@@ -1,5 +1,5 @@
 # thereminq-examples
-Configurations &amp; Code examples for use on the ThereminQ platforms
+Configurations and code examples for use on the ThereminQ platforms
 
 VQE FCI
 
