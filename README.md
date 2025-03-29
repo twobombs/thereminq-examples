@@ -1,7 +1,7 @@
 # ThereminQ-examples
 Configurations and code examples for use on the ThereminQ platforms
 
-Some graph output:
+Some of the graph output:
 
 VQE H2 FCI
 
