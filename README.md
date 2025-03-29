@@ -11,7 +11,7 @@ Willow 106x106
 
 ![402325505-a887d0c6-be0b-4c94-abd0-8ee185d26e76 (1)](https://github.com/user-attachments/assets/991f546c-2b40-483a-9d14-4fa19a8a5ee8)
 
-Graphs (bonsai)
+ThereminQ-Bonsai
 
 ![230887892-1490ddb4-959c-45bb-98ac-28fe682f92a9](https://github.com/user-attachments/assets/a093653a-e7c1-4747-a85a-6cc24f271923)
 ![141675948-cd953c5b-5bdc-4e67-82bd-649530596788 (1)](https://github.com/user-attachments/assets/4d1ffde1-e3e2-4238-b66f-2ef3258d6d5d)
