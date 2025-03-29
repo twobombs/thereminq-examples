@@ -1,4 +1,4 @@
-# thereminq-examples
+# ThereminQ-examples
 Configurations and code examples for use on the ThereminQ platforms
 
 VQE FCI
