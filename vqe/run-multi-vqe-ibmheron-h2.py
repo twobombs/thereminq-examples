@@ -2,7 +2,12 @@
 # *** Modified for H2/6-31G (8 qubits), targeting IBM Quantum Heron (ibm_brisbane) ***
 # !!! EXTREME WARNING: Runs on REAL HARDWARE. Expect NOISE, SHOTS, QUEUE TIMES, COST. !!!
 # !!! Requires IBM Quantum Account & API Token configured. !!!
-# Current time: Friday, March 28, 2025 at 1:39 AM (Almelo, Overijssel, Netherlands)
+
+# original created by Dan Strano of the Unitary fund 
+# https://github.com/vm6502q/pyqrack-examples/blob/main/vqe.py
+# plot was added by Qwen2.5-Coder-32B-Instruct-Q5_K_S.gguf
+# heavily modified and expanded by gemini 2.5
+# experimental code - can change without notice
 
 import os
 import pennylane as qml
