@@ -1,8 +1,6 @@
 #!/bin/bash
 
-export QRACK_QPAGER_DEVICES=14.0,10.1,10.2
-export QRACK_QPAGER_DEVICES_HOST_POINTER=14.0,1.1,10.0,1.1,10.0,1.1
 export QRACK_OCL_DEFAULT_DEVICE=0
-export QRACK_MAX_PAGING_QB=30
+export QRACK_MAX_PAGING_QB=29
 
 python3 alt_ising_ace.py
