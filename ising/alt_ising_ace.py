@@ -4,6 +4,9 @@
 # where N is >= number of qubits, especially for >28 qubits.
 # Example: export QRACK_MAX_PAGING_QB=56
 
+# original by Dan Strano https://github.com/vm6502q/pyqrack-examples/blob/main/ising/ising_ace.py
+# modified and adapted by gemini25 for runtime enviroment constraints
+
 import sys
 import time
 import os # Imported for environment variable check
