@@ -10,4 +10,5 @@ Looking into alignment with the recent CERN/NikHEF HHL effort
 sources: 
 
 https://medium.com/@hydrogenstudioz/i-discovered-how-to-stabilize-quantum-superposition-and-it-changes-everything-761b2269e9a3
+
 https://www.linkedin.com/feed/update/urn:li:activity:7321287387030904833/
