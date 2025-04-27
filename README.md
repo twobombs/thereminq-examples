@@ -1,5 +1,6 @@
 # ThereminQ-examples
-Configurations and code examples for use on the ThereminQ platforms
+
+Experimental configurations & examples for use and developed on the ThereminQ platform
 
 Some of the graph output:
 
