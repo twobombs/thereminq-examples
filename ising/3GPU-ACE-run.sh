@@ -3,11 +3,11 @@
 # default for largest device
 export QRACK_OCL_DEFAULT_DEVICE=0
 # max paging 
-export QRACK_MAX_PAGING_QB=28
+export QRACK_MAX_PAGING_QB=29
 # lightcone on
 export QRACK_QTENSORNETWORK_THRESHOLD_QB=1
 # new var for max frambuffer
-export QRACK_QBDT_MAX_ALLOC_MB=10000
+export QRACK_QBDT_MAX_ALLOC_MB=32000
 # Suggested 'WD40' value for SDRP
 export QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.024
 
