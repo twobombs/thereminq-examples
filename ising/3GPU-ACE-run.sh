@@ -10,6 +10,8 @@ export QRACK_QTENSORNETWORK_THRESHOLD_QB=1
 export QRACK_QBDT_MAX_ALLOC_MB=32000
 # Suggested 'WD40' value for SDRP
 export QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.024
+# deep fidelity enabled
+export QRACK_DISABLE_QUNIT_FIDELITY_GUARD=1
 
 cd /notebooks/qrack/pyqrack-examples/ising
 
