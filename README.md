@@ -17,6 +17,13 @@ QHRF
 ![Screenshot from 2025-04-26 09-17-50](https://github.com/user-attachments/assets/01a3b824-ab49-4d34-af55-48ce7585f216)
 
 
+VQE-QML on Hermitian matrices
+
+![Screenshot from 2025-05-21 14-50-11](https://github.com/user-attachments/assets/c42ea5a2-cd38-4b9b-bd0d-d4e45715236d)
+
+
+older work:
+
 ThereminQ-Bonsai
 
 ![230887892-1490ddb4-959c-45bb-98ac-28fe682f92a9](https://github.com/user-attachments/assets/a093653a-e7c1-4747-a85a-6cc24f271923)
