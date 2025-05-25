@@ -1,4 +1,4 @@
-# original bij Dan Strano https://github.com/vm6502q/pyqrack-examples/blob/main/ising/ising_ace_depth_series.py
+# original by Dan Strano https://github.com/vm6502q/pyqrack-examples/blob/main/ising/ising_ace_depth_series.py
 # modified by gemini25 for automated iteration; tested settings can be found in ising_ace_depth_full_series.sh
 # Further modified by Gemini (Bard) to parallelize depth iterations.
 # GPL3
