@@ -1,4 +1,4 @@
-# advised and tested settings for running the ising models
+# advised and tested settings for running the ising models on the ace mitiq backend
 
 export QRACK_DISABLE_QUNIT_FIDELITY_GUARD=1
 export QRACK_MAX_PAGING_QB=28
