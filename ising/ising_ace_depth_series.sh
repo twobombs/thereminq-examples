@@ -4,5 +4,4 @@ export QRACK_QTENSORNETWORK_THRESHOLD_QB=-1
 export QRACK_OCL_DEFAULT_DEVICE=0
 export QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.1464466
 
-cd /notebooks/qrack/pyqrack-examples/ising/
-python3 ising_ace_depth_series.py
+python3 ising_ace_depth_full_series.py 28 28
