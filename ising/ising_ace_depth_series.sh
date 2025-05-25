@@ -1,3 +1,5 @@
+# advised and tested settings for running the ising models
+
 export QRACK_DISABLE_QUNIT_FIDELITY_GUARD=1
 export QRACK_MAX_PAGING_QB=28
 export QRACK_QTENSORNETWORK_THRESHOLD_QB=-1
