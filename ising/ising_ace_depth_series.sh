@@ -11,13 +11,11 @@ export QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.1464466
 #!/bin/bash
 
 # This script runs the ising_ace_depth_series.py script
-# with the first parameter varying from 4 to 28,
-# and the second parameter (depth) fixed at 20.
 
 echo "Starting the script..."
 
 # Loop from 4 to 28 (inclusive)
-for i in $(seq 4 46)
+for i in $(seq 4 48)
 do
   echo "Running forked with parameter: $i and depth: $i"
 
