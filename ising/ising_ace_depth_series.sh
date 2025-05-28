@@ -21,7 +21,7 @@ do
   echo "Running forked with parameter: $i and depth: $i"
 
   python3 ising_ace_depth_series.py "$i" "$i" > "$i".log &
-
+  # depth replace second "i$" with required depth or multiples of $i
   sleep 10
 
 done
