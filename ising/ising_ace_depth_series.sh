@@ -1,21 +1,25 @@
-# advised and tested settings for running the ising models on the ace mitiq backend
+#!/bin/bash
+
+# advised and tested settings for running the ising models on the qrack ace mitiq backend
 # a machine with 24 threads, 32GB ram and 32 GB vram will be able to run this up to 50 qubits at the same depth in parallel
 
 export QRACK_DISABLE_QUNIT_FIDELITY_GUARD=1
-# because of extreme tensor and tfim compression the number of max-paged qubits seems to becomes trivial set here at 28 yet we want to go to 48 in parallel (!!)
+# set here at 28 yet we want to go to 50+ in parallel and it fits (!!)
 export QRACK_MAX_PAGING_QB=28
+
+# tensor on = 0 / off is -1 
 export QRACK_QTENSORNETWORK_THRESHOLD_QB=0
+
+# change to fit your preference
 export QRACK_OCL_DEFAULT_DEVICE=2
+
+# SDRP value 'du your'
 export QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.1464466
 
-
-#!/bin/bash
-
-# This script runs the ising_ace_depth_series.py script
-
+# This script will now run the ising_ace_depth_series.py forked
 echo "Starting the script..."
 
-# Loop from 4 to 28 (inclusive)
+# Loop from 4 to 50+ (inclusive)
 for i in $(seq 4 50)
 do
   echo "Running forked with parameter: $i and depth: $i"
@@ -28,4 +32,4 @@ do
 
 done
 
-echo "Script finished."
+echo "Script finished - all will run in the background and produce logs and graphs"
