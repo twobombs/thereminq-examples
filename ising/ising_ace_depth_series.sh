@@ -3,6 +3,7 @@
 # advised and tested settings for running the ising models on the qrack ace mitiq backend
 # a machine with 24 threads, 32GB ram and 32 GB vram will be able to run this up to 50 qubits at the same depth in parallel
 
+# disable fid guard so the run isn't interrupted and data will be produced even with low prob.
 export QRACK_DISABLE_QUNIT_FIDELITY_GUARD=1
 # set here at 28 yet we want to go to 50+ in parallel and it fits (!!)
 export QRACK_MAX_PAGING_QB=28
