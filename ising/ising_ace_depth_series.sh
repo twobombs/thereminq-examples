@@ -1,8 +1,8 @@
 # advised and tested settings for running the ising models on the ace mitiq backend
 
 export QRACK_DISABLE_QUNIT_FIDELITY_GUARD=1
-# because of extreme tensor and tfim compression the number of max-paged qubits seems to becomes triviall set here at 48 because we want to go to 48 in parallel (!!)
-export QRACK_MAX_PAGING_QB=48
+# because of extreme tensor and tfim compression the number of max-paged qubits seems to becomes trivial set here at 28 yet we want to go to 48 in parallel (!!)
+export QRACK_MAX_PAGING_QB=28
 export QRACK_QTENSORNETWORK_THRESHOLD_QB=-1
 export QRACK_OCL_DEFAULT_DEVICE=2
 export QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.1464466
