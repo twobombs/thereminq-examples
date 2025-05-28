@@ -1,6 +1,8 @@
 #!/bin/bash
 
-# advised and tested settings for running the ising models on the qrack ace mitiq backend
+# experimental highly paralellized runtime for the ising_ace_depth_series on https://github.com/vm6502q/pyqrack-examples/tree/main/ising by Dan Strano
+
+# below are advised and tested settings for running the ising models on the qrack ace mitiq backend
 # a machine with 24 threads, 32GB ram and 32 GB vram will be able to run this up to 50 qubits at the same depth in parallel
 
 # disable fid guard so the run isn't interrupted and data will be produced even with low prob.
