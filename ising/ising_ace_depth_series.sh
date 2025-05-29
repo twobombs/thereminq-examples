@@ -2,8 +2,13 @@
 
 # experimental highly paralellized script for the ising_ace_depth_series on https://github.com/vm6502q/pyqrack-examples/tree/main/ising by Dan Strano
 
-# below are advised and tested settings for running the ising models on the qrack ace mitiq backend
-# a machine with 24 threads, 32GB ram and 16 GB vram will be able to run this up to 50 qubits at the same depth in parallel
+# below are advised and tested settings for running highly compressed ising models on the qrack ace tfim mitiq backend whilst enabling GPU and tensorized SDROP settings
+# a machine with 24 threads, 32GB ram and 16 GB vram should be able to run this up to 50 qubits at the same depth in parallel runtime 
+
+# code and docker images avaliable on dockerhub and github
+# https://github.com/twobombs
+# https://hub.docker.com/r/twobombs/thereminq-tensors
+
 
 # disable fid guard so the run isn't interrupted and data will be produced even with low prob.
 export QRACK_DISABLE_QUNIT_FIDELITY_GUARD=1
