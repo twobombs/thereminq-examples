@@ -1,3 +1,6 @@
+# this visualisation takes the cleaned-up output of the ising_ace_depth_series and graphs it
+# https://g.co/gemini/share/e13681913255
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import ast
