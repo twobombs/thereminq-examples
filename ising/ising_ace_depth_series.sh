@@ -2,7 +2,7 @@
 
 # experimental highly paralellized script for the ising_ace_depth_series.py on https://github.com/vm6502q/pyqrack-examples/tree/main/ising by Dan Strano
 
-# below are advised and tested settings for running highly compressed ising models on the qrack ace tfim mitiq backend whilst enabling GPU and tensorized SDROP settings
+# below are advised and tested settings for running highly compressed ising models on the qrack ace tfim mitiq backend whilst enabling GPU, tensorized and SDRP settings
 # a machine with 24 threads, 32GB ram and 16 GB vram should be able to run this up to 50 qubits at the same depth in parallel runtime 
 
 # code and docker images avaliable on dockerhub and github
