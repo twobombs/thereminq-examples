@@ -23,7 +23,7 @@ export QRACK_QTENSORNETWORK_THRESHOLD_QB=0
 export QRACK_OCL_DEFAULT_DEVICE=2
 
 # SDRP value 'du jour'
-export QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.1464466
+# export QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.1464466
 
 # This script will now run the ising_ace_depth_series.py forked
 echo "Starting the script..."
