@@ -29,7 +29,7 @@ export QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.1464466
 echo "Starting the script..."
 
 # Loop from 4 to 50+ (inclusive)
-for i in $(seq 4 50)
+for i in $(seq 4 96)
 do
   echo "Running forked with parameter: $i and depth: $i"
 
@@ -37,8 +37,9 @@ do
   # depth replace second "$i" with required depth or multiples of $i
 
   # 30 second between threads to end and/or stack up 
-  sleep 30
-
+  # sleep 30
+  # or (default) the anykey
+  read -n 1 -s -r -p "Press any key to continue..."
 done
 
 echo "Script finished - all will run in the background and produce logs and graphs"
