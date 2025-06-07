@@ -29,7 +29,7 @@ export QRACK_OCL_DEFAULT_DEVICE=2
 echo "Starting the script..."
 
 # Loop from 4 to 50+ (inclusive)
-for i in $(seq 4 132)
+for i in $(seq 4 156)
 do
   echo "Running forked with parameter: $i and depth: $i"
 
