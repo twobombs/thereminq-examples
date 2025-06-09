@@ -1,4 +1,4 @@
-Highly compressed multithreading ACE Mitiq Ising depth tests 
+Highly compressed multithreading ACE Mitiq Ising depth tests visualisations
 
 ![Screenshot from 2025-06-09 14-39-43](https://github.com/user-attachments/assets/18ae217c-b28b-42ab-8949-2a6a4c4ebcd7)
 ![magnetization_heatmap](https://github.com/user-attachments/assets/25e3922f-a12a-4c6b-be4d-0926196a17f5)
