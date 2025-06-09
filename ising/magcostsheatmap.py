@@ -66,7 +66,7 @@ def create_magnetization_heatmap(file_path):
 
         # --- 5. Customize the Layout ---
         fig.update_layout(
-            title='Magnetization Heatmap vs. Time ( high width@lower time = good )',
+            title='Magnetization Heatmap vs. Time ( high mag+width@lower time = good )',
             xaxis_title='Time Bins (Seconds)',
             yaxis_title='Width',
             xaxis=dict(tickangle=-45), # Angle the x-axis labels for readability
