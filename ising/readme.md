@@ -1,5 +1,6 @@
 Highly compressed multithreading ACE Mitiq Ising depth tests visualisations
 
+
 ![mag_vs_sec_heatmap](https://github.com/user-attachments/assets/784a2115-1009-40c4-a18e-ed134fe0ae95)
 ![Screenshot from 2025-06-09 14-39-43](https://github.com/user-attachments/assets/18ae217c-b28b-42ab-8949-2a6a4c4ebcd7)
 ![magnetization_heatmap](https://github.com/user-attachments/assets/25e3922f-a12a-4c6b-be4d-0926196a17f5)
@@ -17,3 +18,5 @@ https://g.co/gemini/share/fe558030b59b
 ![Code_Generated_Image (2)](https://github.com/user-attachments/assets/08bdcbc0-933b-4f78-8bc2-733f7cb19ffc)
 ![Code_Generated_Image (3)](https://github.com/user-attachments/assets/d71832d3-10e0-4243-8680-743917de3e4f)
 
+row/collum vs qubits settings
+![Screenshot_from_2025-06-14_09-40-41](https://github.com/user-attachments/assets/566b2b9f-b14a-4b6d-bfa9-40ae81e30225)
