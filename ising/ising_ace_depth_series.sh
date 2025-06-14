@@ -22,7 +22,7 @@ export QRACK_QTENSORNETWORK_THRESHOLD_QB=0
 # SDRP value 'du jour'
 #export QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.1464466
 
-# set max device number
+# set max device number : starts with 0 for one GPU
 max_gpu=2
 
 # This script will now run the ising_ace_depth_series.py forked
@@ -36,9 +36,11 @@ do
   # rnd gpu selection - set max to fit your preference on max_gpu
   gpuselect=$((RANDOM % max_gpu))
   export QRACK_OCL_DEFAULT_DEVICE=$gpuselect
-  
-  python3 ising_ace_depth_series.py "$i" "$i" > "$i".log &
-  # depth replace second "$i" with required depth or multiples of $i
+
+  # kinda middle of the road setting that might not always work right
+  python3 ising_ace_depth_series.py "$i" 20 1024 False 3 6 1 > "$i".log &
+  # depth replace second var with required depth or multiples of $i
+  # third var behind True/Flase is number of full iterations 
 
   # 30 second between threads to end and/or stack up 
   # sleep 30
