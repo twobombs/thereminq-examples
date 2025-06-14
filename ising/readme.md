@@ -1,4 +1,4 @@
-Highly compressed multithreading ACE Mitiq Ising depth tests visualisations
+Highly compressed multithreaded ACE Ising depth tests visualisations
 
 
 ![mag_vs_sec_heatmap](https://github.com/user-attachments/assets/784a2115-1009-40c4-a18e-ed134fe0ae95)
