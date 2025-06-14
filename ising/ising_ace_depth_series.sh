@@ -40,6 +40,8 @@ do
   # kinda middle of the road setting that might not always work right
   python3 ising_ace_depth_series.py "$i" 20 1024 False 3 6 1 > "$i".log &
   # depth replace second var with required depth or multiples of $i
+  # third var is number of measurements 
+  # 5 & 6 are rows vs collums ( see readme.md for estimates )
   # third var behind True/Flase is number of full iterations 
 
   # 30 second between threads to end and/or stack up 
