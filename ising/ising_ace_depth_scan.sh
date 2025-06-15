@@ -46,7 +46,7 @@ python3 ising_ace_depth_series.py 12 20 1024 True 2 3 1 > 12_20.txt &
 read -n 1 -s -r -p "Press any key to continue..."
 
 export QRACK_OCL_DEFAULT_DEVICE=0
-python3 ising_ace_depth_series.py 14 20 1024 True 1 2 1 > 14_20.txt &
+python3 ising_ace_depth_series.py 14 20 1024 False 1 2 1 > 14_20.txt &
 
 read -n 1 -s -r -p "Press any key to continue..."
 
