@@ -105,10 +105,10 @@ python3 ising_ace_depth_series.py 36 20 1024 False 3 6 1 > 36_20.txt &
 
 read -n 1 -s -r -p "Press any key to continue..."
 
-export QRACK_OCL_DEFAULT_DEVICE=0
-python3 ising_ace_depth_series.py 40 20 1024 False 4 5 1 > 40_20.txt &
-
-read -n 1 -s -r -p "Press any key to continue..."
+# qiskit transpiler drama on thse settings
+# export QRACK_OCL_DEFAULT_DEVICE=0
+# python3 ising_ace_depth_series.py 40 20 1024 False 4 5 1 > 40_20.txt &
+# read -n 1 -s -r -p "Press any key to continue..."
 
 # medium circuits
 
