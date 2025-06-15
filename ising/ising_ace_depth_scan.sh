@@ -105,7 +105,7 @@ python3 ising_ace_depth_series.py 36 20 1024 False 3 6 1 > 36_20.txt &
 
 read -n 1 -s -r -p "Press any key to continue..."
 
-# qiskit transpiler drama on thse settings
+# qiskit transpiler drama on these settings
 # export QRACK_OCL_DEFAULT_DEVICE=0
 # python3 ising_ace_depth_series.py 40 20 1024 False 4 5 1 > 40_20.txt &
 # read -n 1 -s -r -p "Press any key to continue..."
@@ -117,10 +117,10 @@ python3 ising_ace_depth_series.py 42 20 1024 True 1 6 1 > 42_20.txt &
 
 read -n 1 -s -r -p "Press any key to continue..."
 
-export QRACK_OCL_DEFAULT_DEVICE=2
-python3 ising_ace_depth_series.py 45 20 1024 True 3 5 1 > 45_20.txt &
-
-read -n 1 -s -r -p "Press any key to continue..."
+# qiskit transpiler drama on these settings
+# export QRACK_OCL_DEFAULT_DEVICE=2
+# python3 ising_ace_depth_series.py 45 20 1024 False 3 5 1 > 45_20.txt &
+# read -n 1 -s -r -p "Press any key to continue..."
 
 export QRACK_OCL_DEFAULT_DEVICE=0
 python3 ising_ace_depth_series.py 48 20 1024 True 4 6 1 > 48_20.txt &
