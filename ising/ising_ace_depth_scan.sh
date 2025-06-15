@@ -7,7 +7,7 @@
 # disable fid guard so the run isn't interrupted and data will be produced even with low prob.
 export QRACK_DISABLE_QUNIT_FIDELITY_GUARD=1
 
-# set here at 28 yet we will be able to go to 50+ in parallel and it fits all on just 32 GB (!!)
+# set here at 28 yet we will be able to go to 50+ instances in parallel
 export QRACK_MAX_PAGING_QB=28
 
 # tensor on = 0 / off is -1 
