@@ -22,8 +22,8 @@ export QRACK_QTENSORNETWORK_THRESHOLD_QB=0
 # SDRP value 'du jour'
 #export QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.1464466
 
-# set max device number : starts with 0 for one GPU
-max_gpu=2
+# set max devices
+max_gpu=3
 
 # This script will now run the ising_ace_depth_series.py forked
 echo "Starting the script..."
