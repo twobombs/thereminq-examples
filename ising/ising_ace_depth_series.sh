@@ -29,7 +29,7 @@ max_gpu=2
 echo "Starting the script..."
 
 # Loop from 4 to 50+ (inclusive)
-for i in $(seq 4 156)
+for i in $(seq 4 256)
 do
   echo "Running forked with parameter: $i and depth: $i"
   
@@ -38,7 +38,7 @@ do
   export QRACK_OCL_DEFAULT_DEVICE=$gpuselect
 
   # kinda middle of the road setting that might not always work right
-  python3 ising_ace_depth_series.py "$i" 20 1024 False 3 6 1 > "$i".log &
+  python3 ising_ace_depth_series.py "$i" 20 > "$i".log &
   # depth replace second var with required depth or multiples of $i
   # third var is number of measurements 
   # 5 & 6 are rows vs collums ( see readme.md for estimates )
