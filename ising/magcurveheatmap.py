@@ -16,6 +16,7 @@ def create_heatmap_from_log(file_path='fullog.txt'):
     Reads quantum simulation log data from a file, processes it,
     and generates a heatmap of magnetization vs. qubit width and circuit depth.
     The heatmap is displayed and saved as a high-resolution PNG.
+    The plot size and font size are adjusted dynamically for the data size.
 
     Args:
         file_path (str): The path to the log file.
@@ -51,9 +52,41 @@ def create_heatmap_from_log(file_path='fullog.txt'):
         # If there are multiple trials for the same width/depth, this will average them.
         heatmap_data = df.pivot_table(index='width', columns='depth', values='magnetization')
 
+        # --- Dynamic adjustments for large datasets ---
+        # Get the dimensions of the data for the heatmap
+        nrows, ncols = heatmap_data.shape
+        print(f"Detected a dataset with {nrows} qubit widths and {ncols} depths.")
+
+        # Dynamically adjust figure size to better fit the data.
+        # These factors can be adjusted for optimal viewing.
+        fig_width = max(16, ncols * 0.7)
+        fig_height = max(10, nrows * 0.4)
+        
+        # Dynamically adjust annotation font size.
+        if nrows > 50 or ncols > 40:
+            annot_font_size = 6
+            print("Large dataset detected. Using a smaller font (size 6) for annotations.")
+        else:
+            annot_font_size = 8
+            
+        # For extremely large datasets (like 256 qubits), annotations might still be impractical.
+        # Consider setting `annot=False` if the plot remains unreadable.
+        if nrows > 100:
+            print("\nWarning: With over 100 widths, annotations may be unreadable even with small font.")
+            print("For a cleaner plot, consider editing the script to set annot=False in the sns.heatmap() call.\n")
+
+
         # Create the heatmap using seaborn
-        plt.figure(figsize=(16, 10))
-        sns.heatmap(heatmap_data, annot=True, fmt=".3f", cmap="viridis", linewidths=.5)
+        plt.figure(figsize=(fig_width, fig_height))
+        sns.heatmap(
+            heatmap_data, 
+            annot=True, 
+            fmt=".3f", 
+            cmap="viridis", 
+            linewidths=.5,
+            # Pass a dictionary to control annotation properties, including font size
+            annot_kws={'size': annot_font_size} 
+        )
 
         # Add titles and labels for clarity
         plt.title('Magnetization vs. Qubit Width and Circuit Depth', fontsize=16)
