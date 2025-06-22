@@ -3,89 +3,78 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import ast
 
-def create_magnetization_heatmap(log_file_path, output_filename="magnetization_heatmap.png"):
-    """
-    Reads magnetization data from a log file, processes it, creates a heatmap,
-    and saves it to a file.
+# --- Instructions ---
+# 1. Create a file named 'fullog.txt' in the same directory as this script.
+# 2. Copy and paste your log data into 'fullog.txt'. Each dictionary should be on a new line.
+#    Example content for 'fullog.txt':
+#    {'width': 96, 'depth': 14, 'trial': 1, 'magnetization': 0.029357910156249997, ...}
+#    {'width': 96, 'depth': 15, 'trial': 1, 'magnetization': -0.021504720052083315, ...}
+# 3. Run this Python script. It will display the plot and save it as a PNG.
 
-    The function reads a log file where each line is a dictionary-like string.
-    It parses this data, creates a pivot table with 'width' as rows, 'depth'
-    as columns, and 'magnetization' as values. Finally, it generates, saves,
-    and displays a heatmap of the magnetization.
+def create_heatmap_from_log(file_path='fullog.txt'):
+    """
+    Reads quantum simulation log data from a file, processes it,
+    and generates a heatmap of magnetization vs. qubit width and circuit depth.
+    The heatmap is displayed and saved as a high-resolution PNG.
 
     Args:
-        log_file_path (str): The path to the log file to be processed.
-        output_filename (str): The filename for the saved PNG image.
+        file_path (str): The path to the log file.
     """
-    # --- 1. Read and Parse the Data ---
-    # We open the log file and read each line.
-    # ast.literal_eval is used to safely evaluate the string as a Python literal (in this case, a dictionary).
     try:
-        with open(log_file_path, 'r') as f:
-            # Each line is read and evaluated into a dictionary, then collected into a list.
-            data = [ast.literal_eval(line) for line in f]
-    except FileNotFoundError:
-        print(f"Error: The file '{log_file_path}' was not found.")
-        return
-    except Exception as e:
-        print(f"An error occurred while reading or parsing the file: {e}")
-        return
+        # Read the file and parse each line as a dictionary
+        data = []
+        with open(file_path, 'r') as f:
+            for line in f:
+                # Use ast.literal_eval to safely parse the string as a Python dictionary
+                try:
+                    data.append(ast.literal_eval(line.strip()))
+                except (ValueError, SyntaxError) as e:
+                    print(f"Warning: Skipping malformed line: {line.strip()}\nError: {e}")
+                    continue
 
-    # --- 2. Structure the Data with Pandas ---
-    # A pandas DataFrame is created from the list of dictionaries for easy manipulation.
-    df = pd.DataFrame(data)
+        # Check if any data was successfully parsed
+        if not data:
+            print("Error: No data was loaded. Please check the content of 'fullog.txt'.")
+            return
 
-    # We pivot the DataFrame to get a 2D grid suitable for a heatmap.
-    # 'width' will be the rows (y-axis), 'depth' will be the columns (x-axis),
-    # and 'magnetization' will be the values in the cells.
-    heatmap_data = df.pivot_table(index='width', columns='depth', values='magnetization')
-    
-    # Sorting the index (width) is important for a clean, ordered heatmap.
-    heatmap_data.sort_index(inplace=True)
-
-    # --- 3. Generate the Heatmap ---
-    # We set the size of the figure to ensure the heatmap is readable.
-    plt.figure(figsize=(12, 10))
-
-    # seaborn.heatmap is used to create the heatmap.
-    # 'annot=False' means the values won't be written on the cells.
-    # 'fmt=".3f"' would format the annotation to 3 decimal places if annot were True.
-    # 'cmap="viridis"' sets the color map for the heatmap.
-    sns.heatmap(heatmap_data, annot=False, cmap="viridis")
-
-    # --- 4. Add Titles and Labels for Clarity ---
-    plt.title('Magnetization Heatmap by Width and Depth', fontsize=16)
-    plt.xlabel('Depth', fontsize=12)
-    plt.ylabel('Width', fontsize=12)
-    
-    # Ensures that the plot layout is tight and all elements are visible.
-    plt.tight_layout()
-
-    # --- 5. Save and Show the Plot ---
-    try:
-        # Save the figure to a file before showing it.
-        # dpi=300 ensures a high-resolution image.
-        # bbox_inches='tight' prevents the saved image from being cropped.
-        plt.savefig(output_filename, dpi=300, bbox_inches='tight')
-        print(f"Heatmap successfully saved as '{output_filename}'")
-    except Exception as e:
-        print(f"An error occurred while saving the heatmap: {e}")
+        # Convert the list of dictionaries to a pandas DataFrame
+        df = pd.DataFrame(data)
         
-    # This command displays the generated heatmap.
-    plt.show()
+        # Ensure required columns are present
+        required_cols = ['width', 'depth', 'magnetization']
+        if not all(col in df.columns for col in required_cols):
+            print(f"Error: The log file must contain the columns: {', '.join(required_cols)}")
+            return
 
-# --- Script Execution ---
-# To use this script, replace 'fullog.txt' with the path to your log file.
-# The second argument is the name of the output file.
-try:
-    create_magnetization_heatmap('fullog.txt', 'magnetization_heatmap.png')
-except Exception as e:
-    print("Could not run with 'fullog.txt'. Ensure the file is in the same directory.")
-    # You can create a dummy file to test the script's functionality:
-    # with open("dummy_log.txt", "w") as f:
-    #     f.write("{'width': 10, 'depth': 1, 'magnetization': 0.8}\n")
-    #     f.write("{'width': 10, 'depth': 2, 'magnetization': 0.7}\n")
-    #     f.write("{'width': 20, 'depth': 1, 'magnetization': 0.9}\n")
-    #     f.write("{'width': 20, 'depth': 2, 'magnetization': 0.85}\n")
-    # create_magnetization_heatmap('dummy_log.txt', 'dummy_heatmap.png')
+        # Pivot the DataFrame to create a matrix for the heatmap.
+        # Index: qubit width, Columns: circuit depth, Values: magnetization.
+        # If there are multiple trials for the same width/depth, this will average them.
+        heatmap_data = df.pivot_table(index='width', columns='depth', values='magnetization')
 
+        # Create the heatmap using seaborn
+        plt.figure(figsize=(16, 10))
+        sns.heatmap(heatmap_data, annot=True, fmt=".3f", cmap="viridis", linewidths=.5)
+
+        # Add titles and labels for clarity
+        plt.title('Magnetization vs. Qubit Width and Circuit Depth', fontsize=16)
+        plt.xlabel('Circuit Depth', fontsize=12)
+        plt.ylabel('Qubit Width', fontsize=12)
+
+        # Save the figure as a high-resolution PNG file before displaying it
+        # dpi=300 ensures high quality for publications or presentations.
+        # bbox_inches='tight' removes excess white space around the plot.
+        plt.savefig('qubit_magnetization_heatmap.png', dpi=300, bbox_inches='tight')
+        print("Heatmap saved as 'qubit_magnetization_heatmap.png'")
+
+        # Display the plot
+        plt.show()
+
+    except FileNotFoundError:
+        print(f"Error: The file '{file_path}' was not found.")
+        print("Please make sure 'fullog.txt' is in the same directory as the script.")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+
+if __name__ == '__main__':
+    # Run the function to generate the heatmap
+    create_heatmap_from_log()
