@@ -38,7 +38,7 @@ do
   export QRACK_OCL_DEFAULT_DEVICE=$gpuselect
 
   # kinda middle of the road setting that might not always work right
-  echo $gpuselect
+  echo "job is running on GPU: $gpuselect "
   python3 ising_ace_depth_series.py "$i" 20 1024 > "$i".log &
   # depth replace second var with required depth or multiples of $i
   # third var is number of measurements 
