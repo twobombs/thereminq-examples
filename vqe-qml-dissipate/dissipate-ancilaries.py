@@ -15,7 +15,7 @@
 # PyQrack simulator installed:
 #
 # pip install qiskit numpy matplotlib qiskit-pyqrack
-#
+# https://g.co/gemini/share/2c74852f1c6f
 
 import numpy as np
 import matplotlib.pyplot as plt
