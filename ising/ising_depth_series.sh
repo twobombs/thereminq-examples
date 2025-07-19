@@ -18,17 +18,6 @@ export QRACK_QTENSORNETWORK_THRESHOLD_QB=0
 #export QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.1464466
 # This script runs a comprehensive series of simulations for the ising_depth_series.py script.
 # Each line corresponds to a specific qubit configuration from 4 to 1024 qubits,
-# using the MAXIMUM number of islands for the patching strategy.
-# The script will pause after launching each simulation and wait for a key press.
-# It randomly selects a GPU for each run.
-#
-# The command structure is:
-# python3 ising_depth_series.py <width> <depth> <iterations> <strategy_id>
-#
-# <width>: Total number of qubits.
-# <depth>: The simulation depth.
-# <iterations>: The number of shots/iterations.
-# <strategy_id>: The patching strategy identifier (always 1 for this script).
 
 echo "Starting comprehensive simulation series (4 to 1024 qubits) with MAXIMUM islands..."
 
