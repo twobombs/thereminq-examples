@@ -1,5 +1,6 @@
-Highly compressed multithreaded ACE Ising depth tests visualisations
+Highly compressed multithreaded Ising depth tests visualisations
 
+<img width="1697" height="963" alt="Screenshot from 2025-07-19 17-01-18" src="https://github.com/user-attachments/assets/956216bf-fc10-4030-816a-5d716c1e0411" />
 <img width="3900" height="2700" alt="3d_log_heatmap" src="https://github.com/user-attachments/assets/10acd64b-c44f-4e82-8f07-fbb31b1b7e70" />
 
 ![Screenshot from 2025-07-07 10-20-16](https://github.com/user-attachments/assets/933fb4c2-efe4-4c36-93cd-f77c19dbb5cf)
