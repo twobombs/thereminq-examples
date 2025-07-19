@@ -1,6 +1,9 @@
 # this python script feeds gemini-cli with queries as give on the CMD
 # it is part of the iteratieve design pattern currently in development
 
+# this agentic script is designed for use in thereminq-tensor containers
+# DO NOT RUN AGENTIC CODE ON YOUR LOCAL MACHINE WITH ALL RIGHTS, NOT EVER!!
+
 # main.py
 
 import os
