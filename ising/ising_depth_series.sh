@@ -29,7 +29,7 @@ max_gpu=3
 echo "Starting the script..."
 
 # Loop from 4 to 50+ (inclusive)
-for i in $(seq 4 256)
+for i in $(seq 4 350)
 do
   echo "Running forked with parameter: $i and depth: 20"
   
@@ -39,15 +39,11 @@ do
 
   # kinda middle of the road setting that might not always work right
   echo "job is running on GPU: $gpuselect "
-  python3 ising_ace_depth_series.py "$i" 20 1024 > "$i".log &
+  python3 ising_depth_series.py "$i" 20 1024 1 > "$i".log &
   # depth replace second var with required depth or multiples of $i
   # third var is number of measurements 
-  # 5 & 6 are rows vs collums ( see readme.md for estimates )
-  # third var behind True/Flase is number of full iterations 
+  # fourth is number of trials
 
-  # 30 second between threads to end and/or stack up 
-  # sleep 30
-  # or (default) the anykey
   read -n 1 -s -r -p "Press any key to continue..."
 done
 
