@@ -39,7 +39,7 @@ do
 
   # kinda middle of the road setting that might not always work right
   echo "job is running on GPU: $gpuselect "
-  python3 ising_depth_series.py "$i" 20 1024 1 > "$i".log &
+  python3 ising_depth_series.py "$i" 20 > "$i".log &
   # depth replace second var with required depth or multiples of $i
   # third var is number of measurements 
   # fourth is number of trials
