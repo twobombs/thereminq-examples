@@ -1,0 +1,30 @@
+Device #0, Loaded binary from: /root/.qrack/qrack_ocl_dev_Tesla_M40_24GB.ir
+Device #1, Loaded binary from: /root/.qrack/qrack_ocl_dev_Tesla_M40_24GB.ir
+Device #2, Loaded binary from: /root/.qrack/qrack_ocl_dev_Tesla_M40_24GB.ir
+Devices: []
+{'width': 125, 'depth': 0, 'trial': 1, 'magnetization': 0.9405312499999987, 'square_magnetization': 0.8859779999999932, 'seconds': 10.168519071999981}
+{'width': 125, 'depth': 1, 'trial': 1, 'magnetization': 0.6505312499999989, 'square_magnetization': 0.4282900000000024, 'seconds': 43.10800117200006}
+{'width': 125, 'depth': 2, 'trial': 1, 'magnetization': 0.22560937499999986, 'square_magnetization': 0.060774499999999815, 'seconds': 90.53610017699975}
+{'width': 125, 'depth': 3, 'trial': 1, 'magnetization': 0.058718750000000056, 'square_magnetization': 0.012414499999999998, 'seconds': 139.63809031499977}
+{'width': 125, 'depth': 4, 'trial': 1, 'magnetization': 0.09029687499999994, 'square_magnetization': 0.016135999999999994, 'seconds': 186.9430376309997}
+{'width': 125, 'depth': 5, 'trial': 1, 'magnetization': 0.137609375, 'square_magnetization': 0.025515499999999847, 'seconds': 235.35843020899983}
+{'width': 125, 'depth': 6, 'trial': 1, 'magnetization': 0.13200000000000017, 'square_magnetization': 0.025234499999999792, 'seconds': 282.1110556169997}
+{'width': 125, 'depth': 7, 'trial': 1, 'magnetization': 0.06564062500000006, 'square_magnetization': 0.012900500000000023, 'seconds': 329.07288708199985}
+{'width': 125, 'depth': 8, 'trial': 1, 'magnetization': 0.02335937499999994, 'square_magnetization': 0.00817899999999994, 'seconds': 378.4894550549998}
+{'width': 125, 'depth': 9, 'trial': 1, 'magnetization': 0.0004375000000000003, 'square_magnetization': 0.007778999999999938, 'seconds': 428.1705853899998}
+{'width': 125, 'depth': 10, 'trial': 1, 'magnetization': 0.004140625000000001, 'square_magnetization': 0.007409999999999945, 'seconds': 477.9299182919999}
+{'width': 125, 'depth': 11, 'trial': 1, 'magnetization': -0.002156249999999999, 'square_magnetization': 0.008313999999999962, 'seconds': 528.8245104869998}
+{'width': 125, 'depth': 12, 'trial': 1, 'magnetization': 0.007078125000000005, 'square_magnetization': 0.007551499999999939, 'seconds': 580.1979168979997}
+{'width': 125, 'depth': 13, 'trial': 1, 'magnetization': -0.006406250000000004, 'square_magnetization': 0.007244999999999944, 'seconds': 630.2379489089999}
+{'width': 125, 'depth': 14, 'trial': 1, 'magnetization': -0.012640624999999949, 'square_magnetization': 0.007887999999999947, 'seconds': 681.6423657569999}
+{'width': 125, 'depth': 15, 'trial': 1, 'magnetization': -0.016890624999999954, 'square_magnetization': 0.00780349999999995, 'seconds': 731.660036279}
+{'width': 125, 'depth': 16, 'trial': 1, 'magnetization': 0.011124999999999979, 'square_magnetization': 0.0075649999999999416, 'seconds': 782.428719647}
+{'width': 125, 'depth': 17, 'trial': 1, 'magnetization': 0.02515624999999993, 'square_magnetization': 0.009024499999999965, 'seconds': 834.5689111080001}
+{'width': 125, 'depth': 18, 'trial': 1, 'magnetization': 0.03645312499999995, 'square_magnetization': 0.009179499999999974, 'seconds': 885.9895468919999}
+{'width': 125, 'depth': 19, 'trial': 1, 'magnetization': 0.01857812499999996, 'square_magnetization': 0.0077244999999999545, 'seconds': 937.238519985}
+{'width': 125, 'depth': 20, 'trial': 1, 'magnetization': 0.007968750000000004, 'square_magnetization': 0.007625999999999948, 'seconds': 987.7870857529997}
+Default platform: NVIDIA CUDA
+Default device: #2, Tesla M40 24GB
+OpenCL device #0: Tesla M40 24GB
+OpenCL device #1: Tesla M40 24GB
+OpenCL device #2: Tesla M40 24GB

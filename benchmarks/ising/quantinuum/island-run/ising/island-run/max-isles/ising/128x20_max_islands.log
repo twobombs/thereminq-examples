@@ -1,0 +1,30 @@
+Device #0, Loaded binary from: /root/.qrack/qrack_ocl_dev_Tesla_V100-PCIE-12GB.ir
+Device #1, Loaded binary from: /root/.qrack/qrack_ocl_dev_NVIDIA_CMP_50HX.ir
+Device #2, Loaded binary from: /root/.qrack/qrack_ocl_dev_NVIDIA_CMP_50HX.ir
+Devices: []
+{'width': 128, 'depth': 0, 'trial': 1, 'magnetization': 0.9030609130859375, 'square_magnetization': 0.8175609111785889, 'seconds': 16.58999043899985}
+{'width': 128, 'depth': 1, 'trial': 1, 'magnetization': 0.6326446533203125, 'square_magnetization': 0.40607762336730957, 'seconds': 52.96509377199982}
+{'width': 128, 'depth': 2, 'trial': 1, 'magnetization': 0.133544921875, 'square_magnetization': 0.025107860565185547, 'seconds': 112.92513910700018}
+{'width': 128, 'depth': 3, 'trial': 1, 'magnetization': 0.047821044921875, 'square_magnetization': 0.00926351547241211, 'seconds': 164.3993610309999}
+{'width': 128, 'depth': 4, 'trial': 1, 'magnetization': 0.0697174072265625, 'square_magnetization': 0.011316537857055664, 'seconds': 217.2132328460002}
+{'width': 128, 'depth': 5, 'trial': 1, 'magnetization': 0.1070404052734375, 'square_magnetization': 0.017327547073364258, 'seconds': 268.5733938129997}
+{'width': 128, 'depth': 6, 'trial': 1, 'magnetization': 0.07421875, 'square_magnetization': 0.011660575866699219, 'seconds': 323.62751390300036}
+{'width': 128, 'depth': 7, 'trial': 1, 'magnetization': 0.013824462890625, 'square_magnetization': 0.0063533782958984375, 'seconds': 379.0646763240002}
+{'width': 128, 'depth': 8, 'trial': 1, 'magnetization': -0.021697998046875, 'square_magnetization': 0.007512092590332031, 'seconds': 438.6271707980004}
+{'width': 128, 'depth': 9, 'trial': 1, 'magnetization': -0.0004425048828125, 'square_magnetization': 0.00736546516418457, 'seconds': 499.68743239499963}
+{'width': 128, 'depth': 10, 'trial': 1, 'magnetization': 0.0092620849609375, 'square_magnetization': 0.007119417190551758, 'seconds': 565.1432827400004}
+{'width': 128, 'depth': 11, 'trial': 1, 'magnetization': -0.0003814697265625, 'square_magnetization': 0.00696253776550293, 'seconds': 627.9374548690002}
+{'width': 128, 'depth': 12, 'trial': 1, 'magnetization': -0.0264892578125, 'square_magnetization': 0.008063793182373047, 'seconds': 693.1080810399999}
+{'width': 128, 'depth': 13, 'trial': 1, 'magnetization': -0.0386810302734375, 'square_magnetization': 0.00861668586730957, 'seconds': 757.6779943820002}
+{'width': 128, 'depth': 14, 'trial': 1, 'magnetization': 0.0058135986328125, 'square_magnetization': 0.007630586624145508, 'seconds': 821.9343542369998}
+{'width': 128, 'depth': 15, 'trial': 1, 'magnetization': 0.006561279296875, 'square_magnetization': 0.007727622985839844, 'seconds': 887.1679958599998}
+{'width': 128, 'depth': 16, 'trial': 1, 'magnetization': 0.0053863525390625, 'square_magnetization': 0.007813215255737305, 'seconds': 952.002029454}
+{'width': 128, 'depth': 17, 'trial': 1, 'magnetization': 0.0247650146484375, 'square_magnetization': 0.008221864700317383, 'seconds': 1017.5363517180003}
+{'width': 128, 'depth': 18, 'trial': 1, 'magnetization': 0.05157470703125, 'square_magnetization': 0.010561943054199219, 'seconds': 1080.392973727}
+{'width': 128, 'depth': 19, 'trial': 1, 'magnetization': 0.04058837890625, 'square_magnetization': 0.009424686431884766, 'seconds': 1142.0387893469997}
+{'width': 128, 'depth': 20, 'trial': 1, 'magnetization': 0.001617431640625, 'square_magnetization': 0.007071971893310547, 'seconds': 1229.096489814}
+Default platform: NVIDIA CUDA
+Default device: #0, Tesla V100-PCIE-12GB
+OpenCL device #0: Tesla V100-PCIE-12GB
+OpenCL device #1: NVIDIA CMP 50HX
+OpenCL device #2: NVIDIA CMP 50HX

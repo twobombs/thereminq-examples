@@ -1,0 +1,21 @@
+{'width': 100, 'depth': 1, 'magnetization': 0.8599664306640625, 'seconds': 143.63810593200014}
+{'width': 100, 'depth': 2, 'magnetization': 0.89309326171875, 'seconds': 290.067411516}
+{'width': 100, 'depth': 3, 'magnetization': 0.80019775390625, 'seconds': 428.17807449400016}
+{'width': 100, 'depth': 4, 'magnetization': 0.65900146484375, 'seconds': 569.0827803560001}
+{'width': 100, 'depth': 5, 'magnetization': 0.6267633056640625, 'seconds': 709.540458208}
+{'width': 100, 'depth': 6, 'magnetization': 0.5427484130859375, 'seconds': 4016.9183982199997}
+{'width': 100, 'depth': 7, 'magnetization': 0.4974786376953125, 'seconds': 4243.098266495999}
+{'width': 100, 'depth': 8, 'magnetization': 0.4152264404296875, 'seconds': 8051.647813284}
+{'width': 100, 'depth': 9, 'magnetization': 0.3560772705078125, 'seconds': 11947.762342622}
+{'width': 100, 'depth': 10, 'magnetization': 0.3275860595703125, 'seconds': 13410.03666323}
+{'width': 100, 'depth': 11, 'magnetization': 0.3135089111328125, 'seconds': 14451.253601935}
+{'width': 100, 'depth': 12, 'magnetization': 0.28111572265625, 'seconds': 14696.32538613}
+{'width': 100, 'depth': 13, 'magnetization': 0.2536517333984375, 'seconds': 19576.874668805}
+{'width': 100, 'depth': 14, 'magnetization': 0.284638671875, 'seconds': 20286.511257966}
+{'width': 100, 'depth': 15, 'magnetization': 0.2173565673828125, 'seconds': 20716.217728614003}
+{'width': 100, 'depth': 16, 'magnetization': 0.1944512939453125, 'seconds': 21399.926500377}
+{'width': 100, 'depth': 17, 'magnetization': 0.1996490478515625, 'seconds': 22607.533422366003}
+{'width': 100, 'depth': 18, 'magnetization': 0.15647216796875, 'seconds': 22900.357135126}
+{'width': 100, 'depth': 19, 'magnetization': 0.1622735595703125, 'seconds': 27389.292248863003}
+{'width': 100, 'depth': 20, 'magnetization': 0.139295654296875, 'seconds': 36256.02451583}
+
