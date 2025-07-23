@@ -72,34 +72,22 @@ def expected_closeness_weight(n_rows, n_cols, hamming_weight):
     return 2 * mu_k - 1  # normalized closeness in [-1,1]
 
 
+
 def main():
-    """
-    Generates TFIM samples.
-    CLI Arguments:
-    1: n_qubits (int) - default 16
-    2: depth (int) - default 20
-    3: dt (float) - default 0.25
-    4: shots (int) - default 100
-    5: J (float) - default -1.0
-    6: h (float) - default 2.0
-    7: theta (float, in radians) - default pi/18
-    8: delta_theta (float, in radians) - default 2*pi/9
-    """
-    # --- Default Parameters ---
+    # --- Default settings ---
     n_qubits = 16
     depth = 20
     shots = 100
     t2 = 1
     omega = 1.5
-
-    # Default physics parameters (can be overridden by CLI)
     J = -1.0
     h = 2.0
     dt = 0.25
     theta = math.pi / 18
-    delta_theta = 2 * math.pi / 9
+    delta_theta = None # Flag to check if it's set via CLI
 
-    # --- CLI Argument Parsing ---
+    # --- Parse CLI arguments ---
+    # Overrides defaults if arguments are provided
     if len(sys.argv) > 1:
         n_qubits = int(sys.argv[1])
     if len(sys.argv) > 2:
@@ -113,18 +101,26 @@ def main():
     if len(sys.argv) > 6:
         h = float(sys.argv[6])
     if len(sys.argv) > 7:
-        theta = float(sys.argv[7]) # Input theta in radians
+        theta = float(sys.argv[7])
     if len(sys.argv) > 8:
-        delta_theta = float(sys.argv[8]) # Input delta_theta in radians
+        delta_theta = float(sys.argv[8])
 
-    # --- Print Parameters to Confirm ---
-    print(f"n_qubits: {n_qubits}, depth: {depth}, dt: {dt}, shots: {shots}")
-    print(f"J: {J}, h: {h}, theta: {theta:.4f} rad, delta_theta: {delta_theta:.4f} rad")
-    print(f"t2: {t2}, omega / pi: {omega}")
+    print("t2: " + str(t2))
+    print("omega / pi: " + str(omega))
 
     omega *= math.pi
     n_rows, n_cols = factor_width(n_qubits, False)
     qubits = list(range(n_qubits))
+    depths = list(range(0, depth + 1))
+
+    # If delta_theta was not provided via CLI, calculate it from other params
+    if delta_theta is None:
+        # Coordination number for a square lattice:
+        z = 4
+        # Mean-field critical angle (in radians)
+        theta_c = math.asin(h / (z * J))  # handles signs
+        # Set theta relative to that:
+        delta_theta = theta - theta_c
 
     start = time.perf_counter()
 
@@ -197,49 +193,18 @@ def main():
 
         # Second dimension: permutation within Hamming weight
         # (Written with help from Elara, the custom OpenAI GPT)
-        # Note: This part can be slow for large n_qubits and intermediate m
         closeness_prob = random.random()
-        num_combos = math.comb(n_qubits, m)
-        if num_combos == 0:
-            continue
-        
-        # Select a random starting point to avoid bias in iteration order
-        start_index = random.randint(0, num_combos - 1)
-        
-        # Create an iterator and advance to the random start
-        combo_iter = itertools.combinations(qubits, m)
-        for _ in range(start_index):
-            next(combo_iter)
-
         tot_prob = 0
         state_int = 0
-        
-        # Iterate through combinations in a wrapped manner
-        for i, combo in enumerate(itertools.chain(combo_iter, itertools.combinations(qubits, m))):
-            if i >= num_combos:
-                break # Ensure we only iterate once over all combinations
-
+        for combo in itertools.combinations(qubits, m):
             state_int = sum(1 << pos for pos in combo)
-            # This normalization can be unstable if expected_closeness is -1.
-            # Adding a small epsilon or handling the case might be needed for robustness.
-            expected = expected_closeness_weight(n_rows, n_cols, m)
-            prob_weight = (1.0 + closeness_like_bits(state_int, n_rows, n_cols)) / (1.0 + expected if expected > -1.0 else 1e-9)
-            
-            # The total probability is not well-defined here, this is a weighted random choice.
-            # A more correct approach for large systems would be Metropolis sampling.
-            # For now, we simulate a weighted choice by scaling with a random value.
-            # This is a heuristic and not a formally correct sampling method.
-            # A simple approach that works for small systems:
-            if random.random() < prob_weight / (n_qubits): # Heuristic scaling
-                  break
+            tot_prob += (1.0 + closeness_like_bits(state_int, n_rows, n_cols)) / (1.0 + expected_closeness_weight(n_rows, n_cols, m))
+            if closeness_prob <= tot_prob:
+                break
 
-    samples.append(state_int)
+        samples.append(state_int)
 
     seconds = time.perf_counter() - start
 
     print(samples)
     print("Seconds: " + str(seconds))
-
-
-if __name__ == "__main__":
-    sys.exit(main())
