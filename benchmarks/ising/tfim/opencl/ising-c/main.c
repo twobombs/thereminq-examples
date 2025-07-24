@@ -116,11 +116,6 @@ int main(int argc, char **argv) {
     if (argc > 5) shots = atoi(argv[5]);
     if (argc > 6) trials = atoi(argv[6]);
 
-    if (n_qubits > 28) {
-        fprintf(stderr, "Error: n_qubits > 28 requires too much memory.\n");
-        return 1;
-    }
-
     printf("t1: %f\n", t1);
     printf("t2: %f\n", t2);
     printf("omega / pi: %f\n", omega);
