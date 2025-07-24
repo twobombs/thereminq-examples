@@ -16,7 +16,7 @@ OUTPUT_DIR="${SCRIPT_DIR}/tfim_results"
 
 # Set the number of parallel jobs to run.
 # Adjust this based on the number of CPU cores available on your system.
-PARALLEL_JOBS=8
+PARALLEL_JOBS=24
 
 # --- Setup ---
 # Create the output directory if it doesn't exist.
