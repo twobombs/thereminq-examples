@@ -7,9 +7,9 @@ J = -1.0
 h = 2.0
 z = 4
 theta = 0.17453292519943295 # pi/18 radians
-t = 5
+t = 20
 n_qubits = 56
-shots = 100
+shots = 1000
 
 # --- Print the parameters ---
 print("## Simulation Parameters ##")
