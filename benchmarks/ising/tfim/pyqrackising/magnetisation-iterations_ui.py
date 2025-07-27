@@ -155,7 +155,7 @@ def vedo_plotter_process(data_queue, param_specs):
 
                     z_values = points_array[:, 2]
                     vmin, vmax = 0.0, 1.0
-                    point_cloud_actor = Points(points_array, r=12).cmap('viridis', z_values, vmin=vmin, vmax=vmax)
+                    point_cloud_actor = Points(points_array, r=5).cmap('viridis', z_values, vmin=vmin, vmax=vmax)
 
                     scalar_bar_actor = ScalarBar(
                         point_cloud_actor, title="Avg. Measured Value", pos=((0.85, 0.4), (0.9, 0.9))
