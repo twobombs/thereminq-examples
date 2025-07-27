@@ -3,6 +3,9 @@ PyQrackIsing UI & Visualisation - the realtime interactive 3d Ising Gemini25 cak
 With the TFIM control panel values up to 960 qubits can be set, with extensive factor T, theta and Z settings
 The 'Run full scan' option will dicover all the J and h variables in the visible graph space in real time 
 
+Sample distribution
+<img width="1704" height="922" alt="Screenshot from 2025-07-27 18-39-10" src="https://github.com/user-attachments/assets/e63494c7-acc5-4ceb-a786-f83045ad89e1" />
+
 Surface plot SQR magnetisation
 <img width="1262" height="826" alt="Screenshot from 2025-07-27 14-48-17" src="https://github.com/user-attachments/assets/0d096f9d-ebf7-4910-af07-404ccd7c62d8" />
 
