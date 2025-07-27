@@ -3,6 +3,8 @@ PyQrackIsing UI & Visualisation - the realtime interactive 3d Ising cake
 With the TFIM control panel values up to 960 qubits can be set, with extensive factor T, theta and Z settings
 The 'Run full scan' option will dicover all the J and h variables in the visible graph space in real time 
 
+Surface plot SQR magnetisation
+<img width="1262" height="826" alt="Screenshot from 2025-07-27 14-48-17" src="https://github.com/user-attachments/assets/0d096f9d-ebf7-4910-af07-404ccd7c62d8" />
 
 
 SQR magnetization Interactive UI - run full scan
