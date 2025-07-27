@@ -1,4 +1,4 @@
-PyQrackIsing UI & Visualisation - the realtime interactive 3d Ising cake
+PyQrackIsing UI & Visualisation - the realtime interactive 3d Ising Gemini25 cake 
 
 With the TFIM control panel values up to 960 qubits can be set, with extensive factor T, theta and Z settings
 The 'Run full scan' option will dicover all the J and h variables in the visible graph space in real time 
