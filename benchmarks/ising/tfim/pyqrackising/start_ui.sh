@@ -10,6 +10,6 @@ echo "magnetisation ui"
 python3 magnetisation-iterations_ui.py &
 
 echo "sqr magnetisation ui"
-python3 sqr_magnetisation-iterations_ui.py
+python3 sqr_magnetisation-iterations_ui.py &
 
 tail -f /dev/null
