@@ -5,7 +5,7 @@ simulation output from iterations_cli.py.
 
 This version uses multiprocessing to run the vedo plotter in a separate
 process and a multiprocessing pool to run grid scans in parallel.
-After a full scan, it renders a 3D surface instead of just points.
+It can run a single J-h surface scan or a full Trotter scan over t.
 """
 import subprocess
 import numpy as np
@@ -118,6 +118,60 @@ def run_full_scan_worker(fixed_params, result_queue):
         print(error_msg)
         result_queue.put(('error', error_msg))
 
+def run_trotter_scan_worker(fixed_params, result_queue, start_t): ### MODIFIED ###
+    """
+    Thread worker to scan the full J-h plane for a range of Trotter steps 't'.
+    The scan runs for 20 steps, starting from the value set on the slider.
+    """
+    ### MODIFIED ###
+    # Define the new range based on the slider's starting value.
+    end_t = start_t + 20
+    trotter_range = range(start_t, end_t)
+    ### END MODIFIED ###
+
+    j_range = np.arange(-2.0, 2.0 + 0.1, 0.1)
+    h_range = np.arange(-4.0, 4.0 + 0.1, 0.1)
+    total_planes = len(trotter_range)
+
+    try:
+        multiplier = 3
+        num_processes = mp.cpu_count() * multiplier
+        
+        for i, t_val in enumerate(trotter_range):
+            plane_params = fixed_params.copy()
+            plane_params['t'] = t_val
+            
+            status_msg = f"Trotter Scan ({i+1}/{total_planes}): Starting plane for t={t_val}"
+            result_queue.put(('status', status_msg))
+            print(status_msg)
+
+            all_params = []
+            for h_val in h_range:
+                for j_val in j_range:
+                    current_params = plane_params.copy()
+                    current_params['J'] = round(j_val, 2)
+                    current_params['h'] = round(h_val, 2)
+                    all_params.append(current_params)
+            
+            total_points = len(all_params)
+            count = 0
+            
+            with mp.Pool(processes=num_processes) as pool:
+                for result_type, data in pool.imap_unordered(_execute_simulation, all_params):
+                    count += 1
+                    status_msg = f"Trotter Scan ({i+1}/{total_planes}, t={t_val}): {count}/{total_points}"
+                    result_queue.put(('status', status_msg))
+                    result_queue.put((result_type, data))
+            
+            # Signal that the scan for this 't' value is complete
+            result_queue.put(('trotter_slice_complete', t_val))
+
+        result_queue.put(('status', "Full Trotter Scan complete."))
+    except Exception as e:
+        error_msg = f"A Trotter scan error occurred: {e}"
+        print(error_msg)
+        result_queue.put(('error', error_msg))
+
 # --- Vedo Plotter Process ---
 def vedo_plotter_process(data_queue, param_specs):
     """
@@ -183,6 +237,8 @@ def vedo_plotter_process(data_queue, param_specs):
                     plt.add(point_cloud_actor, scalar_bar_actor)
 
                 elif command == 'scan_complete':
+                    # The `data` now contains the dictionary of fixed parameters for the filename
+                    fixed_params = data
                     if len(scan_points_data) < 4: continue # Need at least a 2x2 grid for a surface
 
                     # --- Build and render the surface mesh ---
@@ -228,6 +284,21 @@ def vedo_plotter_process(data_queue, param_specs):
                     plt.add(surface_actor, scalar_bar_actor)
                     print("Surface mesh rendered.")
 
+                    # --- Create filename and save high-resolution screenshot ---
+                    if fixed_params:
+                        param_parts = []
+                        for key, value in sorted(fixed_params.items()):
+                            if isinstance(value, float):
+                                param_parts.append(f"{key}={value:.2f}")
+                            else:
+                                param_parts.append(f"{key}={value}")
+                        
+                        filename = "TFIM_scan_" + "_".join(param_parts) + ".png"
+                        
+                        # Save screenshot with 3x resolution
+                        plt.screenshot(filename, scale=3)
+                        print(f"Saved high-resolution screenshot to: {filename}")
+
                 elif command == 'clear':
                     plotted_points_data.clear()
                     scan_points_data.clear()
@@ -264,6 +335,8 @@ class ControlPanel:
         self.sim_result_queue = queue.Queue()
         self.param_vars = {}
         self.scan_button = None
+        self.trotter_scan_button = None
+        self.last_scan_params = {}
 
         self.root.title("TFIM Control Panel")
         self.root.geometry("400x650")
@@ -308,10 +381,13 @@ class ControlPanel:
         button_frame.pack(fill=tk.X, pady=20)
 
         self.scan_button = ttk.Button(button_frame, text="Run Full Scan (J vs h)", command=self.start_full_scan)
-        self.scan_button.pack(side=tk.LEFT, expand=True, padx=5, ipady=5)
+        self.scan_button.pack(fill=tk.X, expand=True, padx=5, pady=5, ipady=5)
         
+        self.trotter_scan_button = ttk.Button(button_frame, text="Run Full Trotter Scan (t vs J,h)", command=self.start_trotter_scan)
+        self.trotter_scan_button.pack(fill=tk.X, expand=True, padx=5, pady=5, ipady=5)
+
         clear_button = ttk.Button(button_frame, text="Clear Plot", command=self.clear_plot)
-        clear_button.pack(side=tk.RIGHT, expand=True, padx=5, ipady=5)
+        clear_button.pack(fill=tk.X, expand=True, padx=5, pady=5, ipady=5)
 
         status_bar = ttk.Label(parent, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=5)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
@@ -329,7 +405,7 @@ class ControlPanel:
     def start_full_scan(self):
         """Starts the full J-h grid scan in a new thread."""
         if messagebox.askokcancel("Start Scan?", "This will run many simulations in parallel and render a surface at the end. Continue?"):
-            self.scan_button.config(state=tk.DISABLED)
+            self._disable_buttons()
             self.clear_plot()
             
             # Get fixed parameters (those not being scanned)
@@ -340,8 +416,47 @@ class ControlPanel:
                 if key in fixed_params:
                     fixed_params[key] = int(fixed_params[key])
             
+            self.last_scan_params = fixed_params
+            
             thread = threading.Thread(target=run_full_scan_worker, args=(fixed_params, self.sim_result_queue), daemon=True)
             thread.start()
+
+    def start_trotter_scan(self):
+        """Starts the full Trotter scan in a new thread."""
+        ### MODIFIED ###
+        # Get the starting t value from the slider to define the scan's range
+        start_t = int(self.param_vars['t'].get())
+        msg = (f"This will run a 20-step scan from t={start_t} to t={start_t + 19}.\n"
+               "This will take a very long time and save 20 images.\n\nContinue?")
+        if messagebox.askokcancel("Start Trotter Scan?", msg):
+        ### END MODIFIED ###
+            self._disable_buttons()
+            self.clear_plot()
+            
+            # Get fixed parameters (excluding those being scanned: J, h, t)
+            fixed_params = {name: var.get() for name, var in self.param_vars.items()}
+            fixed_params.pop('J', None)
+            fixed_params.pop('h', None)
+            fixed_params.pop('t', None)
+            for key in ['z', 'n_qubits']: # t is now variable
+                if key in fixed_params:
+                    fixed_params[key] = int(fixed_params[key])
+            
+            self.last_scan_params = fixed_params
+
+            ### MODIFIED ###
+            # Pass the starting t value to the worker thread
+            thread = threading.Thread(target=run_trotter_scan_worker, args=(fixed_params, self.sim_result_queue, start_t), daemon=True)
+            thread.start()
+            ### END MODIFIED ###
+    
+    def _disable_buttons(self):
+        self.scan_button.config(state=tk.DISABLED)
+        self.trotter_scan_button.config(state=tk.DISABLED)
+
+    def _enable_buttons(self):
+        self.scan_button.config(state=tk.NORMAL)
+        self.trotter_scan_button.config(state=tk.NORMAL)
 
     def check_sim_queue(self):
         """Checks the queue for results from the simulation threads/processes."""
@@ -349,20 +464,32 @@ class ControlPanel:
             result_type, data = self.sim_result_queue.get_nowait()
             if result_type == 'success':
                 params, result_data = data
-                self.status_var.set(f"Plotting: J={params['J']:.2f}, h={params['h']:.2f}")
+                # No need to update status for every single point during massive scans
+                # self.status_var.set(f"Plotting: J={params['J']:.2f}, h={params['h']:.2f}")
                 self.data_queue.put(('add', (params, result_data)))
 
             elif result_type == 'error':
                 self.status_var.set("Error: See message box for details.")
-                self.scan_button.config(state=tk.NORMAL) # Re-enable button on error
+                self._enable_buttons()
                 messagebox.showerror("Simulation Error", data)
             
             elif result_type == 'status':
                 self.status_var.set(data)
-                # When the scan worker says it's done, tell the plotter process
-                if "Scan complete" in data:
-                    self.scan_button.config(state=tk.NORMAL)
-                    self.data_queue.put(('scan_complete', None))
+                # When any scan worker says it's done, re-enable buttons
+                if "complete" in data.lower():
+                    self._enable_buttons()
+                    if "Scan complete" in data:
+                        self.data_queue.put(('scan_complete', self.last_scan_params))
+            
+            elif result_type == 'trotter_slice_complete':
+                t_value = data
+                self.status_var.set(f"Trotter slice for t={t_value} complete. Saving image.")
+                # Prepare params for screenshot filename and tell plotter to finalize the surface
+                slice_params = self.last_scan_params.copy()
+                slice_params['t'] = t_value
+                self.data_queue.put(('scan_complete', slice_params))
+                # Tell plotter to clear for the next slice
+                self.data_queue.put(('clear', None))
                     
         except queue.Empty:
             pass # No new results
@@ -413,4 +540,3 @@ if __name__ == '__main__':
         plot_process.terminate()
         
     print("Application closed.")
-
