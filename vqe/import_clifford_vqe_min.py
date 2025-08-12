@@ -1,6 +1,7 @@
 # Quantum chemistry example
 # Developed with help from (OpenAI custom GPT) Elara
 # (Requires OpenFermion)
+# modified by Gemini25 to accomodate csv import
 
 import openfermion as of
 from openfermionpyscf import run_pyscf
