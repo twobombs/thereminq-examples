@@ -1,9 +1,15 @@
 # Quantum chemistry example
+#
 # This script performs a classical simulation of a VQE-like algorithm
 # to find the ground state energy of molecules.
 #
 # It uses OpenFermion to handle the quantum chemistry calculations
 # and multiprocessing to speed up the optimization part of the simulation.
+#
+# from https://github.com/vm6502q/pyqrack-examples/blob/main/algorithms/clifford_vqe_min.py
+# 
+# gemini25 merged this into the existing import modules with parameters
+#
 
 import openfermion as of
 from openfermionpyscf import run_pyscf
