@@ -1,15 +1,9 @@
 # Quantum chemistry example
-#
 # This script performs a classical simulation of a VQE-like algorithm
 # to find the ground state energy of molecules.
 #
 # It uses OpenFermion to handle the quantum chemistry calculations
 # and multiprocessing to speed up the optimization part of the simulation.
-#
-# from https://github.com/vm6502q/pyqrack-examples/blob/main/algorithms/clifford_vqe_min.py
-# 
-# gemini25 merged this into the existing import modules with parameters
-#
 
 import openfermion as of
 from openfermionpyscf import run_pyscf
@@ -59,7 +53,14 @@ for index, row in df.iterrows():
     molecule = of.MolecularData(geometry, basis, multiplicity, charge)
     
     # Run PySCF to get the molecular orbital energies and integrals.
-    molecule = run_pyscf(molecule, run_scf=True, run_fci=True)
+    # The try-except block handles potential errors where the electron count
+    # is inconsistent with the spin multiplicity.
+    try:
+        molecule = run_pyscf(molecule, run_scf=True, run_fci=True)
+    except RuntimeError as e:
+        print(f"Error during PySCF calculation for {element_name} ({symbol}): {e}")
+        print("Skipping this molecule and continuing to the next.")
+        continue
     
     # Get the molecular Hamiltonian in the second quantization representation.
     fermionic_hamiltonian = molecule.get_molecular_hamiltonian()
@@ -220,5 +221,12 @@ for index, row in df.iterrows():
     print(f"Ground State Energy (from CSV): {ground_state_energy}")
     difference = min_energy - ground_state_energy
     print(f"Difference (VQE - Ground State): {difference}")
+    
+    # Calculate and print the percentage difference
+    if ground_state_energy != 0:
+        percentage_difference = (difference / ground_state_energy) * 100
+        print(f"Percentage Difference: {percentage_difference:.4f}%")
+    else:
+        print("Cannot calculate percentage difference (Ground State Energy is zero).")
+        
     print("-" * 50)
-
