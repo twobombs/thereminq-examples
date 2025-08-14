@@ -5,7 +5,7 @@
 # It uses OpenFermion to handle the quantum chemistry calculations
 # and multiprocessing to speed up the optimization part of the simulation.
 
-# original code source https://github.com/vm6502q/pyqrack-examples/blob/main/algorithms/clifford_vqe_min.py
+# original core source by Dan Strano : https://github.com/vm6502q/pyqrack-examples/blob/main/algorithms/clifford_vqe_min.py
 # csv import and merge done by gemini25
 
 import openfermion as of
