@@ -11,7 +11,7 @@
 # according to both Elara and Gemini25 is that better then FW 
 # when required this code will switch to a higher precision chemical libary 
 
-# default settings are set for balanced (~2% derivation) for testing and debugging
+# default settings are set for balanced (~3% derivation) for testing and debugging
 # for more speed set num_steps to less then 100 and/or stepsize to 0.2 or higher
 # more precision set convergence_tolerance to 1e-6 or less and num_steps at or above 400
 
