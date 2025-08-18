@@ -7,6 +7,10 @@
 # code requires a Volta+ NVidia GPU and supports multi NVidia GPUs
 # code requires a specific CVS compiled for the script called import_clifford_vqe_min.csv 
 
+# as reported with the original file this method reports a less then 2% derivations
+# according to both Elara and Gemini25 is that better then FW 
+# when required this code will switch to a higher precision chemical libary 
+
 import pandas as pd
 import ast
 import pennylane as qml
