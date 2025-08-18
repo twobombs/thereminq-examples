@@ -35,16 +35,14 @@ from datetime import datetime
 warnings.filterwarnings("ignore", category=UserWarning, module='pyscf')
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-def calculate_ground_state(geometry, basis, multiplicity, charge, molecule_name, expected_energy):
+def calculate_ground_state(geometry, basis, multiplicity, charge, molecule_name, expected_energy, ansatz_name):
     """
-    Calculates the ground state energy of a molecule using a VQE approach
-    with a chemistry-inspired UCCSD ansatz.
+    Calculates the ground state energy of a molecule using a VQE approach.
+    Allows for switching between different ansatz circuits.
     """
-    print(f"--- [GPU {os.environ.get('CUDA_VISIBLE_DEVICES', 'N/A')}] Starting calculation for {molecule_name} (Multiplicity: {multiplicity}, Charge: {charge}) ---")
+    print(f"--- [GPU {os.environ.get('CUDA_VISIBLE_DEVICES', 'N/A')}] Starting calculation for {molecule_name} (Ansatz: {ansatz_name}) ---")
     
     start_time = time.time()
-    
-    # --- MODIFICATION: List to store convergence history ---
     convergence_log = []
     
     try:
@@ -66,53 +64,44 @@ def calculate_ground_state(geometry, basis, multiplicity, charge, molecule_name,
         # --- GPU DEVICE SELECTION ---
         dev = qml.device("lightning.gpu", wires=n_qubits)
 
-        # --- UCCSD Ansatz Setup ---
+        # --- Ansatz Setup ---
         n_electrons = molecule.n_electrons
         hf_state = qml.qchem.hf_state(n_electrons, n_qubits)
         
-        # Handle cases with no possible excitations (e.g., He2)
         try:
             singles, doubles = qml.qchem.excitations(n_electrons, n_qubits)
         except ValueError as e:
-            print(f"    > WARNING: Could not generate excitations for {molecule_name}. This is expected for systems with no virtual orbitals. {e}")
-            print(f"    > No trainable parameters in UCCSD. Returning Hartree-Fock energy.")
+            print(f"    > WARNING: Could not generate excitations for {molecule_name}. {e}")
             min_energy = molecule.hf_energy
-            print(f"--- [GPU {os.environ.get('CUDA_VISIBLE_DEVICES')}] Finished calculation for {molecule_name}. Final VQE Energy: {min_energy:.8f} Ha ---")
-            if min_energy is not None and expected_energy is not None:
-                abs_diff = abs(min_energy - expected_energy)
-                pct_diff = (abs_diff / abs(expected_energy)) * 100 if abs(expected_energy) > 1e-9 else 0.0
-                print(f"    > Deviation from Expected ({expected_energy:.8f} Ha): {abs_diff:.8f} Ha ({pct_diff:.2f}%)")
-            
-            end_time = time.time()
-            duration = end_time - start_time
-            print(f"    > Calculation took {duration:.2f} seconds.")
-            # Save log file even for this case
-            # (Details will be added in the final block)
+            # (Further logging and return handled in the final block)
             return min_energy
 
-        # Use PennyLane's dedicated function to map excitations to wires
         s_wires, d_wires = qml.qchem.excitations_to_wires(singles, doubles)
-
-        # Define the Quantum Circuit using the UCCSD ansatz
-        @qml.qnode(dev, diff_method="adjoint")
-        def circuit(params):
-            qml.UCCSD(params, wires=range(n_qubits), s_wires=s_wires, d_wires=d_wires, init_state=hf_state)
-            return qml.expval(hamiltonian)
-
-        # The number of parameters is the number of single and double excitations.
         n_params = len(s_wires) + len(d_wires)
+
+        # --- MODIFICATION: Select the quantum circuit based on ansatz_name ---
+        if ansatz_name == 'k-UpCCGSD':
+            # Using the hardware-efficient k-UpCCGSD ansatz
+            k = 1 # Number of repetitions (Trotter steps)
+            @qml.qnode(dev, diff_method="adjoint")
+            def circuit(params):
+                qml.kUpCCGSD(params, wires=range(n_qubits), k=k, s_wires=s_wires, d_wires=d_wires, init_state=hf_state)
+                return qml.expval(hamiltonian)
+        else: # Default to UCCSD
+            ansatz_name = 'UCCSD' # Ensure log is correct
+            @qml.qnode(dev, diff_method="adjoint")
+            def circuit(params):
+                qml.UCCSD(params, wires=range(n_qubits), s_wires=s_wires, d_wires=d_wires, init_state=hf_state)
+                return qml.expval(hamiltonian)
+
         params = np.random.uniform(0, 2 * np.pi, size=n_params, requires_grad=True)
-        
-	# updates the very high stepsize of 0.05 to a 'reasonable' 0.15
-        opt = qml.AdamOptimizer(stepsize=0.15)
-	# number of steps lower because of higher convergence value, yet avoiding long waits set to a balmy 100
-        num_steps = 100
+        opt = qml.AdamOptimizer(stepsize=0.05)
+        num_steps = 400
         min_energy = molecule.hf_energy
 
         # Convergence tracking
         prev_energy = min_energy
-	# modified from the high precision 1e-6 to the faster max 0.5% loss of 6e-3
-        convergence_tolerance = 6e-3
+        convergence_tolerance = 1e-6
         convergence_steps = 10
         steps_without_improvement = 0
         converged_step = None
@@ -126,7 +115,6 @@ def calculate_ground_state(geometry, basis, multiplicity, charge, molecule_name,
             if (step + 1) % 20 == 0:
                 print(f"[GPU {os.environ.get('CUDA_VISIBLE_DEVICES')}] {molecule_name} {log_entry}")
             
-            # Convergence check logic
             if abs(cost - prev_energy) < convergence_tolerance:
                 steps_without_improvement += 1
             else:
@@ -156,7 +144,7 @@ def calculate_ground_state(geometry, basis, multiplicity, charge, molecule_name,
         
         print(f"    > Calculation took {duration:.2f} seconds.")
 
-        # --- MODIFICATION: Save detailed log file ---
+        # Save detailed log file
         log_dir = "calculation_logs"
         os.makedirs(log_dir, exist_ok=True)
         safe_molecule_name = molecule_name.replace(' ', '_').replace('(', '').replace(')', '')
@@ -168,6 +156,7 @@ def calculate_ground_state(geometry, basis, multiplicity, charge, molecule_name,
             f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
             f.write("--- Configuration ---\n")
+            f.write(f"Ansatz Type: {ansatz_name}\n") # Log the ansatz used
             f.write(f"Basis Set: {basis}\n")
             f.write(f"Multiplicity: {multiplicity}\n")
             f.write(f"Charge: {charge}\n")
@@ -210,6 +199,10 @@ def worker_task(task_data):
     expected_energy = row['Ground State Energy ( compound )']
     multiplicity = int(row['correct multiplicity'])
     charge = int(row['correct charge'])
+    
+    # --- MODIFICATION: Read the ansatz name from the CSV ---
+    # pd.isna checks for empty/NaN cells
+    ansatz_name = 'UCCSD' if pd.isna(row['New Ansatz']) else row['New Ansatz']
 
     try:
         geometry = ast.literal_eval(row['Geometry'])
@@ -223,7 +216,8 @@ def worker_task(task_data):
         multiplicity=multiplicity,
         charge=charge,
         molecule_name=molecule_name,
-        expected_energy=expected_energy
+        expected_energy=expected_energy,
+        ansatz_name=ansatz_name
     )
 
     if calculated_energy is not None:
@@ -240,7 +234,6 @@ def worker_task(task_data):
         return {'Original Index': index, 'Calculated Energy': None, 'Absolute Difference': None, 'Percentage Difference': None}
 
 def main():
-    # *** Ensure this filename matches your CSV ***
     df = pd.read_csv('import_clifford_vqe_min.csv')
     df_subset = df
 
@@ -275,4 +268,5 @@ def main():
 if __name__ == "__main__":
     multiprocessing.set_start_method("spawn", force=True)
     main()
+
 
