@@ -11,8 +11,11 @@
 # according to both Elara and Gemini25 is that better then FW 
 # when required this code will switch to a higher precision chemical libary 
 
-# current setting are for ultra precision and allows for elaborate testing and debugging
-# for speed set num_steps to less then 100 and/or stepsize to 0.1 or higher
+# default settings are set for balanced (~2% derivation) for testing and debugging
+# for more speed set num_steps to less then 100 and/or stepsize to 0.2 or higher
+# more precision set convergence_tolerance to 1e-6 or less and num_steps at or above 400
+
+# this code has been tested on a combo of 3 volta/turing cards with ~11TFLOPS FP32 each
 
 import pandas as pd
 import ast
@@ -99,13 +102,16 @@ def calculate_ground_state(geometry, basis, multiplicity, charge, molecule_name,
         n_params = len(s_wires) + len(d_wires)
         params = np.random.uniform(0, 2 * np.pi, size=n_params, requires_grad=True)
         
-        opt = qml.AdamOptimizer(stepsize=0.05)
-        num_steps = 400
+	# updates the very high stepsize of 0.05 to a 'reasonable' 0.15
+        opt = qml.AdamOptimizer(stepsize=0.15)
+	# number of steps lower because of higher convergence value, yet avoiding long waits set to a balmy 100
+        num_steps = 100
         min_energy = molecule.hf_energy
 
         # Convergence tracking
         prev_energy = min_energy
-        convergence_tolerance = 1e-6
+	# modified from the high precision 1e-6 to the faster max 0.5% loss of 6e-3
+        convergence_tolerance = 6e-3
         convergence_steps = 10
         steps_without_improvement = 0
         converged_step = None
