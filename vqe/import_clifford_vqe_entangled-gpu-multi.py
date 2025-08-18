@@ -11,6 +11,9 @@
 # according to both Elara and Gemini25 is that better then FW 
 # when required this code will switch to a higher precision chemical libary 
 
+# current setting are for ultra precision and allows for elaborate testing and debugging
+# for speed set num_steps to less then 100 and/or stepsize to 0.1 or higher
+
 import pandas as pd
 import ast
 import pennylane as qml
