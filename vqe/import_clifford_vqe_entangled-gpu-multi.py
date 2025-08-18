@@ -1,7 +1,11 @@
-# original done by Dan Strano & GPT Elara 
+# original code done by Dan Strano & GPT Elara 
 # https://github.com/vm6502q/pyqrack-examples/blob/main/algorithms/clifford_vqe_entangled.py
-# multi GPU version done by Aryan Blaauw & Gemini25
+
+# multi GPU version with bells and whistles done by Aryan Blaauw & Gemini25
 # https://g.co/gemini/share/a24fec0d245c
+
+# code requires a Volta+ NVidia GPU and supports multi NVidia GPUs
+# code requires a specific CVS compiled for the script called import_clifford_vqe_min.csv 
 
 import pandas as pd
 import ast
