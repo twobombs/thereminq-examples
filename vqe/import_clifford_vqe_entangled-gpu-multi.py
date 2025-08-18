@@ -16,7 +16,7 @@
 # more precision set convergence_tolerance to 1e-6 or less and num_steps at or above 400
 
 # this code has been tested on a combo of 3 DC class volta/turing cards with ~11TFLOPS FP32 each
-# results are stored as a text file in ./calculation_logs/ with he name of the molecule
+# results are stored as a text file in ./calculation_logs/vqe_result_ with he name of the molecule
 
 import pandas as pd
 import ast
