@@ -1,3 +1,8 @@
+# original done by Dan Strano & GPT Elara 
+# https://github.com/vm6502q/pyqrack-examples/blob/main/algorithms/clifford_vqe_entangled.py
+# multi GPU version done by Aryan Blaauw & Gemini25
+# https://g.co/gemini/share/a24fec0d245c
+
 import pandas as pd
 import ast
 import pennylane as qml
