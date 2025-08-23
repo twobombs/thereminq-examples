@@ -12,10 +12,13 @@
 # when required this code will switch to a higher precision chemical libary 
 
 # default settings are set for balanced (~3% derivation) for testing and debugging
+
 # for more speed set num_steps to less then 100 and/or stepsize to 0.2 or higher
-# more precision set convergence_tolerance to 1e-6 or less and num_steps at or above 400
+
+# more precision set convergence_tolerance to 1e-6 or less and num_steps at or above 400 stepsize to 0.05
 
 # this code has been tested on a combo of 3 DC class volta/turing cards with ~11TFLOPS FP32 each
+
 # results are stored as a text file in ./calculation_logs/vqe_result_ with he name of the molecule
 
 import pandas as pd
@@ -46,8 +49,12 @@ def calculate_ground_state(geometry, basis, multiplicity, charge, molecule_name,
     convergence_log = []
     
     try:
+        # --- MODIFICATION: Handle isotopes like Deuterium (D) by treating them as Hydrogen (H) ---
+        # The electronic structure is determined by nuclear charge, which is the same for H and D.
+        processed_geometry = [(atom[0].replace('D', 'H'), atom[1]) for atom in geometry]
+
         # Define molecule and run classical PySCF calculation
-        molecule = MolecularData(geometry, basis, multiplicity, charge)
+        molecule = MolecularData(processed_geometry, basis, multiplicity, charge)
         molecule = run_pyscf(molecule, run_scf=True, verbose=False)
 
         # Get the Hamiltonian operator
@@ -68,40 +75,44 @@ def calculate_ground_state(geometry, basis, multiplicity, charge, molecule_name,
         n_electrons = molecule.n_electrons
         hf_state = qml.qchem.hf_state(n_electrons, n_qubits)
         
-        try:
-            singles, doubles = qml.qchem.excitations(n_electrons, n_qubits)
-        except ValueError as e:
-            print(f"    > WARNING: Could not generate excitations for {molecule_name}. {e}")
-            min_energy = molecule.hf_energy
-            # (Further logging and return handled in the final block)
-            return min_energy
-
-        s_wires, d_wires = qml.qchem.excitations_to_wires(singles, doubles)
-        n_params = len(s_wires) + len(d_wires)
-
-        # --- MODIFICATION: Select the quantum circuit based on ansatz_name ---
-        if ansatz_name == 'k-UpCCGSD':
-            # Using the hardware-efficient k-UpCCGSD ansatz
-            k = 1 # Number of repetitions (Trotter steps)
+        # --- Select the quantum circuit and prepare parameters ---
+        if ansatz_name == 'Hardware-Efficient':
+            # A generic, hardware-friendly ansatz
+            n_layers = 4 # You can tune the number of layers
+            param_shape = qml.StronglyEntanglingLayers.shape(n_layers=n_layers, n_wires=n_qubits)
+            n_params = np.prod(param_shape)
+            
             @qml.qnode(dev, diff_method="adjoint")
             def circuit(params):
-                qml.kUpCCGSD(params, wires=range(n_qubits), k=k, s_wires=s_wires, d_wires=d_wires, init_state=hf_state)
+                qml.BasisState(hf_state, wires=range(n_qubits))
+                qml.StronglyEntanglingLayers(params.reshape(param_shape), wires=range(n_qubits))
                 return qml.expval(hamiltonian)
         else: # Default to UCCSD
             ansatz_name = 'UCCSD' # Ensure log is correct
+            try:
+                singles, doubles = qml.qchem.excitations(n_electrons, n_qubits)
+            except ValueError as e:
+                print(f"    > WARNING: Could not generate excitations for {molecule_name}. {e}")
+                min_energy = molecule.hf_energy
+                # (Further logging and return handled in the final block)
+                return min_energy
+
+            s_wires, d_wires = qml.qchem.excitations_to_wires(singles, doubles)
+            n_params = len(s_wires) + len(d_wires)
+            
             @qml.qnode(dev, diff_method="adjoint")
             def circuit(params):
                 qml.UCCSD(params, wires=range(n_qubits), s_wires=s_wires, d_wires=d_wires, init_state=hf_state)
                 return qml.expval(hamiltonian)
 
         params = np.random.uniform(0, 2 * np.pi, size=n_params, requires_grad=True)
-        opt = qml.AdamOptimizer(stepsize=0.2)
-        num_steps = 100
+        opt = qml.AdamOptimizer(stepsize=0.15)
+        num_steps = 40
         min_energy = molecule.hf_energy
 
         # Convergence tracking
         prev_energy = min_energy
-        convergence_tolerance = 6e-3
+        convergence_tolerance = 1e-3
         convergence_steps = 10
         steps_without_improvement = 0
         converged_step = None
@@ -200,8 +211,7 @@ def worker_task(task_data):
     multiplicity = int(row['correct multiplicity'])
     charge = int(row['correct charge'])
     
-    # --- MODIFICATION: Read the ansatz name from the CSV ---
-    # pd.isna checks for empty/NaN cells
+    # Read the ansatz name from the CSV
     ansatz_name = 'UCCSD' if pd.isna(row['New Ansatz']) else row['New Ansatz']
 
     try:
@@ -241,14 +251,20 @@ def main():
         num_gpus = len(os.popen("nvidia-smi -L").readlines())
         if num_gpus == 0:
             raise ValueError("No NVIDIA GPUs detected.")
-        print(f"\nFound {num_gpus} GPUs. Creating a pool of {num_gpus} worker processes.\n")
     except Exception:
         print("Could not detect NVIDIA GPUs. Defaulting to 1 worker.")
         num_gpus = 1
 
+    # Set the number of workers per GPU
+    workers_per_gpu = 2
+    num_processes = num_gpus * workers_per_gpu
+    
+    print(f"\nFound {num_gpus} GPUs. Creating a pool of {num_processes} worker processes ({workers_per_gpu} per GPU).\n")
+
     tasks = [(i % num_gpus, index, row) for i, (index, row) in enumerate(df_subset.iterrows())]
 
-    with multiprocessing.Pool(processes=num_gpus) as pool:
+    # Use the new total number of processes
+    with multiprocessing.Pool(processes=num_processes) as pool:
         results = pool.map(worker_task, tasks)
 
     results.sort(key=lambda x: x['Original Index'])
@@ -268,5 +284,4 @@ def main():
 if __name__ == "__main__":
     multiprocessing.set_start_method("spawn", force=True)
     main()
-
 
