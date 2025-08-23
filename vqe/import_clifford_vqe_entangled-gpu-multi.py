@@ -95,13 +95,13 @@ def calculate_ground_state(geometry, basis, multiplicity, charge, molecule_name,
                 return qml.expval(hamiltonian)
 
         params = np.random.uniform(0, 2 * np.pi, size=n_params, requires_grad=True)
-        opt = qml.AdamOptimizer(stepsize=0.05)
-        num_steps = 400
+        opt = qml.AdamOptimizer(stepsize=0.2)
+        num_steps = 100
         min_energy = molecule.hf_energy
 
         # Convergence tracking
         prev_energy = min_energy
-        convergence_tolerance = 1e-6
+        convergence_tolerance = 6e-3
         convergence_steps = 10
         steps_without_improvement = 0
         converged_step = None
