@@ -29,7 +29,7 @@ def parse_log_file(filepath):
 def visualize_results_3d():
     """
     Scans the calculation_logs directory, parses the files,
-    and creates a 3D scatter plot of the results.
+    and creates a 3D scatter plot of the results with a legend and labels.
     """
     log_dir = "calculation_logs"
     if not os.path.isdir(log_dir):
@@ -54,14 +54,21 @@ def visualize_results_3d():
     times = np.array([res['time'] for res in results])
     pct_diffs = np.array([res['pct_diff'] for res in results])
 
-    # Create the 3D plot
-    fig = plt.figure(figsize=(12, 10))
-    ax = fig.add_subplot(111, projection='3d')
+    # Create a color map for the legend
+    unique_molecules = sorted(list(set(molecules)))
+    colors = plt.cm.get_cmap('tab20', len(unique_molecules))
+    molecule_to_color = {molecule: colors(i) for i, molecule in enumerate(unique_molecules)}
+    point_colors = [molecule_to_color[mol] for mol in molecules]
 
-    # Create a scatter plot
-    scatter = ax.scatter(qubits, times, pct_diffs, c=pct_diffs, cmap='viridis', s=100, depthshade=True)
+    # Create the 3D plot, adjusting subplot to make space for the legend
+    fig = plt.figure(figsize=(15, 10))
+    ax = fig.add_subplot(1, 1, 1, projection='3d')
+    fig.subplots_adjust(left=0.25) # Make space on the left
 
-    # Add labels for each point
+    # Create a scatter plot with specific colors for each molecule
+    scatter = ax.scatter(qubits, times, pct_diffs, c=point_colors, s=100, depthshade=True)
+
+    # --- MODIFICATION: Add text labels directly to the points in the graph ---
     for i, molecule in enumerate(molecules):
         ax.text(qubits[i], times[i], pct_diffs[i], f'  {molecule}', size=8, zorder=1, color='k')
 
@@ -71,11 +78,17 @@ def visualize_results_3d():
     ax.set_zlabel('Percentage Difference (Error %)')
     ax.set_title('VQE Performance: Complexity vs. Time vs. Accuracy')
     
-    # Add a color bar
-    cbar = fig.colorbar(scatter, shrink=0.5, aspect=10)
-    cbar.set_label('Error Percentage')
+    # Create a custom legend on the left
+    legend_ax = fig.add_axes([0.01, 0.5, 0.2, 0.2]) # Position for the legend
+    legend_ax.axis('off') # Hide the axes box
+    
+    for i, molecule in enumerate(unique_molecules):
+        legend_ax.scatter([], [], c=[molecule_to_color[molecule]], label=molecule)
+    
+    legend_ax.legend(loc='center left', title='Molecules', frameon=False)
 
-    # --- MODIFICATION: Save the figure as a high-resolution PNG ---
+
+    # Save the figure as a high-resolution PNG
     output_filename = 'vqe_performance_plot.png'
     plt.savefig(output_filename, dpi=300, bbox_inches='tight')
     print(f"Graph saved as high-resolution PNG: {output_filename}")
