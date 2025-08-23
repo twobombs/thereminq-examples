@@ -29,7 +29,7 @@ def parse_log_file(filepath):
 def visualize_results_3d():
     """
     Scans the calculation_logs directory, parses the files,
-    and creates a 3D scatter plot of the results with a legend and labels.
+    and creates a 3D scatter plot of the results with a legend, labels, and color bar.
     """
     log_dir = "calculation_logs"
     if not os.path.isdir(log_dir):
@@ -54,21 +54,33 @@ def visualize_results_3d():
     times = np.array([res['time'] for res in results])
     pct_diffs = np.array([res['pct_diff'] for res in results])
 
-    # Create a color map for the legend
+    # --- MODIFICATION: Use different markers for each molecule for the legend ---
     unique_molecules = sorted(list(set(molecules)))
-    colors = plt.cm.get_cmap('tab20', len(unique_molecules))
-    molecule_to_color = {molecule: colors(i) for i, molecule in enumerate(unique_molecules)}
-    point_colors = [molecule_to_color[mol] for mol in molecules]
+    markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p', '*', 'h']
+    molecule_to_marker = {molecule: markers[i % len(markers)] for i, molecule in enumerate(unique_molecules)}
 
-    # Create the 3D plot, adjusting subplot to make space for the legend
+    # Create the 3D plot
     fig = plt.figure(figsize=(15, 10))
-    ax = fig.add_subplot(1, 1, 1, projection='3d')
-    fig.subplots_adjust(left=0.25) # Make space on the left
+    ax = fig.add_subplot(111, projection='3d')
+    fig.subplots_adjust(left=0.25, right=0.85) # Adjust plot area
 
-    # Create a scatter plot with specific colors for each molecule
-    scatter = ax.scatter(qubits, times, pct_diffs, c=point_colors, s=100, depthshade=True)
+    # Plot each molecule's data with its unique marker
+    # The color is still determined by the percentage difference
+    scatter_objects = []
+    for molecule in unique_molecules:
+        mask = [m == molecule for m in molecules]
+        scatter = ax.scatter(
+            qubits[mask], times[mask], pct_diffs[mask],
+            c=pct_diffs[mask],  # Color by error
+            cmap='viridis',
+            s=150,
+            marker=molecule_to_marker[molecule],
+            label=molecule,
+            depthshade=True
+        )
+        scatter_objects.append(scatter)
 
-    # --- MODIFICATION: Add text labels directly to the points in the graph ---
+    # Add text labels directly to the points in the graph
     for i, molecule in enumerate(molecules):
         ax.text(qubits[i], times[i], pct_diffs[i], f'  {molecule}', size=8, zorder=1, color='k')
 
@@ -78,15 +90,13 @@ def visualize_results_3d():
     ax.set_zlabel('Percentage Difference (Error %)')
     ax.set_title('VQE Performance: Complexity vs. Time vs. Accuracy')
     
-    # Create a custom legend on the left
-    legend_ax = fig.add_axes([0.01, 0.5, 0.2, 0.2]) # Position for the legend
-    legend_ax.axis('off') # Hide the axes box
-    
-    for i, molecule in enumerate(unique_molecules):
-        legend_ax.scatter([], [], c=[molecule_to_color[molecule]], label=molecule)
-    
-    legend_ax.legend(loc='center left', title='Molecules', frameon=False)
+    # --- MODIFICATION: Add the legend on the left ---
+    ax.legend(title='Molecules', loc='center left', bbox_to_anchor=(-0.4, 0.5))
 
+    # --- MODIFICATION: Add the color bar on the right ---
+    # We use the first scatter object to create the color bar, as they all share the same color map
+    cbar = fig.colorbar(scatter_objects[0], ax=ax, shrink=0.6, aspect=20, pad=0.1)
+    cbar.set_label('Error Percentage')
 
     # Save the figure as a high-resolution PNG
     output_filename = 'vqe_performance_plot.png'
@@ -98,4 +108,3 @@ def visualize_results_3d():
 
 if __name__ == "__main__":
     visualize_results_3d()
-
