@@ -15,13 +15,14 @@ def parse_log_file(filepath):
         # Use regular expressions to find the data points
         molecule_match = re.search(r"Molecule: (.*)", content)
         qubits_match = re.search(r"Number of Qubits: (\d+)", content)
-        time_match = re.search(r"Calculation Time: ([\d.]+) seconds", content)
+        # --- MODIFICATION: Parse the final energy ---
+        energy_match = re.search(r"Final VQE Energy: ([\d.-]+) Ha", content)
         pct_diff_match = re.search(r"Percentage Difference: ([\d.]+)%", content)
 
-        if all([molecule_match, qubits_match, time_match, pct_diff_match]):
+        if all([molecule_match, qubits_match, energy_match, pct_diff_match]):
             data['molecule'] = molecule_match.group(1).strip()
             data['qubits'] = int(qubits_match.group(1))
-            data['time'] = float(time_match.group(1))
+            data['final_energy'] = float(energy_match.group(1))
             data['pct_diff'] = float(pct_diff_match.group(1))
             return data
     return None
@@ -51,10 +52,11 @@ def visualize_results_3d():
     # Prepare data for plotting
     molecules = [res['molecule'] for res in results]
     qubits = np.array([res['qubits'] for res in results])
-    times = np.array([res['time'] for res in results])
+    # --- MODIFICATION: Use final energy instead of time ---
+    final_energies = np.array([res['final_energy'] for res in results])
     pct_diffs = np.array([res['pct_diff'] for res in results])
 
-    # --- MODIFICATION: Use different markers for each molecule for the legend ---
+    # Use different markers for each molecule for the legend
     unique_molecules = sorted(list(set(molecules)))
     markers = ['o', 's', '^', 'D', 'v', '<', '>', 'p', '*', 'h']
     molecule_to_marker = {molecule: markers[i % len(markers)] for i, molecule in enumerate(unique_molecules)}
@@ -65,12 +67,12 @@ def visualize_results_3d():
     fig.subplots_adjust(left=0.25, right=0.85) # Adjust plot area
 
     # Plot each molecule's data with its unique marker
-    # The color is still determined by the percentage difference
     scatter_objects = []
     for molecule in unique_molecules:
         mask = [m == molecule for m in molecules]
+        # --- MODIFICATION: Plot final_energies on the y-axis ---
         scatter = ax.scatter(
-            qubits[mask], times[mask], pct_diffs[mask],
+            qubits[mask], final_energies[mask], pct_diffs[mask],
             c=pct_diffs[mask],  # Color by error
             cmap='viridis',
             s=150,
@@ -82,19 +84,20 @@ def visualize_results_3d():
 
     # Add text labels directly to the points in the graph
     for i, molecule in enumerate(molecules):
-        ax.text(qubits[i], times[i], pct_diffs[i], f'  {molecule}', size=8, zorder=1, color='k')
+        # --- MODIFICATION: Adjust text label position for the new y-axis ---
+        ax.text(qubits[i], final_energies[i], pct_diffs[i], f'  {molecule}', size=8, zorder=1, color='k')
 
     # Set labels and title
     ax.set_xlabel('Number of Qubits (Complexity)')
-    ax.set_ylabel('Calculation Time (seconds)')
+    # --- MODIFICATION: Update y-axis label ---
+    ax.set_ylabel('Final VQE Energy (Hartree)')
     ax.set_zlabel('Percentage Difference (Error %)')
-    ax.set_title('VQE Performance: Complexity vs. Time vs. Accuracy')
+    ax.set_title('VQE Performance: Complexity vs. Energy vs. Accuracy')
     
-    # --- MODIFICATION: Add the legend on the left ---
+    # Add the legend on the left
     ax.legend(title='Molecules', loc='center left', bbox_to_anchor=(-0.4, 0.5))
 
-    # --- MODIFICATION: Add the color bar on the right ---
-    # We use the first scatter object to create the color bar, as they all share the same color map
+    # Add the color bar on the right
     cbar = fig.colorbar(scatter_objects[0], ax=ax, shrink=0.6, aspect=20, pad=0.1)
     cbar.set_label('Error Percentage')
 
