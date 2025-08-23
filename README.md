@@ -2,6 +2,10 @@
 
 Experimental configurations & development examples on the ThereminQ platform
 
+```bash
+docker run --gpus all --device=/dev/dri:/dev/dri -d twobombs/thereminq-tensors:jupyter [-m 16g --memory-swap 320g]
+````
+
 Some of the graph output:
 
 VQE H2 FCI
