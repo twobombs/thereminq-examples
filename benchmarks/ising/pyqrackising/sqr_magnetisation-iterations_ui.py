@@ -5,7 +5,15 @@ simulation output from iterations_cli.py.
 
 This version uses multiprocessing to run the vedo plotter in a separate
 process and a multiprocessing pool to run grid scans in parallel.
-It can run a single J-h surface scan or a full Trotter scan over t.
+It can run a single J-h surface scan, a full Trotter scan over t,
+a full Qubit scan over n_qubits, AND import pre-calculated CSV data.
+
+This version is optimized with batch processing for high-performance live rendering.
+
+RUNTIME OPTIMIZATIONS:
+- Reuses the multiprocessing.Pool across scan steps to eliminate process creation overhead.
+- Sets a sensible maxtasksperchild to keep long-running workers fresh.
+- MODIFIED to oversubscribe CPU workers by 20% for experimentation.
 """
 import subprocess
 import numpy as np
@@ -16,6 +24,13 @@ import threading
 import queue
 import sys
 import multiprocessing as mp
+import math
+
+# Added for the import feature
+import os
+import pandas as pd
+from tkinter import filedialog
+
 
 # --- Simulation Runners ---
 
@@ -25,14 +40,11 @@ def _execute_simulation(params):
     This is a top-level function so it can be 'pickled' by multiprocessing.
     Returns a tuple: (result_type, data)
     """
-    # NOTE: Ensure 'sqr_magnetisation-iterations_cli.py' is in the same directory
-    # or provide a full path to it.
     command = [sys.executable, 'sqr_magnetisation-iterations_cli.py']
     for key, value in params.items():
         command.extend([f'--{key}', str(value)])
 
     try:
-        # On Windows, this flag prevents a console window from popping up for each simulation
         creationflags = 0
         if sys.platform == "win32":
             creationflags = subprocess.CREATE_NO_WINDOW
@@ -45,12 +57,11 @@ def _execute_simulation(params):
         samples_line = ""
         time_line = "Calculation took: N/A"
 
-        # Find the relevant lines in the CLI output
         try:
             samples_index = output_lines.index("## Output Samples (Decimal Comma-Separated) ##")
             samples_line = output_lines[samples_index + 1]
         except (ValueError, IndexError):
-            pass # samples_line will remain empty
+            pass
 
         for line in output_lines:
             if line.startswith("Calculation took:"):
@@ -60,7 +71,6 @@ def _execute_simulation(params):
         if not samples_line:
             return ('error', "Could not find sample output in simulation results.")
 
-        # The CLI script seems to output a comma as a decimal separator
         avg_magnetization = float(samples_line.replace(',', '.'))
         return ('success', (params, (avg_magnetization, time_line)))
 
@@ -78,10 +88,76 @@ def run_simulation_thread(params, result_queue):
     result_type, data = _execute_simulation(params)
     result_queue.put((result_type, data))
 
+### NEW/MODIFIED ###
+def run_import_worker(list_of_directories, result_queue):
+    """
+    Thread worker to import and render CSV files from a LIST of directories.
+    It iterates through each directory, and for each CSV file within, it
+    renders, saves a screenshot, and clears the plot.
+    """
+    try:
+        total_dirs = len(list_of_directories)
+        for dir_idx, directory_path in enumerate(list_of_directories):
+            dir_name = os.path.basename(directory_path)
+            
+            # Sort files for deterministic order
+            csv_files = sorted([f for f in os.listdir(directory_path) if f.lower().endswith('.csv')])
+            if not csv_files:
+                print(f"INFO: No CSV files found in '{dir_name}', skipping.")
+                continue
+
+            total_files_in_dir = len(csv_files)
+            for i, filename in enumerate(csv_files):
+                status_msg = f"Dir {dir_idx+1}/{total_dirs} | File {i+1}/{total_files_in_dir}: {filename}"
+                result_queue.put(('status', status_msg))
+                
+                filepath = os.path.join(directory_path, filename)
+                df = pd.read_csv(filepath)
+
+                # Clean NaN values from the current file's data
+                initial_rows = len(df)
+                df.dropna(subset=['J', 'h', 'samples'], inplace=True)
+                if len(df) < initial_rows:
+                    print(f"INFO [{filename}]: Ignored {initial_rows - len(df)} rows with NaN values.")
+
+                if not {'J', 'h', 'samples'}.issubset(df.columns):
+                    result_queue.put(('error', f"CSV '{filename}' is missing required columns (J, h, samples). Skipping."))
+                    continue
+
+                # Process all data from the single file in batches
+                results_batch = []
+                BATCH_SIZE = 500
+                for _, row in df.iterrows():
+                    params = {'J': row['J'], 'h': row['h']}
+                    avg_magnetization = row['samples']
+                    time_line = "Imported from CSV"
+                    results_batch.append((params, (avg_magnetization, time_line)))
+
+                    if len(results_batch) >= BATCH_SIZE:
+                        result_queue.put(('success_batch', results_batch.copy()))
+                        results_batch.clear()
+                
+                if results_batch:
+                    result_queue.put(('success_batch', results_batch.copy()))
+
+                # Signal that this file is done and ready for saving/clearing
+                # Prefix with directory name to avoid screenshot name clashes
+                base_filename = os.path.splitext(filename)[0]
+                dataset_name = f"{dir_name}_{base_filename}"
+                result_queue.put(('import_slice_complete', dataset_name))
+
+        result_queue.put(('status', f"Full import of {total_dirs} directories complete."))
+
+    except Exception as e:
+        error_msg = f"An error occurred during import: {e}"
+        print(error_msg)
+        result_queue.put(('error', error_msg))
+####################
+
 def run_full_scan_worker(fixed_params, result_queue):
     """
     Thread worker to scan the full J-h plane IN PARALLEL.
-    This function prepares the jobs and hands them to a multiprocessing Pool.
+    This version batches results for much faster rendering.
     """
     j_range = np.arange(-2.0, 2.0 + 0.1, 0.1)
     h_range = np.arange(-4.0, 4.0 + 0.1, 0.1)
@@ -96,21 +172,32 @@ def run_full_scan_worker(fixed_params, result_queue):
     
     total_points = len(all_params)
     count = 0
+    
+    results_batch = []
+    BATCH_SIZE = 100
 
     try:
-        # Use a multiplier for the number of processes to keep the CPU busy
-        multiplier = 3
-        num_processes = mp.cpu_count() * multiplier
-        print(f"Initializing pool with {num_processes} worker processes for {total_points} simulations...")
-
-        with mp.Pool(processes=num_processes) as pool:
-            # imap_unordered processes tasks in parallel and yields results as they complete,
-            # which is great for seeing live progress.
+        base_processes = mp.cpu_count()
+        num_processes = int(base_processes + math.ceil(base_processes * 0.10))
+        print(f"Oversubscribing CPU: Running with {num_processes} worker processes on a {base_processes}-thread system...")
+        
+        with mp.Pool(processes=num_processes, maxtasksperchild=1500) as pool:
             for result_type, data in pool.imap_unordered(_execute_simulation, all_params):
                 count += 1
                 status_msg = f"Scanning... {count}/{total_points}"
                 result_queue.put(('status', status_msg))
-                result_queue.put((result_type, data))
+
+                if result_type == 'success':
+                    results_batch.append(data)
+                    if len(results_batch) >= BATCH_SIZE:
+                        result_queue.put(('success_batch', results_batch.copy()))
+                        results_batch.clear()
+                else:
+                    result_queue.put((result_type, data))
+            
+            if results_batch:
+                result_queue.put(('success_batch', results_batch.copy()))
+                results_batch.clear()
 
         result_queue.put(('status', f"Scan complete. Plotted {total_points} points."))
     except Exception as e:
@@ -118,53 +205,63 @@ def run_full_scan_worker(fixed_params, result_queue):
         print(error_msg)
         result_queue.put(('error', error_msg))
 
-def run_trotter_scan_worker(fixed_params, result_queue, start_t): ### MODIFIED ###
+def run_trotter_scan_worker(fixed_params, result_queue, start_t):
     """
-    Thread worker to scan the full J-h plane for a range of Trotter steps 't'.
-    The scan runs for 20 steps, starting from the value set on the slider.
+    Thread worker to scan J-h planes for a range of Trotter steps 't'.
+    This version batches results and REUSES the process pool for massive speedup.
     """
-    ### MODIFIED ###
-    # Define the new range based on the slider's starting value.
     end_t = start_t + 20
     trotter_range = range(start_t, end_t)
-    ### END MODIFIED ###
 
     j_range = np.arange(-2.0, 2.0 + 0.1, 0.1)
     h_range = np.arange(-4.0, 4.0 + 0.1, 0.1)
     total_planes = len(trotter_range)
+    
+    results_batch = []
+    BATCH_SIZE = 100
 
     try:
-        multiplier = 3
-        num_processes = mp.cpu_count() * multiplier
+        base_processes = mp.cpu_count()
+        num_processes = int(base_processes + math.ceil(base_processes * 0.10))
         
-        for i, t_val in enumerate(trotter_range):
-            plane_params = fixed_params.copy()
-            plane_params['t'] = t_val
-            
-            status_msg = f"Trotter Scan ({i+1}/{total_planes}): Starting plane for t={t_val}"
-            result_queue.put(('status', status_msg))
-            print(status_msg)
+        with mp.Pool(processes=num_processes, maxtasksperchild=1500) as pool:
+            print(f"Oversubscribing CPU: Running with {num_processes} worker processes on a {base_processes}-thread system...")
+            for i, t_val in enumerate(trotter_range):
+                plane_params = fixed_params.copy()
+                plane_params['t'] = t_val
+                
+                status_msg = f"Trotter Scan ({i+1}/{total_planes}): Starting plane for t={t_val}"
+                result_queue.put(('status', status_msg))
+                print(status_msg)
 
-            all_params = []
-            for h_val in h_range:
-                for j_val in j_range:
-                    current_params = plane_params.copy()
-                    current_params['J'] = round(j_val, 2)
-                    current_params['h'] = round(h_val, 2)
-                    all_params.append(current_params)
-            
-            total_points = len(all_params)
-            count = 0
-            
-            with mp.Pool(processes=num_processes) as pool:
+                all_params = []
+                for h_val in h_range:
+                    for j_val in j_range:
+                        current_params = plane_params.copy()
+                        current_params['J'] = round(j_val, 2)
+                        current_params['h'] = round(h_val, 2)
+                        all_params.append(current_params)
+                
+                total_points = len(all_params)
+                count = 0
+                
                 for result_type, data in pool.imap_unordered(_execute_simulation, all_params):
                     count += 1
                     status_msg = f"Trotter Scan ({i+1}/{total_planes}, t={t_val}): {count}/{total_points}"
                     result_queue.put(('status', status_msg))
-                    result_queue.put((result_type, data))
-            
-            # Signal that the scan for this 't' value is complete
-            result_queue.put(('trotter_slice_complete', t_val))
+                    if result_type == 'success':
+                        results_batch.append(data)
+                        if len(results_batch) >= BATCH_SIZE:
+                            result_queue.put(('success_batch', results_batch.copy()))
+                            results_batch.clear()
+                    else:
+                        result_queue.put((result_type, data))
+                
+                if results_batch:
+                    result_queue.put(('success_batch', results_batch.copy()))
+                    results_batch.clear()
+
+                result_queue.put(('trotter_slice_complete', t_val))
 
         result_queue.put(('status', "Full Trotter Scan complete."))
     except Exception as e:
@@ -172,15 +269,87 @@ def run_trotter_scan_worker(fixed_params, result_queue, start_t): ### MODIFIED #
         print(error_msg)
         result_queue.put(('error', error_msg))
 
+def run_qubit_scan_worker(fixed_params, result_queue, start_t, n_qubits_range):
+    """
+    Top-level worker to scan over N Qubits, containing Trotter scans.
+    This version batches results and REUSES the process pool for massive speedup.
+    """
+    end_t = start_t + 20
+    trotter_range = range(start_t, end_t)
+    n_qubits_vals = range(int(n_qubits_range[0]), int(n_qubits_range[1]) + 1)
+
+    j_range = np.arange(-2.0, 2.0 + 0.1, 0.1)
+    h_range = np.arange(-4.0, 4.0 + 0.1, 0.1)
+
+    total_qubit_steps = len(n_qubits_vals)
+    total_trotter_steps = len(trotter_range)
+    
+    results_batch = []
+    BATCH_SIZE = 100
+
+    try:
+        base_processes = mp.cpu_count()
+        num_processes = int(base_processes + math.ceil(base_processes * 0.10))
+
+        with mp.Pool(processes=num_processes, maxtasksperchild=1500) as pool:
+            print(f"Oversubscribing CPU: Running with {num_processes} worker processes on a {base_processes}-thread system...")
+            for q_idx, n_qubits_val in enumerate(n_qubits_vals):
+                for t_idx, t_val in enumerate(trotter_range):
+                    plane_params = fixed_params.copy()
+                    plane_params['t'] = t_val
+                    plane_params['n_qubits'] = n_qubits_val
+
+                    status_msg = (f"Qubit Scan ({q_idx+1}/{total_qubit_steps}, n={n_qubits_val}) | "
+                                  f"Trotter ({t_idx+1}/{total_trotter_steps}, t={t_val})")
+                    result_queue.put(('status', status_msg))
+                    print(status_msg)
+
+                    all_params = []
+                    for h_val in h_range:
+                        for j_val in j_range:
+                            current_params = plane_params.copy()
+                            current_params['J'] = round(j_val, 2)
+                            current_params['h'] = round(h_val, 2)
+                            all_params.append(current_params)
+                    
+                    total_points = len(all_params)
+                    count = 0
+                    
+                    for result_type, data in pool.imap_unordered(_execute_simulation, all_params):
+                        count += 1
+                        status_msg = (f"Qubit Scan ({q_idx+1}/{total_qubit_steps}, n={n_qubits_val}) | "
+                                      f"Trotter ({t_idx+1}/{total_trotter_steps}, t={t_val}): {count}/{total_points}")
+                        result_queue.put(('status', status_msg))
+                        if result_type == 'success':
+                            results_batch.append(data)
+                            if len(results_batch) >= BATCH_SIZE:
+                                result_queue.put(('success_batch', results_batch.copy()))
+                                results_batch.clear()
+                        else:
+                            result_queue.put((result_type, data))
+                    
+                    if results_batch:
+                        result_queue.put(('success_batch', results_batch.copy()))
+                        results_batch.clear()
+                    
+                    result_queue.put(('trotter_slice_complete', (t_val, n_qubits_val)))
+
+        result_queue.put(('status', "Full Qubit/Trotter Scan complete."))
+    except Exception as e:
+        error_msg = f"A Qubit scan error occurred: {e}"
+        print(error_msg)
+        result_queue.put(('error', error_msg))
+
 # --- Vedo Plotter Process ---
+
 def vedo_plotter_process(data_queue, param_specs):
     """
     This function runs in a separate process to handle all vedo plotting.
-    It now handles both point clouds and surface mesh rendering.
+    This version is optimized to handle batched point data for high performance.
     """
     j_range = (param_specs['J']['from_'], param_specs['J']['to'])
     h_range = (param_specs['h']['from_'], param_specs['h']['to'])
-    z_range = (0.0, 1.0) # Expected range for average magnetization
+    z_range = (0.0, 1.0)
 
     plt = Plotter(
         axes=dict(
@@ -192,13 +361,11 @@ def vedo_plotter_process(data_queue, param_specs):
         title="TFIM Phase Visualizer"
     )
 
-    # Data storage
     plotted_points_data = []
-    scan_points_data = {} # For the grid scan: (J,h) -> z
+    scan_points_data = {}
 
-    # Vedo actors
     point_cloud_actor = None
-    surface_actor = None # New actor for the mesh
+    surface_actor = None
     info_text_actor = Text2D("Initializing...", pos='top-left', s=1.1, bg='gray', alpha=0.7)
     scalar_bar_actor = None
     
@@ -210,73 +377,64 @@ def vedo_plotter_process(data_queue, param_specs):
             while not data_queue.empty():
                 command, data = data_queue.get_nowait()
                 
-                if command == 'add':
-                    params, (avg_z, time_str) = data
-                    new_point = (params['J'], params['h'], avg_z)
-                    
-                    # Store data for both live points and final surface
-                    plotted_points_data.append(new_point)
-                    scan_points_data[(params['J'], params['h'])] = avg_z
+                if command == 'add_batch':
+                    # data is a list of [(params, (avg_z, time_str)), ...]
+                    for params, (avg_z, time_str) in data:
+                        new_point = (params['J'], params['h'], avg_z)
+                        plotted_points_data.append(new_point)
+                        scan_points_data[(params['J'], params['h'])] = avg_z
 
-                    # Update the live point cloud
-                    plt.remove(point_cloud_actor)
+                    if point_cloud_actor:
+                        plt.remove(point_cloud_actor)
+
                     points_array = np.array(plotted_points_data)
                     z_values = points_array[:, 2]
-                    vmin, vmax = 0.0, 1.0
-                    point_cloud_actor = Points(points_array, r=5).cmap('viridis', z_values, vmin=vmin, vmax=vmax)
-
-                    # Update scalar bar and text
+                    point_cloud_actor = Points(points_array, r=5).cmap('viridis', z_values, vmin=0.0, vmax=1.0)
+                    
+                    plt.add(point_cloud_actor)
+                    
+                    last_params, (last_avg_z, last_time_str) = data[-1]
                     plt.remove(scalar_bar_actor)
                     scalar_bar_actor = ScalarBar(point_cloud_actor, title="Avg. Measured Value", pos=((0.85, 0.4), (0.9, 0.9)))
                     info_text = (f"Plotted points: {len(plotted_points_data)}\n"
-                                 f"Last point: J={params['J']:.2f}, h={params['h']:.2f}\n"
-                                 f"Avg. Value: {avg_z:.4f}\n"
-                                 f"{time_str}")
+                                 f"Last point: J={last_params['J']:.2f}, h={last_params['h']:.2f}\n"
+                                 f"Avg. Value: {last_avg_z:.4f}\n"
+                                 f"{last_time_str}")
                     info_text_actor.text(info_text)
-
-                    plt.add(point_cloud_actor, scalar_bar_actor)
+                    plt.add(scalar_bar_actor)
 
                 elif command == 'scan_complete':
-                    # The `data` now contains the dictionary of fixed parameters for the filename
                     fixed_params = data
-                    if len(scan_points_data) < 4: continue # Need at least a 2x2 grid for a surface
+                    if len(scan_points_data) < 4: continue
 
-                    # --- Build and render the surface mesh ---
                     print("Scan complete. Generating surface mesh...")
                     j_coords = sorted(list(set(p[0] for p in scan_points_data.keys())))
                     h_coords = sorted(list(set(p[1] for p in scan_points_data.keys())))
                     
                     if len(j_coords) < 2 or len(h_coords) < 2: continue
 
-                    # Create vertices and faces for the mesh
                     vertices = []
                     for h in h_coords:
                         for j in j_coords:
-                            z = scan_points_data.get((j, h), 0.0) # Default to 0 if a point is missing
+                            z = scan_points_data.get((j, h), 0.0)
                             vertices.append([j, h, z])
                     
                     faces = []
                     nx, ny = len(j_coords), len(h_coords)
                     for i in range(ny - 1):
                         for j in range(nx - 1):
-                            p1 = i * nx + j
-                            p2 = i * nx + j + 1
-                            p3 = (i + 1) * nx + j + 1
-                            p4 = (i + 1) * nx + j
+                            p1, p2 = i * nx + j, i * nx + j + 1
+                            p3, p4 = (i + 1) * nx + j + 1, (i + 1) * nx + j
                             faces.append([p1, p2, p3, p4])
 
-                    # Remove the old point cloud actor
                     plt.remove(point_cloud_actor)
                     point_cloud_actor = None
                     plotted_points_data.clear()
 
-                    # Create and style the new surface actor
                     surface_actor = Mesh([vertices, faces]).lighting('glossy')
                     z_values = np.array(vertices)[:, 2]
-                    vmin, vmax = 0.0, 1.0
-                    surface_actor.cmap('viridis', z_values, vmin=vmin, vmax=vmax)
+                    surface_actor.cmap('viridis', z_values, vmin=0.0, vmax=1.0)
                     
-                    # Update scalar bar and info text for the new surface
                     plt.remove(scalar_bar_actor)
                     scalar_bar_actor = ScalarBar(surface_actor, title="Avg. Measured Value", pos=((0.85, 0.4), (0.9, 0.9)))
                     info_text_actor.text(f"Surface plot with {len(vertices)} vertices.\nScan complete.")
@@ -284,18 +442,9 @@ def vedo_plotter_process(data_queue, param_specs):
                     plt.add(surface_actor, scalar_bar_actor)
                     print("Surface mesh rendered.")
 
-                    # --- Create filename and save high-resolution screenshot ---
                     if fixed_params:
-                        param_parts = []
-                        for key, value in sorted(fixed_params.items()):
-                            if isinstance(value, float):
-                                param_parts.append(f"{key}={value:.2f}")
-                            else:
-                                param_parts.append(f"{key}={value}")
-                        
-                        filename = "TFIM_scan_" + "_".join(param_parts) + ".png"
-                        
-                        # Save screenshot with 3x resolution
+                        param_parts = [f"{key}={value}" for key, value in sorted(fixed_params.items())]
+                        filename = "TFIM_scan_" + "_".join(param_parts).replace(' ', '_') + ".png"
                         plt.screenshot(filename, scale=3)
                         print(f"Saved high-resolution screenshot to: {filename}")
 
@@ -303,9 +452,7 @@ def vedo_plotter_process(data_queue, param_specs):
                     plotted_points_data.clear()
                     scan_points_data.clear()
                     plt.remove(point_cloud_actor, surface_actor, scalar_bar_actor)
-                    point_cloud_actor = None
-                    surface_actor = None
-                    scalar_bar_actor = None
+                    point_cloud_actor, surface_actor, scalar_bar_actor = None, None, None
                     info_text_actor.text("Plot cleared.")
                     plt.add(info_text_actor)
                     plt.reset_camera()
@@ -325,21 +472,17 @@ def vedo_plotter_process(data_queue, param_specs):
 
 # --- GUI Class ---
 class ControlPanel:
-    """
-    Manages the tkinter GUI, and sends data to the vedo process.
-    """
     def __init__(self, root, param_specs, data_queue):
         self.root = root
         self.param_specs = param_specs
         self.data_queue = data_queue
         self.sim_result_queue = queue.Queue()
         self.param_vars = {}
-        self.scan_button = None
-        self.trotter_scan_button = None
+        self.scan_button, self.trotter_scan_button, self.qubit_scan_button, self.import_button = None, None, None, None
         self.last_scan_params = {}
 
         self.root.title("TFIM Control Panel")
-        self.root.geometry("400x650")
+        self.root.geometry("400x750") # Increased height for new button
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         main_frame = ttk.Frame(root, padding="10")
@@ -366,14 +509,9 @@ class ControlPanel:
             value_label = ttk.Label(frame, text=f"{var.get():.2f}", width=6)
             value_label.pack(side=tk.RIGHT, padx=(5, 0))
 
-            # Use a lambda to capture the correct variables for the command
-            command = lambda val, l=value_label, v=var, s=spec: \
-                l.config(text=f"{v.get():.2f}" if s['resolution'] < 1 else f"{int(v.get())}")
+            command = lambda val, l=value_label, v=var, s=spec: l.config(text=f"{v.get():.2f}" if s['resolution'] < 1 else f"{int(v.get())}")
 
-            slider = ttk.Scale(
-                frame, from_=spec['from_'], to=spec['to'],
-                orient=tk.HORIZONTAL, variable=var, command=command
-            )
+            slider = ttk.Scale(frame, from_=spec['from_'], to=spec['to'], orient=tk.HORIZONTAL, variable=var, command=command)
             slider.pack(fill=tk.X, expand=True)
             slider.bind("<ButtonRelease-1>", self.run_simulation_from_sliders)
 
@@ -386,6 +524,12 @@ class ControlPanel:
         self.trotter_scan_button = ttk.Button(button_frame, text="Run Full Trotter Scan (t vs J,h)", command=self.start_trotter_scan)
         self.trotter_scan_button.pack(fill=tk.X, expand=True, padx=5, pady=5, ipady=5)
 
+        self.qubit_scan_button = ttk.Button(button_frame, text="Run Full Qubit/Trotter Scan", command=self.start_qubit_scan)
+        self.qubit_scan_button.pack(fill=tk.X, expand=True, padx=5, pady=5, ipady=5)
+        
+        self.import_button = ttk.Button(button_frame, text="Import All Directories", command=self.start_import_scan)
+        self.import_button.pack(fill=tk.X, expand=True, padx=5, pady=5, ipady=5)
+
         clear_button = ttk.Button(button_frame, text="Clear Plot", command=self.clear_plot)
         clear_button.pack(fill=tk.X, expand=True, padx=5, pady=5, ipady=5)
 
@@ -397,104 +541,137 @@ class ControlPanel:
         for key in ['z', 't', 'n_qubits']:
             if key in current_params:
                 current_params[key] = int(current_params[key])
-
         self.status_var.set("Running single simulation...")
-        thread = threading.Thread(target=run_simulation_thread, args=(current_params, self.sim_result_queue), daemon=True)
-        thread.start()
+        threading.Thread(target=run_simulation_thread, args=(current_params, self.sim_result_queue), daemon=True).start()
         
     def start_full_scan(self):
-        """Starts the full J-h grid scan in a new thread."""
-        if messagebox.askokcancel("Start Scan?", "This will run many simulations in parallel and render a surface at the end. Continue?"):
+        if messagebox.askokcancel("Start Scan?", "This will run many simulations in parallel and render a surface. Continue?"):
             self._disable_buttons()
             self.clear_plot()
-            
-            # Get fixed parameters (those not being scanned)
             fixed_params = {name: var.get() for name, var in self.param_vars.items()}
-            fixed_params.pop('J', None)
-            fixed_params.pop('h', None)
+            fixed_params.pop('J', None); fixed_params.pop('h', None)
             for key in ['z', 't', 'n_qubits']:
-                if key in fixed_params:
-                    fixed_params[key] = int(fixed_params[key])
-            
+                if key in fixed_params: fixed_params[key] = int(fixed_params[key])
             self.last_scan_params = fixed_params
-            
-            thread = threading.Thread(target=run_full_scan_worker, args=(fixed_params, self.sim_result_queue), daemon=True)
-            thread.start()
+            threading.Thread(target=run_full_scan_worker, args=(fixed_params, self.sim_result_queue), daemon=True).start()
 
     def start_trotter_scan(self):
-        """Starts the full Trotter scan in a new thread."""
-        ### MODIFIED ###
-        # Get the starting t value from the slider to define the scan's range
         start_t = int(self.param_vars['t'].get())
-        msg = (f"This will run a 20-step scan from t={start_t} to t={start_t + 19}.\n"
-               "This will take a very long time and save 20 images.\n\nContinue?")
+        msg = f"This will run a 20-step scan from t={start_t} to t={start_t + 19}.\nThis will take a long time and save 20 images.\n\nContinue?"
         if messagebox.askokcancel("Start Trotter Scan?", msg):
-        ### END MODIFIED ###
             self._disable_buttons()
             self.clear_plot()
-            
-            # Get fixed parameters (excluding those being scanned: J, h, t)
             fixed_params = {name: var.get() for name, var in self.param_vars.items()}
-            fixed_params.pop('J', None)
-            fixed_params.pop('h', None)
-            fixed_params.pop('t', None)
-            for key in ['z', 'n_qubits']: # t is now variable
-                if key in fixed_params:
-                    fixed_params[key] = int(fixed_params[key])
-            
+            fixed_params.pop('J', None); fixed_params.pop('h', None); fixed_params.pop('t', None)
+            for key in ['z', 'n_qubits']:
+                if key in fixed_params: fixed_params[key] = int(fixed_params[key])
             self.last_scan_params = fixed_params
-
-            ### MODIFIED ###
-            # Pass the starting t value to the worker thread
-            thread = threading.Thread(target=run_trotter_scan_worker, args=(fixed_params, self.sim_result_queue, start_t), daemon=True)
-            thread.start()
-            ### END MODIFIED ###
+            threading.Thread(target=run_trotter_scan_worker, args=(fixed_params, self.sim_result_queue, start_t), daemon=True).start()
+            
+    def start_qubit_scan(self):
+        start_t = int(self.param_vars['t'].get())
+        n_qubits_from = int(self.param_specs['n_qubits']['from_'])
+        n_qubits_to = int(self.param_specs['n_qubits']['to'])
+        msg = (f"This will run a full Trotter scan (starting from t={start_t}) "
+               f"for EVERY qubit count from {n_qubits_from} to {n_qubits_to}.\n\n"
+               "THIS WILL TAKE AN EXTREMELY LONG TIME AND GENERATE HUNDREDS OF IMAGES.\n\nContinue?")
+        if messagebox.askokcancel("Start Full Qubit Scan?", msg, icon='warning'):
+            self._disable_buttons()
+            self.clear_plot()
+            fixed_params = {name: var.get() for name, var in self.param_vars.items()}
+            fixed_params.pop('J', None); fixed_params.pop('h', None); fixed_params.pop('t', None); fixed_params.pop('n_qubits', None)
+            for key in ['z']:
+                if key in fixed_params: fixed_params[key] = int(fixed_params[key])
+            self.last_scan_params = fixed_params
+            n_qubits_range = (n_qubits_from, n_qubits_to)
+            threading.Thread(target=run_qubit_scan_worker, args=(fixed_params, self.sim_result_queue, start_t, n_qubits_range), daemon=True).start()
     
+    ### NEW/MODIFIED ###
+    def start_import_scan(self):
+        """Callback for the 'Import All' button. Scans ALL subdirectories automatically."""
+        base_path = './tfim_results_final'
+        if not os.path.isdir(base_path):
+            messagebox.showerror("Directory Not Found", f"The base directory '{base_path}' does not exist.")
+            return
+
+        # Get all subdirectories automatically
+        try:
+            subdirectories = sorted([os.path.join(base_path, d) for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))])
+            if not subdirectories:
+                messagebox.showinfo("No Directories Found", f"No subdirectories found to scan in '{base_path}'.")
+                return
+        except Exception as e:
+            messagebox.showerror("Error Reading Directories", f"Could not read subdirectories from '{base_path}':\n{e}")
+            return
+            
+        msg = (f"This will scan {len(subdirectories)} directories and render every CSV file found within them.\n\n"
+               "This may generate a large number of images. Continue?")
+        
+        if messagebox.askokcancel("Start Full Import Scan?", msg):
+            self._disable_buttons()
+            self.clear_plot()
+            self.status_var.set(f"Starting full import scan of {len(subdirectories)} directories...")
+            threading.Thread(target=run_import_worker, args=(subdirectories, self.sim_result_queue), daemon=True).start()
+
     def _disable_buttons(self):
         self.scan_button.config(state=tk.DISABLED)
         self.trotter_scan_button.config(state=tk.DISABLED)
+        self.qubit_scan_button.config(state=tk.DISABLED)
+        self.import_button.config(state=tk.DISABLED)
 
     def _enable_buttons(self):
         self.scan_button.config(state=tk.NORMAL)
         self.trotter_scan_button.config(state=tk.NORMAL)
+        self.qubit_scan_button.config(state=tk.NORMAL)
+        self.import_button.config(state=tk.NORMAL)
 
     def check_sim_queue(self):
         """Checks the queue for results from the simulation threads/processes."""
         try:
             result_type, data = self.sim_result_queue.get_nowait()
-            if result_type == 'success':
-                params, result_data = data
-                # No need to update status for every single point during massive scans
-                # self.status_var.set(f"Plotting: J={params['J']:.2f}, h={params['h']:.2f}")
-                self.data_queue.put(('add', (params, result_data)))
+
+            if result_type == 'success_batch':
+                self.data_queue.put(('add_batch', data))
+            
+            elif result_type == 'success':
+                self.data_queue.put(('add_batch', [data]))
 
             elif result_type == 'error':
                 self.status_var.set("Error: See message box for details.")
                 self._enable_buttons()
-                messagebox.showerror("Simulation Error", data)
+                messagebox.showerror("Operation Error", data)
             
             elif result_type == 'status':
                 self.status_var.set(data)
-                # When any scan worker says it's done, re-enable buttons
                 if "complete" in data.lower():
                     self._enable_buttons()
-                    if "Scan complete" in data:
+                    # This handles the original "full scan" which terminates on a status message
+                    if "scan complete" in data.lower():
                         self.data_queue.put(('scan_complete', self.last_scan_params))
             
             elif result_type == 'trotter_slice_complete':
-                t_value = data
-                self.status_var.set(f"Trotter slice for t={t_value} complete. Saving image.")
-                # Prepare params for screenshot filename and tell plotter to finalize the surface
                 slice_params = self.last_scan_params.copy()
-                slice_params['t'] = t_value
+                if isinstance(data, tuple):
+                    t_value, n_qubits_value = data
+                    self.status_var.set(f"Slice for t={t_value}, n={n_qubits_value} complete. Saving.")
+                    slice_params['t'], slice_params['n_qubits'] = int(t_value), int(n_qubits_value)
+                else:
+                    t_value = data
+                    self.status_var.set(f"Trotter slice for t={t_value} complete. Saving image.")
+                    slice_params['t'] = int(t_value)
                 self.data_queue.put(('scan_complete', slice_params))
-                # Tell plotter to clear for the next slice
+                self.data_queue.put(('clear', None))
+
+            elif result_type == 'import_slice_complete':
+                dataset_name = data
+                self.status_var.set(f"Image for {dataset_name} complete. Saving.")
+                slice_params = {'dataset': dataset_name}
+                self.data_queue.put(('scan_complete', slice_params))
                 self.data_queue.put(('clear', None))
                     
         except queue.Empty:
-            pass # No new results
+            pass
         finally:
-            # Check again after a short delay
             self.root.after(100, self.check_sim_queue)
 
     def clear_plot(self):
@@ -508,10 +685,8 @@ class ControlPanel:
 
 # --- Main Execution ---
 if __name__ == '__main__':
-    # This is crucial for multiprocessing to work correctly on Windows and macOS
     mp.freeze_support()
 
-    # Define the parameters, their ranges, and default values for the GUI
     param_specs = {
         'J': {'from_': -2.0, 'to': 2.0, 'resolution': 0.1, 'default': -1.0},
         'h': {'from_': -4.0, 'to': 4.0, 'resolution': 0.1, 'default': 2.0},
@@ -521,19 +696,14 @@ if __name__ == '__main__':
         'n_qubits': {'from_': 4, 'to': 960, 'resolution': 1, 'default': 56},
     }
     
-    # Create the communication queue for the plotter process
     data_queue = mp.Queue()
-
-    # Create and start the plotter process
     plot_process = mp.Process(target=vedo_plotter_process, args=(data_queue, param_specs), daemon=True)
     plot_process.start()
 
-    # Create and run the main Tkinter GUI
     root = tk.Tk()
     app = ControlPanel(root, param_specs, data_queue)
     root.mainloop()
 
-    # Clean up the plotter process when the GUI is closed
     plot_process.join(timeout=2)
     if plot_process.is_alive():
         print("Terminating plotter process...")
