@@ -69,7 +69,14 @@ generate_csv_for_t() {
         FILENAME=$(basename "$LOG_PATH")
         PARAMS=$(echo "$FILENAME" | sed -e 's/\.log$//' -e 's/J//' -e 's/_h/ /' -e 's/_z/ /' -e 's/_theta/ /' -e 's/_t/ /' -e 's/m/-/g' -e 's/p/./g')
         read -r J_VAL H_VAL Z_VAL THETA_VAL T_VAL <<< "$PARAMS"
-        RESULT=$(grep '^RESULT: ' "$LOG_PATH" | cut -d' ' -f2)
+        
+        # --- FIX START ---
+        # The original script looked for "RESULT: ". 
+        # The log file actually contains the result on the line after "## Output Samples...".
+        # This command finds that line, gets the line after it (-A 1), and keeps only that second line (tail -n 1).
+        RESULT=$(grep -A 1 "## Output Samples (Decimal Comma-Separated) ##" "$LOG_PATH" | tail -n 1)
+        # --- FIX END ---
+        
         if [ -n "$RESULT" ]; then
             echo "${J_VAL},${H_VAL},${Z_VAL},${THETA_VAL},${T_VAL},${N_QUBITS_VAL},${RESULT}" >> "$CSV_FILE"
         fi
@@ -175,3 +182,4 @@ done
 
 echo "---"
 echo "All simulations and CSV generations are complete."
+
