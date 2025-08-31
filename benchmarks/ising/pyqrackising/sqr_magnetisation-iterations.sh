@@ -5,7 +5,7 @@
 # Key Improvements:
 # 1. Resumable: Checks for existing, non-empty log files and skips them.
 # 2. Safer Defaults: The N_qubits range has been adjusted to a more common
-#    set of values to prevent accidentally starting billions of simulations.
+#    set of values to prevent accidentally starting trillions of simulations.
 # 3. Enhanced Output: Provides a summary of completed, skipped, and total jobs.
 # 4. Sorted Directories: Zero-pads n_qubit directory names for correct sorting.
 # 5. Granular & Parallel CSVs: Generates a separate summary CSV for each 'T' 
