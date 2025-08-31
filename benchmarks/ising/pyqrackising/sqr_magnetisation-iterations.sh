@@ -97,10 +97,11 @@ export -f generate_csv_for_t
 PI_HALF=$(python3 -c "import numpy as np; print(np.pi/2)")
 NEG_PI_HALF=$(python3 -c "import numpy as np; print(-np.pi/2)")
 J_VALUES=$(seq -s ' ' -2.0 0.1 2.0)
-H_VALUES=$(seq -s ' ' -2.0 0.1 2.0)
+H_VALUES=$(seq -s ' ' -4.0 0.1 4.0)
 Z_VALUES=$(seq -s ' ' -2 1 2)
 THETA_VALUES=$(seq -s ' ' $NEG_PI_HALF 0.1 $PI_HALF)
-T_VALUES=$(seq -s ' ' 1 1 20)
+#T_VALUES=$(seq -s ' ' 1 1 20)
+T_VALUES=20
 N_QUBITS_VALUES=$(seq -s ' ' 4 1 2048)
 
 # --- Total iterations calculation ---
