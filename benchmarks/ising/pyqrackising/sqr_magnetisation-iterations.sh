@@ -62,7 +62,7 @@ generate_csv_for_t() {
     local CSV_FILE="${N_QUBITS_DIR}/summary_t${T_VAL_CURRENT}.csv"
 
     # Write header.
-    echo "J,h,z,theta,t,n_qubits,result" > "$CSV_FILE"
+    echo "J,h,z,theta,t,n_qubits,samples" > "$CSV_FILE"
 
     # Find log files for the specific T value and append to its CSV.
     find "$N_QUBITS_DIR" -name "*_t${T_VAL_CURRENT}.log" | while read -r LOG_PATH; do
