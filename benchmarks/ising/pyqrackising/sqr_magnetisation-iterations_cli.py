@@ -25,7 +25,7 @@ print(f"n_qubits (Number of Qubits): {args.n_qubits}")
 print("-" * 25) # Separator
 
 # --- Time the calculation ---
-start_time = time.perf_counter() # Start the clock
+#start_time = time.perf_counter() # Start the clock
 
 samples = tfim_square_magnetization(
     J=args.J,
@@ -36,10 +36,10 @@ samples = tfim_square_magnetization(
     n_qubits=args.n_qubits,
 )
 
-end_time = time.perf_counter() # Stop the clock
-elapsed_time = end_time - start_time
-print(f"Calculation took: {elapsed_time:.4f} seconds")
-print("-" * 25)
+#end_time = time.perf_counter() # Stop the clock
+#elapsed_time = end_time - start_time
+#print(f"Calculation took: {elapsed_time:.4f} seconds")
+#print("-" * 25)
 
 # --- Print the output samples as comma-separated decimals ---
 print("\n## Output Samples (Decimal Comma-Separated) ##")
