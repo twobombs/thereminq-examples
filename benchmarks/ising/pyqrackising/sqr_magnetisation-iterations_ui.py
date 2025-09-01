@@ -3,17 +3,20 @@
 An interactive 3D visualizer for the Transverse Field Ising Model (TFIM)
 simulation output from iterations_cli.py.
 
+This is a self-contained, single-file application.
+
 This version uses multiprocessing to run the vedo plotter in a separate
 process and a multiprocessing pool to run grid scans in parallel.
 It can run a single J-h surface scan, a full Trotter scan over t,
-a full Qubit scan over n_qubits, AND import pre-calculated CSV data.
+a full Qubit scan over n_qubits, import pre-calculated CSV data, AND
+salvage data from log files.
 
 This version is optimized with batch processing for high-performance live rendering.
 
 RUNTIME OPTIMIZATIONS:
 - Reuses the multiprocessing.Pool across scan steps to eliminate process creation overhead.
 - Sets a sensible maxtasksperchild to keep long-running workers fresh.
-- MODIFIED to oversubscribe CPU workers by 20% for experimentation.
+- MODIFIED to oversubscribe CPU workers by 10% for experimentation.
 """
 import subprocess
 import numpy as np
@@ -26,9 +29,11 @@ import sys
 import multiprocessing as mp
 import math
 
-# Added for the import feature
+# Added for the import and salvage features
 import os
+import re
 import pandas as pd
+from collections import defaultdict
 from tkinter import filedialog
 
 
@@ -88,7 +93,104 @@ def run_simulation_thread(params, result_queue):
     result_type, data = _execute_simulation(params)
     result_queue.put((result_type, data))
 
-### NEW/MODIFIED ###
+### NEW: INTEGRATED SALVAGE LOGIC ###
+def _salvage_logic_task(result_queue):
+    """
+    This function contains the full logic for parsing log files and creating CSVs.
+    It communicates its progress back to the GUI via the result_queue.
+    Returns True on success, False on failure.
+    """
+    # --- Configuration ---
+    LOG_DIRECTORY = './tfim_logs'
+    OUTPUT_DIRECTORY = './tfim_results_final'
+    # ---------------------
+
+    def parse_log_file(filepath):
+        """Parses a single log file to extract simulation data points."""
+        line_regex = re.compile(
+            r"Params:.*?{'J': ([-0-9.]+), 'h': ([-0-9.]+), 'z': ([-0-9.]+), 'theta': ([-0-9.]+), 't': ([-0-9.]+), 'n_qubits': ([-0-9.]+)}.*?Result: ([-0-9.]+)"
+        )
+        extracted_data = []
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    match = line_regex.search(line)
+                    if match:
+                        try:
+                            data_point = {
+                                'J': float(match.group(1)),
+                                'h': float(match.group(2)),
+                                'z': int(match.group(3)),
+                                'theta': float(match.group(4)),
+                                't': int(match.group(5)),
+                                'n_qubits': int(match.group(6)),
+                                'samples': float(match.group(7))
+                            }
+                            extracted_data.append(data_point)
+                        except (ValueError, IndexError):
+                            continue
+        except Exception as e:
+            print(f"Error reading or parsing {os.path.basename(filepath)}: {e}") # Log to console
+        return extracted_data
+
+    # --- Main Salvage Logic ---
+    if not os.path.isdir(LOG_DIRECTORY):
+        result_queue.put(('error', f"Log directory not found at '{LOG_DIRECTORY}'"))
+        return False
+
+    os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
+    all_log_files = [f for f in os.listdir(LOG_DIRECTORY) if f.lower().endswith('.log')]
+
+    if not all_log_files:
+        result_queue.put(('status', f"No .log files found in '{LOG_DIRECTORY}'. Nothing to do."))
+        return True
+
+    result_queue.put(('status', f"Found {len(all_log_files)} log files to process..."))
+    
+    grouped_data = defaultdict(list)
+    total_points_found = 0
+    for i, filename in enumerate(all_log_files):
+        result_queue.put(('status', f"Processing file {i+1}/{len(all_log_files)}: {filename}"))
+        filepath = os.path.join(LOG_DIRECTORY, filename)
+        data_from_file = parse_log_file(filepath)
+        if data_from_file:
+            for point in data_from_file:
+                key = (point['n_qubits'], point['t'], point['z'], point['theta'])
+                grouped_data[key].append({'J': point['J'], 'h': point['h'], 'samples': point['samples']})
+            total_points_found += len(data_from_file)
+
+    if not grouped_data:
+        result_queue.put(('status', "Could not find any valid data points in the log files."))
+        return True
+
+    result_queue.put(('status', f"Parsed {total_points_found} points, creating {len(grouped_data)} CSV files..."))
+
+    for key, data_points in grouped_data.items():
+        n, t, z, theta = key
+        output_subdir = os.path.join(OUTPUT_DIRECTORY, f"n{n}_z{z}_theta{theta:.2f}".replace('.', 'p'))
+        os.makedirs(output_subdir, exist_ok=True)
+        csv_filename = f"TFIM_scan_n{n}_t{t}.csv"
+        output_path = os.path.join(output_subdir, csv_filename)
+        
+        df = pd.DataFrame(data_points)
+        df.sort_values(by=['h', 'J'], inplace=True)
+        df.to_csv(output_path, index=False, float_format='%.4f')
+
+    result_queue.put(('status', "Log salvage complete. CSVs are ready to be imported."))
+    return True
+
+def run_salvage_worker(result_queue):
+    """
+    Thread worker to execute the in-process log salvage logic.
+    """
+    try:
+        # Call the internal function instead of an external script
+        _salvage_logic_task(result_queue)
+    except Exception as e:
+        error_msg = f"A critical error occurred during the salvage operation: {e}"
+        result_queue.put(('error', error_msg))
+#######################################
+
 def run_import_worker(list_of_directories, result_queue):
     """
     Thread worker to import and render CSV files from a LIST of directories.
@@ -152,7 +254,6 @@ def run_import_worker(list_of_directories, result_queue):
         error_msg = f"An error occurred during import: {e}"
         print(error_msg)
         result_queue.put(('error', error_msg))
-####################
 
 def run_full_scan_worker(fixed_params, result_queue):
     """
@@ -347,13 +448,10 @@ def vedo_plotter_process(data_queue, param_specs):
     This function runs in a separate process to handle all vedo plotting.
     This version is optimized to handle batched point data for high performance.
     """
-    # MODIFICATION 1: Define the scaling factor for the Z-axis (your "y axis").
     Z_AXIS_SCALE_FACTOR = 4.0
 
     j_range = (param_specs['J']['from_'], param_specs['J']['to'])
     h_range = (param_specs['h']['from_'], param_specs['h']['to'])
-    
-    # MODIFICATION 2: Scale the Z-axis range. The original was (0.0, 1.0).
     z_range = (0.0, 1.0 * Z_AXIS_SCALE_FACTOR)
 
     plt = Plotter(
@@ -384,19 +482,16 @@ def vedo_plotter_process(data_queue, param_specs):
                 
                 if command == 'add_batch':
                     for params, (avg_z, time_str) in data:
-                        # MODIFICATION 3: Scale the z-coordinate of each new point.
                         new_point = (params['J'], params['h'], avg_z * Z_AXIS_SCALE_FACTOR)
                         plotted_points_data.append(new_point)
-                        # Store the ORIGINAL, unscaled value for mesh generation logic
                         scan_points_data[(params['J'], params['h'])] = avg_z
 
                     if point_cloud_actor:
                         plt.remove(point_cloud_actor)
 
                     points_array = np.array(plotted_points_data)
-                    z_values = points_array[:, 2] # These are now the scaled Z-values
+                    z_values = points_array[:, 2] 
                     
-                    # MODIFICATION 4: Update vmax in cmap to match the scaled range.
                     point_cloud_actor = Points(points_array, r=5).cmap('viridis', z_values, vmin=0.0, vmax=1.0 * Z_AXIS_SCALE_FACTOR)
                     
                     plt.add(point_cloud_actor)
@@ -406,7 +501,6 @@ def vedo_plotter_process(data_queue, param_specs):
                     scalar_bar_actor = ScalarBar(point_cloud_actor, title="Avg. Measured Value", pos=((0.85, 0.4), (0.9, 0.9)))
                     info_text = (f"Plotted points: {len(plotted_points_data)}\n"
                                  f"Last point: J={last_params['J']:.2f}, h={last_params['h']:.2f}\n"
-                                 # Display the original, unscaled average value
                                  f"Avg. Value: {last_avg_z:.4f}\n"
                                  f"{last_time_str}")
                     info_text_actor.text(info_text)
@@ -425,9 +519,7 @@ def vedo_plotter_process(data_queue, param_specs):
                     vertices = []
                     for h in h_coords:
                         for j in j_coords:
-                            # Retrieve original Z value
                             z_original = scan_points_data.get((j, h), 0.0)
-                            # MODIFICATION 3 (for mesh): Scale the z-coordinate of each vertex.
                             vertices.append([j, h, z_original * Z_AXIS_SCALE_FACTOR])
                     
                     faces = []
@@ -443,9 +535,8 @@ def vedo_plotter_process(data_queue, param_specs):
                     plotted_points_data.clear()
 
                     surface_actor = Mesh([vertices, faces]).lighting('glossy')
-                    z_values = np.array(vertices)[:, 2] # These are the scaled Z-values
+                    z_values = np.array(vertices)[:, 2]
                     
-                    # MODIFICATION 4 (for mesh): Update vmax in cmap to match the scaled range.
                     surface_actor.cmap('viridis', z_values, vmin=0.0, vmax=1.0 * Z_AXIS_SCALE_FACTOR)
                     
                     plt.remove(scalar_bar_actor)
@@ -491,11 +582,11 @@ class ControlPanel:
         self.data_queue = data_queue
         self.sim_result_queue = queue.Queue()
         self.param_vars = {}
-        self.scan_button, self.trotter_scan_button, self.qubit_scan_button, self.import_button = None, None, None, None
+        self.scan_button, self.trotter_scan_button, self.qubit_scan_button, self.import_button, self.salvage_button = None, None, None, None, None
         self.last_scan_params = {}
 
         self.root.title("TFIM Control Panel")
-        self.root.geometry("400x750") # Increased height for new button
+        self.root.geometry("400x800") # Increased height for new buttons
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         main_frame = ttk.Frame(root, padding="10")
@@ -543,6 +634,12 @@ class ControlPanel:
         self.import_button = ttk.Button(button_frame, text="Import All Directories", command=self.start_import_scan)
         self.import_button.pack(fill=tk.X, expand=True, padx=5, pady=5, ipady=5)
 
+        # Separator for visual distinction
+        ttk.Separator(button_frame, orient='horizontal').pack(fill='x', pady=10)
+
+        self.salvage_button = ttk.Button(button_frame, text="Salvage Logs to CSV", command=self.start_salvage_process)
+        self.salvage_button.pack(fill=tk.X, expand=True, padx=5, pady=5, ipady=5)
+        
         clear_button = ttk.Button(button_frame, text="Clear Plot", command=self.clear_plot)
         clear_button.pack(fill=tk.X, expand=True, padx=5, pady=5, ipady=5)
 
@@ -599,7 +696,6 @@ class ControlPanel:
             n_qubits_range = (n_qubits_from, n_qubits_to)
             threading.Thread(target=run_qubit_scan_worker, args=(fixed_params, self.sim_result_queue, start_t, n_qubits_range), daemon=True).start()
     
-    ### NEW/MODIFIED ###
     def start_import_scan(self):
         """Callback for the 'Import All' button. Scans ALL subdirectories automatically."""
         base_path = './tfim_results_final'
@@ -607,7 +703,6 @@ class ControlPanel:
             messagebox.showerror("Directory Not Found", f"The base directory '{base_path}' does not exist.")
             return
 
-        # Get all subdirectories automatically
         try:
             subdirectories = sorted([os.path.join(base_path, d) for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))])
             if not subdirectories:
@@ -626,17 +721,30 @@ class ControlPanel:
             self.status_var.set(f"Starting full import scan of {len(subdirectories)} directories...")
             threading.Thread(target=run_import_worker, args=(subdirectories, self.sim_result_queue), daemon=True).start()
 
+    def start_salvage_process(self):
+        """Callback for the 'Salvage Logs' button."""
+        msg = ("This will process raw log files from './tfim_logs' into clean CSVs "
+               "in './tfim_results_final'. This is used to recover data from an "
+               "incomplete or crashed simulation.\n\nContinue?")
+        if messagebox.askokcancel("Start Log Salvage?", msg):
+            self._disable_buttons()
+            self.status_var.set("Starting log salvage process...")
+            # Run the salvage worker in a separate thread
+            threading.Thread(target=run_salvage_worker, args=(self.sim_result_queue,), daemon=True).start()
+
     def _disable_buttons(self):
         self.scan_button.config(state=tk.DISABLED)
         self.trotter_scan_button.config(state=tk.DISABLED)
         self.qubit_scan_button.config(state=tk.DISABLED)
         self.import_button.config(state=tk.DISABLED)
+        self.salvage_button.config(state=tk.DISABLED)
 
     def _enable_buttons(self):
         self.scan_button.config(state=tk.NORMAL)
         self.trotter_scan_button.config(state=tk.NORMAL)
         self.qubit_scan_button.config(state=tk.NORMAL)
         self.import_button.config(state=tk.NORMAL)
+        self.salvage_button.config(state=tk.NORMAL)
 
     def check_sim_queue(self):
         """Checks the queue for results from the simulation threads/processes."""
@@ -656,7 +764,7 @@ class ControlPanel:
             
             elif result_type == 'status':
                 self.status_var.set(data)
-                if "complete" in data.lower():
+                if "complete" in data.lower() or "nothing to do" in data.lower():
                     self._enable_buttons()
                     # This handles the original "full scan" which terminates on a status message
                     if "scan complete" in data.lower():
@@ -723,3 +831,4 @@ if __name__ == '__main__':
         plot_process.terminate()
         
     print("Application closed.")
+    
