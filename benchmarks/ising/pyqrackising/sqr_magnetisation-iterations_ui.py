@@ -347,9 +347,14 @@ def vedo_plotter_process(data_queue, param_specs):
     This function runs in a separate process to handle all vedo plotting.
     This version is optimized to handle batched point data for high performance.
     """
+    # MODIFICATION 1: Define the scaling factor for the Z-axis (your "y axis").
+    Z_AXIS_SCALE_FACTOR = 4.0
+
     j_range = (param_specs['J']['from_'], param_specs['J']['to'])
     h_range = (param_specs['h']['from_'], param_specs['h']['to'])
-    z_range = (0.0, 1.0)
+    
+    # MODIFICATION 2: Scale the Z-axis range. The original was (0.0, 1.0).
+    z_range = (0.0, 1.0 * Z_AXIS_SCALE_FACTOR)
 
     plt = Plotter(
         axes=dict(
@@ -378,18 +383,21 @@ def vedo_plotter_process(data_queue, param_specs):
                 command, data = data_queue.get_nowait()
                 
                 if command == 'add_batch':
-                    # data is a list of [(params, (avg_z, time_str)), ...]
                     for params, (avg_z, time_str) in data:
-                        new_point = (params['J'], params['h'], avg_z)
+                        # MODIFICATION 3: Scale the z-coordinate of each new point.
+                        new_point = (params['J'], params['h'], avg_z * Z_AXIS_SCALE_FACTOR)
                         plotted_points_data.append(new_point)
+                        # Store the ORIGINAL, unscaled value for mesh generation logic
                         scan_points_data[(params['J'], params['h'])] = avg_z
 
                     if point_cloud_actor:
                         plt.remove(point_cloud_actor)
 
                     points_array = np.array(plotted_points_data)
-                    z_values = points_array[:, 2]
-                    point_cloud_actor = Points(points_array, r=5).cmap('viridis', z_values, vmin=0.0, vmax=1.0)
+                    z_values = points_array[:, 2] # These are now the scaled Z-values
+                    
+                    # MODIFICATION 4: Update vmax in cmap to match the scaled range.
+                    point_cloud_actor = Points(points_array, r=5).cmap('viridis', z_values, vmin=0.0, vmax=1.0 * Z_AXIS_SCALE_FACTOR)
                     
                     plt.add(point_cloud_actor)
                     
@@ -398,6 +406,7 @@ def vedo_plotter_process(data_queue, param_specs):
                     scalar_bar_actor = ScalarBar(point_cloud_actor, title="Avg. Measured Value", pos=((0.85, 0.4), (0.9, 0.9)))
                     info_text = (f"Plotted points: {len(plotted_points_data)}\n"
                                  f"Last point: J={last_params['J']:.2f}, h={last_params['h']:.2f}\n"
+                                 # Display the original, unscaled average value
                                  f"Avg. Value: {last_avg_z:.4f}\n"
                                  f"{last_time_str}")
                     info_text_actor.text(info_text)
@@ -416,8 +425,10 @@ def vedo_plotter_process(data_queue, param_specs):
                     vertices = []
                     for h in h_coords:
                         for j in j_coords:
-                            z = scan_points_data.get((j, h), 0.0)
-                            vertices.append([j, h, z])
+                            # Retrieve original Z value
+                            z_original = scan_points_data.get((j, h), 0.0)
+                            # MODIFICATION 3 (for mesh): Scale the z-coordinate of each vertex.
+                            vertices.append([j, h, z_original * Z_AXIS_SCALE_FACTOR])
                     
                     faces = []
                     nx, ny = len(j_coords), len(h_coords)
@@ -432,8 +443,10 @@ def vedo_plotter_process(data_queue, param_specs):
                     plotted_points_data.clear()
 
                     surface_actor = Mesh([vertices, faces]).lighting('glossy')
-                    z_values = np.array(vertices)[:, 2]
-                    surface_actor.cmap('viridis', z_values, vmin=0.0, vmax=1.0)
+                    z_values = np.array(vertices)[:, 2] # These are the scaled Z-values
+                    
+                    # MODIFICATION 4 (for mesh): Update vmax in cmap to match the scaled range.
+                    surface_actor.cmap('viridis', z_values, vmin=0.0, vmax=1.0 * Z_AXIS_SCALE_FACTOR)
                     
                     plt.remove(scalar_bar_actor)
                     scalar_bar_actor = ScalarBar(surface_actor, title="Avg. Measured Value", pos=((0.85, 0.4), (0.9, 0.9)))
