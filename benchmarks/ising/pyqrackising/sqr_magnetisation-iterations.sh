@@ -49,9 +49,9 @@ else
 fi
 echo "---"
 
-# ##################################################################
-# ### NEW SECTION START: Function for Parallel CSV Generation ###
-# ##################################################################
+##################################################################
+### NEW SECTION START: Function for Parallel CSV Generation ###
+##################################################################
 # This function encapsulates the logic for creating one summary CSV file.
 # It's designed to be called by xargs to run in parallel.
 # Arguments: $1: N_QUBITS_DIR, $2: T_VAL_CURRENT, $3: N_QUBITS_VAL
@@ -88,20 +88,20 @@ generate_csv_for_t() {
 
 # Export the function so it's available to the subshells created by xargs.
 export -f generate_csv_for_t
-# ##################################################################
-# ### NEW SECTION END ###
-# ##################################################################
+##################################################################
+### NEW SECTION END ###
+##################################################################
 
 
 # --- Define parameter ranges ---
 PI_HALF=$(python3 -c "import numpy as np; print(np.pi/2)")
 NEG_PI_HALF=$(python3 -c "import numpy as np; print(-np.pi/2)")
-J_VALUES=$(seq -s ' ' -2.0 0.1 2.0)
-H_VALUES=$(seq -s ' ' -4.0 0.1 4.0)
+J_VALUES=$(seq -s ' ' -2.0 0.5 2.0)
+H_VALUES=$(seq -s ' ' -4.0 0.5 4.0)
 Z_VALUES=$(seq -s ' ' -2 1 2)
 THETA_VALUES=$(seq -s ' ' $NEG_PI_HALF 0.1 $PI_HALF)
-#T_VALUES=$(seq -s ' ' 1 1 20)
-T_VALUES=20
+T_VALUES=$(seq -s ' ' 10 1 19)
+#T_VALUES=20
 N_QUBITS_VALUES=$(seq -s ' ' 4 1 2048)
 
 # --- Total iterations calculation ---
@@ -130,6 +130,9 @@ echo "---"
 
 echo "Generating and executing commands..."
 ITERATIONS_PER_QUBIT=$((NUM_J * NUM_H * NUM_Z * NUM_THETA * NUM_T))
+
+# Array to hold Process IDs (PIDs) of background CSV generation tasks
+csv_pids=()
 
 for N_QUBITS_VAL in $N_QUBITS_VALUES; do
     N_QUBITS_DIR_NAME=$(printf "nqubits_%04d" "$N_QUBITS_VAL")
@@ -169,18 +172,31 @@ for N_QUBITS_VAL in $N_QUBITS_VALUES; do
     echo "Simulations for n_qubits = ${N_QUBITS_VAL} complete."
     
     # ##################################################################
-    # ### MODIFIED SECTION START: Parallel CSV Generation ###
+    # ### MODIFIED SECTION START: Parallel CSV Generation (Forked) ###
     # ##################################################################
-    echo "Generating CSV summaries in parallel for ${N_QUBITS_DIR_NAME}..."
+    echo "Forking CSV summary generation for ${N_QUBITS_DIR_NAME} to run in the background..."
 
-    # Pipe each T value to xargs, which calls our exported function in parallel.
-    printf "%s\n" $T_VALUES | xargs -P "$PARALLEL_JOBS" -I {} bash -c "generate_csv_for_t \"$N_QUBITS_DIR\" \"{}\" \"$N_QUBITS_VAL\""
-
+    # Run the CSV generation in a background subshell
+    (
+        printf "%s\n" $T_VALUES | xargs -P "$PARALLEL_JOBS" -I {} bash -c "generate_csv_for_t \"$N_QUBITS_DIR\" \"{}\" \"$N_QUBITS_VAL\""
+    ) &
+    
+    # Store the PID of the background process
+    csv_pids+=($!)
     # ##################################################################
     # ### MODIFIED SECTION END ###
     # ##################################################################
 done
 
+# ---
+# NEW: Wait for all background CSV generation jobs to finish
+echo "---"
+echo "All simulation loops initiated. Waiting for any remaining CSV generation jobs to complete..."
+for pid in "${csv_pids[@]}"; do
+    wait "$pid"
+done
+
 echo "---"
 echo "All simulations and CSV generations are complete."
+
 
