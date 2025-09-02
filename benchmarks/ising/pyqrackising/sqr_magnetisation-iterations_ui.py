@@ -582,7 +582,7 @@ def vedo_plotter_process(data_queue, param_specs, continue_event):
         point_cloud_actor = None
         plotted_points_data.clear()
         
-        surface_actor = Mesh([vertices, faces]).lighting('glossy')
+        surface_actor = Mesh([vertices, faces]).lighting('ambient')
         z_values_surf = np.array(vertices)[:, 2]
         surface_actor.cmap('viridis', z_values_surf, vmin=0.0, vmax=1.0 * Z_AXIS_SCALE_FACTOR)
         
