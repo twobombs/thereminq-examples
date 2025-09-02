@@ -194,8 +194,7 @@ def run_salvage_worker(result_queue):
 def run_import_worker(list_of_directories, result_queue):
     """
     Thread worker to import and render CSV files from a LIST of directories.
-    It iterates through each directory, and for each CSV file within, it
-    renders, saves a screenshot, and clears the plot.
+    This version is OPTIMIZED to avoid slow iteration for much faster loading.
     """
     try:
         total_dirs = len(list_of_directories)
@@ -216,7 +215,7 @@ def run_import_worker(list_of_directories, result_queue):
                 filepath = os.path.join(directory_path, filename)
                 df = pd.read_csv(filepath)
 
-                # Clean NaN values from the current file's data
+                # Clean NaN values
                 initial_rows = len(df)
                 df.dropna(subset=['J', 'h', 'samples'], inplace=True)
                 if len(df) < initial_rows:
@@ -226,12 +225,82 @@ def run_import_worker(list_of_directories, result_queue):
                     result_queue.put(('error', f"CSV '{filename}' is missing required columns (J, h, samples). Skipping."))
                     continue
 
-                # Process all data from the single file in batches
+                # --- OPTIMIZATION START (Fix 1) ---
+                # Avoid df.iterrows()! Get columns as lists for massive speedup.
+                j_vals = df['J'].tolist()
+                h_vals = df['h'].tolist()
+                samples_vals = df['samples'].tolist()
+                num_rows = len(df)
+                # --- OPTIMIZATION END ---
+                
                 results_batch = []
-                BATCH_SIZE = 500
-                for _, row in df.iterrows():
-                    params = {'J': row['J'], 'h': row['h']}
-                    avg_magnetization = row['samples']
+                BATCH_SIZE = 2000 # Increased batch size is fine now
+                
+                # --- OPTIMIZATION START (Fix 1) ---
+                # Loop through the lists using an index, which is extremely fast.
+                for idx in range(num_rows):
+                    params = {'J': j_vals[idx], 'h': h_vals[idx]}
+                    avg_magnetization = samples_vals[idx]
+                    time_line = "Imported from CSV"
+                    results_batch.append((params, (avg_magnetization, time_line)))
+
+                    # Send batch when full
+                    if len(results_batch) >= BATCH_SIZE:
+                        result_queue.put(('success_batch', results_batch.copy()))
+                        results_batch.clear()
+                # --- OPTIMIZATION END ---
+                
+                # Send any remaining data in the last batch
+                if results_batch:
+                    result_queue.put(('success_batch', results_batch.copy()))
+
+                # Signal that this file is done and ready for saving/clearing
+                base_filename = os.path.splitext(filename)[0]
+                dataset_name = f"{dir_name}_{base_filename}"
+                result_queue.put(('import_slice_complete', dataset_name))
+
+        result_queue.put(('status', f"Full import of {total_dirs} directories complete."))
+
+    except Exception as e:
+        error_msg = f"An error occurred during import: {e}"
+        print(error_msg)
+        result_queue.put(('error', error_msg))
+
+def run_view_worker(list_of_directories, result_queue, continue_event):
+    """
+    Thread worker to interactively VIEW CSV files one by one.
+    Pauses after each file and waits for a signal to continue.
+    """
+    try:
+        total_dirs = len(list_of_directories)
+        for dir_idx, directory_path in enumerate(list_of_directories):
+            dir_name = os.path.basename(directory_path)
+            csv_files = sorted([f for f in os.listdir(directory_path) if f.lower().endswith('.csv')])
+            if not csv_files:
+                continue
+
+            total_files_in_dir = len(csv_files)
+            for i, filename in enumerate(csv_files):
+                status_msg = f"Dir {dir_idx+1}/{total_dirs} | Loading {i+1}/{total_files_in_dir}: {filename}"
+                result_queue.put(('status', status_msg))
+                
+                filepath = os.path.join(directory_path, filename)
+                df = pd.read_csv(filepath)
+                df.dropna(subset=['J', 'h', 'samples'], inplace=True)
+
+                if not {'J', 'h', 'samples'}.issubset(df.columns):
+                    continue
+                
+                j_vals = df['J'].tolist()
+                h_vals = df['h'].tolist()
+                samples_vals = df['samples'].tolist()
+                num_rows = len(df)
+                
+                results_batch = []
+                BATCH_SIZE = 2000
+                for idx in range(num_rows):
+                    params = {'J': j_vals[idx], 'h': h_vals[idx]}
+                    avg_magnetization = samples_vals[idx]
                     time_line = "Imported from CSV"
                     results_batch.append((params, (avg_magnetization, time_line)))
 
@@ -242,16 +311,23 @@ def run_import_worker(list_of_directories, result_queue):
                 if results_batch:
                     result_queue.put(('success_batch', results_batch.copy()))
 
-                # Signal that this file is done and ready for saving/clearing
-                # Prefix with directory name to avoid screenshot name clashes
+                # NEW: Signal to render, then wait for the user to right-click in the plot
                 base_filename = os.path.splitext(filename)[0]
                 dataset_name = f"{dir_name}_{base_filename}"
-                result_queue.put(('import_slice_complete', dataset_name))
+                result_queue.put(('view_slice_and_wait', dataset_name))
+                
+                continue_event.clear()
+                print(f"Displaying '{dataset_name}'. Waiting for right-click in plot window to continue...")
+                result_queue.put(('status', f"Waiting for right-click to view next file..."))
+                continue_event.wait() # This blocks until the plotter process sets the event
+                
+                # After continuing, send a command to clear the plot for the next slice
+                result_queue.put(('clear', None))
 
-        result_queue.put(('status', f"Full import of {total_dirs} directories complete."))
+        result_queue.put(('status', f"Interactive view of {total_dirs} directories complete."))
 
     except Exception as e:
-        error_msg = f"An error occurred during import: {e}"
+        error_msg = f"An error occurred during interactive view: {e}"
         print(error_msg)
         result_queue.put(('error', error_msg))
 
@@ -443,10 +519,10 @@ def run_qubit_scan_worker(fixed_params, result_queue, start_t, n_qubits_range):
 
 # --- Vedo Plotter Process ---
 
-def vedo_plotter_process(data_queue, param_specs):
+def vedo_plotter_process(data_queue, param_specs, continue_event):
     """
     This function runs in a separate process to handle all vedo plotting.
-    This version is optimized to handle batched point data for high performance.
+    This version uses a throttled recreation approach for stability.
     """
     Z_AXIS_SCALE_FACTOR = 4.0
 
@@ -466,99 +542,137 @@ def vedo_plotter_process(data_queue, param_specs):
 
     plotted_points_data = []
     scan_points_data = {}
-
+    
     point_cloud_actor = None
     surface_actor = None
     info_text_actor = Text2D("Initializing...", pos='top-left', s=1.1, bg='gray', alpha=0.7)
     scalar_bar_actor = None
     
+    # --- FINAL FIX: Throttling parameters ---
+    batch_counter = 0
+    UPDATE_INTERVAL = 10 # Update the plot every 10 batches
+
     plt.show(info_text_actor, interactive=False)
+    
+    def _generate_and_add_surface(fixed_params=None, dataset_name=None):
+        nonlocal surface_actor, scalar_bar_actor, point_cloud_actor
+        
+        if len(scan_points_data) < 4: return
+        
+        j_coords = sorted(list(set(p[0] for p in scan_points_data.keys())))
+        h_coords = sorted(list(set(p[1] for p in scan_points_data.keys())))
+        
+        if len(j_coords) < 2 or len(h_coords) < 2: return
+
+        vertices = []
+        for h in h_coords:
+            for j in j_coords:
+                z_original = scan_points_data.get((j, h), 0.0)
+                vertices.append([j, h, z_original * Z_AXIS_SCALE_FACTOR])
+        
+        faces = []
+        nx, ny = len(j_coords), len(h_coords)
+        for i in range(ny - 1):
+            for j in range(nx - 1):
+                p1, p2 = i * nx + j, i * nx + j + 1
+                p3, p4 = (i + 1) * nx + j + 1, (i + 1) * nx + j
+                faces.append([p1, p2, p3, p4])
+
+        plt.remove(point_cloud_actor)
+        point_cloud_actor = None
+        plotted_points_data.clear()
+        
+        surface_actor = Mesh([vertices, faces]).lighting('glossy')
+        z_values_surf = np.array(vertices)[:, 2]
+        surface_actor.cmap('viridis', z_values_surf, vmin=0.0, vmax=1.0 * Z_AXIS_SCALE_FACTOR)
+        
+        plt.remove(scalar_bar_actor)
+        scalar_bar_actor = ScalarBar(surface_actor, title="Avg. Measured Value", pos=((0.85, 0.4), (0.9, 0.9)))
+        info_text_actor.text(f"Surface plot with {len(vertices)} vertices.\nScan complete.")
+        
+        plt.add(surface_actor, scalar_bar_actor)
+        print("Surface mesh rendered.")
+
+        # Handle saving for non-interactive modes
+        if fixed_params:
+            param_parts = [f"{key}={value}" for key, value in sorted(fixed_params.items())]
+            filename = "TFIM_scan_" + "_".join(param_parts).replace(' ', '_') + ".png"
+            plt.screenshot(filename, scale=3)
+            print(f"Saved high-resolution screenshot to: {filename}")
 
     def update_plot(timer_id):
         nonlocal point_cloud_actor, surface_actor, info_text_actor, scalar_bar_actor
+        nonlocal batch_counter
+
         try:
             while not data_queue.empty():
                 command, data = data_queue.get_nowait()
                 
                 if command == 'add_batch':
+                    batch_counter += 1
+                    last_data_point = None
                     for params, (avg_z, time_str) in data:
                         new_point = (params['J'], params['h'], avg_z * Z_AXIS_SCALE_FACTOR)
                         plotted_points_data.append(new_point)
                         scan_points_data[(params['J'], params['h'])] = avg_z
+                        last_data_point = (params, (avg_z, time_str))
 
-                    if point_cloud_actor:
-                        plt.remove(point_cloud_actor)
+                    # --- FINAL FIX: Throttled actor recreation for stability ---
+                    if batch_counter % UPDATE_INTERVAL == 0 and plotted_points_data:
+                        plt.remove(point_cloud_actor, scalar_bar_actor)
 
-                    points_array = np.array(plotted_points_data)
-                    z_values = points_array[:, 2] 
+                        points_array = np.array(plotted_points_data)
+                        z_values = points_array[:, 2]
+                        
+                        # Recreate the actor from scratch - this is the most stable method
+                        point_cloud_actor = Points(points_array, r=5).cmap('viridis', z_values, vmin=0.0, vmax=1.0 * Z_AXIS_SCALE_FACTOR)
+                        scalar_bar_actor = ScalarBar(point_cloud_actor, title="Avg. Measured Value", pos=((0.85, 0.4), (0.9, 0.9)))
+                        plt.add(point_cloud_actor, scalar_bar_actor)
+
+                    # Always update the text info so the GUI feels responsive
+                    if last_data_point:
+                        last_params, (last_avg_z, last_time_str) = last_data_point
+                        info_text = (f"Plotted points: {len(plotted_points_data)}\n"
+                                     f"Last point: J={last_params['J']:.2f}, h={last_params['h']:.2f}\n"
+                                     f"Avg. Value: {last_avg_z:.4f}\n"
+                                     f"{last_time_str}")
+                        info_text_actor.text(info_text)
+
+                elif command == 'view_slice_and_wait':
+                    dataset_name = data
+                    _generate_and_add_surface()
+                    info_text_actor.text(f"Viewing: {dataset_name}\nRIGHT-CLICK in the window to continue.")
                     
-                    point_cloud_actor = Points(points_array, r=5).cmap('viridis', z_values, vmin=0.0, vmax=1.0 * Z_AXIS_SCALE_FACTOR)
-                    
-                    plt.add(point_cloud_actor)
-                    
-                    last_params, (last_avg_z, last_time_str) = data[-1]
-                    plt.remove(scalar_bar_actor)
-                    scalar_bar_actor = ScalarBar(point_cloud_actor, title="Avg. Measured Value", pos=((0.85, 0.4), (0.9, 0.9)))
-                    info_text = (f"Plotted points: {len(plotted_points_data)}\n"
-                                 f"Last point: J={last_params['J']:.2f}, h={last_params['h']:.2f}\n"
-                                 f"Avg. Value: {last_avg_z:.4f}\n"
-                                 f"{last_time_str}")
-                    info_text_actor.text(info_text)
-                    plt.add(scalar_bar_actor)
+                    def resume_callback(evt):
+                        print("Right-click detected. Resuming scan.")
+                        continue_event.set()
+                        plt.remove_callback('RightButtonPress') # Clean up
+
+                    plt.add_callback('RightButtonPress', resume_callback)
 
                 elif command == 'scan_complete':
                     fixed_params = data
-                    if len(scan_points_data) < 4: continue
+                    # Final render before creating surface
+                    if plotted_points_data:
+                        plt.remove(point_cloud_actor, scalar_bar_actor)
+                        points_array = np.array(plotted_points_data)
+                        z_values = points_array[:, 2]
+                        point_cloud_actor = Points(points_array, r=5).cmap('viridis', z_values, vmin=0.0, vmax=1.0 * Z_AXIS_SCALE_FACTOR)
+                        scalar_bar_actor = ScalarBar(point_cloud_actor, title="Avg. Measured Value", pos=((0.85, 0.4), (0.9, 0.9)))
+                        plt.add(point_cloud_actor, scalar_bar_actor)
+                        plt.render() # Force one last render of all points
 
-                    print("Scan complete. Generating surface mesh...")
-                    j_coords = sorted(list(set(p[0] for p in scan_points_data.keys())))
-                    h_coords = sorted(list(set(p[1] for p in scan_points_data.keys())))
-                    
-                    if len(j_coords) < 2 or len(h_coords) < 2: continue
-
-                    vertices = []
-                    for h in h_coords:
-                        for j in j_coords:
-                            z_original = scan_points_data.get((j, h), 0.0)
-                            vertices.append([j, h, z_original * Z_AXIS_SCALE_FACTOR])
-                    
-                    faces = []
-                    nx, ny = len(j_coords), len(h_coords)
-                    for i in range(ny - 1):
-                        for j in range(nx - 1):
-                            p1, p2 = i * nx + j, i * nx + j + 1
-                            p3, p4 = (i + 1) * nx + j + 1, (i + 1) * nx + j
-                            faces.append([p1, p2, p3, p4])
-
-                    plt.remove(point_cloud_actor)
-                    point_cloud_actor = None
-                    plotted_points_data.clear()
-
-                    surface_actor = Mesh([vertices, faces]).lighting('glossy')
-                    z_values = np.array(vertices)[:, 2]
-                    
-                    surface_actor.cmap('viridis', z_values, vmin=0.0, vmax=1.0 * Z_AXIS_SCALE_FACTOR)
-                    
-                    plt.remove(scalar_bar_actor)
-                    scalar_bar_actor = ScalarBar(surface_actor, title="Avg. Measured Value", pos=((0.85, 0.4), (0.9, 0.9)))
-                    info_text_actor.text(f"Surface plot with {len(vertices)} vertices.\nScan complete.")
-                    
-                    plt.add(surface_actor, scalar_bar_actor)
-                    print("Surface mesh rendered.")
-
-                    if fixed_params:
-                        param_parts = [f"{key}={value}" for key, value in sorted(fixed_params.items())]
-                        filename = "TFIM_scan_" + "_".join(param_parts).replace(' ', '_') + ".png"
-                        plt.screenshot(filename, scale=3)
-                        print(f"Saved high-resolution screenshot to: {filename}")
+                    _generate_and_add_surface(fixed_params)
 
                 elif command == 'clear':
                     plotted_points_data.clear()
                     scan_points_data.clear()
+                    batch_counter = 0
+                    
                     plt.remove(point_cloud_actor, surface_actor, scalar_bar_actor)
                     point_cloud_actor, surface_actor, scalar_bar_actor = None, None, None
+                    
                     info_text_actor.text("Plot cleared.")
-                    plt.add(info_text_actor)
                     plt.reset_camera()
 
                 elif command == 'close':
@@ -566,27 +680,31 @@ def vedo_plotter_process(data_queue, param_specs):
                     return
 
         except Exception as e:
+            import traceback
             print(f"Error in vedo process: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
         
         plt.render()
 
     plt.add_callback('timer', update_plot)
-    plt.timer_callback('create', dt=100)
+    plt.timer_callback('create', dt=50)
     plt.interactive().close()
 
 # --- GUI Class ---
 class ControlPanel:
-    def __init__(self, root, param_specs, data_queue):
+    def __init__(self, root, param_specs, data_queue, continue_event):
         self.root = root
         self.param_specs = param_specs
         self.data_queue = data_queue
+        self.continue_event = continue_event
         self.sim_result_queue = queue.Queue()
         self.param_vars = {}
-        self.scan_button, self.trotter_scan_button, self.qubit_scan_button, self.import_button, self.salvage_button = None, None, None, None, None
+        self.scan_button, self.trotter_scan_button, self.qubit_scan_button = None, None, None
+        self.import_button, self.view_button, self.salvage_button = None, None, None
         self.last_scan_params = {}
 
         self.root.title("TFIM Control Panel")
-        self.root.geometry("400x800") # Increased height for new buttons
+        self.root.geometry("400x850") # Increased height for new buttons
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         main_frame = ttk.Frame(root, padding="10")
@@ -633,6 +751,9 @@ class ControlPanel:
         
         self.import_button = ttk.Button(button_frame, text="Import All Directories", command=self.start_import_scan)
         self.import_button.pack(fill=tk.X, expand=True, padx=5, pady=5, ipady=5)
+
+        self.view_button = ttk.Button(button_frame, text="View All Directories (Interactive)", command=self.start_view_scan)
+        self.view_button.pack(fill=tk.X, expand=True, padx=5, pady=5, ipady=5)
 
         # Separator for visual distinction
         ttk.Separator(button_frame, orient='horizontal').pack(fill='x', pady=10)
@@ -721,6 +842,31 @@ class ControlPanel:
             self.status_var.set(f"Starting full import scan of {len(subdirectories)} directories...")
             threading.Thread(target=run_import_worker, args=(subdirectories, self.sim_result_queue), daemon=True).start()
 
+    def start_view_scan(self):
+        """Callback for the 'View All' button. Scans and pauses for each file."""
+        base_path = './tfim_results_final'
+        if not os.path.isdir(base_path):
+            messagebox.showerror("Directory Not Found", f"The base directory '{base_path}' does not exist.")
+            return
+
+        try:
+            subdirectories = sorted([os.path.join(base_path, d) for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))])
+            if not subdirectories:
+                messagebox.showinfo("No Directories Found", f"No subdirectories found to scan in '{base_path}'.")
+                return
+        except Exception as e:
+            messagebox.showerror("Error Reading Directories", f"Could not read subdirectories from '{base_path}':\n{e}")
+            return
+            
+        msg = (f"This will scan {len(subdirectories)} directories and render each CSV file one by one.\n\n"
+               "You must RIGHT-CLICK in the plot window to advance to the next file.\n\nContinue?")
+        
+        if messagebox.askokcancel("Start Interactive View Scan?", msg):
+            self._disable_buttons()
+            self.clear_plot()
+            self.status_var.set(f"Starting interactive view of {len(subdirectories)} directories...")
+            threading.Thread(target=run_view_worker, args=(subdirectories, self.sim_result_queue, self.continue_event), daemon=True).start()
+
     def start_salvage_process(self):
         """Callback for the 'Salvage Logs' button."""
         msg = ("This will process raw log files from './tfim_logs' into clean CSVs "
@@ -737,6 +883,7 @@ class ControlPanel:
         self.trotter_scan_button.config(state=tk.DISABLED)
         self.qubit_scan_button.config(state=tk.DISABLED)
         self.import_button.config(state=tk.DISABLED)
+        self.view_button.config(state=tk.DISABLED)
         self.salvage_button.config(state=tk.DISABLED)
 
     def _enable_buttons(self):
@@ -744,6 +891,7 @@ class ControlPanel:
         self.trotter_scan_button.config(state=tk.NORMAL)
         self.qubit_scan_button.config(state=tk.NORMAL)
         self.import_button.config(state=tk.NORMAL)
+        self.view_button.config(state=tk.NORMAL)
         self.salvage_button.config(state=tk.NORMAL)
 
     def check_sim_queue(self):
@@ -789,7 +937,11 @@ class ControlPanel:
                 slice_params = {'dataset': dataset_name}
                 self.data_queue.put(('scan_complete', slice_params))
                 self.data_queue.put(('clear', None))
-                    
+            
+            elif result_type == 'view_slice_and_wait':
+                # This is a command from the worker to the plotter, just pass it through
+                self.data_queue.put((result_type, data))
+                
         except queue.Empty:
             pass
         finally:
@@ -818,11 +970,13 @@ if __name__ == '__main__':
     }
     
     data_queue = mp.Queue()
-    plot_process = mp.Process(target=vedo_plotter_process, args=(data_queue, param_specs), daemon=True)
+    continue_event = mp.Event() # Event for pause/resume functionality
+    
+    plot_process = mp.Process(target=vedo_plotter_process, args=(data_queue, param_specs, continue_event), daemon=True)
     plot_process.start()
 
     root = tk.Tk()
-    app = ControlPanel(root, param_specs, data_queue)
+    app = ControlPanel(root, param_specs, data_queue, continue_event)
     root.mainloop()
 
     plot_process.join(timeout=2)
@@ -831,4 +985,3 @@ if __name__ == '__main__':
         plot_process.terminate()
         
     print("Application closed.")
-    
