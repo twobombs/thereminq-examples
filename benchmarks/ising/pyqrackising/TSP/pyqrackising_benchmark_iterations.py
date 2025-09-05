@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# from: https://github.com/vm6502q/PyQrackIsing/blob/main/scripts/tsp_benchmarks.py
+
 import networkx as nx
 import random
 import time
