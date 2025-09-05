@@ -105,8 +105,9 @@ if __name__ == "__main__":
     print("\n--- Final Results ---")
     print(benchmark_results)
 
-    # --- Save results to a CSV file ---
-    csv_file_path = "maxcut_benchmark_results.csv"
+    # --- Save results to a CSV file with a dynamic name ---
+    sizes_str = "_".join(map(str, args.sizes))
+    csv_file_path = f"maxcut_benchmark_results_{sizes_str}.csv"
     csv_header = ["Size", "GraphType", "Trial", "Solver", "CutValue", "Time"]
 
     with open(csv_file_path, 'w', newline='') as f:
@@ -123,4 +124,8 @@ if __name__ == "__main__":
                         writer.writerow(row)
 
     print(f"\nBenchmark results have been saved to {csv_file_path}")
+<<<<<<< Updated upstream
     
+=======
+
+>>>>>>> Stashed changes
