@@ -124,8 +124,4 @@ if __name__ == "__main__":
                         writer.writerow(row)
 
     print(f"\nBenchmark results have been saved to {csv_file_path}")
-<<<<<<< Updated upstream
-    
-=======
 
->>>>>>> Stashed changes
