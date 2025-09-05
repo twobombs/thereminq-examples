@@ -40,18 +40,12 @@ def validate_tsp_solution(G, path):
 
 
 # Benchmark framework for the PyQrackIsing TSP solver
-def benchmark_pyqrackising(n_nodes=64, trials=3):
+def benchmark_pyqrackising(n_nodes=64, trials=1):
     """Runs and times the PyQrackIsing TSP solver."""
     results = []
     G, _ = generate_clustered_tsp(n_nodes)
 
-    # Exclude numba JIT compilation overhead with a warm-up run
-    # This ensures our timing is more accurate for the actual runs.
-    print(f"Warming up solver for {n_nodes} nodes...")
-    tsp_symmetric(G)
-    print("Warm-up complete.")
-
-    print(f"Running {trials} trials for {n_nodes} nodes...")
+    print(f"Running {trials} trial for {n_nodes} nodes...")
     for trial in range(trials):
         start_time = time.time()
         path, length = tsp_symmetric(G)
@@ -62,7 +56,7 @@ def benchmark_pyqrackising(n_nodes=64, trials=3):
         
         # Ensure the solution is valid
         assert validate_tsp_solution(G, path), f"Invalid PyQrackIsing solution in trial {trial}"
-        print(f"  Trial {trial + 1}/{trials} complete. Time: {end_time - start_time:.4f}s, Length: {length:.6f}")
+        print(f"  Trial complete. Time: {end_time - start_time:.4f}s, Length: {length:.6f}")
 
     return results
 
@@ -93,32 +87,31 @@ print("-" * 45)
 
 for n in node_sizes:
     # Run the benchmark for the current node size
-    trial_results = benchmark_pyqrackising(n_nodes=n, trials=3)
+    trial_results = benchmark_pyqrackising(n_nodes=n, trials=1)
     
-    # Process the results for this size
-    transposed = list(zip(*trial_results))
-    avg_time = sum(transposed[0]) / len(transposed[0])
-    min_length = min(transposed[1])
+    # Process the results for this single size
+    run_time = trial_results[0][0]
+    path_length = trial_results[0][1]
     
     # Store data for final summary
     summary_data.append({
         "Nodes": n,
-        "Avg. Time (s)": avg_time,
-        "Best Path Length": min_length,
+        "Time (s)": run_time,
+        "Path Length": path_length,
     })
 
     # --- Intermediate Reporting ---
     print("\n--- Intermediate Result ---")
     print(f"Problem Size: {n} Nodes")
-    print(f"  Average Time: {avg_time:.6f} seconds")
-    print(f"  Best Length:  {min_length:.6f}")
+    print(f"  Run Time: {run_time:.6f} seconds")
+    print(f"  Path Length:  {path_length:.6f}")
     print("-" * 45)
 
 
 # --- Final CSV Output ---
 try:
     with open(csv_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=["Nodes", "Avg. Time (s)", "Best Path Length"])
+        writer = csv.DictWriter(f, fieldnames=["Nodes", "Time (s)", "Path Length"])
         writer.writeheader()
         writer.writerows(summary_data)
     print(f"\n Benchmark complete. Results saved to '{os.path.abspath(csv_file)}'")
