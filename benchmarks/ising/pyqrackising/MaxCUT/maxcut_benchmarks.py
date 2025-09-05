@@ -3,6 +3,7 @@ import networkx as nx
 import numpy as np
 import time
 import csv
+import argparse
 
 from PyQrackIsing import spin_glass_solver
 
@@ -40,7 +41,7 @@ def evaluate_cut_value(G, partition):
             cut += w
     return cut
 
-def benchmark_maxcut(generators, sizes=[64, 128, 256], seed=42, trials=5):
+def benchmark_maxcut(generators, sizes=[64, 128, 256], seed=42, trials=1):
     """
     Benchmarks the Qrack spin glass solver for the Max-Cut problem.
     """
@@ -79,6 +80,17 @@ def benchmark_maxcut(generators, sizes=[64, 128, 256], seed=42, trials=5):
     return results
 
 if __name__ == "__main__":
+    # --- Set up CLI argument parsing ---
+    parser = argparse.ArgumentParser(description="Run Max-Cut benchmarks with a Qrack solver.")
+    parser.add_argument(
+        '--sizes',
+        type=int,
+        nargs='+',
+        default=[64, 128, 256],
+        help='One or more graph sizes (number of nodes) to benchmark. Example: --sizes 32 64'
+    )
+    args = parser.parse_args()
+
     # Define the graph generators to test
     graph_generators = {
         "Erdos-Renyi": (erdos_renyi_graph, {"p": 0.5}),
@@ -86,8 +98,8 @@ if __name__ == "__main__":
         "Hard (bipartite expander)": (hard_instance_graph, {"d": 10}),
     }
 
-    # Run the benchmark
-    benchmark_results = benchmark_maxcut(graph_generators)
+    # Run the benchmark with the specified or default sizes
+    benchmark_results = benchmark_maxcut(graph_generators, sizes=args.sizes)
 
     # Print the final results dictionary
     print("\n--- Final Results ---")
@@ -111,3 +123,4 @@ if __name__ == "__main__":
                         writer.writerow(row)
 
     print(f"\nBenchmark results have been saved to {csv_file_path}")
+    
