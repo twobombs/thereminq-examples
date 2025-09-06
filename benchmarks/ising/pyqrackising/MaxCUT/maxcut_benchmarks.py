@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# from: https://github.com/vm6502q/PyQrackIsing/blob/main/scripts/maxcut_benchmarks.py
+
 import networkx as nx
 import numpy as np
 import time
