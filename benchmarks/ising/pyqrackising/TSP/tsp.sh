@@ -28,10 +28,10 @@ total_jobs_launched=0
 for nodes in 32 64 128 256 512
 do
   # Loop for quality from 1 to 10
-  for quality in $(seq 1 10)
+  for quality in $(seq 1 7)
   do
     # Loop for correction_quality from 1 to 10
-    for correction_quality in $(seq 1 10)
+    for correction_quality in $(seq 1 7)
     do
       # --- Job Management ---
       # If we have already launched the maximum number of jobs,
