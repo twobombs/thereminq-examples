@@ -71,8 +71,11 @@ do
       # This ensures that each experimental run is statistically independent.
       SEED=$((nodes * 10000 + quality * 100 + correction_quality))
 
+      # Format the nodes with leading zeros for consistent sorting.
+      formatted_nodes=$(printf "%04d" $nodes)
+
       # Define the output filename based on the current variables
-      OUTPUT_FILE="results/tsp_n${nodes}_q${quality}_cq${correction_quality}_i${ITERATIONS}_s${SEED}.txt"
+      OUTPUT_FILE="results/tsp_n${formatted_nodes}_q${quality}_cq${correction_quality}_i${ITERATIONS}_s${SEED}.txt"
 
       # We run the command inside a subshell `()` and in the background `&`
       (
@@ -92,4 +95,5 @@ echo "All jobs have been launched. Waiting for the last running jobs to finish..
 wait
 
 echo "All iterations complete. Results are saved in the 'results' directory."
+
 
