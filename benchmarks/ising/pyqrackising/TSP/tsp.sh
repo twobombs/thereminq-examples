@@ -15,7 +15,7 @@ ITERATIONS=1 # Set fixed parameter for iterations
 # --- Resource Management ---
 # Set MAX_JOBS to use all but one available CPU thread, leaving overhead for the system.
 # This is much more efficient than the previous conservative setting.
-MAX_JOBS=$(( $(nproc) / 2 ))
+MAX_JOBS=$(( $(nproc) / 16 ))
 # Ensure MAX_JOBS is at least 1, even on a single-core machine.
 if [[ $MAX_JOBS -lt 1 ]]; then
     MAX_JOBS=1
