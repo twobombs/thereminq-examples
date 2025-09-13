@@ -8,8 +8,8 @@
 # Usage: ./tsp.sh "[nodes_list]" "[quality_sequence]" "[correction_quality_sequence]"
 # Example: ./tsp.sh "32 64 128" "$(seq 1 5)" "$(seq 1 5)"
 NODES_TO_RUN=${1:-"$(seq 32 2 4069)"}
-QUALITY_RANGE=${2:-"$(seq 1 2)"}
-CORRECTION_QUALITY_RANGE=${3:-"$(seq 1 2)"}
+QUALITY_RANGE=${2:-"$(seq 0 1 2)"}
+CORRECTION_QUALITY_RANGE=${3:-"$(seq 0 1 2)"}
 ITERATIONS=1 # Set fixed parameter for iterations
 
 # --- Resource Management ---
