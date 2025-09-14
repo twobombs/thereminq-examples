@@ -8,7 +8,7 @@ MULTI_START_RANGE="1"
 PYTHON_SCRIPT="tsp_monte_carlo.py" # The name of your python script
 
 # --- Resource Management ---
-MAX_JOBS=$(( $(nproc) / 8 ))
+MAX_JOBS=$(( $(nproc) / 2 ))
 if [[ $MAX_JOBS -lt 1 ]]; then
     MAX_JOBS=1
 fi
