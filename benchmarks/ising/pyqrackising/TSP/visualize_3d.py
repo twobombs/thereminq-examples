@@ -105,11 +105,11 @@ if __name__ == "__main__":
         plotter.add_mesh(
             line,
             scalars=scalar_values,
-            cmap='viridis_r', # FIX: Use the reversed colormap
+            cmap='viridis_r',
             clim=color_limits,
-            line_width=3,
+            line_width=1, # FIX: Changed from 3 to 1 for thinner lines
             show_scalar_bar=False,
-            opacity=0.9
+            opacity=0.5
         )
 
     plotter.add_scalar_bar(title="Number of Nodes", fmt="%.0f")
