@@ -19,7 +19,7 @@ mkdir -p results
 total_jobs_launched=0
 
 # Outer loop for nodes, iterating from 32 to 2048 with a step of 2.
-for (( nodes=32; nodes<=2048; nodes+=2 ))
+for (( nodes=32; nodes<=4096; nodes+=2 ))
 do
   # Loop for multi_start
   for multi_start in $MULTI_START_RANGE
