@@ -1,5 +1,4 @@
 #!/bin/bash
-# tsp_mc_runner.sh
 # This script runs the Monte Carlo TSP script with various parameters in parallel.
 
 # --- Configuration ---
