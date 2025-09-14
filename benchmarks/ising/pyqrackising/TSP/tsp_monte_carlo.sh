@@ -8,7 +8,11 @@ MULTI_START_RANGE="1"
 PYTHON_SCRIPT="tsp_monte_carlo.py" # The name of your python script
 
 # --- Resource Management ---
-MAX_JOBS=$(( $(nproc) / 2 ))
+# The divisor controls CPU utilization. 2 = 50%, 1.8 = ~55%, 1 = 100%.
+# Using a smaller number increases the number of parallel jobs.
+UTILIZATION_DIVISOR="1.8"
+MAX_JOBS=$(printf "%.0f" $(echo "$(nproc) / $UTILIZATION_DIVISOR" | bc -l))
+
 if [[ $MAX_JOBS -lt 1 ]]; then
     MAX_JOBS=1
 fi
@@ -18,7 +22,7 @@ echo "Running with a maximum of $MAX_JOBS parallel jobs."
 mkdir -p results
 total_jobs_launched=0
 
-# Outer loop for nodes, iterating from 32 to 2048 with a step of 2.
+# Outer loop for nodes, iterating from 32 to 8192 with a step of 2.
 for (( nodes=32; nodes<=8192; nodes+=2 ))
 do
   # Loop for multi_start
