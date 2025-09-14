@@ -105,7 +105,7 @@ if __name__ == "__main__":
         plotter.add_mesh(
             line,
             scalars=scalar_values,
-            cmap='viridis',
+            cmap='viridis_r', # FIX: Use the reversed colormap
             clim=color_limits,
             line_width=3,
             show_scalar_bar=False,
