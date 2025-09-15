@@ -1,7 +1,12 @@
 #!/bin/bash
 # This script runs the Monte Carlo TSP script with various parameters in parallel.
+#
+# USAGE: ./tsp_monte_carlo.sh [OPTIONAL_SEED]
+# If a seed is provided as the first argument, it will be used for all runs.
+# Otherwise, a unique seed will be generated for each combination of parameters.
 
 # --- Configuration ---
+CLI_SEED=$1 # MODIFIED: Read the first command-line argument for the seed
 MULTI_START_RANGE="1"
 # K_NEIGHBORS_RANGE is now calculated dynamically based on the number of nodes.
 PYTHON_SCRIPT="tsp_monte_carlo.py" # The name of your python script
@@ -37,8 +42,17 @@ do
       wait -n
     fi
 
+    # --- MODIFIED: Seed Generation Logic ---
+    if [[ -n "$CLI_SEED" ]]; then
+      # If a seed was provided via the command line, use it
+      SEED="$CLI_SEED"
+    else
+      # Otherwise, generate a deterministic seed based on parameters
+      SEED=$((nodes * 10000 + multi_start * 100 + k_neighbors))
+    fi
+    # --- End of Modification ---
+
     # --- Job Execution (in background) ---
-    SEED=$((nodes * 10000 + multi_start * 100 + k_neighbors))
     formatted_nodes=$(printf "%04d" $nodes)
     OUTPUT_FILE="results/tspmontecarlo_n${formatted_nodes}_ms${multi_start}_kn${k_neighbors}_s${SEED}.txt"
 
