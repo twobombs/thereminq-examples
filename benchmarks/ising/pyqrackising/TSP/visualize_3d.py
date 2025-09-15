@@ -109,7 +109,7 @@ if __name__ == "__main__":
             clim=color_limits,
             line_width=1, # FIX: Changed from 3 to 1 for thinner lines
             show_scalar_bar=False,
-            opacity=0.5
+            opacity=0.01
         )
 
     plotter.add_scalar_bar(title="Number of Nodes", fmt="%.0f")
