@@ -79,8 +79,7 @@ if __name__ == "__main__":
     coords_a = coords[set_a_nodes]
     coords_b = coords[set_b_nodes]
     
-    # --- CHANGE HERE: Use legacy global theme setting ---
-    # This method is compatible with older PyVista versions
+    # Set the global theme's font color for older PyVista versions
     pv.global_theme.font.color = 'white'
 
     # --- 3. PYVISTA SIDE-BY-SIDE VISUALIZATION ---
@@ -98,7 +97,8 @@ if __name__ == "__main__":
         scalars=set_a_nodes,
         cmap='viridis',
         clim=color_limits,
-        point_size=8,
+        point_size=5,             # CHANGED
+        opacity=0.7,              # ADDED
         render_points_as_spheres=True,
         label="Set A Nodes",
         show_scalar_bar=False
@@ -113,7 +113,8 @@ if __name__ == "__main__":
         scalars=set_b_nodes,
         cmap='viridis',
         clim=color_limits,
-        point_size=8,
+        point_size=5,             # CHANGED
+        opacity=0.7,              # ADDED
         render_points_as_spheres=True,
         label="Set B Nodes"
     )
