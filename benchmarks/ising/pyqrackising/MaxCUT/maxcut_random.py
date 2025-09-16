@@ -1,5 +1,7 @@
 # Random MAXCUT (for execution time tests)
 # Produced by Dan Strano, Elara (the OpenAI custom GPT)
+# from https://github.com/vm6502q/PyQrackIsing/blob/main/scripts/maxcut_random.py
+# modified to produce the node paths
 
 from pyqrackising import spin_glass_solver
 from numba import njit, prange
