@@ -18,6 +18,13 @@ QUALITY_RANGE=${2:-"$(seq 1 2)"}
 CORRECTION_QUALITY_RANGE=${3:-"$(seq 1 2)"}
 SEED_OVERRIDE=${4:-""}
 
+# MODIFIED: Use a fixed seed if only the nodes argument is provided.
+FIXED_SEED_DEFAULT=""
+if [[ $# -eq 1 ]]; then
+    FIXED_SEED_DEFAULT="12345" # This seed will be used for all iterations
+    echo "Only nodes argument provided. Using fixed seed $FIXED_SEED_DEFAULT for all iterations."
+fi
+
 # MODIFIED: Iterations are now always set to the number of nodes.
 ITERATIONS=$NODES
 echo "Node count is $NODES. Running $ITERATIONS iterations for each parameter combination."
@@ -62,8 +69,11 @@ do
 
         current_gpu=$((total_jobs_launched % N_GPUS))
         
-        # MODIFIED: When a seed is passed, it is now kept exactly the same for all iterations.
-        if [[ -n "$SEED_OVERRIDE" ]]; then
+        # MODIFIED: Updated seed logic to prioritize the new fixed seed default.
+        if [[ -n "$FIXED_SEED_DEFAULT" ]]; then
+          SEED="$FIXED_SEED_DEFAULT"
+        elif [[ -n "$SEED_OVERRIDE" ]]; then
+          # When a seed is passed, it is now kept exactly the same for all iterations.
           SEED="$SEED_OVERRIDE"
         else
           # Generate a unique seed for each iteration if no override is given
