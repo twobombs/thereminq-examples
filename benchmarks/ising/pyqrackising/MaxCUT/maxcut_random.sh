@@ -13,21 +13,23 @@ if [[ -z "$1" ]]; then # MODIFIED: Add check to ensure nodes value is provided.
     exit 1
 fi
 
-NODES=${1}
+NODE_INPUT=${1}
 QUALITY_RANGE=${2:-"$(seq 1 2)"}
 CORRECTION_QUALITY_RANGE=${3:-"$(seq 1 2)"}
 SEED_OVERRIDE=${4:-""}
 
-# MODIFIED: Use a fixed seed if only the nodes argument is provided.
-FIXED_SEED_DEFAULT=""
+# MODIFIED: Conditional logic based on number of arguments
 if [[ $# -eq 1 ]]; then
-    FIXED_SEED_DEFAULT=$RANDOM # MODIFIED: Use a random seed for the default
+    # Behavior for a single argument: iterate from 32 up to NODE_INPUT
+    FIXED_SEED_DEFAULT=$RANDOM
     echo "Only nodes argument provided. Using fixed random seed $FIXED_SEED_DEFAULT for all iterations."
+    NODE_SEQUENCE=$(seq 32 $NODE_INPUT)
+    echo "Will iterate through node counts from 32 to $NODE_INPUT."
+else
+    # Original behavior: use only the provided node value
+    NODE_SEQUENCE=$NODE_INPUT
 fi
 
-# MODIFIED: Iterations are now always set to the number of nodes.
-ITERATIONS=$NODES
-echo "Node count is $NODES. Running $ITERATIONS iterations for each parameter combination."
 
 # --- Resource Management ---
 MAX_JOBS=$(( $(nproc) / 16 ))
@@ -54,9 +56,13 @@ fi
 mkdir -p results
 total_jobs_launched=0
 
-# The 'nodes' variable is now a single value, so this outer loop only runs once.
-for nodes_val in $NODES
+# MODIFIED: Loop now iterates over the generated NODE_SEQUENCE
+for nodes_val in $NODE_SEQUENCE
 do
+  # MODIFIED: Iterations are now set inside the loop for each node count
+  ITERATIONS=$nodes_val
+  echo "--- Starting runs for node count $nodes_val ($ITERATIONS iterations) ---"
+
   for quality in $QUALITY_RANGE
   do
     for correction_quality in $CORRECTION_QUALITY_RANGE
@@ -69,11 +75,9 @@ do
 
         current_gpu=$((total_jobs_launched % N_GPUS))
         
-        # MODIFIED: Updated seed logic to prioritize the new fixed seed default.
         if [[ -n "$FIXED_SEED_DEFAULT" ]]; then
           SEED="$FIXED_SEED_DEFAULT"
         elif [[ -n "$SEED_OVERRIDE" ]]; then
-          # When a seed is passed, it is now kept exactly the same for all iterations.
           SEED="$SEED_OVERRIDE"
         else
           # Generate a unique seed for each iteration if no override is given
@@ -81,7 +85,6 @@ do
         fi
 
         formatted_nodes=$(printf "%04d" $nodes_val)
-        # Filename still includes iteration 'i' to prevent overwrites
         OUTPUT_FILE="results/macxut_n${formatted_nodes}_q${quality}_cq${correction_quality}_i${i}_s${SEED}.txt"
 
         (
