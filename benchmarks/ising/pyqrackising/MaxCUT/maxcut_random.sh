@@ -21,8 +21,8 @@ SEED_OVERRIDE=${4:-""}
 # MODIFIED: Use a fixed seed if only the nodes argument is provided.
 FIXED_SEED_DEFAULT=""
 if [[ $# -eq 1 ]]; then
-    FIXED_SEED_DEFAULT="12345" # This seed will be used for all iterations
-    echo "Only nodes argument provided. Using fixed seed $FIXED_SEED_DEFAULT for all iterations."
+    FIXED_SEED_DEFAULT=$RANDOM # MODIFIED: Use a random seed for the default
+    echo "Only nodes argument provided. Using fixed random seed $FIXED_SEED_DEFAULT for all iterations."
 fi
 
 # MODIFIED: Iterations are now always set to the number of nodes.
