@@ -14,8 +14,9 @@ if [[ -z "$1" ]]; then # MODIFIED: Add check to ensure nodes value is provided.
 fi
 
 NODE_INPUT=${1}
-QUALITY_RANGE=${2:-"$(seq 1 2)"}
-CORRECTION_QUALITY_RANGE=${3:-"$(seq 1 2)"}
+# MODIFIED: Changed default value generation to be more robust.
+QUALITY_RANGE=${2:-"1 2"}
+CORRECTION_QUALITY_RANGE=${3:-"1 2"}
 SEED_OVERRIDE=${4:-""}
 
 # MODIFIED: Conditional logic based on number of arguments
