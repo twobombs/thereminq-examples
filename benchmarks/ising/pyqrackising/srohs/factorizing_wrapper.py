@@ -1,6 +1,6 @@
 # this is a wrapper that leverages ising models to factor
 # derived from: https://arxiv.org/abs/2301.06738
-# gemini25
+# gemini25 - initial version : this will fail because reasons
 
 import numpy as np
 import dimod
