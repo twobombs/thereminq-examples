@@ -22,7 +22,7 @@ SEED_OVERRIDE=${4:-""}
 # MODIFIED: Conditional logic based on number of arguments
 if [[ $# -eq 1 ]]; then
     # Behavior for a single argument: iterate from 32 up to NODE_INPUT
-    FIXED_SEED_DEFAULT=$RANDOM
+    FIXED_SEED_DEFAULT=$RANDOM$RANDOM
     echo "Only nodes argument provided. Using fixed random seed $FIXED_SEED_DEFAULT for all iterations."
     NODE_SEQUENCE=$(seq 32 $NODE_INPUT)
     echo "Will iterate through node counts from 32 to $NODE_INPUT."
@@ -33,7 +33,7 @@ fi
 
 
 # --- Resource Management ---
-MAX_JOBS=$(( $(nproc) / 16 ))
+MAX_JOBS=$(( $(nproc) / 2 ))
 if [[ $MAX_JOBS -lt 1 ]]; then
     MAX_JOBS=1
 fi
@@ -61,7 +61,7 @@ total_jobs_launched=0
 for nodes_val in $NODE_SEQUENCE
 do
   # MODIFIED: Iterations are now set inside the loop for each node count
-  ITERATIONS=$nodes_val
+  ITERATIONS=1 
   echo "--- Starting runs for node count $nodes_val ($ITERATIONS iterations) ---"
 
   for quality in $QUALITY_RANGE
