@@ -8,6 +8,8 @@ import multiprocessing
 from tqdm import tqdm
 import pyvista as pv
 from scipy.spatial.distance import pdist, squareform
+import datetime
+from PIL import Image
 
 def parse_maxcut_worker(filepath):
     """Worker function to parse a single Max-Cut file."""
@@ -27,7 +29,6 @@ def parse_maxcut_worker(filepath):
             return None
 
         def parse_node_list(match_group):
-            # Handles empty lists that might occur
             if not match_group.strip():
                 return []
             return [int(node) for node in match_group.split(', ')]
@@ -43,15 +44,71 @@ def parse_maxcut_worker(filepath):
         print(f"Warning: Could not parse {basename}. Error: {e}")
         return None
 
+def calculate_cut_edges_worker(row_tuple):
+    """Worker function to find cut edges for a single graph in parallel."""
+    index, row = row_tuple
+    n_nodes = row['nodes']
+    seed = row['seed']
+    set_a = set(row['set_a'])
+    set_b = set(row['set_b'])
+    
+    DISTANCE_THRESHOLD = 0.75 
+    
+    local_edge_points = []
+    local_edge_scalars = []
+
+    np.random.seed(seed)
+    coords = np.random.normal(size=(n_nodes, 3))
+    norm = np.linalg.norm(coords, axis=1, keepdims=True)
+    np.divide(coords, norm, out=coords, where=norm!=0)
+
+    dist_matrix = squareform(pdist(coords))
+    adjacency_matrix = (dist_matrix > 0) & (dist_matrix < DISTANCE_THRESHOLD)
+    
+    source_nodes, target_nodes = np.where(adjacency_matrix)
+    for i, j in zip(source_nodes, target_nodes):
+        if i < j:
+            is_in_a_i = i in set_a
+            is_in_b_j = j in set_b
+            is_in_b_i = i in set_b
+            is_in_a_j = j in set_a
+            
+            if (is_in_a_i and is_in_b_j) or (is_in_b_i and is_in_a_j):
+                local_edge_points.append(coords[i])
+                local_edge_points.append(coords[j])
+                local_edge_scalars.append(i)
+                local_edge_scalars.append(j)
+                
+    return local_edge_points, local_edge_scalars
+
+def process_image_for_ffmpeg(numpy_array):
+    """Converts a NumPy array to a Pillow Image and crops to even dimensions."""
+    try:
+        img = Image.fromarray(numpy_array)
+        width, height = img.size
+        if width % 2 != 0 or height % 2 != 0:
+            new_width = width - (width % 2)
+            new_height = height - (height % 2)
+            img = img.crop((0, 0, new_width, new_height))
+        return img
+    except Exception as e:
+        print(f"WARNING: Could not process image for even dimensions. Reason: {e}")
+        return None
+
+
 if __name__ == "__main__":
     # --- 1. SETUP AND PARALLEL FILE PARSING ---
     results_dir = 'results'
+    if not os.path.exists(results_dir):
+        print(f"Error: The '{results_dir}' directory does not exist.")
+        sys.exit(1)
+
     file_paths = glob.glob(os.path.join(results_dir, 'macxut_*.txt'))
     if not file_paths:
         print(f"Error: No 'macxut_*.txt' files found in '{results_dir}'.")
         sys.exit(1)
 
-    print(f"Found {len(file_paths)} result files. Parsing...")
+    print(f"Found {len(file_paths)} result files. Parsing in parallel...")
     results_list = []
     with multiprocessing.Pool() as pool:
         for result in tqdm(pool.imap_unordered(parse_maxcut_worker, file_paths),
@@ -66,92 +123,125 @@ if __name__ == "__main__":
     df = pd.DataFrame(results_list)
     print(f"\nSuccessfully parsed {len(df)} files.")
 
-    # --- 2. PREPARE DATA FOR PLOTTING (MODIFIED TO PLOT ALL FILES) ---
-    print("Aggregating coordinates for all parsed files. This may take a moment...")
-
-    all_coords_a = []
-    all_coords_b = []
-    all_scalars_a = []
-    all_scalars_b = []
-
-    # Loop through every row in the DataFrame
-    for index, row in tqdm(df.iterrows(), total=df.shape[0], ascii=True, desc="Processing Files"):
-        n_nodes = row['nodes']
-        seed = row['seed']
-        set_a_nodes = row['set_a']
-        set_b_nodes = row['set_b']
-
-        # Generate coordinates for this specific graph
+    # --- 2. AGGREGATE NODE COORDINATES ---
+    print("Aggregating node coordinates for all parsed files...")
+    all_coords_a, all_coords_b = [], []
+    all_scalars_a, all_scalars_b = [], []
+    for index, row in tqdm(df.iterrows(), total=df.shape[0], ascii=True, desc="Aggregating Coords"):
+        n_nodes, seed = row['nodes'], row['seed']
+        set_a_nodes, set_b_nodes = row['set_a'], row['set_b']
         np.random.seed(seed)
         coords = np.random.normal(size=(n_nodes, 3))
-        # Avoid division by zero if a node is at the origin (highly unlikely)
         norm = np.linalg.norm(coords, axis=1, keepdims=True)
         np.divide(coords, norm, out=coords, where=norm!=0)
 
-
-        # Append coordinates and scalars for Set A
-        if set_a_nodes: # Ensure the list is not empty
+        if set_a_nodes:
             all_coords_a.append(coords[set_a_nodes])
             all_scalars_a.extend(set_a_nodes)
-
-        # Append coordinates and scalars for Set B
-        if set_b_nodes: # Ensure the list is not empty
+        if set_b_nodes:
             all_coords_b.append(coords[set_b_nodes])
             all_scalars_b.extend(set_b_nodes)
 
-    # Combine the lists of arrays into single large arrays
     master_coords_a = np.vstack(all_coords_a)
     master_coords_b = np.vstack(all_coords_b)
 
-    print(f"\nTotal points for Set A: {len(master_coords_a)}")
-    print(f"Total points for Set B: {len(master_coords_b)}")
-
-    # Set the global theme's font color for older PyVista versions
-    pv.global_theme.font.color = 'white'
-
-    # --- 3. PYVISTA SIDE-BY-SIDE VISUALIZATION (MODIFIED TO PLOT ALL FILES) ---
-    print("Generating the side-by-side 3D plot with PyVista...")
-    plotter = pv.Plotter(shape=(1, 2), window_size=[1600, 800])
+    # --- 3. IDENTIFY AND PREPARE CUT EDGES (PARALLEL) ---
+    print("\nIdentifying cut edges in parallel...")
+    edge_points_lists = []
+    edge_scalars_lists = []
+    with multiprocessing.Pool() as pool:
+        for points, scalars in tqdm(pool.imap_unordered(calculate_cut_edges_worker, df.iterrows(), chunksize=1),
+                           total=len(df), ascii=True, desc="Finding Cut Edges"):
+            if points:
+                edge_points_lists.append(points)
+                edge_scalars_lists.append(scalars)
+    
+    edge_points = [point for sublist in edge_points_lists for point in sublist]
+    edge_scalars = [scalar for sublist in edge_scalars_lists for scalar in sublist]
+    
+    # --- 4. PYVISTA VISUALIZATION ---
+    print("\nGenerating the 3D plot...")
+    plotter = pv.Plotter(shape=(1, 2), window_size=[1600, 800], off_screen=False)
     plotter.set_background('black')
+    light = pv.Light(light_type='camera light', intensity=1.5)
+    plotter.add_light(light)
 
-    # Determine a common color limit for the scalar bar
-    max_node_index = df['nodes'].max()
-    color_limits = [0, max_node_index]
+    if edge_points:
+        edge_points_array = np.array(edge_points)
+        num_edges = len(edge_points_array) // 2
+        lines_cell_array = np.hstack([np.full((num_edges, 1), 2), np.arange(num_edges * 2).reshape(-1, 2)])
+        cut_edges_mesh = pv.PolyData(edge_points_array, lines=lines_cell_array)
+        cut_edges_mesh['Node Index'] = edge_scalars
+        print(f"Found {num_edges} unique cut edges to display.")
+    else:
+        cut_edges_mesh = None
+        print("No cut edges found with the current distance threshold.")
 
-    # --- Plot for Set A (All Files) ---
+    poly_a = pv.PolyData(master_coords_a)
+    poly_a['Node Index'] = all_scalars_a
+    poly_b = pv.PolyData(master_coords_b)
+    poly_b['Node Index'] = all_scalars_b
+    color_limits = [0, df['nodes'].max()]
+    
     plotter.subplot(0, 0)
-    plotter.add_text("Set A (All Files)", font_size=20, color='white')
-    plotter.add_mesh(
-        pv.PolyData(master_coords_a),
-        scalars=all_scalars_a,
-        cmap='viridis',
-        clim=color_limits,
-        point_size=2,  # Reduced point size for clarity
-        opacity=0.7,
-        render_points_as_spheres=True,
-        show_scalar_bar=False
-    )
-    plotter.show_bounds(location='outer', all_edges=True, color='white')
+    plotter.add_text("Set A", font_size=20, color='white')
+    plotter.add_mesh(poly_a, scalars='Node Index', cmap='viridis', clim=color_limits,
+                     point_size=5, opacity=0.01, render_points_as_spheres=True,
+                     show_scalar_bar=False)
+    if cut_edges_mesh:
+        plotter.add_mesh(cut_edges_mesh, scalars='Node Index', cmap='viridis',
+                         clim=color_limits, line_width=1, opacity=0.01)
 
-    # --- Plot for Set B (All Files) ---
     plotter.subplot(0, 1)
-    plotter.add_text("Set B (All Files)", font_size=20, color='white')
-    plotter.add_mesh(
-        pv.PolyData(master_coords_b),
-        scalars=all_scalars_b,
-        cmap='viridis',
-        clim=color_limits,
-        point_size=2,  # Reduced point size for clarity
-        opacity=0.7,
-        render_points_as_spheres=True
-    )
-    plotter.add_scalar_bar(
-        title="Node Index",
-        fmt="%.0f"
-    )
-    plotter.show_bounds(location='outer', all_edges=True, color='white')
-
+    plotter.add_text("Set B", font_size=20, color='white')
+    scalar_bar_args = {"title": "Node Index", "fmt": "%.0f", "color": "white"}
+    plotter.add_mesh(poly_b, scalars='Node Index', cmap='viridis', clim=color_limits,
+                     point_size=5, opacity=0.01, render_points_as_spheres=True,
+                     scalar_bar_args=scalar_bar_args)
+    if cut_edges_mesh:
+        plotter.add_mesh(cut_edges_mesh, scalars='Node Index', cmap='viridis',
+                         clim=color_limits, line_width=1, opacity=0.01)
+    
     plotter.link_views()
-    print("\nShowing plot window. Close the window to exit.")
+
+    # --- INTERACTIVE CALLBACKS ---
+    def save_high_res_screenshot(*args):
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            filename = f"maxcut_visualization_{timestamp}.png"
+            print(f"\nSaving screenshot to: {filename}")
+            image_array = plotter.screenshot(scale=3, return_img=True)
+            processed_image = process_image_for_ffmpeg(image_array)
+            if processed_image:
+                processed_image.save(filename)
+                print(f"Screenshot successfully saved.")
+        except Exception as e:
+            print(f"ERROR: Failed to save screenshot. Reason: {e}")
+
+    def record_rotation_animation():
+        plotter.reset_camera(render=False)
+        print("\n'r' key pressed! Starting animation recording...")
+        n_steps = 180
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        animation_dir = f"animation_{timestamp}"
+        os.makedirs(animation_dir, exist_ok=True)
+        print(f"Saving {n_steps} frames to: {animation_dir}")
+        
+        for i in tqdm(range(n_steps), desc="Recording Frames", ascii=True):
+            plotter.camera.azimuth += 360.0 / n_steps
+            plotter.render()
+            filename = os.path.join(animation_dir, f"frame_{i:03d}.png")
+            image_array = plotter.screenshot(scale=3, return_img=True)
+            processed_image = process_image_for_ffmpeg(image_array)
+            if processed_image:
+                processed_image.save(filename)
+        print("Animation recording complete.")
+
+    plotter.track_click_position(callback=save_high_res_screenshot, side='right')
+    plotter.add_key_event('r', record_rotation_animation)
+
+    print("\nShowing plot window. Close to exit.")
+    print("- Right-click to save a high-resolution screenshot.")
+    print("- Press 'r' to record a 360-degree animation.")
     plotter.show()
     print("PyVista plot window closed.")
