@@ -8,6 +8,7 @@ import multiprocessing
 from tqdm import tqdm
 import pyvista as pv
 from scipy.spatial.distance import pdist, squareform
+from scipy.spatial import KDTree
 import datetime
 from PIL import Image
 
@@ -45,7 +46,7 @@ def parse_maxcut_worker(filepath):
         return None
 
 def calculate_cut_edges_worker(row_tuple):
-    """Worker function to find cut edges for a single graph in parallel."""
+    """Worker function to find cut edges using a fast KDTree."""
     index, row = row_tuple
     n_nodes = row['nodes']
     seed = row['seed']
@@ -57,27 +58,28 @@ def calculate_cut_edges_worker(row_tuple):
     local_edge_points = []
     local_edge_scalars = []
 
+    # Regenerate coordinates
     np.random.seed(seed)
     coords = np.random.normal(size=(n_nodes, 3))
     norm = np.linalg.norm(coords, axis=1, keepdims=True)
     np.divide(coords, norm, out=coords, where=norm!=0)
 
-    dist_matrix = squareform(pdist(coords))
-    adjacency_matrix = (dist_matrix > 0) & (dist_matrix < DISTANCE_THRESHOLD)
+    # --- OPTIMIZATION: Use a KDTree for fast neighbor search ---
+    tree = KDTree(coords)
+    pairs = tree.query_pairs(r=DISTANCE_THRESHOLD)
     
-    source_nodes, target_nodes = np.where(adjacency_matrix)
-    for i, j in zip(source_nodes, target_nodes):
-        if i < j:
-            is_in_a_i = i in set_a
-            is_in_b_j = j in set_b
-            is_in_b_i = i in set_b
-            is_in_a_j = j in set_a
-            
-            if (is_in_a_i and is_in_b_j) or (is_in_b_i and is_in_a_j):
-                local_edge_points.append(coords[i])
-                local_edge_points.append(coords[j])
-                local_edge_scalars.append(i)
-                local_edge_scalars.append(j)
+    # Find edges crossing from set A to set B
+    for i, j in pairs:
+        is_in_a_i = i in set_a
+        is_in_b_j = j in set_b
+        is_in_b_i = i in set_b
+        is_in_a_j = j in set_a
+        
+        if (is_in_a_i and is_in_b_j) or (is_in_b_i and is_in_a_j):
+            local_edge_points.append(coords[i])
+            local_edge_points.append(coords[j])
+            local_edge_scalars.append(i)
+            local_edge_scalars.append(j)
                 
     return local_edge_points, local_edge_scalars
 
@@ -149,7 +151,9 @@ if __name__ == "__main__":
     print("\nIdentifying cut edges in parallel...")
     edge_points_lists = []
     edge_scalars_lists = []
-    with multiprocessing.Pool(processes=os.cpu_count()) as pool:
+    num_workers = os.cpu_count() * 4
+    print(f"Using {num_workers} worker processes for edge calculation...")
+    with multiprocessing.Pool(processes=num_workers) as pool:
         for points, scalars in tqdm(pool.imap_unordered(calculate_cut_edges_worker, df.iterrows(), chunksize=1),
                            total=len(df), ascii=True, desc="Finding Cut Edges"):
             if points:
