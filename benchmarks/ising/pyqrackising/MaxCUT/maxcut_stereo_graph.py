@@ -196,7 +196,7 @@ if __name__ == "__main__":
     print("\nGenerating the 3D plot...")
     plotter = pv.Plotter(shape=(1, 2), window_size=[1600, 800], off_screen=False)
     plotter.set_background('black')
-    light = pv.Light(light_type='camera light', intensity=1.5)
+    light = pv.Light(light_type='camera light', intensity=0.5)
     plotter.add_light(light)
 
     if edge_points:
@@ -219,20 +219,20 @@ if __name__ == "__main__":
     # Plot for Set A
     plotter.subplot(0, 0)
     plotter.add_mesh(poly_a, scalars='Node Index', cmap='viridis', clim=color_limits,
-                     point_size=10, opacity=0.8, render_points_as_spheres=True,
+                     point_size=3, opacity=0.05, render_points_as_spheres=True,
                      show_scalar_bar=False)
     if cut_edges_mesh:
         plotter.add_mesh(cut_edges_mesh, scalars='Node Index', cmap='viridis',
-                         clim=color_limits, line_width=2, opacity=0.5)
+                         clim=color_limits, line_width=1, opacity=0.05)
     plotter.add_text("Set A", font_size=20, color='white')
 
     # Plot for Set B
     plotter.subplot(0, 1)
     plotter.add_mesh(poly_b, scalars='Node Index', cmap='viridis', clim=color_limits,
-                     point_size=10, opacity=0.8, render_points_as_spheres=True)
+                     point_size=3, opacity=0.05, render_points_as_spheres=True)
     if cut_edges_mesh:
         plotter.add_mesh(cut_edges_mesh, scalars='Node Index', cmap='viridis',
-                         clim=color_limits, line_width=2, opacity=0.5)
+                         clim=color_limits, line_width=1, opacity=0.05)
     plotter.add_text("Set B", font_size=20, color='white')
     
     # Manually add the scalar bar as a final step
@@ -288,4 +288,3 @@ if __name__ == "__main__":
     print("- Press 'r' to record a 360-degree animation.")
     plotter.show()
     print("PyVista plot window closed.")
-    
