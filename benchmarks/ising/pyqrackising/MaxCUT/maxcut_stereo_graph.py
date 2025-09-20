@@ -110,7 +110,7 @@ if __name__ == "__main__":
 
     print(f"Found {len(file_paths)} result files. Parsing in parallel...")
     results_list = []
-    with multiprocessing.Pool() as pool:
+    with multiprocessing.Pool(processes=os.cpu_count()) as pool:
         for result in tqdm(pool.imap_unordered(parse_maxcut_worker, file_paths),
                            total=len(file_paths), ascii=True, desc="Parsing Files"):
             if result:
@@ -149,7 +149,7 @@ if __name__ == "__main__":
     print("\nIdentifying cut edges in parallel...")
     edge_points_lists = []
     edge_scalars_lists = []
-    with multiprocessing.Pool() as pool:
+    with multiprocessing.Pool(processes=os.cpu_count()) as pool:
         for points, scalars in tqdm(pool.imap_unordered(calculate_cut_edges_worker, df.iterrows(), chunksize=1),
                            total=len(df), ascii=True, desc="Finding Cut Edges"):
             if points:
@@ -183,24 +183,34 @@ if __name__ == "__main__":
     poly_b['Node Index'] = all_scalars_b
     color_limits = [0, df['nodes'].max()]
     
+    # Plot for Set A
     plotter.subplot(0, 0)
-    plotter.add_text("Set A", font_size=20, color='white')
     plotter.add_mesh(poly_a, scalars='Node Index', cmap='viridis', clim=color_limits,
-                     point_size=5, opacity=0.01, render_points_as_spheres=True,
+                     point_size=10, opacity=0.8, render_points_as_spheres=True,
                      show_scalar_bar=False)
     if cut_edges_mesh:
         plotter.add_mesh(cut_edges_mesh, scalars='Node Index', cmap='viridis',
-                         clim=color_limits, line_width=1, opacity=0.01)
+                         clim=color_limits, line_width=2, opacity=0.5)
+    plotter.add_text("Set A", font_size=20, color='white')
 
+    # Plot for Set B
     plotter.subplot(0, 1)
-    plotter.add_text("Set B", font_size=20, color='white')
-    scalar_bar_args = {"title": "Node Index", "fmt": "%.0f", "color": "white"}
     plotter.add_mesh(poly_b, scalars='Node Index', cmap='viridis', clim=color_limits,
-                     point_size=5, opacity=0.01, render_points_as_spheres=True,
-                     scalar_bar_args=scalar_bar_args)
+                     point_size=10, opacity=0.8, render_points_as_spheres=True)
     if cut_edges_mesh:
         plotter.add_mesh(cut_edges_mesh, scalars='Node Index', cmap='viridis',
-                         clim=color_limits, line_width=1, opacity=0.01)
+                         clim=color_limits, line_width=2, opacity=0.5)
+    plotter.add_text("Set B", font_size=20, color='white')
+    
+    # Manually add the scalar bar as a final step
+    plotter.add_scalar_bar(
+        title="Node Index",
+        fmt="%.0f",
+        color="white",
+        title_font_size=20,
+        label_font_size=16,
+        font_family="arial"
+    )
     
     plotter.link_views()
 
@@ -221,7 +231,7 @@ if __name__ == "__main__":
     def record_rotation_animation():
         plotter.reset_camera(render=False)
         print("\n'r' key pressed! Starting animation recording...")
-        n_steps = 180
+        n_steps = 360
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         animation_dir = f"animation_{timestamp}"
         os.makedirs(animation_dir, exist_ok=True)
