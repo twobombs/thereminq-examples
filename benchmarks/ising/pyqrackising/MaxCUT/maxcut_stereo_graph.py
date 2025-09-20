@@ -80,7 +80,7 @@ def calculate_cut_edges_worker(row_tuple):
             local_edge_points.append(coords[j])
             local_edge_scalars.append(i)
             local_edge_scalars.append(j)
-                
+                    
     return local_edge_points, local_edge_scalars
 
 def process_image_for_ffmpeg(numpy_array):
@@ -155,7 +155,7 @@ if __name__ == "__main__":
     print(f"Using {num_workers} worker processes for edge calculation...")
     with multiprocessing.Pool(processes=num_workers) as pool:
         for points, scalars in tqdm(pool.imap_unordered(calculate_cut_edges_worker, df.iterrows(), chunksize=1),
-                           total=len(df), ascii=True, desc="Finding Cut Edges"):
+                                  total=len(df), ascii=True, desc="Finding Cut Edges"):
             if points:
                 edge_points_lists.append(points)
                 edge_scalars_lists.append(scalars)
@@ -163,6 +163,35 @@ if __name__ == "__main__":
     edge_points = [point for sublist in edge_points_lists for point in sublist]
     edge_scalars = [scalar for sublist in edge_scalars_lists for scalar in sublist]
     
+    # ##################################################################
+    # ### --- NEW: Deduplicate collected edges --- ###
+    # ##################################################################
+    print("\nDeduplicating cut edges...")
+    seen_edges = set()
+    unique_edge_points = []
+    unique_edge_scalars = []
+    
+    # Iterate over pairs of scalars which represent the node indices for each edge
+    for i in range(0, len(edge_scalars), 2):
+        node1_idx, node2_idx = edge_scalars[i], edge_scalars[i+1]
+        
+        # Create a canonical representation for the edge (e.g., always sorted)
+        edge_tuple = tuple(sorted((node1_idx, node2_idx)))
+        
+        if edge_tuple not in seen_edges:
+            seen_edges.add(edge_tuple)
+            # Add the corresponding points and scalars for this new, unique edge
+            unique_edge_points.extend([edge_points[i], edge_points[i+1]])
+            unique_edge_scalars.extend([node1_idx, node2_idx])
+    
+    # Overwrite the old lists with the deduplicated versions
+    original_count = len(edge_scalars) // 2
+    edge_points = unique_edge_points
+    edge_scalars = unique_edge_scalars
+    new_count = len(seen_edges)
+    print(f"Removed {original_count - new_count} duplicate edges. Using {new_count} unique edges for visualization.")
+    # ##################################################################
+
     # --- 4. PYVISTA VISUALIZATION ---
     print("\nGenerating the 3D plot...")
     plotter = pv.Plotter(shape=(1, 2), window_size=[1600, 800], off_screen=False)
@@ -176,7 +205,7 @@ if __name__ == "__main__":
         lines_cell_array = np.hstack([np.full((num_edges, 1), 2), np.arange(num_edges * 2).reshape(-1, 2)])
         cut_edges_mesh = pv.PolyData(edge_points_array, lines=lines_cell_array)
         cut_edges_mesh['Node Index'] = edge_scalars
-        print(f"Found {num_edges} unique cut edges to display.")
+        print(f"Displaying {num_edges} unique cut edges.")
     else:
         cut_edges_mesh = None
         print("No cut edges found with the current distance threshold.")
@@ -259,3 +288,4 @@ if __name__ == "__main__":
     print("- Press 'r' to record a 360-degree animation.")
     plotter.show()
     print("PyVista plot window closed.")
+    
