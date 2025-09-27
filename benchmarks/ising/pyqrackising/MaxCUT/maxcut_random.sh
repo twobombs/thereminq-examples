@@ -4,30 +4,24 @@
 # It has been updated to be more robust, efficient, and flexible.
 
 # --- Configuration ---
-# MODIFIED: Script now requires a single value for nodes.
-# Usage: ./maxcut_random.sh <nodes> "[quality_sequence]" "[correction_quality_sequence]" [optional_seed]
-# Example: ./maxcut_random.sh 1024 "$(seq 1 5)" "$(seq 1 5)" 12345
-if [[ -z "$1" ]]; then # MODIFIED: Add check to ensure nodes value is provided.
+# Usage: ./maxcut_random.sh <nodes> "[quality_sequence]" [optional_seed]
+# Example: ./maxcut_random.sh 1024 "$(seq 1 5)" 12345
+if [[ -z "$1" ]]; then
     echo "Error: You must provide a single number for nodes."
-    echo "Usage: $0 <nodes> \"[quality_range]\" \"[correction_quality_range]\" [optional_seed]"
+    echo "Usage: $0 <nodes> \"[quality_range]\" [optional_seed]"
     exit 1
 fi
 
 NODE_INPUT=${1}
-# MODIFIED: Changed default value generation to be more robust.
 QUALITY_RANGE=${2:-"1 2"}
-CORRECTION_QUALITY_RANGE=${3:-"1 2"}
-SEED_OVERRIDE=${4:-""}
+SEED_OVERRIDE=${3:-""}
 
-# MODIFIED: Conditional logic based on number of arguments
 if [[ $# -eq 1 ]]; then
-    # Behavior for a single argument: iterate from 32 up to NODE_INPUT
     FIXED_SEED_DEFAULT=$RANDOM$RANDOM
     echo "Only nodes argument provided. Using fixed random seed $FIXED_SEED_DEFAULT for all iterations."
-    NODE_SEQUENCE=$(seq 32 $NODE_INPUT)
+    NODE_SEQUENCE=$(seq 16 $NODE_INPUT)
     echo "Will iterate through node counts from 32 to $NODE_INPUT."
 else
-    # Original behavior: use only the provided node value
     NODE_SEQUENCE=$NODE_INPUT
 fi
 
@@ -57,44 +51,52 @@ fi
 mkdir -p results
 total_jobs_launched=0
 
-# MODIFIED: Loop now iterates over the generated NODE_SEQUENCE
 for nodes_val in $NODE_SEQUENCE
 do
-  # MODIFIED: Iterations are now set inside the loop for each node count
   ITERATIONS=1 
   echo "--- Starting runs for node count $nodes_val ($ITERATIONS iterations) ---"
 
   for quality in $QUALITY_RANGE
   do
-    for correction_quality in $CORRECTION_QUALITY_RANGE
+    for i in $(seq 1 $ITERATIONS)
     do
-      for i in $(seq 1 $ITERATIONS)
-      do
-        if [[ $(jobs -r -p | wc -l) -ge $MAX_JOBS ]]; then
-          wait -n
-        fi
+      if [[ -n "$FIXED_SEED_DEFAULT" ]]; then
+        SEED="$FIXED_SEED_DEFAULT"
+      elif [[ -n "$SEED_OVERRIDE" ]]; then
+        SEED="$SEED_OVERRIDE"
+      else
+        SEED=$((nodes_val * 100000 + quality * 1000 + i))
+      fi
 
-        current_gpu=$((total_jobs_launched % N_GPUS))
-        
-        if [[ -n "$FIXED_SEED_DEFAULT" ]]; then
-          SEED="$FIXED_SEED_DEFAULT"
-        elif [[ -n "$SEED_OVERRIDE" ]]; then
-          SEED="$SEED_OVERRIDE"
-        else
-          # Generate a unique seed for each iteration if no override is given
-          SEED=$((nodes_val * 100000 + quality * 1000 + correction_quality * 10 + i))
-        fi
+      formatted_nodes=$(printf "%04d" $nodes_val)
+      
+      # --- MODIFICATION START ---
+      
+      # --- Job 1: Default Execution ---
+      if [[ $(jobs -r -p | wc -l) -ge $MAX_JOBS ]]; then wait -n; fi
+      
+      current_gpu=$((total_jobs_launched % N_GPUS))
+      OUTPUT_FILE="results/macxut_n${formatted_nodes}_q${quality}_i${i}_s${SEED}.txt"
 
-        formatted_nodes=$(printf "%04d" $nodes_val)
-        OUTPUT_FILE="results/macxut_n${formatted_nodes}_q${quality}_cq${correction_quality}_i${i}_s${SEED}.txt"
+      (
+        echo "Starting job (n=$nodes_val q=$quality i=$i s=$SEED) [DEFAULT] on GPU $current_gpu"
+        export PYOPENCL_CTX="0:${current_gpu}" && python3 maxcut_random.py --n-nodes $nodes_val --quality $quality --seed $SEED > "$OUTPUT_FILE"
+      ) &
+      total_jobs_launched=$((total_jobs_launched + 1))
+      
+      # --- Job 2: --is-alt-gpu Execution ---
+      if [[ $(jobs -r -p | wc -l) -ge $MAX_JOBS ]]; then wait -n; fi
 
-        (
-          echo "Starting job (n=$nodes_val q=$quality cq=$correction_quality i=$i s=$SEED) on GPU $current_gpu"
-          export PYOPENCL_CTX="0:${current_gpu}" && python3 maxcut_random.py $nodes_val $quality $correction_quality $SEED > "$OUTPUT_FILE"
-        ) &
+      current_gpu_alt=$((total_jobs_launched % N_GPUS))
+      OUTPUT_FILE_GPU_ON="results/macxut_n${formatted_nodes}_q${quality}_i${i}_s${SEED}_gpu-on.txt"
 
-        total_jobs_launched=$((total_jobs_launched + 1))
-      done
+      (
+        echo "Starting job (n=$nodes_val q=$quality i=$i s=$SEED) [--is-alt-gpu] on GPU $current_gpu_alt"
+        export PYOPENCL_CTX="0:${current_gpu_alt}" && python3 maxcut_random.py --n-nodes $nodes_val --quality $quality --seed $SEED --is-alt-gpu > "$OUTPUT_FILE_GPU_ON"
+      ) &
+      total_jobs_launched=$((total_jobs_launched + 1))
+
+      # --- MODIFICATION END ---
     done
   done
 done

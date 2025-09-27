@@ -1,12 +1,11 @@
 # Random MAXCUT (for execution time tests)
-# Produced by Dan Strano, Elara (the OpenAI custom GPT)
 # from https://github.com/vm6502q/PyQrackIsing/blob/main/scripts/maxcut_random.py
-# modified to produce the node paths
+# modified to produce the node paths and support CLI flags
 
 from pyqrackising import spin_glass_solver
 from numba import njit, prange
 import numpy as np
-import sys
+import argparse
 import time
 
 
@@ -27,34 +26,50 @@ def generate_adjacency(n_nodes=64, seed=None):
 
 
 if __name__ == "__main__":
-    n_nodes = int(sys.argv[1]) if len(sys.argv) > 1 else 64
-    quality = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-    correction_quality = int(sys.argv[3]) if len(sys.argv) > 3 else 2
-    seed = int(sys.argv[4]) if len(sys.argv) > 4 else None
+    # Set up the argument parser
+    parser = argparse.ArgumentParser(description="Solve a random MAXCUT problem using PyQrackIsing.")
+    
+    # --- MODIFICATION START ---
+    # Changed positional arguments to named, optional arguments
+    parser.add_argument("--n-nodes", type=int, default=64, help="Number of nodes in the graph (default: 64)")
+    parser.add_argument("--quality", type=int, default=1, help="Quality parameter for the solver (default: 1)")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility (default: None)")
+    # --- MODIFICATION END ---
+    
+    # Add the boolean flag for alternative GPU sampling
+    parser.add_argument(
+        "--is-alt-gpu",
+        action="store_true",
+        help="Use the alternative full-GPU sampling algorithm. Default is False."
+    )
+    
+    # Parse the arguments from the command line
+    args = parser.parse_args()
 
     start = time.perf_counter()
-    G_m = generate_adjacency(n_nodes=n_nodes, seed=seed)
+    G_m = generate_adjacency(n_nodes=args.n_nodes, seed=args.seed)
     seconds = time.perf_counter() - start
     print(f"{seconds} seconds to initialize the adjacency matrix (statement of the problem itself)")
 
-    print(f"Random seed: {seed}")
-    print(f"Node count: {n_nodes}")
+    print(f"Random seed: {args.seed}")
+    print(f"Node count: {args.n_nodes}")
+    print(f"Using alternative GPU sampling: {args.is_alt_gpu}")
+    
     start = time.perf_counter()
-    bitstring, cut_value, cut, energy = spin_glass_solver(G_m, quality=quality, correction_quality=correction_quality)
+    # Call the solver (no changes needed here)
+    bitstring, cut_value, cut, energy = spin_glass_solver(
+        G_m, 
+        quality=args.quality, 
+        is_alt_gpu_sampling=args.is_alt_gpu
+    )
     seconds = time.perf_counter() - start
     
-    # The debug line you wanted to keep
     print(f"DEBUG - Raw bitstring variable: {bitstring}")
-
     print(f"Seconds to solution: {seconds}")
     
-    # --- FINAL FIX ---
-    # 1. Convert the result string to a list of characters (e.g., '101' -> ['1', '0', '1'])
-    # 2. Convert that list into a NumPy array of integers (e.g., [1, 0, 1])
     bits_array = np.array(list(bitstring), dtype=int)
     
-    # 3. Now, use this proper array to find the node sets
-    nodes = np.arange(n_nodes)
+    nodes = np.arange(args.n_nodes)
     set_A = nodes[bits_array == 0]
     set_B = nodes[bits_array == 1]
     
