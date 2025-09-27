@@ -13,7 +13,7 @@ if [[ -z "$1" ]]; then
 fi
 
 NODE_INPUT=${1}
-QUALITY_RANGE=${2:-"1 2"}
+QUALITY_RANGE=${2:-"1 2 3"}
 SEED_OVERRIDE=${3:-""}
 
 if [[ $# -eq 1 ]]; then
