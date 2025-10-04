@@ -2,7 +2,7 @@ small QVML demo based on https://github.com/vm6502q/pyqrack-examples/blob/main/t
 
 tensors are created from stevector and concentrated for optimisation by pyqrackising
 
-data is saved and scripts scrape and visualize the data 
+data is saved and scripts scrape and visualize the data by either save it in a csv or a graph
 
 <img width="12800" height="6945" alt="tensor_network_screenshot" src="https://github.com/user-attachments/assets/9652bd67-1e4a-4c0e-86b8-e8914b08fff4" />
 
