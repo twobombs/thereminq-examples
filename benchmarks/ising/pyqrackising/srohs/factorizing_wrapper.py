@@ -1,17 +1,126 @@
 # this is a wrapper that leverages ising models to factor
 # derived from: https://arxiv.org/abs/2301.06738
-# gemini25 - initial version : this will fail because reasons
+# gemini25 - initial version
 
 import numpy as np
 import dimod
 from collections import defaultdict
-from pyqrackising import spin_glass_solver
 import sys
+import multiprocessing
+import os
+import time
+import traceback
+import pyopencl as cl
+import itertools
+# MODIFICATION: Add the warnings library
+import warnings
 
+# --- Worker Functions ---
+
+def run_solver_on_gpu(gpu_id_str, result_queue, run_id, model_data):
+    """Initializes a solver on a specific GPU and runs one instance."""
+    try:
+        # MODIFICATION: Suppress the specific non-fatal RuntimeWarning from the solver
+        warnings.filterwarnings('ignore', 'divide by zero encountered in divide', RuntimeWarning)
+        
+        os.environ['PYOPENCL_CTX'] = gpu_id_str
+        from pyqrackising import spin_glass_solver
+
+        p, q = solve_and_decode(model_data, use_gpu=True)
+        result_queue.put((run_id, p, q))
+
+    except Exception:
+        print(f"--- ERROR in worker process on GPU {gpu_id_str} (run ID {run_id}) ---")
+        traceback.print_exc()
+        result_queue.put((run_id, None, None))
+
+def init_worker_cpu(shared_model_data):
+    """Initializes global variables for each CPU worker process."""
+    global worker_model_data
+    worker_model_data = shared_model_data
+
+def run_solver_on_cpu(run_id):
+    """A single, independent solver instance run by a CPU worker process."""
+    try:
+        # MODIFICATION: Suppress the specific non-fatal RuntimeWarning from the solver
+        warnings.filterwarnings('ignore', 'divide by zero encountered in divide', RuntimeWarning)
+
+        p, q = solve_and_decode(worker_model_data, use_gpu=False)
+        return (run_id, p, q)
+    except Exception:
+        print(f"--- ERROR in CPU worker process (run ID {run_id}) ---")
+        traceback.print_exc()
+        return (run_id, None, None)
+
+# --- Shared Logic ---
+
+def solve_and_decode(model_data, use_gpu):
+    """
+    A single run of the solver and result decoding.
+    Will now loop internally until a non-zero result is found.
+    """
+    from pyqrackising import spin_glass_solver
+    # Unpack the model data
+    max_cut_graph = model_data['graph']
+    num_qubits_per_factor = model_data['nq']
+    label_to_index = model_data['labels']
+    quality = model_data['quality']
+
+    p, q = 0, 0
+    # Loop until both factors are non-zero.
+    while p == 0 or q == 0:
+        num_total_vars = max_cut_graph.shape[0]
+        result_tuple = spin_glass_solver(
+            max_cut_graph,
+            quality=quality,
+            is_base_maxcut_gpu=use_gpu
+        )
+        bitstring = result_tuple[0]
+        spins = {i: 1 - 2 * int(bit) for i, bit in enumerate(bitstring)}
+        ancilla_node_idx = num_total_vars - 1
+        ancilla_spin = spins.get(ancilla_node_idx, 1)
+        normalized_spins = {var: spin * ancilla_spin for var, spin in spins.items()}
+        binary_solution = {i: (s + 1) // 2 for i, s in normalized_spins.items()}
+        
+        # Reset p and q before recalculating
+        p, q = 0, 0
+        for i in range(num_qubits_per_factor):
+            if binary_solution.get(label_to_index.get(i), 0) == 1:
+                p += 2**i
+        for i in range(num_qubits_per_factor):
+            if binary_solution.get(label_to_index.get(num_qubits_per_factor + i), 0) == 1:
+                q += 2**i
+        
+        if p == 0 or q == 0:
+            print(f"(Worker {os.getpid()} got a zero factor ({p}, {q}). Retrying...) ", end="", flush=True)
+
+    return p, q
+
+def process_and_log_result(run_id, p_res, q_res, N_to_factor, log_filename):
+    """
+    Processes a result from any worker, logs it, and returns True if successful.
+    """
+    if p_res is None:
+        return False, (0, 0) # Signal failure
+
+    factors = tuple(sorted((p_res, q_res)))
+    product = factors[0] * factors[1]
+    cost = (product - N_to_factor)**2
+    
+    with open(log_filename, 'a') as f:
+        f.write(f"{run_id},{factors[0]},{factors[1]},{cost}\n")
+
+    if product == N_to_factor:
+        print("\nStatus: Success! Optimal solution found.")
+        print(f"Result from Run {run_id}: p={factors[0]}, q={factors[1]}")
+        print(f"Verification: {factors[0]} * {factors[1]} = {product} (Target N={N_to_factor})")
+        return True, factors
+    
+    return False, factors
+
+
+# --- (The following functions are used only in the main process) ---
 def create_hubo_for_factorization(N, NQ):
-    """
-    Generates the HUBO model for factoring integer N.
-    """
     hubo = defaultdict(float)
     for l1 in range(NQ):
         for l2 in range(NQ):
@@ -33,105 +142,151 @@ def create_hubo_for_factorization(N, NQ):
     return hubo
 
 def convert_ising_to_maxcut(h, J, num_vars, label_to_index):
-    """
-    Converts an Ising model to an equivalent Max-Cut problem graph.
-    """
     graph_size = num_vars + 1
     ancilla_node_idx = num_vars
     W = np.zeros((graph_size, graph_size))
-    
     for (i_label, j_label), coupling in J.items():
         i, j = label_to_index[i_label], label_to_index[j_label]
         W[i, j] = coupling
         W[j, i] = coupling
-
     for i_label, bias in h.items():
         i = label_to_index[i_label]
         W[i, ancilla_node_idx] = -bias
         W[ancilla_node_idx, i] = -bias
-        
     return W
-
-def solve_and_decode(max_cut_graph, NQ, label_to_index, quality, correction_quality):
-    """
-    A single run of the solver and result decoding.
-    """
-    num_total_vars = max_cut_graph.shape[0]
-    
-    result_tuple = spin_glass_solver(
-        max_cut_graph, 
-        quality=quality, 
-        correction_quality=correction_quality
-    )
-    bitstring = result_tuple[0]
-
-    spins = {i: 1 - 2 * int(bit) for i, bit in enumerate(bitstring)}
-    ancilla_node_idx = num_total_vars - 1
-    ancilla_spin = spins.get(ancilla_node_idx, 1)
-    normalized_spins = {var: spin * ancilla_spin for var, spin in spins.items()}
-    binary_solution = {i: (s + 1) // 2 for i, s in normalized_spins.items()}
-
-    p, q = 0, 0
-    for i in range(NQ):
-        if binary_solution.get(label_to_index.get(i), 0) == 1:
-            p += 2**i
-    for i in range(NQ):
-        if binary_solution.get(label_to_index.get(NQ + i), 0) == 1:
-            q += 2**i
-            
-    return p, q
 
 # --- Main execution block ---
 if __name__ == '__main__':
+    multiprocessing.set_start_method('spawn', force=True)
+
+    # --- Default Values ---
     N_to_factor = 15
-    num_qubits_per_factor = 3
+    quality = 4
+    workers_per_gpu = 1
+    use_gpu = True
+
+    # --- Parse Command-Line Arguments ---
+    if len(sys.argv) > 1:
+        try:
+            N_to_factor = int(sys.argv[1])
+        except ValueError:
+            print(f"Error: Invalid number '{sys.argv[1]}'. Please provide an integer.")
+            sys.exit(1)
+
+    if len(sys.argv) > 2:
+        try:
+            quality = int(sys.argv[2])
+        except ValueError:
+            print(f"Error: Invalid quality '{sys.argv[2]}'. Please provide an integer.")
+            sys.exit(1)
     
-    # Solver Tuning Parameters
-    quality = 2
-    correction_quality = 4
-    num_runs = 10
+    if len(sys.argv) > 3 and sys.argv[3].lower() == 'cpu':
+        use_gpu = False
+
+    device_suffix = "_cpu" if not use_gpu else ""
+    log_filename = f"factor_landscape_{N_to_factor}_q{quality}{device_suffix}.log"
+    print(f"Logging run results to: {log_filename}")
+    if not os.path.exists(log_filename):
+        with open(log_filename, 'w') as f:
+            f.write("run,p,q,cost\n")
+
+    num_qubits_per_factor = (N_to_factor.bit_length() // 2) + 1
     
+    print(f"\nAttempting to factor N = {N_to_factor}")
+    print(f"Using solver quality: {quality}")
+    print(f"Calculated qubits per factor = {num_qubits_per_factor}")
+
     # --- Model Preparation (Done once) ---
     hubo = create_hubo_for_factorization(N_to_factor, num_qubits_per_factor)
     max_coeff = max(abs(c) for c in hubo.values()) if hubo else 1.0
-    bqm = dimod.make_quadratic(hubo, strength=max_coeff * 5, vartype='BINARY')
+    bqm = dimod.make_quadratic(hubo, strength=max_coeff * 2, vartype='BINARY')
     label_to_index = {label: i for i, label in enumerate(bqm.variables)}
     num_bqm_vars = len(label_to_index)
     h, J, offset = bqm.to_ising()
     max_cut_graph = convert_ising_to_maxcut(h, J, num_bqm_vars, label_to_index)
+    max_abs_val = np.max(np.abs(max_cut_graph))
+    if max_abs_val > 0:
+        max_cut_graph /= max_abs_val
     
-    print(f"Original problem variables: {2 * num_qubits_per_factor}")
     print(f"Total variables after HUBO->QUBO reduction: {num_bqm_vars}")
-    print(f"Max-Cut graph size: {max_cut_graph.shape[0]}x{max_cut_graph.shape[1]}")
-    print(f"Running solver {num_runs} times to find the best solution...\n")
     
-    # --- Solver Loop ---
+    model_data = {
+        'graph': max_cut_graph, 'nq': num_qubits_per_factor,
+        'labels': label_to_index, 'quality': quality, 'N': N_to_factor
+    }
+    
+    solution_found = False
     best_solution = (0, 0)
-    lowest_cost = sys.maxsize
 
-    for i in range(num_runs):
-        p, q = solve_and_decode(
-            max_cut_graph, 
-            num_qubits_per_factor,
-            label_to_index,
-            quality=quality,
-            correction_quality=correction_quality
-        )
+    # --- Conditional execution path (GPU vs CPU) ---
+    if use_gpu:
+        print("\n--- Running on available GPUs ---")
+        gpu_id_list = []
+        platforms = cl.get_platforms()
+        for p_idx, p in enumerate(platforms):
+            try:
+                for d_idx, d in enumerate(p.get_devices(device_type=cl.device_type.GPU)):
+                    gpu_id_list.append(f"{p_idx}:{d_idx}")
+                    print(f"  Found GPU: '{d.name}' (ID: {p_idx}:{d_idx})")
+            except cl.Error:
+                continue
         
-        cost = (p * q - N_to_factor)**2
-        print(f"Run {i+1}/{num_runs}: Found ({p}, {q}). Cost = {cost}")
+        if not gpu_id_list:
+            print("Error: No OpenCL-enabled GPUs found.")
+            sys.exit(1)
+
+        total_workers = len(gpu_id_list) * workers_per_gpu
+        print(f"Configured for {workers_per_gpu} worker(s) per GPU. Total: {total_workers}")
         
-        if cost < lowest_cost:
-            lowest_cost = cost
-            best_solution = (p, q)
+        result_queue = multiprocessing.Queue()
+        active_processes = {}
+        run_count = 0
+        
+        try:
+            while not solution_found:
+                while len(active_processes) < total_workers:
+                    run_count += 1
+                    gpu_to_use = gpu_id_list[(run_count - 1) % len(gpu_id_list)]
+                    proc = multiprocessing.Process(target=run_solver_on_gpu, args=(gpu_to_use, result_queue, run_count, model_data))
+                    proc.start()
+                    active_processes[proc.pid] = proc
+
+                res_id, p_res, q_res = result_queue.get()
+                solution_found, factors = process_and_log_result(res_id, p_res, q_res, N_to_factor, log_filename)
+                if solution_found:
+                    best_solution = factors
+
+                finished_pids = [pid for pid, proc in active_processes.items() if not proc.is_alive()]
+                for pid in finished_pids:
+                    del active_processes[pid]
+        
+        finally:
+            print("\n--- Terminating GPU worker processes ---")
+            for pid, proc in active_processes.items():
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join()
     
-    # --- Final Results ---
-    print("\n--- Best Result Found ---")
-    factors = sorted(best_solution)
-    print(f"Found factors p = {factors[0]}, q = {factors[1]}")
-    print(f"Verification: {factors[0]} * {factors[1]} = {factors[0] * factors[1]} (N={N_to_factor})")
-    if lowest_cost == 0:
-        print("Success: Optimal solution found!")
+    else: # CPU Path
+        print("\n--- Running on CPU ---")
+        total_threads = os.cpu_count()
+        num_workers = max(1, int(total_threads * 0.75))
+        print(f"System has {total_threads} threads. Using {num_workers} concurrent CPU worker(s).")
+
+        initializer_args = (model_data,)
+        
+        with multiprocessing.Pool(processes=num_workers, initializer=init_worker_cpu, initargs=initializer_args) as pool:
+            for run_id, p_res, q_res in pool.imap_unordered(run_solver_on_cpu, itertools.count(1)):
+                solution_found, factors = process_and_log_result(run_id, p_res, q_res, N_to_factor, log_filename)
+                if solution_found:
+                    best_solution = factors
+                    pool.terminate()
+                    break
+    
+    # --- Final Summary ---
+    print("\n--- Overall Summary ---")
+    if solution_found:
+        print(f"Optimal solution p={best_solution[0]}, q={best_solution[1]} was found.")
     else:
-        print("Note: Solver did not find the optimal solution.")
-      
+        print("Execution stopped, but the optimal solution was not found.")
+
