@@ -1,41 +1,40 @@
 #!/bin/bash
 
-# The outer loop iterates from 65535 to 4294967295 with a step of 65535
+# Determine the number of available CPU cores.
+num_cores=$(nproc)
+
+# The outer loop iterates to generate products.
 for i in {65535..4294967295..65535}; do
-    # Find the largest prime number less than or equal to $i
+    # Calculate the product.
     prime1=$(matho-primes -c 1 -u "$i")
-
-    # Find the largest prime less than or equal to (prime1 * 2)
     prime2=$(matho-primes -c 1 -u "$(($prime1 * 2))")
-
-    # Calculate the product of the two primes
     product=$(($prime1 * $prime2))
 
-    # --- Start of concurrent execution block ---
-
-    # Array to hold the PIDs of the background jobs for this product
+    # This array will hold the PIDs for ALL jobs related to this single product.
     pids=()
 
-    # Launch all quality iterations concurrently
+    # Loop through each quality value from 2 to 6.
     for quality in {2..6}; do
+        # 1. Launch the "non-cpu" job for the current quality.
+        # This fulfills the "keep the non cpu loop" requirement.
         python3 factorizing_wrapper.py "$product" "$quality" &
-        # Store the PID of the last backgrounded process in our array
+        pids+=($!)
+
+        # 2. Launch "cpu" jobs, now using the SAME quality variable.
+        python3 factorizing_wrapper.py "$product" "$quality" "$cpu" &
         pids+=($!)
     done
 
-    # Wait for the *first* of the background jobs to finish.
-    # The -n flag is the key here.
+    # --- Manage the Grand Race ---
+
+    # Wait for the first process from the entire pool to finish.
     wait -n
 
-    # As soon as one process finishes, kill all the PIDs we stored.
-    # This terminates the other four running processes.
-    # Output is redirected to /dev/null to suppress messages.
+    # Once a winner is found, terminate all other running processes for this product.
     kill "${pids[@]}" &>/dev/null
 
-    # A final wait cleans up any remaining terminated (zombie) processes.
+    # Clean up any remaining zombie processes.
     wait &>/dev/null
-
-    # --- End of concurrent execution block ---
 done
 
 echo "Script finished."
