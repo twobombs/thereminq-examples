@@ -20,10 +20,11 @@ for i in {65535..4294967295..65535}; do
         python3 factorizing_wrapper.py "$product" "$quality" &
         pids+=($!)
 
-        # 2. Launch "cpu" jobs, now using the SAME quality variable.
-        python3 factorizing_wrapper.py "$product" "$quality" "$cpu" &
-        pids+=($!)
     done
+
+    # 2. Launch "cpu" jobs, now using the 3 quality variable.
+    python3 factorizing_wrapper.py "$product" 3 cpu &
+    pids+=($!)
 
     # --- Manage the Grand Race ---
 
