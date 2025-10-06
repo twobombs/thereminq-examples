@@ -296,7 +296,7 @@ if __name__ == '__main__':
     else: # CPU Path
         print("\n--- Running on CPU ---")
         total_threads = os.cpu_count()
-        num_workers = max(1, int(total_threads * 0.1))
+        num_workers = max(1, int(total_threads * 0.25))
         print(f"System has {total_threads} threads. Using {num_workers} concurrent CPU worker(s).")
 
         initializer_args = (model_data,)
