@@ -14,7 +14,7 @@ for i in {65535..4294967295..65535}; do
     pids=()
 
     # Loop through each quality value from 2 to 6.
-    for quality in {2..6}; do
+    for quality in {2..7}; do
         # 1. Launch the "non-cpu" job for the current quality.
         # This fulfills the "keep the non cpu loop" requirement.
         python3 factorizing_wrapper.py "$product" "$quality" &
@@ -23,7 +23,7 @@ for i in {65535..4294967295..65535}; do
     done
 
     # 2. Launch "cpu" jobs, now using the 3 quality variable.
-    python3 factorizing_wrapper.py "$product" 3 cpu &
+    python3 factorizing_wrapper.py "$product" 8 cpu &
     pids+=($!)
 
     # --- Manage the Grand Race ---
