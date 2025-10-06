@@ -185,6 +185,7 @@ if __name__ == '__main__':
     quality = 4
     workers_per_gpu = 1
     use_gpu = True
+    max_runs = 100 # *** NEW: Iteration limit ***
 
     # --- Parse Command-Line Arguments ---
     if len(sys.argv) > 1:
@@ -216,6 +217,7 @@ if __name__ == '__main__':
     print(f"\nAttempting to factor N = {N_to_factor}")
     print(f"Using solver quality: {quality}")
     print(f"Calculated qubits per factor = {num_qubits_per_factor}")
+    print(f"Stopping after {max_runs} iterations if no solution is found.") # *** NEW: Info message ***
 
     # --- Model Preparation (Done once) ---
     hubo = create_hubo_for_factorization(N_to_factor, num_qubits_per_factor)
@@ -238,6 +240,7 @@ if __name__ == '__main__':
     
     solution_found = False
     best_solution = (0, 0)
+    completed_runs = 0 # *** NEW: Counter for completed runs ***
 
     # --- Conditional execution path (GPU vs CPU) ---
     if use_gpu:
@@ -264,8 +267,9 @@ if __name__ == '__main__':
         run_count = 0
         
         try:
-            while not solution_found:
-                while len(active_processes) < total_workers:
+            # *** MODIFIED: Loop condition now includes run limit ***
+            while not solution_found and completed_runs < max_runs:
+                while len(active_processes) < total_workers and run_count < max_runs:
                     run_count += 1
                     gpu_to_use = gpu_id_list[(run_count - 1) % len(gpu_id_list)]
                     proc = multiprocessing.Process(target=run_solver_on_gpu, args=(gpu_to_use, result_queue, run_count, model_data))
@@ -273,6 +277,7 @@ if __name__ == '__main__':
                     active_processes[proc.pid] = proc
 
                 res_id, p_res, q_res = result_queue.get()
+                completed_runs += 1 # *** NEW: Increment completed run counter ***
                 solution_found, factors = process_and_log_result(res_id, p_res, q_res, N_to_factor, log_filename)
                 if solution_found:
                     best_solution = factors
@@ -297,7 +302,10 @@ if __name__ == '__main__':
         initializer_args = (model_data,)
         
         with multiprocessing.Pool(processes=num_workers, initializer=init_worker_cpu, initargs=initializer_args) as pool:
-            for run_id, p_res, q_res in pool.imap_unordered(run_solver_on_cpu, itertools.count(1)):
+            # *** MODIFIED: Use a finite range instead of an infinite count ***
+            run_iterator = range(1, max_runs + 1)
+            for run_id, p_res, q_res in pool.imap_unordered(run_solver_on_cpu, run_iterator):
+                completed_runs += 1 # *** NEW: Increment completed run counter ***
                 solution_found, factors = process_and_log_result(run_id, p_res, q_res, N_to_factor, log_filename)
                 if solution_found:
                     best_solution = factors
@@ -309,4 +317,6 @@ if __name__ == '__main__':
     if solution_found:
         print(f"Optimal solution p={best_solution[0]}, q={best_solution[1]} was found.")
     else:
-        print("Execution stopped, but the optimal solution was not found.")
+        # *** MODIFIED: More informative message on failure ***
+        print(f"Execution stopped. The optimal solution was not found within the {max_runs} run limit.")
+    print(f"A total of {completed_runs} runs were completed.")

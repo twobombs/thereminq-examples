@@ -4,7 +4,7 @@
 num_cores=$(nproc)
 
 # The outer loop iterates to generate products.
-for i in {65535..4294967295..65535}; do
+for i in {32768..4294967295..65535}; do
     # Calculate the product.
     prime1=$(matho-primes -c 1 -u "$i")
     prime2=$(matho-primes -c 1 -u "$(($prime1 * 2))")
