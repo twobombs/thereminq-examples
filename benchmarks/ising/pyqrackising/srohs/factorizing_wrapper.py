@@ -12,7 +12,6 @@ import time
 import traceback
 import pyopencl as cl
 import itertools
-# MODIFICATION: Add the warnings library
 import warnings
 
 # --- Worker Functions ---
@@ -20,7 +19,6 @@ import warnings
 def run_solver_on_gpu(gpu_id_str, result_queue, run_id, model_data):
     """Initializes a solver on a specific GPU and runs one instance."""
     try:
-        # MODIFICATION: Suppress the specific non-fatal RuntimeWarning from the solver
         warnings.filterwarnings('ignore', 'divide by zero encountered in divide', RuntimeWarning)
         
         os.environ['PYOPENCL_CTX'] = gpu_id_str
@@ -42,7 +40,6 @@ def init_worker_cpu(shared_model_data):
 def run_solver_on_cpu(run_id):
     """A single, independent solver instance run by a CPU worker process."""
     try:
-        # MODIFICATION: Suppress the specific non-fatal RuntimeWarning from the solver
         warnings.filterwarnings('ignore', 'divide by zero encountered in divide', RuntimeWarning)
 
         p, q = solve_and_decode(worker_model_data, use_gpu=False)
@@ -57,7 +54,8 @@ def run_solver_on_cpu(run_id):
 def solve_and_decode(model_data, use_gpu):
     """
     A single run of the solver and result decoding.
-    Will now loop internally until a non-zero result is found.
+    Will now loop internally until a potentially valid (non-zero, non-trivial) 
+    result is found.
     """
     from pyqrackising import spin_glass_solver
     # Unpack the model data
@@ -65,10 +63,11 @@ def solve_and_decode(model_data, use_gpu):
     num_qubits_per_factor = model_data['nq']
     label_to_index = model_data['labels']
     quality = model_data['quality']
+    # MODIFICATION: Unpack N to check if it's odd or even
+    N_to_factor = model_data['N']
 
-    p, q = 0, 0
-    # Loop until both factors are non-zero.
-    while p == 0 or q == 0:
+    # MODIFICATION: Use a `while True` loop that we explicitly break from
+    while True:
         num_total_vars = max_cut_graph.shape[0]
         result_tuple = spin_glass_solver(
             max_cut_graph,
@@ -91,9 +90,31 @@ def solve_and_decode(model_data, use_gpu):
             if binary_solution.get(label_to_index.get(num_qubits_per_factor + i), 0) == 1:
                 q += 2**i
         
-        if p == 0 or q == 0:
-            print(f"(Worker {os.getpid()} got a zero factor ({p}, {q}). Retrying...) ", end="", flush=True)
+        # --- MODIFICATION: New, more robust validation logic ---
+        is_invalid = False
+        reason = ""
 
+        # Condition 1: Check for zero factors (solver failure)
+        if p == 0 or q == 0:
+            is_invalid = True
+            reason = "zero factor"
+        # Condition 2: Check for trivial factors of 1
+        elif p == 1 or q == 1:
+            is_invalid = True
+            reason = "trivial factor of 1"
+        # Condition 3: If N is odd, its factors must also be odd.
+        # (p % 2 == 0) is true if p is even. We check this only if N is odd.
+        elif (N_to_factor % 2 != 0) and (p % 2 == 0 or q % 2 == 0):
+            is_invalid = True
+            reason = "even factor for an odd target N"
+
+        if is_invalid:
+            print(f"(Worker {os.getpid()} got an invalid solution ({p}, {q}) - {reason}. Retrying...) ", end="", flush=True)
+            # The 'continue' is implied, the loop will repeat
+        else:
+            # If we pass all checks, break the loop to return the result
+            break
+            
     return p, q
 
 def process_and_log_result(run_id, p_res, q_res, N_to_factor, log_filename):
@@ -289,4 +310,3 @@ if __name__ == '__main__':
         print(f"Optimal solution p={best_solution[0]}, q={best_solution[1]} was found.")
     else:
         print("Execution stopped, but the optimal solution was not found.")
-
