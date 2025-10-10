@@ -4,7 +4,7 @@
 num_cores=$(nproc)
 
 # The outer loop iterates to generate products.
-for i in {32768..4294967295..65535}; do
+for i in {128..4294967295..32}; do
     # Calculate the product.
     prime1=$(matho-primes -c 1 -u "$i")
     prime2=$(matho-primes -c 1 -u "$(($prime1 * 2))")
@@ -32,7 +32,7 @@ for i in {32768..4294967295..65535}; do
     wait -n
 
     # Once a winner is found, terminate all other running processes for this product.
-    kill "${pids[@]}" &>/dev/null
+    # kill "${pids[@]}" &>/dev/null
 
     # Clean up any remaining zombie processes.
     wait &>/dev/null
