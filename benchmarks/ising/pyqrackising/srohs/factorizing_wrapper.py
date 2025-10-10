@@ -233,7 +233,7 @@ if __name__ == '__main__':
     quality = 4
     workers_per_gpu = 1
     use_gpu = True
-    max_runs = 100 
+    max_runs = 1
 
     # --- Parse Command-Line Arguments ---
     if len(sys.argv) > 1:
