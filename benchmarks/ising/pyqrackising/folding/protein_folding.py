@@ -1,3 +1,6 @@
+# this is a ruuner that leverages pyqrackising to fold proteins
+# gpu performance will stack with the number of cpu threads avaliable
+
 import numpy as np
 import dimod
 from collections import defaultdict
