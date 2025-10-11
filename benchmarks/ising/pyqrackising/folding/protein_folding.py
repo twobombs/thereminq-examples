@@ -10,13 +10,12 @@ import pyopencl as cl
 import itertools
 import warnings
 
-# --- Worker Functions (Largely unchanged, adapted for clarity) ---
+# --- Worker Functions ---
 
 def run_solver_on_gpu(gpu_id_str, result_queue, run_id, model_data):
     """Initializes a solver on a specific GPU and runs one instance for protein folding."""
     try:
         warnings.filterwarnings('ignore', 'divide by zero encountered in divide', RuntimeWarning)
-        
         os.environ['PYOPENCL_CTX'] = gpu_id_str
         from pyqrackising import spin_glass_solver
 
@@ -37,7 +36,6 @@ def run_solver_on_cpu(run_id):
     """A single, independent solver instance run by a CPU worker process."""
     try:
         warnings.filterwarnings('ignore', 'divide by zero encountered in divide', RuntimeWarning)
-
         energy, conformation = solve_and_decode_protein(worker_model_data, use_gpu=False)
         return (run_id, energy, conformation)
     except Exception:
@@ -45,130 +43,84 @@ def run_solver_on_cpu(run_id):
         traceback.print_exc()
         return (run_id, None, None)
 
-# --- Shared Logic (Modified for Protein Folding) ---
+# --- Shared Logic ---
 
 def solve_and_decode_protein(model_data, use_gpu):
     """
-    A single run of the solver and result decoding for the HP protein folding model.
+    Decodes the binary result from a relative-turn protein folding QUBO.
     """
     from pyqrackising import spin_glass_solver
-    # Unpack the model data
     max_cut_graph = model_data['graph']
     label_to_index = model_data['labels']
     quality = model_data['quality']
-    sequence_len = model_data['seq_len']
+    sequence = model_data['sequence']
+    n = len(sequence)
 
-    # The solver returns the bitstring that minimizes the energy (maximizes the cut)
     result_tuple = spin_glass_solver(
-        max_cut_graph,
-        quality=quality,
-        is_combo_maxcut_gpu=use_gpu
+        max_cut_graph, quality=quality, is_combo_maxcut_gpu=use_gpu
     )
     bitstring = result_tuple[0]
-    energy = result_tuple[3] # spin_glass_solver returns energy as the 4th element
+    energy = result_tuple[3]
 
     spins = {i: 1 - 2 * int(bit) for i, bit in enumerate(bitstring)}
     ancilla_node_idx = max_cut_graph.shape[0] - 1
     ancilla_spin = spins.get(ancilla_node_idx, 1)
     normalized_spins = {var: spin * ancilla_spin for var, spin in spins.items()}
     binary_solution = {i: (s + 1) // 2 for i, s in normalized_spins.items()}
-    
-    # Decode the binary solution into a sequence of moves
-    moves = []
-    directions = ["U", "D", "L", "R"] # Up, Down, Left, Right
-    for i in range(sequence_len):
-        move_vars = [label_to_index.get(f'm_{i}_{d}', -1) for d in range(4)]
-        
-        chosen_move_idx = -1
-        for idx, var_idx in enumerate(move_vars):
-            if var_idx != -1 and binary_solution.get(var_idx, 0) == 1:
-                chosen_move_idx = idx
-                break
-        
-        moves.append(directions[chosen_move_idx] if chosen_move_idx != -1 else "N/A")
 
-    return energy, moves
+    turn_map = {(0, 0): 'F', (0, 1): 'R', (1, 0): 'L', (1, 1): 'B'}
+    turns = []
+    for i in range(1, n):
+        b0_idx = label_to_index.get(f'b_{i}_0', -1)
+        b1_idx = label_to_index.get(f'b_{i}_1', -1)
+        b0 = binary_solution.get(b0_idx, 0)
+        b1 = binary_solution.get(b1_idx, 0)
+        turns.append(turn_map.get((b0, b1), 'F'))
+
+    coords = [(0, 0)] * n
+    directions = [(1, 0), (0, 1), (-1, 0), (0, -1)]
+    heading = 0
+    for i in range(1, n):
+        turn = turns[i - 1]
+        if turn == 'L':
+            heading = (heading + 1) % 4
+        elif turn == 'R':
+            heading = (heading - 1 + 4) % 4
+        move = directions[heading]
+        coords[i] = (coords[i-1][0] + move[0], coords[i-1][1] + move[1])
+
+    return energy, coords
 
 def process_and_log_result(run_id, energy, conformation, log_filename):
-    """
-    Processes a result, logs it, and updates the best-found solution.
-    """
+    """Processes a result, logs it, and updates the best-found solution."""
     if energy is None:
         return float('inf'), []
-
     with open(log_filename, 'a') as f:
-        f.write(f"{run_id},{energy},{''.join(conformation)}\n")
-    
+        conf_str = ';'.join([f'({x},{y})' for x, y in conformation])
+        f.write(f"{run_id},{energy},{conf_str}\n")
     return energy, conformation
 
-# --- Model Creation (NEW: For Protein Folding) ---
+# --- Model Creation ---
 
-def create_protein_folding_qubo(sequence, grid_size=None):
+def create_protein_folding_qubo_relative(sequence):
     """
-    Creates a QUBO for the 2D HP protein folding model.
-    - sequence: A string of 'H' and 'P' (e.g., "HPHPPHH").
-    - grid_size: The side length of the square lattice (e.g., len(sequence)).
+    Creates a QUBO for the 2D HP protein folding model using relative turns.
     """
     n = len(sequence)
-    if grid_size is None:
-        grid_size = n
-    
     qubo = defaultdict(float)
-    
-    # --- Variable Definition ---
-    # x_i,j,k = 1 if amino acid 'i' is at grid position (j, k)
-    def x(i, j, k):
-        return (i * grid_size * grid_size) + (j * grid_size) + k
 
-    # --- Constraints ---
-    P_overlap = 10  # Strong penalty for two beads occupying the same site
-    P_chain = 10    # Strong penalty for non-adjacent beads in the chain
+    def b(i, turn_bit):
+        return f'b_{i}_{turn_bit}'
 
-    # 1. Each amino acid must occupy exactly one grid position
-    for i in range(n):
-        for j1 in range(grid_size):
-            for k1 in range(grid_size):
-                qubo[((x(i, j1, k1)), (x(i, j1, k1)))] -= 1
-                for j2 in range(grid_size):
-                    for k2 in range(grid_size):
-                        if (j1, k1) < (j2, k2):
-                            qubo[((x(i, j1, k1)), (x(i, j2, k2)))] += 2
+    for i in range(1, n):
+        qubo[(b(i, 0), b(i, 1))] += 10
 
-    # 2. Each grid position can be occupied by at most one amino acid
-    for j in range(grid_size):
-        for k in range(grid_size):
-            for i1 in range(n):
-                for i2 in range(i1 + 1, n):
-                    qubo[((x(i1, j, k)), (x(i2, j, k)))] += P_overlap
-                    
-    # 3. Chain connectivity constraint
-    for i in range(n - 1):
-        for j1 in range(grid_size):
-            for k1 in range(grid_size):
-                for j2 in range(grid_size):
-                    for k2 in range(grid_size):
-                        # Manhattan distance
-                        dist = abs(j1 - j2) + abs(k1 - k2)
-                        if dist != 1:
-                           qubo[((x(i, j1, k1)), (x(i + 1, j2, k2)))] += P_chain
-
-    # --- Objective Function: Maximize H-H contacts ---
-    # A negative weight encourages the variables to be 1
-    for i in range(n):
-        for j in range(i + 2, n): # Non-adjacent pairs
-            if sequence[i] == 'H' and sequence[j] == 'H':
-                for j1 in range(grid_size):
-                    for k1 in range(grid_size):
-                        # Neighbors
-                        neighbors = []
-                        if j1 > 0: neighbors.append((j1 - 1, k1))
-                        if j1 < grid_size - 1: neighbors.append((j1 + 1, k1))
-                        if k1 > 0: neighbors.append((j1, k1 - 1))
-                        if k1 < grid_size - 1: neighbors.append((j1, k1 + 1))
-                        
-                        for j2, k2 in neighbors:
-                           qubo[((x(i, j1, k1)), (x(j, j2, k2)))] -= 1
-
+    for i in range(1, n - 1):
+        if sequence[i-1] == 'H' and sequence[i+1] == 'H':
+            qubo[(b(i, 0), b(i, 0))] -= 1
+            qubo[(b(i, 1), b(i, 1))] -= 1
+            qubo[(b(i, 0), b(i, 1))] += 2
+            
     return qubo
 
 def convert_ising_to_maxcut(h, J, num_vars, label_to_index):
@@ -176,47 +128,43 @@ def convert_ising_to_maxcut(h, J, num_vars, label_to_index):
     ancilla_node_idx = num_vars
     W = np.zeros((graph_size, graph_size))
     for (i_label, j_label), coupling in J.items():
-        i, j = label_to_index[i_label], label_to_index[j_label]
-        W[i, j] = coupling
-        W[j, i] = coupling
+        i, j = label_to_index.get(i_label, -1), label_to_index.get(j_label, -1)
+        if i != -1 and j != -1:
+            W[i, j] = coupling
+            W[j, i] = coupling
     for i_label, bias in h.items():
-        i = label_to_index[i_label]
-        W[i, ancilla_node_idx] = -bias
-        W[ancilla_node_idx, i] = -bias
+        i = label_to_index.get(i_label, -1)
+        if i != -1:
+            W[i, ancilla_node_idx] = -bias
+            W[ancilla_node_idx, i] = -bias
     return W
 
 # --- Main execution block ---
 if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
 
-    # --- Default Values ---
-    protein_sequence = "HPHPPHHPHPPHPHHPPHPH" # 20-mer example
+    protein_sequence = "HPHPPHHPHPPHPHHPPHPH"
     quality = 4
-    workers_per_gpu = 1
+    workers_per_gpu = 10
     use_gpu = True
-    max_runs = 100 
+    max_runs = 100
 
-    # --- Parse Command-Line Arguments ---
-    if len(sys.argv) > 1:
-        protein_sequence = sys.argv[1]
-    if len(sys.argv) > 2:
-        quality = int(sys.argv[2])
-    if len(sys.argv) > 3 and sys.argv[3].lower() == 'cpu':
-        use_gpu = False
+    if len(sys.argv) > 1: protein_sequence = sys.argv[1]
+    if len(sys.argv) > 2: quality = int(sys.argv[2])
+    if len(sys.argv) > 3 and sys.argv[3].lower() == 'cpu': use_gpu = False
 
     device_suffix = "_cpu" if not use_gpu else ""
     log_filename = f"protein_folding_{protein_sequence}_q{quality}{device_suffix}.log"
     print(f"Logging run results to: {log_filename}")
     if not os.path.exists(log_filename):
         with open(log_filename, 'w') as f:
-            f.write("run,energy,conformation\n")
+            f.write("run,energy,conformation_coords\n")
 
     print(f"\nAttempting to fold sequence: {protein_sequence} (Length: {len(protein_sequence)})")
     print(f"Using solver quality: {quality}")
     print(f"Stopping after {max_runs} runs.")
 
-    # --- Model Preparation (Done once) ---
-    qubo = create_protein_folding_qubo(protein_sequence)
+    qubo = create_protein_folding_qubo_relative(protein_sequence)
     bqm = dimod.BinaryQuadraticModel.from_qubo(qubo)
     
     label_to_index = {label: i for i, label in enumerate(bqm.variables)}
@@ -224,13 +172,12 @@ if __name__ == '__main__':
     h, J, offset = bqm.to_ising()
     max_cut_graph = convert_ising_to_maxcut(h, J, num_bqm_vars, label_to_index)
     max_abs_val = np.max(np.abs(max_cut_graph))
-    if max_abs_val > 0:
-        max_cut_graph /= max_abs_val
+    if max_abs_val > 0: max_cut_graph /= max_abs_val
     
     print(f"Total variables in QUBO model: {num_bqm_vars}")
     
     model_data = {
-        'graph': max_cut_graph, 'seq_len': len(protein_sequence),
+        'graph': max_cut_graph, 'sequence': protein_sequence,
         'labels': label_to_index, 'quality': quality
     }
     
@@ -238,22 +185,84 @@ if __name__ == '__main__':
     best_conformation = []
     completed_runs = 0
 
-    # --- Conditional execution path (GPU vs CPU) ---
     if use_gpu:
-        # (GPU execution logic remains the same as the factorization script)
         print("\n--- Running on available GPUs ---")
-        # ... (Omitted for brevity, identical to previous script)
-    else: # CPU Path
-        # (CPU execution logic remains the same as the factorization script)
-        print("\n--- Running on CPU ---")
-        # ... (Omitted for brevity, identical to previous script)
+        gpu_id_list = []
+        try:
+            platforms = cl.get_platforms()
+            for p_idx, p in enumerate(platforms):
+                for d_idx, d in enumerate(p.get_devices(device_type=cl.device_type.GPU)):
+                    gpu_id_list.append(f"{p_idx}:{d_idx}")
+                    print(f"  Found GPU: '{d.name}' (ID: {p_idx}:{d_idx})")
+        except Exception as e:
+            print(f"Warning: Could not enumerate OpenCL GPUs. {e}")
+        
+        if not gpu_id_list:
+            print("Error: No OpenCL-enabled GPUs found. Exiting.")
+            sys.exit(1)
 
-    # --- Final Summary ---
+        total_workers = len(gpu_id_list) * workers_per_gpu
+        print(f"Configured for {workers_per_gpu} worker(s) per GPU. Total: {total_workers}")
+        
+        result_queue = multiprocessing.Queue()
+        active_processes = {}
+        run_count = 0
+        
+        try:
+            # FIX: Restructured main loop for robust process management
+            while completed_runs < max_runs:
+                # Launch new processes if there are open slots
+                while len(active_processes) < total_workers and run_count < max_runs:
+                    run_count += 1
+                    gpu_to_use = gpu_id_list[(run_count - 1) % len(gpu_id_list)]
+                    proc = multiprocessing.Process(target=run_solver_on_gpu, args=(gpu_to_use, result_queue, run_count, model_data))
+                    proc.start()
+                    active_processes[proc.pid] = proc
+
+                # Wait for the next result from any process
+                res_id, energy_res, conf_res = result_queue.get()
+                completed_runs += 1
+                energy, conformation = process_and_log_result(res_id, energy_res, conf_res, log_filename)
+                
+                if energy < best_energy:
+                    best_energy = energy
+                    best_conformation = conformation
+                    print(f"\nNew best energy found: {best_energy:.4f} on run {res_id}")
+
+                # Clean up any processes that have finished
+                finished_pids = [pid for pid, proc in active_processes.items() if not proc.is_alive()]
+                for pid in finished_pids:
+                    active_processes[pid].join()  # FIX: Properly join the process
+                    del active_processes[pid]
+        finally:
+            print("\n--- Terminating GPU worker processes ---")
+            for pid, proc in active_processes.items():
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join()
+    
+    else: # CPU Path
+        print("\n--- Running on CPU ---")
+        total_threads = os.cpu_count()
+        num_workers = max(1, int(total_threads * 0.75))
+        print(f"System has {total_threads} threads. Using {num_workers} concurrent CPU worker(s).")
+        initializer_args = (model_data,)
+        
+        with multiprocessing.Pool(processes=num_workers, initializer=init_worker_cpu, initargs=initializer_args) as pool:
+            run_iterator = range(1, max_runs + 1)
+            for run_id, energy_res, conf_res in pool.imap_unordered(run_solver_on_cpu, run_iterator):
+                completed_runs += 1
+                energy, conformation = process_and_log_result(run_id, energy_res, conf_res, log_filename)
+                if energy < best_energy:
+                    best_energy = energy
+                    best_conformation = conformation
+                    print(f"\nNew best energy found: {best_energy:.4f} on run {run_id}")
+
     print("\n--- Overall Summary ---")
     if best_energy != float('inf'):
         print(f"Best energy found: {best_energy}")
-        print(f"Best conformation (moves): {' '.join(best_conformation)}")
+        conf_str = ' -> '.join([f'({c[0]},{c[1]})' for c in best_conformation])
+        print(f"Best conformation coordinates: {conf_str}")
     else:
         print(f"Execution stopped. No valid conformation was found within the {max_runs} run limit.")
     print(f"A total of {completed_runs} runs were completed.")
-
