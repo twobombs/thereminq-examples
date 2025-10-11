@@ -102,6 +102,17 @@ def process_and_log_result(run_id, energy, conformation, log_filename):
 
 # --- Model Creation ---
 
+def convert_to_hp(sequence):
+    """Converts a standard amino acid sequence to a hydrophobic-polar (HP) model sequence."""
+    hydrophobic = "AVLIMFWYCPG" 
+    hp_sequence = ""
+    for amino_acid in sequence.upper():
+        if amino_acid in hydrophobic:
+            hp_sequence += "H"
+        else:
+            hp_sequence += "P"
+    return hp_sequence
+
 def create_protein_folding_qubo_relative(sequence):
     """
     Creates a QUBO for the 2D HP protein folding model using relative turns.
@@ -143,28 +154,43 @@ def convert_ising_to_maxcut(h, J, num_vars, label_to_index):
 if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
 
-    protein_sequence = "HPHPPHHPHPPHPHHPPHPH"
+    # --- Default Values ---
+    protein_input = "TRP-cage,20,NLYIQWLKDGGPSSGRPPPS"
     quality = 4
-    workers_per_gpu = 10
+    workers_per_gpu = 1 # This will be recalculated for GPU path
     use_gpu = True
-    max_runs = 100
+    max_runs = 100 
 
-    if len(sys.argv) > 1: protein_sequence = sys.argv[1]
+    # --- Parse Command-Line Arguments ---
+    if len(sys.argv) > 1: protein_input = sys.argv[1]
     if len(sys.argv) > 2: quality = int(sys.argv[2])
     if len(sys.argv) > 3 and sys.argv[3].lower() == 'cpu': use_gpu = False
 
+    try:
+        name, length_str, sequence = protein_input.split(',')
+        length = int(length_str)
+        if len(sequence) != length:
+            print(f"Error: Provided sequence length ({len(sequence)}) does not match stated length ({length}). Exiting.")
+            sys.exit(1)
+    except ValueError:
+        print("Error: Invalid input format. Please use 'Name,Length,Sequence'. Exiting.")
+        sys.exit(1)
+
+    hp_sequence = convert_to_hp(sequence)
+
     device_suffix = "_cpu" if not use_gpu else ""
-    log_filename = f"protein_folding_{protein_sequence}_q{quality}{device_suffix}.log"
+    log_filename = f"protein_folding_{name}_{length}mer_q{quality}{device_suffix}.log"
     print(f"Logging run results to: {log_filename}")
     if not os.path.exists(log_filename):
         with open(log_filename, 'w') as f:
             f.write("run,energy,conformation_coords\n")
 
-    print(f"\nAttempting to fold sequence: {protein_sequence} (Length: {len(protein_sequence)})")
+    print(f"\nAttempting to fold protein: {name} (Sequence: {sequence}, Length: {length})")
+    print(f"Converted HP sequence: {hp_sequence}")
     print(f"Using solver quality: {quality}")
     print(f"Stopping after {max_runs} runs.")
 
-    qubo = create_protein_folding_qubo_relative(protein_sequence)
+    qubo = create_protein_folding_qubo_relative(hp_sequence)
     bqm = dimod.BinaryQuadraticModel.from_qubo(qubo)
     
     label_to_index = {label: i for i, label in enumerate(bqm.variables)}
@@ -177,7 +203,7 @@ if __name__ == '__main__':
     print(f"Total variables in QUBO model: {num_bqm_vars}")
     
     model_data = {
-        'graph': max_cut_graph, 'sequence': protein_sequence,
+        'graph': max_cut_graph, 'sequence': hp_sequence,
         'labels': label_to_index, 'quality': quality
     }
     
@@ -201,6 +227,13 @@ if __name__ == '__main__':
             print("Error: No OpenCL-enabled GPUs found. Exiting.")
             sys.exit(1)
 
+        # --- MODIFICATION: Dynamic worker calculation ---
+        total_threads = os.cpu_count()
+        num_gpus = len(gpu_id_list)
+        workers_per_gpu = max(1, total_threads // num_gpus)
+        print(f"System has {total_threads} threads and {num_gpus} GPU(s).")
+        # --- END MODIFICATION ---
+
         total_workers = len(gpu_id_list) * workers_per_gpu
         print(f"Configured for {workers_per_gpu} worker(s) per GPU. Total: {total_workers}")
         
@@ -209,17 +242,15 @@ if __name__ == '__main__':
         run_count = 0
         
         try:
-            # FIX: Restructured main loop for robust process management
             while completed_runs < max_runs:
-                # Launch new processes if there are open slots
                 while len(active_processes) < total_workers and run_count < max_runs:
                     run_count += 1
+                    # Cycle through GPUs to distribute workers evenly
                     gpu_to_use = gpu_id_list[(run_count - 1) % len(gpu_id_list)]
                     proc = multiprocessing.Process(target=run_solver_on_gpu, args=(gpu_to_use, result_queue, run_count, model_data))
                     proc.start()
                     active_processes[proc.pid] = proc
 
-                # Wait for the next result from any process
                 res_id, energy_res, conf_res = result_queue.get()
                 completed_runs += 1
                 energy, conformation = process_and_log_result(res_id, energy_res, conf_res, log_filename)
@@ -229,10 +260,9 @@ if __name__ == '__main__':
                     best_conformation = conformation
                     print(f"\nNew best energy found: {best_energy:.4f} on run {res_id}")
 
-                # Clean up any processes that have finished
                 finished_pids = [pid for pid, proc in active_processes.items() if not proc.is_alive()]
                 for pid in finished_pids:
-                    active_processes[pid].join()  # FIX: Properly join the process
+                    active_processes[pid].join()
                     del active_processes[pid]
         finally:
             print("\n--- Terminating GPU worker processes ---")
@@ -242,9 +272,10 @@ if __name__ == '__main__':
                     proc.join()
     
     else: # CPU Path
-        print("\n--- Running on CPU ---")
+        # For CPU, we still use a fraction of total threads for stability
         total_threads = os.cpu_count()
         num_workers = max(1, int(total_threads * 0.75))
+        print("\n--- Running on CPU ---")
         print(f"System has {total_threads} threads. Using {num_workers} concurrent CPU worker(s).")
         initializer_args = (model_data,)
         
