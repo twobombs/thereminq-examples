@@ -13,7 +13,7 @@ for i in {128..4294967295..32}; do
     # This array will hold the PIDs for ALL jobs related to this single product.
     pids=()
 
-    # Loop through each quality value from 2 to 6.
+    # Loop through each quality value from 2 to 7
     for quality in {2..7}; do
         # 1. Launch the "non-cpu" job for the current quality.
         # This fulfills the "keep the non cpu loop" requirement.
@@ -22,7 +22,7 @@ for i in {128..4294967295..32}; do
 
     done
 
-    # 2. Launch "cpu" jobs, now using the 3 quality variable.
+    # 2. Launch "cpu" jobs, now using the 8 quality variable.
     python3 factorizing_wrapper.py "$product" 8 cpu &
     pids+=($!)
 
