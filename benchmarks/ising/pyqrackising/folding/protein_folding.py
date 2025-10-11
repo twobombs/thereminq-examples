@@ -1,4 +1,4 @@
-# this is a ruuner that leverages pyqrackising to fold proteins
+# this is a runner that leverages pyqrackising to fold proteins
 # gpu performance will stack with the number of cpu threads avaliable
 
 import numpy as np
