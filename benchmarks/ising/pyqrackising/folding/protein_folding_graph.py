@@ -25,7 +25,7 @@ def parse_filename(filename):
 
 def read_first_conformation(filepath):
     """
-    Reads a log file and returns the coordinate string from the first data row.
+    Reads a log file and returns the energy and coordinate string from the first data row.
     """
     try:
         with open(filepath, 'r') as f:
@@ -33,15 +33,15 @@ def read_first_conformation(filepath):
             first_data_line = f.readline()
             parts = first_data_line.strip().split(',', 2)
             if len(parts) == 3:
-                # Return the full line data: run, energy, coords
-                return parts[1], parts[2]
-    except Exception as e:
+                # Return energy (as float) and coordinate string
+                return float(parts[1]), parts[2]
+    except (Exception, ValueError) as e:
         print(f"  - [ERROR] Could not read file {os.path.basename(filepath)}: {e}")
     return None, None
 
 def parse_coords(coord_string):
     """
-    Converts the coordinate string from the log file into a list of (x, y) tuples.
+    Converts the coordinate string into a list of (x, y) tuples.
     """
     coords = []
     if not isinstance(coord_string, str):
@@ -73,71 +73,80 @@ for filename in sorted(os.listdir(log_files_dir)):
             files_by_protein[protein][q_level][device] = os.path.join(log_files_dir, filename)
 
 for protein, q_levels_data in files_by_protein.items():
-    sorted_q_levels = sorted(q_levels_data.keys())
-    num_rows = len(sorted_q_levels)
-    
+    # --- Step 1: Read data and determine the sorting order ---
+    plot_rows_data = []
+    for q_level, device_files in q_levels_data.items():
+        cpu_file = device_files.get('cpu')
+        gpu_file = device_files.get('gpu')
+        
+        cpu_energy, _ = read_first_conformation(cpu_file) if cpu_file else (None, None)
+        gpu_energy, _ = read_first_conformation(gpu_file) if gpu_file else (None, None)
+
+        # Determine the best energy for this quality level to use for sorting
+        energies = [e for e in [cpu_energy, gpu_energy] if e is not None]
+        if not energies:
+            continue # Skip if no valid energy data was found
+        
+        min_energy = min(energies)
+        
+        plot_rows_data.append({
+            'q_level': q_level,
+            'min_energy': min_energy,
+            'cpu_file': cpu_file,
+            'gpu_file': gpu_file
+        })
+
+    # --- Step 2: Sort the rows by the minimum energy (lowest first) ---
+    sorted_plot_rows = sorted(plot_rows_data, key=lambda x: x['min_energy'])
+
+    num_rows = len(sorted_plot_rows)
     if num_rows == 0:
         continue
 
+    # --- Step 3: Create the plot using the sorted data ---
     fig, axes = plt.subplots(num_rows, 2, figsize=(10, 4 * num_rows), squeeze=False)
     protein_title = protein.replace('_', ' ').title()
-    fig.suptitle(f"'{protein_title}' Folded Conformations by Quality Level", fontsize=16, y=0.99)
+    fig.suptitle(f"'{protein_title}' Folded Conformations (Sorted by Energy)", fontsize=16, y=0.99)
 
-    for i, q_level in enumerate(sorted_q_levels):
-        # Process CPU file
+    for i, row_data in enumerate(sorted_plot_rows):
+        q_level = row_data['q_level']
+        
+        # --- Column 0: CPU Plot ---
         ax_cpu = axes[i, 0]
-        cpu_file = q_levels_data[q_level].get('cpu')
-        if cpu_file:
-            energy, coord_string = read_first_conformation(cpu_file)
+        if row_data['cpu_file']:
+            energy, coord_string = read_first_conformation(row_data['cpu_file'])
             if coord_string:
                 coords = parse_coords(coord_string)
                 if coords:
                     x_coords, y_coords = zip(*coords)
                     ax_cpu.plot(x_coords, y_coords, marker='o', linestyle='-', color='cyan')
-                    # Add energy to the title
-                    title = f"Quality: {q_level} (CPU)"
-                    if energy:
-                        title += f"\nEnergy: {float(energy):.2f}"
+                    title = f"Quality: {q_level} (CPU)\nEnergy: {energy:.2f}"
                     ax_cpu.set_title(title)
                     ax_cpu.set_aspect('equal', adjustable='box')
-                else:
-                    ax_cpu.set_title(f"Quality: {q_level} (CPU)\nNo coords parsed")
-            else:
-                ax_cpu.set_title(f"Quality: {q_level} (CPU)\nError reading coords")
         else:
             ax_cpu.set_title(f"Quality: {q_level} (CPU)\nNot Found")
             ax_cpu.axis('off')
 
-        # Process GPU file
+        # --- Column 1: GPU Plot ---
         ax_gpu = axes[i, 1]
-        gpu_file = q_levels_data[q_level].get('gpu')
-        if gpu_file:
-            energy, coord_string = read_first_conformation(gpu_file)
+        if row_data['gpu_file']:
+            energy, coord_string = read_first_conformation(row_data['gpu_file'])
             if coord_string:
                 coords = parse_coords(coord_string)
                 if coords:
                     x_coords, y_coords = zip(*coords)
                     ax_gpu.plot(x_coords, y_coords, marker='o', linestyle='-', color='yellow')
-                    # Add energy to the title
-                    title = f"Quality: {q_level} (GPU)"
-                    if energy:
-                         title += f"\nEnergy: {float(energy):.2f}"
+                    title = f"Quality: {q_level} (GPU)\nEnergy: {energy:.2f}"
                     ax_gpu.set_title(title)
                     ax_gpu.set_aspect('equal', adjustable='box')
-                else:
-                    ax_gpu.set_title(f"Quality: {q_level} (GPU)\nNo coords parsed")
-            else:
-                ax_gpu.set_title(f"Quality: {q_level} (GPU)\nError reading coords")
         else:
             ax_gpu.set_title(f"Quality: {q_level} (GPU)\nNot Found")
             ax_gpu.axis('off')
 
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     
-    # --- SAVE THE FIGURE ---
-    # Create a filename like 'Glucagon_conformations.png'
-    output_filename = f"{protein_title}_conformations.png"
-    plt.savefig(output_filename, dpi=300) # dpi=300 gives high-quality output
+    output_filename = f"{protein_title}_conformations_sorted_by_energy.png"
+    plt.savefig(output_filename, dpi=300)
     print(f"Plot saved to {output_filename}")
     
     plt.show()
