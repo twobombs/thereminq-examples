@@ -1,5 +1,6 @@
 # this is a runner that leverages pyqrackising to fold proteins
 # gpu performance will stack with the number of cpu threads avaliable
+# according to the formula : cputhreads/gpus = workers per GPU
 
 import numpy as np
 import dimod
