@@ -1,3 +1,6 @@
+<img width="5978" height="1578" alt="468390747-272a9fdc-d924-4771-850c-d100f23562f6" src="https://github.com/user-attachments/assets/28d7ad12-e406-40b3-88f9-1c8ac45a6556" />
+
+
 # ThereminQ-examples
 
 Experimental configurations & development examples on the ThereminQ platform
