@@ -1,6 +1,8 @@
 # this is a runner that leverages pyqrackising to fold proteins
 # gpu performance will stack with the number of cpu threads avaliable
 # according to the formula : cputhreads/gpus = workers per GPU
+# This version *requires* a GPU to manage the worker distribution,
+# even if the solver itself is set to CPU mode.
 
 import numpy as np
 import dimod
@@ -16,36 +18,31 @@ import warnings
 
 # --- Worker Functions ---
 
-def run_solver_on_gpu(gpu_id_str, result_queue, run_id, model_data):
-    """Initializes a solver on a specific GPU and runs one instance for protein folding."""
+def run_solver_worker(gpu_id_str, use_gpu_flag, result_queue, run_id, model_data):
+    """
+    Initializes a solver on a specific GPU context and runs one instance.
+    The 'use_gpu_flag' determines whether the solver *itself* uses the GPU.
+    The 'gpu_id_str' is used to pin the process to a specific device context.
+    """
     try:
         warnings.filterwarnings('ignore', 'divide by zero encountered in divide', RuntimeWarning)
+        
+        # Set the OpenCL context for this worker process.
+        # We do this even for CPU solves to ensure processes are
+        # distributed across the hardware contexts.
         os.environ['PYOPENCL_CTX'] = gpu_id_str
+        
         from pyqrackising import spin_glass_solver
 
-        energy, conformation = solve_and_decode_protein(model_data, use_gpu=True)
+        # Pass the 'use_gpu_flag' to the solver
+        energy, conformation = solve_and_decode_protein(model_data, use_gpu=use_gpu_flag)
         result_queue.put((run_id, energy, conformation))
 
     except Exception:
-        print(f"--- ERROR in worker process on GPU {gpu_id_str} (run ID {run_id}) ---")
+        ctx_name = f"GPU {gpu_id_str}" if use_gpu_flag else f"CPU (on GPU {gpu_id_str} context)"
+        print(f"--- ERROR in worker process on {ctx_name} (run ID {run_id}) ---")
         traceback.print_exc()
         result_queue.put((run_id, None, None))
-
-def init_worker_cpu(shared_model_data):
-    """Initializes global variables for each CPU worker process."""
-    global worker_model_data
-    worker_model_data = shared_model_data
-
-def run_solver_on_cpu(run_id):
-    """A single, independent solver instance run by a CPU worker process."""
-    try:
-        warnings.filterwarnings('ignore', 'divide by zero encountered in divide', RuntimeWarning)
-        energy, conformation = solve_and_decode_protein(worker_model_data, use_gpu=False)
-        return (run_id, energy, conformation)
-    except Exception:
-        print(f"--- ERROR in CPU worker process (run ID {run_id}) ---")
-        traceback.print_exc()
-        return (run_id, None, None)
 
 # --- Shared Logic ---
 
@@ -161,14 +158,16 @@ if __name__ == '__main__':
     # --- Default Values ---
     protein_input = "TRP-cage,20,NLYIQWLKDGGPSSGRPPPS"
     quality = 4
-    workers_per_gpu = 1 # This will be recalculated for GPU path
+    workers_per_gpu = 1 # This will be recalculated
     use_gpu = True
     max_runs = 100 
 
     # --- Parse Command-Line Arguments ---
     if len(sys.argv) > 1: protein_input = sys.argv[1]
     if len(sys.argv) > 2: quality = int(sys.argv[2])
-    if len(sys.argv) > 3 and sys.argv[3].lower() == 'cpu': use_gpu = False
+    # The 'cpu' argument now just toggles the solver mode, not the execution path
+    if len(sys.argv) > 3 and sys.argv[3].lower() == 'cpu': 
+        use_gpu = False
 
     try:
         name, length_str, sequence = protein_input.split(',')
@@ -182,7 +181,7 @@ if __name__ == '__main__':
 
     hp_sequence = convert_to_hp(sequence)
 
-    device_suffix = "_cpu" if not use_gpu else ""
+    device_suffix = "_cpu_on_gpu" if not use_gpu else "_gpu"
     log_filename = f"protein_folding_{name}_{length}mer_q{quality}{device_suffix}.log"
     print(f"Logging run results to: {log_filename}")
     if not os.path.exists(log_filename):
@@ -215,83 +214,72 @@ if __name__ == '__main__':
     best_conformation = []
     completed_runs = 0
 
-    if use_gpu:
-        print("\n--- Running on available GPUs ---")
-        gpu_id_list = []
-        try:
-            platforms = cl.get_platforms()
-            for p_idx, p in enumerate(platforms):
-                for d_idx, d in enumerate(p.get_devices(device_type=cl.device_type.GPU)):
-                    gpu_id_list.append(f"{p_idx}:{d_idx}")
-                    print(f"  Found GPU: '{d.name}' (ID: {p_idx}:{d_idx})")
-        except Exception as e:
-            print(f"Warning: Could not enumerate OpenCL GPUs. {e}")
-        
-        if not gpu_id_list:
-            print("Error: No OpenCL-enabled GPUs found. Exiting.")
-            sys.exit(1)
-
-        # --- MODIFICATION: Dynamic worker calculation ---
-        total_threads = os.cpu_count()
-        num_gpus = len(gpu_id_list)
-        workers_per_gpu = max(1, total_threads // num_gpus)
-        print(f"System has {total_threads} threads and {num_gpus} GPU(s).")
-        # --- END MODIFICATION ---
-
-        total_workers = len(gpu_id_list) * workers_per_gpu
-        print(f"Configured for {workers_per_gpu} worker(s) per GPU. Total: {total_workers}")
-        
-        result_queue = multiprocessing.Queue()
-        active_processes = {}
-        run_count = 0
-        
-        try:
-            while completed_runs < max_runs:
-                while len(active_processes) < total_workers and run_count < max_runs:
-                    run_count += 1
-                    # Cycle through GPUs to distribute workers evenly
-                    gpu_to_use = gpu_id_list[(run_count - 1) % len(gpu_id_list)]
-                    proc = multiprocessing.Process(target=run_solver_on_gpu, args=(gpu_to_use, result_queue, run_count, model_data))
-                    proc.start()
-                    active_processes[proc.pid] = proc
-
-                res_id, energy_res, conf_res = result_queue.get()
-                completed_runs += 1
-                energy, conformation = process_and_log_result(res_id, energy_res, conf_res, log_filename)
-                
-                if energy < best_energy:
-                    best_energy = energy
-                    best_conformation = conformation
-                    print(f"\nNew best energy found: {best_energy:.4f} on run {res_id}")
-
-                finished_pids = [pid for pid, proc in active_processes.items() if not proc.is_alive()]
-                for pid in finished_pids:
-                    active_processes[pid].join()
-                    del active_processes[pid]
-        finally:
-            print("\n--- Terminating GPU worker processes ---")
-            for pid, proc in active_processes.items():
-                if proc.is_alive():
-                    proc.terminate()
-                    proc.join()
+    # --- This is now the ONLY execution path ---
+    # It requires OpenCL GPUs to be present to manage the workers.
     
-    else: # CPU Path
-        # For CPU, we still use a fraction of total threads for stability
-        total_threads = os.cpu_count()
-        num_workers = max(1, int(total_threads * 0.75))
-        print("\n--- Running on CPU ---")
-        print(f"System has {total_threads} threads. Using {num_workers} concurrent CPU worker(s).")
-        initializer_args = (model_data,)
-        
-        with multiprocessing.Pool(processes=num_workers, initializer=init_worker_cpu, initargs=initializer_args) as pool:
-            run_iterator = range(1, max_runs + 1)
-            for run_id, energy_res, conf_res in pool.imap_unordered(run_solver_on_cpu, run_iterator):
-                completed_runs += 1
-                energy, conformation = process_and_log_result(run_id, energy_res, conf_res, log_filename)
-                if energy < best_energy:
-                    best_energy = energy
-                    best_conformation = conformation
-                    print(f"\nNew best energy found: {best_energy:.4f} on run {run_id}")
+    solver_mode = "GPU" if use_gpu else "CPU"
+    print(f"\n--- Initializing workers (Solver Mode: {solver_mode}) ---")
+    
+    gpu_id_list = []
+    try:
+        platforms = cl.get_platforms()
+        for p_idx, p in enumerate(platforms):
+            for d_idx, d in enumerate(p.get_devices(device_type=cl.device_type.GPU)):
+                gpu_id_list.append(f"{p_idx}:{d_idx}")
+                print(f"  Found GPU: '{d.name}' (ID: {p_idx}:{d_idx})")
+    except Exception as e:
+        print(f"Warning: Could not enumerate OpenCL GPUs. {e}")
+    
+    if not gpu_id_list:
+        print("Error: No OpenCL-enabled GPUs found. This script requires GPUs to manage worker distribution. Exiting.")
+        sys.exit(1)
+
+    total_threads = os.cpu_count()
+    num_gpus = len(gpu_id_list)
+    workers_per_gpu = max(1, total_threads // num_gpus)
+    print(f"System has {total_threads} threads and {num_gpus} GPU(s).")
+
+    total_workers = len(gpu_id_list) * workers_per_gpu
+    print(f"Configured for {workers_per_gpu} worker(s) per GPU. Total: {total_workers}")
+    
+    result_queue = multiprocessing.Queue()
+    active_processes = {}
+    run_count = 0
+    
+    try:
+        while completed_runs < max_runs:
+            while len(active_processes) < total_workers and run_count < max_runs:
+                run_count += 1
+                # Cycle through GPUs to distribute workers evenly
+                gpu_to_use = gpu_id_list[(run_count - 1) % len(gpu_id_list)]
+                
+                # Call the unified worker, passing the use_gpu flag
+                proc = multiprocessing.Process(
+                    target=run_solver_worker, 
+                    args=(gpu_to_use, use_gpu, result_queue, run_count, model_data)
+                )
+                proc.start()
+                active_processes[proc.pid] = proc
+
+            res_id, energy_res, conf_res = result_queue.get()
+            completed_runs += 1
+            energy, conformation = process_and_log_result(res_id, energy_res, conf_res, log_filename)
+            
+            if energy < best_energy:
+                best_energy = energy
+                best_conformation = conformation
+                print(f"\nNew best energy found: {best_energy:.4f} on run {res_id}")
+
+            finished_pids = [pid for pid, proc in active_processes.items() if not proc.is_alive()]
+            for pid in finished_pids:
+                active_processes[pid].join()
+                del active_processes[pid]
+    finally:
+        print("\n--- Terminating worker processes ---")
+        for pid, proc in active_processes.items():
+            if proc.is_alive():
+                proc.terminate()
+                proc.join()
 
     print("\n--- Overall Summary ---")
     if best_energy != float('inf'):
@@ -301,3 +289,4 @@ if __name__ == '__main__':
     else:
         print(f"Execution stopped. No valid conformation was found within the {max_runs} run limit.")
     print(f"A total of {completed_runs} runs were completed.")
+    
