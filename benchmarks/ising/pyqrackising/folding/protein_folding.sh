@@ -19,14 +19,14 @@ tail -n +2 "$CSV_FILE" | while IFS=',' read -r protein length sequence; do
     echo "--- Processing Protein: $protein ---"
 
     # Loop through the specified quality range
-    for quality in {2..7}; do
+    for quality in {2..3}; do
         echo ""
         echo "--> Testing with Quality Level: $quality <--"
 
         # Run the GPU version
-        echo "Starting GPU run for $protein at quality $quality..."
-        python3 protein_folding.py "$protein_input" "$quality"
-        echo "GPU run for $protein at quality $quality finished."
+        # echo "Starting GPU run for $protein at quality $quality..."
+        # python3 protein_folding.py "$protein_input" "$quality"
+        # echo "GPU run for $protein at quality $quality finished."
         
         echo "" # Add a space for readability
 
