@@ -3,7 +3,6 @@
 # according to the formula : cputhreads/gpus = workers per GPU
 # This version *requires* a GPU to manage the worker distribution,
 # even if the solver itself is set to CPU mode.
-
 import numpy as np
 import dimod
 from collections import defaultdict
@@ -15,6 +14,7 @@ import traceback
 import pyopencl as cl
 import itertools
 import warnings
+import queue # <--- ADDED for non-blocking gets
 
 # --- Worker Functions ---
 
@@ -246,8 +246,14 @@ if __name__ == '__main__':
     active_processes = {}
     run_count = 0
     
+    # --- MODIFIED SECTION: Non-blocking loop with timeout ---
+    
+    WORKER_TIMEOUT = 600  # 10 minutes * 60 seconds
+
     try:
         while completed_runs < max_runs:
+            
+            # 1. Launch new workers if there's room and we have runs left
             while len(active_processes) < total_workers and run_count < max_runs:
                 run_count += 1
                 # Cycle through GPUs to distribute workers evenly
@@ -259,25 +265,69 @@ if __name__ == '__main__':
                     args=(gpu_to_use, use_gpu, result_queue, run_count, model_data)
                 )
                 proc.start()
-                active_processes[proc.pid] = proc
+                # Store the process and its start time, keyed by its run_id
+                active_processes[run_count] = (proc, time.time())
 
-            res_id, energy_res, conf_res = result_queue.get()
-            completed_runs += 1
-            energy, conformation = process_and_log_result(res_id, energy_res, conf_res, log_filename)
+            # 2. Check for results from the queue (non-blocking)
+            try:
+                # Use a short timeout to keep the loop responsive
+                res_id, energy_res, conf_res = result_queue.get(timeout=1.0)
+                
+                # A worker finished successfully!
+                completed_runs += 1
+                energy, conformation = process_and_log_result(res_id, energy_res, conf_res, log_filename)
+                
+                if energy < best_energy:
+                    best_energy = energy
+                    best_conformation = conformation
+                    print(f"\nNew best energy found: {best_energy:.4f} on run {res_id}")
+                
+                # Clean up the finished process
+                if res_id in active_processes:
+                    proc, _ = active_processes.pop(res_id)
+                    proc.join()
+
+            except queue.Empty:
+                # This is normal, means no result was ready.
+                # We'll just loop again and check timeouts.
+                pass
+
+            # 3. Check all active processes for timeouts or unexpected crashes
+            current_time = time.time()
+            timed_out_runs = []
             
-            if energy < best_energy:
-                best_energy = energy
-                best_conformation = conformation
-                print(f"\nNew best energy found: {best_energy:.4f} on run {res_id}")
+            # Iterate over a copy since we may modify the dict
+            for run_id, (proc, start_time) in active_processes.items():
+                if not proc.is_alive():
+                    # Worker crashed without putting a result in the queue.
+                    print(f"\n--- WARNING: Worker for run {run_id} died unexpectedly. ---")
+                    timed_out_runs.append(run_id) # Add to list to be cleaned up
+                
+                elif (current_time - start_time) > WORKER_TIMEOUT:
+                    # Worker has timed out.
+                    print(f"\n--- TIMEOUT: Terminating worker for run {run_id} (PID {proc.pid}) after 10 minutes. ---")
+                    proc.terminate()
+                    timed_out_runs.append(run_id)
+                    
+                    # Log this timeout as a failed run
+                    process_and_log_result(run_id, None, None, log_filename)
+                    completed_runs += 1 # Count this as a (failed) run
 
-            finished_pids = [pid for pid, proc in active_processes.items() if not proc.is_alive()]
-            for pid in finished_pids:
-                active_processes[pid].join()
-                del active_processes[pid]
+            # 4. Clean up all timed-out or crashed processes
+            for run_id in timed_out_runs:
+                if run_id in active_processes:
+                    proc, _ = active_processes.pop(run_id)
+                    proc.join() # Wait for the terminated process to be fully cleaned up
+            
+            # 5. Exit condition if all work is done
+            if not active_processes and run_count >= max_runs:
+                break
+            
     finally:
-        print("\n--- Terminating worker processes ---")
-        for pid, proc in active_processes.items():
+        print("\n--- Terminating any remaining worker processes ---")
+        for run_id, (proc, start_time) in active_processes.items():
             if proc.is_alive():
+                print(f"Terminating run {run_id}...")
                 proc.terminate()
                 proc.join()
 
@@ -288,5 +338,5 @@ if __name__ == '__main__':
         print(f"Best conformation coordinates: {conf_str}")
     else:
         print(f"Execution stopped. No valid conformation was found within the {max_runs} run limit.")
-    print(f"A total of {completed_runs} runs were completed.")
-    
+    print(f"A total of {completed_runs} runs were completed (including timeouts/errors).")
+
