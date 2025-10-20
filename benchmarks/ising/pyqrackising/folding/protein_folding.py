@@ -3,6 +3,7 @@
 # according to the formula : cputhreads/gpus = workers per GPU
 # This version *requires* a GPU to manage the worker distribution,
 # even if the solver itself is set to CPU mode.
+
 import numpy as np
 import dimod
 from collections import defaultdict
@@ -14,7 +15,7 @@ import traceback
 import pyopencl as cl
 import itertools
 import warnings
-import queue # <--- ADDED for non-blocking gets
+import queue # For non-blocking gets
 
 # --- Worker Functions ---
 
@@ -246,9 +247,11 @@ if __name__ == '__main__':
     active_processes = {}
     run_count = 0
     
-    # --- MODIFIED SECTION: Non-blocking loop with timeout ---
+    # --- MODIFIED SECTION: Non-blocking loop with timeout and sanity filter ---
     
     WORKER_TIMEOUT = 600  # 10 minutes * 60 seconds
+    # ADDED: Sanity check for monster energy values
+    MIN_SENSIBLE_ENERGY = -100000.0 
 
     try:
         while completed_runs < max_runs:
@@ -277,10 +280,15 @@ if __name__ == '__main__':
                 completed_runs += 1
                 energy, conformation = process_and_log_result(res_id, energy_res, conf_res, log_filename)
                 
-                if energy < best_energy:
+                # --- MODIFIED: Check if the result is better AND sane ---
+                if energy < best_energy and energy > MIN_SENSIBLE_ENERGY:
                     best_energy = energy
                     best_conformation = conformation
                     print(f"\nNew best energy found: {best_energy:.4f} on run {res_id}")
+                
+                # Log if we are ignoring a "monster" value
+                elif energy < MIN_SENSIBLE_ENERGY:
+                    print(f"\n--- WARNING: Ignoring nonsensical energy {energy:.4f} on run {res_id} (below threshold {MIN_SENSIBLE_ENERGY}) ---")
                 
                 # Clean up the finished process
                 if res_id in active_processes:
@@ -339,4 +347,4 @@ if __name__ == '__main__':
     else:
         print(f"Execution stopped. No valid conformation was found within the {max_runs} run limit.")
     print(f"A total of {completed_runs} runs were completed (including timeouts/errors).")
-
+    
