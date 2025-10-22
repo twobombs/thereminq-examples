@@ -59,7 +59,7 @@ def solve_and_decode_protein(model_data, use_gpu):
     n = len(sequence)
 
     result_tuple = spin_glass_solver(
-        max_cut_graph, quality=quality, is_combo_maxcut_gpu=use_gpu
+        max_cut_graph, quality=quality, is_maxcut_gpu=use_gpu  # <<< MODIFIED LINE
     )
     bitstring = result_tuple[0]
     energy = result_tuple[3]
@@ -347,4 +347,3 @@ if __name__ == '__main__':
     else:
         print(f"Execution stopped. No valid conformation was found within the {max_runs} run limit.")
     print(f"A total of {completed_runs} runs were completed (including timeouts/errors).")
-    
