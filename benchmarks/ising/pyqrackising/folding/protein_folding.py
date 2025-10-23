@@ -184,7 +184,7 @@ if __name__ == '__main__':
 
     hp_sequence = convert_to_hp(sequence)
 
-    device_suffix = "_cpu_on_gpu" if not use_gpu else "_gpu"
+    device_suffix = "_cpu" if not use_gpu else "_gpu"
     log_filename = f"protein_folding_{name}_{length}mer_q{quality}{device_suffix}.log"
     print(f"Logging run results to: {log_filename}")
     if not os.path.exists(log_filename):
