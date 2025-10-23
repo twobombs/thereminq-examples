@@ -1,6 +1,8 @@
+#!/usr/bin/env python
+
 # this is a runner that leverages pyqrackising to fold proteins
 # gpu performance will stack with the number of cpu threads avaliable
-# according to the formula : cputhreads/gpus = workers per GPU
+# according to the formula : cputhreads/gpus = workers per GPU * 3
 # This version *requires* a GPU to manage the worker distribution,
 # even if the solver itself is set to CPU mode.
 
@@ -235,43 +237,105 @@ if __name__ == '__main__':
         print("Error: No OpenCL-enabled GPUs found. This script requires GPUs to manage worker distribution. Exiting.")
         sys.exit(1)
 
-    total_threads = os.cpu_count()
+    total_threads = os.cpu_count() # This is the "amount of cores"
     num_gpus = len(gpu_id_list)
-    workers_per_gpu = max(1, total_threads // num_gpus)
+    
+    # This is the total workload cap (tripled from original)
+    workers_per_gpu = max(1, (total_threads // num_gpus) * 3)
+    
     print(f"System has {total_threads} threads and {num_gpus} GPU(s).")
 
     total_workers = len(gpu_id_list) * workers_per_gpu
-    print(f"Configured for {workers_per_gpu} worker(s) per GPU. Total: {total_workers}")
+    print(f"Configured for {workers_per_gpu} worker(s) per GPU. Total Capacity: {total_workers}")
     
     result_queue = multiprocessing.Queue()
     active_processes = {}
     run_count = 0
     
-    # --- MODIFIED SECTION: Non-blocking loop with timeout and sanity filter ---
+    # --- MODIFIED SECTION: Load-Aware Batch Staggered loop ---
     
     WORKER_TIMEOUT = 600  # 10 minutes * 60 seconds
-    # ADDED: Sanity check for monster energy values
     MIN_SENSIBLE_ENERGY = -100000.0 
+    STAGGER_DELAY = 20.0 # Time in seconds between *checking* to launch a batch
+    
+    # <<< MODIFIED: Define the batch size as 3 * num_gpus
+    batch_size = num_gpus * 3
+    print(f"Launch batch size set to: {batch_size} (3x num_gpus)")
+
+    has_load_avg = hasattr(os, "getloadavg")
+    if has_load_avg:
+        print(f"Worker dispatch mode: System Load (checking < {total_threads} load) AND {STAGGER_DELAY}s stagger.")
+    else:
+        print(f"Worker dispatch mode: Time-based ({STAGGER_DELAY}s stagger). os.getloadavg() not available (e.g., Windows).")
 
     try:
+        # Track last launch time. Initialize to allow immediate first launch.
+        last_launch_time = time.time() - STAGGER_DELAY 
+
         while completed_runs < max_runs:
             
-            # 1. Launch new workers if there's room and we have runs left
-            while len(active_processes) < total_workers and run_count < max_runs:
-                run_count += 1
-                # Cycle through GPUs to distribute workers evenly
-                gpu_to_use = gpu_id_list[(run_count - 1) % len(gpu_id_list)]
-                
-                # Call the unified worker, passing the use_gpu flag
-                proc = multiprocessing.Process(
-                    target=run_solver_worker, 
-                    args=(gpu_to_use, use_gpu, result_queue, run_count, model_data)
-                )
-                proc.start()
-                # Store the process and its start time, keyed by its run_id
-                active_processes[run_count] = (proc, time.time())
+            # Get current time once at the start of the loop
+            current_time = time.time() 
+            
+            # 1. Check if we are able to launch a new batch
+            time_to_check = (current_time - last_launch_time) >= STAGGER_DELAY
+            can_launch = False
 
-            # 2. Check for results from the queue (non-blocking)
+            if time_to_check:
+                if has_load_avg:
+                    current_load_1m = os.getloadavg()[0]
+                    # Check if 1-min load avg is less than the number of logical cores
+                    if current_load_1m < total_threads:
+                        can_launch = True
+                    else:
+                        # Load is too high, reset timer to check again later
+                        last_launch_time = current_time 
+                        # print(f"Load high ({current_load_1m:.2f} >= {total_threads}), holding workers...") # Uncomment for verbose logging
+                else:
+                    # No load average (e.g., Windows), just use the time delay
+                    can_launch = True
+            
+            # 2. Launch a new *batch* of workers if all conditions are met
+            if (can_launch and
+                len(active_processes) < total_workers and
+                run_count < max_runs):
+                
+                # Reset the stagger timer *now that we are launching*
+                last_launch_time = current_time 
+                
+                # <<< MODIFIED: Use new batch_size variable
+                print(f"\nConditions met: Launching a batch of up to {batch_size} workers...")
+                if has_load_avg:
+                    # Log the load *at the time of decision*
+                    print(f"  (System load {os.getloadavg()[0]:.2f} < {total_threads} cores)")
+                
+                # <<< MODIFIED: Use new batch_size variable
+                for _ in range(batch_size):
+                    
+                    # Check limits *inside* the loop for each worker
+                    if len(active_processes) >= total_workers:
+                        print(f"  ...Total worker capacity reached ({total_workers}).")
+                        break 
+                    if run_count >= max_runs:
+                        print("  ...Max runs reached.")
+                        break
+
+                    # If we're here, we can launch one more worker.
+                    run_count += 1
+                    # Cycle through GPUs to distribute workers evenly
+                    gpu_to_use = gpu_id_list[(run_count - 1) % len(gpu_id_list)]
+                    
+                    print(f"  ... Launching run {run_count} on GPU {gpu_to_use}")
+
+                    proc = multiprocessing.Process(
+                        target=run_solver_worker, 
+                        args=(gpu_to_use, use_gpu, result_queue, run_count, model_data)
+                    )
+                    proc.start()
+                    # Store the process and its start time, keyed by its run_id
+                    active_processes[run_count] = (proc, time.time())
+
+            # 3. Check for results from the queue (non-blocking)
             try:
                 # Use a short timeout to keep the loop responsive
                 res_id, energy_res, conf_res = result_queue.get(timeout=1.0)
@@ -280,7 +344,7 @@ if __name__ == '__main__':
                 completed_runs += 1
                 energy, conformation = process_and_log_result(res_id, energy_res, conf_res, log_filename)
                 
-                # --- MODIFIED: Check if the result is better AND sane ---
+                # --- Check if the result is better AND sane ---
                 if energy < best_energy and energy > MIN_SENSIBLE_ENERGY:
                     best_energy = energy
                     best_conformation = conformation
@@ -297,11 +361,10 @@ if __name__ == '__main__':
 
             except queue.Empty:
                 # This is normal, means no result was ready.
-                # We'll just loop again and check timeouts.
+                # We'll just loop again and check timeouts/stagger.
                 pass
 
-            # 3. Check all active processes for timeouts or unexpected crashes
-            current_time = time.time()
+            # 4. Check all active processes for timeouts or unexpected crashes
             timed_out_runs = []
             
             # Iterate over a copy since we may modify the dict
@@ -321,13 +384,13 @@ if __name__ == '__main__':
                     process_and_log_result(run_id, None, None, log_filename)
                     completed_runs += 1 # Count this as a (failed) run
 
-            # 4. Clean up all timed-out or crashed processes
+            # 5. Clean up all timed-out or crashed processes
             for run_id in timed_out_runs:
                 if run_id in active_processes:
                     proc, _ = active_processes.pop(run_id)
                     proc.join() # Wait for the terminated process to be fully cleaned up
             
-            # 5. Exit condition if all work is done
+            # 6. Exit condition if all work is done
             if not active_processes and run_count >= max_runs:
                 break
             
@@ -347,3 +410,4 @@ if __name__ == '__main__':
     else:
         print(f"Execution stopped. No valid conformation was found within the {max_runs} run limit.")
     print(f"A total of {completed_runs} runs were completed (including timeouts/errors).")
+    
