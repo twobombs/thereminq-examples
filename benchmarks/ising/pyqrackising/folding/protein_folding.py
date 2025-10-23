@@ -254,7 +254,7 @@ if __name__ == '__main__':
     
     # --- MODIFIED SECTION: Load-Aware Batch Staggered loop ---
     
-    WORKER_TIMEOUT = 600  # 10 minutes * 60 seconds
+    WORKER_TIMEOUT = 180  # 3 minutes * 60 seconds
     MIN_SENSIBLE_ENERGY = -100000.0 
     STAGGER_DELAY = 10.0 # Time in seconds between *checking* to launch a batch
     
@@ -376,7 +376,7 @@ if __name__ == '__main__':
                 
                 elif (current_time - start_time) > WORKER_TIMEOUT:
                     # Worker has timed out.
-                    print(f"\n--- TIMEOUT: Terminating worker for run {run_id} (PID {proc.pid}) after 10 minutes. ---")
+                    print(f"\n--- TIMEOUT: Terminating worker for run {run_id} (PID {proc.pid}) after 3 minutes. ---")
                     proc.terminate()
                     timed_out_runs.append(run_id)
                     
