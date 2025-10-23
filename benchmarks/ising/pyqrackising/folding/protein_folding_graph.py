@@ -10,7 +10,7 @@ def parse_filename(filename):
     """
     Extracts protein name, quality level, and device from a log file name.
     """
-    pattern = r"protein_folding_(?P<protein>.*?)_(?P<mer>\d+mer)_q(?P<q_level>\d+)(?P<device>_cpu)?\.log"
+    pattern = r"protein_folding_(?P<protein>.*?)_(?P<mer>\d+mer)_q(?P<q_level>\d+)(?P<device>_cpu_on_gpu)?\.log"
     match = re.match(pattern, filename)
     
     if match:
