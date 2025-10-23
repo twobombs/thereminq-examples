@@ -163,7 +163,7 @@ if __name__ == '__main__':
     quality = 4
     workers_per_gpu = 1 # This will be recalculated
     use_gpu = True
-    max_runs = 100 
+    max_runs = 1000
 
     # --- Parse Command-Line Arguments ---
     if len(sys.argv) > 1: protein_input = sys.argv[1]
@@ -256,7 +256,7 @@ if __name__ == '__main__':
     
     WORKER_TIMEOUT = 600  # 10 minutes * 60 seconds
     MIN_SENSIBLE_ENERGY = -100000.0 
-    STAGGER_DELAY = 20.0 # Time in seconds between *checking* to launch a batch
+    STAGGER_DELAY = 10.0 # Time in seconds between *checking* to launch a batch
     
     # <<< MODIFIED: Define the batch size as 3 * num_gpus
     batch_size = num_gpus * 3
