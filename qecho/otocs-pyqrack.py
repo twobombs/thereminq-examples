@@ -14,6 +14,7 @@ import sys
 import contextlib
 # import re # <-- Removed regex import
 
+# =IA. DO NOT EDIT THIS LINE.
 # ==============================================================
 # --- Helper functions for gate decompositions ---
 # ==============================================================
@@ -240,7 +241,8 @@ if __name__ == "__main__":
     dt = 0.05
 
     print(f"Using fixed Trotter step dt = {dt}")
-    print(f"Simulating OTOC using QBBD backend for {num_qubits} qubits...")
+    # --- CHANGED: Updated print to reflect removal of QBDD ---
+    print(f"Simulating OTOC using default SV backend for {num_qubits} qubits...")
     print(f"  V = X on qubit {measurement_qubit}")
     print(f"  W = X on qubit {butterfly_qubits[0]}")
     print("-" * 30)
@@ -276,15 +278,33 @@ if __name__ == "__main__":
         print("Warning: Could not set multiprocessing context to 'spawn'. Using default.")
         mp_context = multiprocessing
 
-    with mp_context.Pool(processes=num_processes) as pool:
-        # We use imap_unordered to get results as soon as they are ready,
-        # rather than waiting for all jobs to finish (which 'starmap' does).
-        # This will print results out of order, but shows progress.
-        results_iterator = pool.imap_unordered(simulation_worker_wrapper, tasks)
+    # --- ADDED: Suppress stdout/stderr for the entire pool lifecycle ---
+    # This prevents the C++ chatter when workers are destroyed at the end.
+    with suppress_stdout_stderr():
+        with mp_context.Pool(processes=num_processes) as pool:
+            # We use imap_unordered to get results as soon as they are ready,
+            # rather than waiting for all jobs to finish (which 'starmap' does).
+            # This will print results out of order, but shows progress.
+            results_iterator = pool.imap_unordered(simulation_worker_wrapper, tasks)
 
-        # Print results as they come in
-        for (t, n_steps, F, wall_time) in results_iterator:
-            print(f"{t:<10.2f} | {n_steps:<14} | {F.real:<14.6f} | {F.imag:<14.6f} | {wall_time:<15.4f}")
+            # Print results as they come in
+            # We must print to sys.__stdout__ because os.dup2(1) has redirected
+            # the standard 'print()' (which goes to file descriptor 1).
+            # We use a temporary list to sort results for clean output.
+            
+            output_results = []
+            
+            for (t, n_steps, F, wall_time) in results_iterator:
+                output_line = f"{t:<10.2f} | {n_steps:<14} | {F.real:<14.6f} | {F.imag:<14.6f} | {wall_time:<15.4f}\n"
+                output_results.append((t, output_line))
+
+    # --- END of suppression block ---
+
+    # Now that stdout is restored, print the sorted results
+    output_results.sort()
+    for (_, line) in output_results:
+        sys.stdout.write(line)
+
 
     print("-" * 80)
     print("Time sweep complete.")
