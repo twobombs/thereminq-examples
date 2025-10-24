@@ -1,109 +1,291 @@
-# from https://arxiv.org/pdf/2510.19550
-# gemini25 - draft
+#!/usr/bin/env python3
+# Out-of-Time-Order Correlator (OTOC) simulation using PyQrack QBDD backend
+# Based on gemini25-draft, modified for correct OTOC evaluation via overlap
+# Aryan Blaauw & GPT-5, Oct 2025
 
-# --- Other imports and helper functions remain the same ---
 import math
-from pyqrack import QrackSimulator # Make sure pyqrack is installed
+import time
+from pyqrack import QrackSimulator
+import multiprocessing
+from itertools import cycle
+# Add imports for suppressing C++ stdout/stderr
+import os
+import sys
+import contextlib
+# import re # <-- Removed regex import
 
-# --- rz, rx, ry, apply_zz_evolution, apply_dq_evolution, apply_trotter_step functions are unchanged ---
-# (Include the previous definitions here)
-# ... (rz definition) ...
-# ... (rx definition) ...
-# ... (ry definition) ...
-# ... (apply_zz_evolution definition) ...
-# ... (apply_dq_evolution definition) ...
-# ... (apply_trotter_step definition) ...
+# ==============================================================
+# --- Helper functions for gate decompositions ---
+# ==============================================================
 
+def rz(sim, angle, q):
+    """Pauli-Z rotation"""
+    sim.r(3, angle, q)
 
-def simulate_otoc_qbdd(n_qubits, couplings, time, n_steps, m_qubit, b_qubits):
+def rx(sim, angle, q):
+    """Pauli-X rotation"""
+    sim.r(1, angle, q)
+
+def ry(sim, angle, q):
+    """Pauli-Y rotation"""
+    sim.r(2, angle, q)
+
+def apply_zz_evolution(sim, q1, q2, angle):
+    """Applies e^(-i * angle * Z1 * Z2)."""
+    sim.mcx([q1], q2)
+    rz(sim, 2.0 * angle, q2)
+    sim.mcx([q1], q2)
+
+def apply_dq_evolution(sim, q1, q2, angle):
+    """Applies e^(-i * angle * (YY - XX))"""
+    # --- e^(i * angle * XX)
+    angle_xx = -angle
+    sim.h(q1)
+    sim.h(q2)
+    sim.mcx([q1], q2)
+    rz(sim, 2.0 * angle_xx, q2)
+    sim.mcx([q1], q2)
+    sim.h(q1)
+    sim.h(q2)
+    # --- e^(-i * angle * YY)
+    angle_yy = angle
+    rx(sim, math.pi / 2.0, q1)
+    rx(sim, math.pi / 2.0, q2)
+    sim.mcx([q1], q2)
+    rz(sim, 2.0 * angle_yy, q2)
+    sim.mcx([q1], q2)
+    rx(sim, -math.pi / 2.0, q1)
+    rx(sim, -math.pi / 2.0, q2)
+
+def apply_trotter_step(sim, couplings, dt, n_qubits, forward=True):
+    """Applies one Trotter step for H = sum (Jzz Z.Z + Jdq(YY-XX))"""
+    tstep = dt if forward else -dt
+    for (q1, q2), terms in couplings.items():
+        if 'zz' in terms and terms['zz'] != 0:
+            apply_zz_evolution(sim, q1, q2, terms['zz'] * tstep)
+        if 'dq' in terms and terms['dq'] != 0:
+            apply_dq_evolution(sim, q1, q2, terms['dq'] * tstep)
+
+# ==============================================================
+# --- New OTOC via two-branch overlap ---
+# ==============================================================
+
+@contextlib.contextmanager
+def suppress_stdout_stderr():
+    """A context manager that redirects stdout and stderr to devnull
+       using low-level file descriptor duplication to capture C++ output.
     """
-    Simulates the full OTOC protocol using the QBBD backend.
-
-    Args:
-        n_qubits (int): Total number of qubits (spins).
-        couplings (dict): Dictionary mapping (q1, q2) tuples to coupling strengths.
-                          Example: {(0, 1): {'zz': 0.5, 'dq': 1.2}, ...}
-        time (float): Total forward/backward evolution time.
-        n_steps (int): Number of Trotter steps.
-        m_qubit (int): Index of the measurement qubit.
-        b_qubits (list): List of indices for the butterfly qubits.
-
-    Returns:
-        float: The calculated OTOC value (expectation of Pauli-X on m_qubit).
-    """
-    # *** MODIFICATION HERE: Instantiate with QBBD backend ***
-    # The exact flag might depend on the specific PyQrack version,
-    # 'is_qbdd=True' is a common pattern. Check PyQrack docs if this fails.
-    sim = QrackSimulator(n_qubits, is_qbdd=True)
-    # **********************************************************
-
-    dt = time / n_steps
-
-    # 1. Initial State Preparation
-    sim.x(m_qubit) # Pauli-X on measurement qubit
-
-    # 2. Forward Evolution
-    for _ in range(n_steps):
-        apply_trotter_step(sim, couplings, dt, n_qubits, forward=True)
-
-    # 3. Butterfly Operator
-    for bq in b_qubits:
-        sim.x(bq) # Example perturbation: a simple Pauli-X flip
-
-    # 4. Backward Evolution
-    for _ in range(n_steps):
-        apply_trotter_step(sim, couplings, dt, n_qubits, forward=False)
-
-    # 5. Measurement
-    # Assuming exp_pauli_sum works with QBBD backend.
-    # Define the Pauli string for <X> on m_qubit: [1.0, qubit_pauli_map]
-    # qubit_pauli_map: list of N integers, 1=X at m_qubit, 0=I elsewhere
-    pauli_op_map = [0] * n_qubits
-    pauli_op_map[m_qubit] = 1 # 1 corresponds to Pauli X
-    pauli_op = [1.0] + pauli_op_map
+    # Save original file descriptors
+    old_stdout_fd = os.dup(1)
+    old_stderr_fd = os.dup(2)
     
-    # Note: The format for exp_pauli_sum might need adjustment based on PyQrack version.
-    # The format [coeff, [p1, p2, ..., pn]] where pi is Pauli index (0=I, 1=X, 2=Y, 3=Z)
-    # might be required by some versions. Let's stick to the previous PDF's format for now.
-    # The format [1.0] + list(...) in the original PDF seems non-standard for typical exp_pauli_sum.
-    # A more common format would be something like:
-    # pauli_list = [[1.0, pauli_op_map]] # A list containing one term
-    # otoc_value = sim.exp_pauli_sum(pauli_list)
-    # Let's refine the Pauli op construction based on common conventions:
-    pauli_list = []
-    term_map = [0] * n_qubits # 0 = Pauli I
-    term_map[m_qubit] = 1   # 1 = Pauli X
-    pauli_list.append([1.0, term_map]) # Append the term [<coeff>, <pauli_indices>]
+    with open(os.devnull, 'w') as fnull:
+        devnull_fd = fnull.fileno()
+        # Redirect stdout (1) and stderr (2) to devnull
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+    
+    try:
+        yield
+    finally:
+        # Restore original stdout and stderr
+        os.dup2(old_stdout_fd, 1)
+        os.dup2(old_stderr_fd, 2)
+        # Close the saved FDs
+        os.close(old_stdout_fd)
+        os.close(old_stderr_fd)
 
-    otoc_value = sim.exp_pauli_sum(pauli_list) # Use the list-of-terms format
+def compute_otoc_overlap(n_qubits, couplings, time_t, n_steps, m_qubit, b_qubits, device_id):
+    """
+    Compute F(t) = <psi| V(t) W V(t) W |psi>
+    using two-branch overlap method.
+    'device_id' specifies which GPU to run this instance on.
+    """
+    def run_branch(seq_fn, dev_id):
+        # We remove 'isBinaryDecisionTree=True' because the .out_ket() method
+        # on the QBDD backend appears to be causing a 'std::bad_alloc' (out of memory)
+        # error in the C++ library, even for a small 20-qubit system.
+        # The default state vector backend should handle 20 qubits easily.
+        
+        s = None
+        init_exception = None
+        
+        # --- Suppress C++ stdout/stderr during init ---
+        # This context manager redirects file descriptors 1 (stdout) and 2 (stderr)
+        # to /dev/null just for the QrackSimulator init and set_device call.
+        with suppress_stdout_stderr():
+            try:
+                s = QrackSimulator(n_qubits) # , isBinaryDecisionTree=True)
+                s.set_device(dev_id)
+            except Exception as e:
+                # Store exception to re-raise it after stdout is restored
+                init_exception = e
+        # ----------------------------------------------
 
-    return otoc_value
+        # --- Handle init exception (if any) with stdout restored ---
+        if init_exception:
+            # If init failed, print the error and re-raise it.
+            print(f"Error during QrackSimulator init on device {dev_id}: {init_exception}")
+            raise init_exception
+        # --------------------------------------------------
 
-# --- Example Usage (Unchanged, but now calls simulate_otoc_qbdd) ---
-if __name__ == '__main__':
-    # Example usage for a 3-qubit system
-    num_qubits = 3
-    # Define couplings for the TARDIS-2 like Hamiltonian
-    # H = d_01(YY-XX) + d_01(ZZ) + d_12(YY-XX) + d_12(ZZ) ...
-    example_couplings = {
-        (0, 1): {'zz': 1.5, 'dq': 0.8},
-        (1, 2): {'zz': 1.2, 'dq': 1.0},
-        (0, 2): {'zz': 0.5, 'dq': 0.3} # All-to-all coupling assumed here
-    }
+        s.h(m_qubit)  # prepare |+> on measurement qubit
+
+        if n_steps == 0:
+            dt = 0.0
+            steps = 0
+        else:
+            dt = time_t / n_steps
+            steps = n_steps
+
+        # forward evolution
+        for _ in range(steps):
+            apply_trotter_step(s, couplings, dt, n_qubits, forward=True)
+
+        # branch-specific sequence
+        seq_fn(s)
+
+        # backward evolution
+        for _ in range(steps):
+            apply_trotter_step(s, couplings, dt, n_qubits, forward=False)
+
+        return s
+
+    def branchA_seq(s):
+        # apply V then W (order: V(t) W)
+        s.x(m_qubit)
+        for bq in b_qubits:
+            s.x(bq)
+
+    def branchB_seq(s):
+        # apply W then V (order: W V(t))
+        for bq in b_qubits:
+            s.x(bq)
+        s.x(m_qubit)
+
+    simA = run_branch(branchA_seq, device_id)
+    simB = run_branch(branchB_seq, device_id)
+
+    # ---- State overlap ----
+    # Adapt these lines based on your PyQrack version's API.
+    # The 'dir()' output suggests 'out_ket()' is the method to get the state.
+    try:
+        svA = simA.out_ket()    # CHANGED: from get_statevector()
+        svB = simB.out_ket()    # CHANGED: from get_statevector()
+
+        # This calculation assumes svA and svB are iterables (like lists)
+        # of complex numbers or types that can be cast to complex.
+        if svA is None or svB is None:
+             raise ValueError("simA.out_key() or simB.out_ket() returned None.")
+
+        inner = sum(complex(a).conjugate() * complex(b) for a, b in zip(svA, svB))
+        return inner
+
+    except AttributeError as e:
+        # This block might be hit if a *different* attribute is missing,
+        # but the original get_statevector/state_inner_product are confirmed missing.
+        raise RuntimeError(
+            f"An AttributeError occurred: {e}. "
+            "This is unexpected if 'out_ket' exists. "
+            "Check PyQrack documentation."
+        )
+    except Exception as e:
+        # Catch other errors, e.g., TypeError if out_ket() returns a string
+        # and complex() fails.
+        raise RuntimeError(
+            f"Failed to compute overlap using .out_ket(). Error: {e}. "
+            "Check the return type of .out_ket(). It might not be a list of complex numbers. "
+            "Original tried methods 'get_statevector' and 'state_inner_product' are confirmed missing."
+        )
+
+# ==============================================================
+# --- Worker function for parallel processing ---
+# ==============================================================
+
+def simulation_worker(t, n_steps, device_id, n_qubits, couplings, m_qubit, b_qubits):
+    """Worker function for parallel processing one time point."""
+    start = time.time()
+    F = compute_otoc_overlap(n_qubits, couplings, t, n_steps, m_qubit, b_qubits, device_id)
+    end = time.time()
+    # Return results for printing
+    return (t, n_steps, F, end - start)
+
+def simulation_worker_wrapper(args_tuple):
+    """Helper to unpack arguments for pool.imap_unordered."""
+    return simulation_worker(*args_tuple)
+
+# ==============================================================
+# --- Main routine ---
+# ==============================================================
+
+if __name__ == "__main__":
+    
+    # --- Device detection logic removed. ---
+    # --- Hardcoding 3 GPUs as requested. ---
+    base_gpus = [0, 1, 2]
+    
+    num_qubits = 20
+
+    # --- Build 1D chain Hamiltonian ---
+    example_couplings = {}
+    zz_strength = 0.15
+    dq_strength = 0.08
+
+    print(f"Building 1D chain Hamiltonian for {num_qubits} qubits...")
+    for i in range(num_qubits - 1):
+        example_couplings[(i, i + 1)] = {"zz": zz_strength, "dq": dq_strength}
+
     measurement_qubit = 0
-    butterfly_qubit_list = [2] # Perturb qubit 2
-    total_time = 1.0 # Corresponds to 't' in C(t)
-    trotter_steps = 20
+    butterfly_qubits = [num_qubits - 1]
+    dt = 0.05
 
+    print(f"Using fixed Trotter step dt = {dt}")
     print(f"Simulating OTOC using QBBD backend for {num_qubits} qubits...")
+    print(f"  V = X on qubit {measurement_qubit}")
+    print(f"  W = X on qubit {butterfly_qubits[0]}")
+    print("-" * 30)
 
-    otoc = simulate_otoc_qbdd(
-        n_qubits=num_qubits,
-        couplings=example_couplings,
-        time=total_time,
-        n_steps=trotter_steps,
-        m_qubit=measurement_qubit,
-        b_qubits=butterfly_qubit_list
-    )
+    # --- Time sweep (parallel) ---
+    time_points = [i for i in range(0, 31)]  # 0 to 30
 
-    print(f"Simulated OTOC (QBDD) at time t={total_time}: {otoc}")
+    # Define the list of GPU device IDs to use
+    # Run 2 processes per GPU to increase utilization
+    gpu_devices = base_gpus * 2 # Use devices [0,1,2] and run 2 threads per device
+    device_cycle = cycle(gpu_devices)
+    num_processes = len(gpu_devices)
+
+    print(f"Starting parallel time sweep across {num_processes} workers ({len(base_gpus)} GPUs x 2 workers) on devices: {gpu_devices}...")
+    # --- FIXED: Added padding and closing quote to the f-string ---
+    print(f"{'Time (t)':<10} | {'Trotter Steps':<14} | {'Re[OTOC]':<14} | {'Im[OTOC]':<14} | {'Wall Time (s)':<15}")
+    print("-" * 80)
+
+    # Prepare the list of tasks for the pool
+    tasks = []
+    for t in time_points:
+        n_steps = 0 if t == 0 else max(1, int(t / dt))
+        # Assign a device from the cycle
+        assigned_device = next(device_cycle)
+        # Add arguments for starmap
+        tasks.append((t, n_steps, assigned_device, num_qubits, example_couplings, measurement_qubit, butterfly_qubits))
+
+    # Use multiprocessing Pool to run tasks in parallel
+    # We set the start method to 'spawn' for GPU/CUDA compatibility
+    try:
+        mp_context = multiprocessing.get_context('spawn')
+    except Exception:
+        print("Warning: Could not set multiprocessing context to 'spawn'. Using default.")
+        mp_context = multiprocessing
+
+    with mp_context.Pool(processes=num_processes) as pool:
+        # We use imap_unordered to get results as soon as they are ready,
+        # rather than waiting for all jobs to finish (which 'starmap' does).
+        # This will print results out of order, but shows progress.
+        results_iterator = pool.imap_unordered(simulation_worker_wrapper, tasks)
+
+        # Print results as they come in
+        for (t, n_steps, F, wall_time) in results_iterator:
+            print(f"{t:<10.2f} | {n_steps:<14} | {F.real:<14.6f} | {F.imag:<14.6f} | {wall_time:<15.4f}")
+
+    print("-" * 80)
+    print("Time sweep complete.")
+
