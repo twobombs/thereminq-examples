@@ -75,6 +75,9 @@ def apply_trotter_step(sim, couplings, dt, n_qubits, forward=True):
 def suppress_stdout_stderr():
     """A context manager that redirects stdout and stderr to devnull
        using low-level file descriptor duplication to capture C++ output.
+       
+       Yields:
+           int: The file descriptor for the original, un-redirected stdout.
     """
     # Save original file descriptors
     old_stdout_fd = os.dup(1)
@@ -87,7 +90,8 @@ def suppress_stdout_stderr():
         os.dup2(devnull_fd, 2)
     
     try:
-        yield
+        # --- CHANGED: Yield the *original* stdout file descriptor ---
+        yield old_stdout_fd
     finally:
         # Restore original stdout and stderr
         os.dup2(old_stdout_fd, 1)
@@ -95,6 +99,7 @@ def suppress_stdout_stderr():
         # Close the saved FDs
         os.close(old_stdout_fd)
         os.close(old_stderr_fd)
+
 
 def compute_otoc_overlap(n_qubits, couplings, time_t, n_steps, m_qubit, b_qubits, device_id):
     """
@@ -126,7 +131,9 @@ def compute_otoc_overlap(n_qubits, couplings, time_t, n_steps, m_qubit, b_qubits
         # --- Handle init exception (if any) with stdout restored ---
         if init_exception:
             # If init failed, print the error and re-raise it.
-            print(f"Error during QrackSimulator init on device {dev_id}: {init_exception}")
+            # We must write to stderr directly as stdout might still be captured.
+            sys.stderr.write(f"Error during QrackSimulator init on device {dev_id}: {init_exception}\n")
+            sys.stderr.flush()
             raise init_exception
         # --------------------------------------------------
 
@@ -260,6 +267,7 @@ if __name__ == "__main__":
     # --- FIXED: Added padding and closing quote to the f-string ---
     print(f"{'Time (t)':<10} | {'Trotter Steps':<14} | {'Re[OTOC]':<14} | {'Im[OTOC]':<14} | {'Wall Time (s)':<15}")
     print("-" * 80)
+    sys.stdout.flush() # Ensure headers are printed
 
     # Prepare the list of tasks for the pool
     tasks = []
@@ -280,32 +288,25 @@ if __name__ == "__main__":
 
     # --- ADDED: Suppress stdout/stderr for the entire pool lifecycle ---
     # This prevents the C++ chatter when workers are destroyed at the end.
-    with suppress_stdout_stderr():
+    # --- CHANGED: It now yields the original stdout file descriptor ---
+    with suppress_stdout_stderr() as original_stdout_fd:
         with mp_context.Pool(processes=num_processes) as pool:
             # We use imap_unordered to get results as soon as they are ready,
             # rather than waiting for all jobs to finish (which 'starmap' does).
             # This will print results out of order, but shows progress.
             results_iterator = pool.imap_unordered(simulation_worker_wrapper, tasks)
 
-            # Print results as they come in
-            # We must print to sys.__stdout__ because os.dup2(1) has redirected
-            # the standard 'print()' (which goes to file descriptor 1).
-            # We use a temporary list to sort results for clean output.
-            
-            output_results = []
-            
+            # --- CHANGED: Print results immediately using os.write ---
+            # This writes *directly* to the original stdout file descriptor,
+            # bypassing the redirect and printing immediately.
             for (t, n_steps, F, wall_time) in results_iterator:
                 output_line = f"{t:<10.2f} | {n_steps:<14} | {F.real:<14.6f} | {F.imag:<14.6f} | {wall_time:<15.4f}\n"
-                output_results.append((t, output_line))
+                # Write the byte-encoded string to the original stdout FD
+                os.write(original_stdout_fd, output_line.encode())
 
     # --- END of suppression block ---
 
-    # Now that stdout is restored, print the sorted results
-    output_results.sort()
-    for (_, line) in output_results:
-        sys.stdout.write(line)
-
-
+    # Results are already printed, so we just print the footer.
     print("-" * 80)
     print("Time sweep complete.")
 
