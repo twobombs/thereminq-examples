@@ -158,23 +158,25 @@ def compute_otoc_overlap(n_qubits, couplings, time_t, n_steps, m_qubit, b_qubits
         # Initial state: |+> on measurement qubit, |0> elsewhere
         s.h(m_qubit)
 
+        # Calculate dt based on total time and total steps for this run
         if n_steps == 0 or time_t == 0.0:
-            dt = 0.0
+            dt_actual = 0.0
             steps = 0
         else:
-            dt = time_t / n_steps
+            # dt_actual might differ slightly from fixed_dt due to rounding n_steps
+            dt_actual = time_t / n_steps
             steps = n_steps
 
         # Forward evolution U(t)
         for _ in range(steps):
-            apply_trotter_step(s, couplings, dt, n_qubits, forward=True)
+            apply_trotter_step(s, couplings, dt_actual, n_qubits, forward=True)
 
         # Branch-specific sequence (W then V, or V then W)
         seq_fn(s)
 
         # Backward evolution U_dag(t)
         for _ in range(steps):
-            apply_trotter_step(s, couplings, dt, n_qubits, forward=False)
+            apply_trotter_step(s, couplings, dt_actual, n_qubits, forward=False)
 
         return s
 
@@ -299,8 +301,9 @@ if __name__ == "__main__":
 
     # --- Build 1D chain Hamiltonian ---
     example_couplings = {}
-    zz_strength = 0.15 # Example strength
-    dq_strength = 0.08 # Example strength
+    # --- Using Very Weak interaction strengths ---
+    zz_strength = 0.0015
+    dq_strength = 0.0008
 
     print(f"Building 1D chain Hamiltonian for {num_qubits} qubits...")
     for i in range(num_qubits - 1):
@@ -308,7 +311,8 @@ if __name__ == "__main__":
 
     measurement_qubit = 0
     butterfly_qubits = [num_qubits - 1] # Single butterfly qubit at the end
-    fixed_dt = 0.05 # Fixed time step for Trotterization
+    # --- Using Smaller time step ---
+    fixed_dt = 0.01 # Fixed time step for Trotterization
 
     print(f"Using fixed Trotter step dt = {fixed_dt}")
     print(f"Simulating OTOC using default SV backend for {num_qubits} qubits...")
@@ -317,7 +321,9 @@ if __name__ == "__main__":
     print("-" * 30)
 
     # --- Time sweep (parallel) ---
-    max_time = 3.0
+    # --- MODIFIED: Increased max_time ---
+    max_time = 10.0 # Increased from 3.0
+    # --- END MODIFICATION ---
     num_time_points = 31 # Number of points including t=0
     time_points = [i * max_time / (num_time_points -1) for i in range(num_time_points)] # Linear spacing
 
@@ -341,6 +347,7 @@ if __name__ == "__main__":
     tasks = []
     for t in time_points:
         # Calculate number of steps for this time point based on fixed dt
+        # Note: n_steps will be significantly larger due to increased max_time
         n_steps = 0 if t == 0 else max(1, int(round(t / fixed_dt)))
         assigned_device = next(device_cycle)
         tasks.append((t, n_steps, assigned_device, num_qubits, example_couplings, measurement_qubit, butterfly_qubits))
