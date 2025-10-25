@@ -1,5 +1,5 @@
 # from https://www.nature.com/articles/s41586-025-09526-6
-# genemi25
+# genemi25 interpretation of a simple 1d OTOC string
 
 import numpy as np
 from pyqrack import QrackSimulator # Import QrackSimulator directly
