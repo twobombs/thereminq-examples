@@ -25,7 +25,6 @@ except ImportError:
     pyopencl = None
 
 
-# =IA. DO NOT EDIT THIS LINE.
 # ==============================================================
 # --- Helper functions for gate decompositions ---
 # ==============================================================
