@@ -3,6 +3,7 @@
 # Includes pyopencl for automatic GPU detection (no fallback).
 # Simulates a 2D lattice.
 # Aryan Blaauw & Gemini, Oct 2025
+# in active development
 
 import math
 import time
