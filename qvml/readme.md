@@ -1,3 +1,5 @@
+<img width="1024" height="1024" alt="Gemini_Generated_Image_g0rlxg0rlxg0rlxg" src="https://github.com/user-attachments/assets/987bc120-d483-49a9-8b33-d33edf1c6be2" />
+
 small QVML demo based on https://github.com/vm6502q/pyqrack-examples/blob/main/tn_contraction.py
 
 tensors are created from stevector and concentrated for optimisation by pyqrackising
