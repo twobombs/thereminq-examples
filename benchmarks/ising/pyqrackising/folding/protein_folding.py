@@ -61,7 +61,7 @@ def solve_and_decode_protein(model_data, use_gpu):
     n = len(sequence)
 
     result_tuple = spin_glass_solver(
-        max_cut_graph, quality=quality, is_maxcut_gpu=use_gpu  # <<< MODIFIED LINE
+        max_cut_graph, quality=quality, is_maxcut_gpu=use_gpu
     )
     bitstring = result_tuple[0]
     energy = result_tuple[3]
@@ -264,7 +264,7 @@ if __name__ == '__main__':
 
     has_load_avg = hasattr(os, "getloadavg")
     if has_load_avg:
-        print(f"Worker dispatch mode: System Load (checking < {total_threads} load) AND {STAGGER_DELAY}s stagger.")
+        print(f"Worker dispatch mode: System Load (checking < {total_threads} load) OR (active workers < {total_threads}) AND {STAGGER_DELAY}s stagger.")
     else:
         print(f"Worker dispatch mode: Time-based ({STAGGER_DELAY}s stagger). os.getloadavg() not available (e.g., Windows).")
 
@@ -280,17 +280,31 @@ if __name__ == '__main__':
             # 1. Check if we are able to launch a new batch
             time_to_check = (current_time - last_launch_time) >= STAGGER_DELAY
             can_launch = False
+            launch_reason = "" # Store *why* we are launching
 
             if time_to_check:
                 if has_load_avg:
                     current_load_1m = os.getloadavg()[0]
-                    # Check if 1-min load avg is less than the number of logical cores
-                    if current_load_1m < total_threads:
+                    num_active_workers = len(active_processes)
+                    
+                    # --- MODIFIED LAUNCH LOGIC ---
+                    # Condition 1: System load is low (original logic)
+                    load_is_low = current_load_1m < total_threads
+                    # Condition 2: *Our* active worker count is low (the new rule)
+                    our_workers_are_low = num_active_workers < total_threads
+
+                    if load_is_low or our_workers_are_low:
                         can_launch = True
+                        if not load_is_low:
+                            # This is the exception case
+                            launch_reason = f"  (Note: Sys load {current_load_1m:.2f} is high, but launching as workers ({num_active_workers}) < cores ({total_threads}))"
+                        else:
+                            # This is the normal case
+                            launch_reason = f"  (System load {current_load_1m:.2f} < {total_threads} cores)"
                     else:
-                        # Load is too high, reset timer to check again later
+                        # Load is high AND our workers are high, so we must wait
                         last_launch_time = current_time 
-                        # print(f"Load high ({current_load_1m:.2f} >= {total_threads}), holding workers...") # Uncomment for verbose logging
+                        print(f"  (Load high ({current_load_1m:.2f}) and active workers ({num_active_workers}) >= cores, holding...)")
                 else:
                     # No load average (e.g., Windows), just use the time delay
                     can_launch = True
@@ -305,9 +319,10 @@ if __name__ == '__main__':
                 
                 # <<< MODIFIED: Use new batch_size variable
                 print(f"\nConditions met: Launching a batch of up to {batch_size} workers...")
-                if has_load_avg:
-                    # Log the load *at the time of decision*
-                    print(f"  (System load {os.getloadavg()[0]:.2f} < {total_threads} cores)")
+                
+                # <<< MODIFIED: Use the saved reason string from our logic check
+                if has_load_avg and launch_reason:
+                    print(launch_reason)
                 
                 # <<< MODIFIED: Use new batch_size variable
                 for _ in range(batch_size):
