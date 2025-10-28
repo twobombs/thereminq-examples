@@ -1,7 +1,7 @@
+#!/bin/bash
+
 # everybody's looking at the ladder 
 # https://youtu.be/XzO9jGPtrhc?si=hl7L-93FIRkgsC97
-
-#!/bin/bash
 
 # --- Script Configuration ---
 LOG_DIR="otoc_sweep_log"
@@ -20,7 +20,7 @@ if ! command -v clinfo &> /dev/null; then
     exit 1
 fi
 
-# --- â¨ MODIFIED LINE: Using gsub for robust parsing ---
+# --- Ã¢Â¨ MODIFIED LINE: Using gsub for robust parsing ---
 # This awk command is safer. It strips all non-digits from the fields.
 mapfile -t GPUS < <(clinfo -l | awk '
 /Platform #/ { plat_field = $2 } 
@@ -106,4 +106,4 @@ echo ""
 echo "All $TOTAL_JOBS_LAUNCHED jobs have been launched."
 echo "Waiting for the last $ACTIVE_JOBS jobs to finish..."
 wait
-echo "â Parameter sweep complete. Results are in the '$LOG_DIR' directory."
+echo "Ã¢ Parameter sweep complete. Results are in the '$LOG_DIR' directory."
