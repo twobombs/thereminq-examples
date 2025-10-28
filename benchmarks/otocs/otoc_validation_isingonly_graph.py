@@ -12,7 +12,8 @@ OUTPUT_FILE = "otoc_sweep_3d_plot.png"
 
 def parse_log_file(file_path):
     """
-    Parses a single log file to find qubits, depth, and log(real time).
+    Parses a single log file to find qubits, depth, 
+    log(real time), and prob_zero.
     """
     # 1. Parse filename for qubits and depth
     match = re.search(r"q(\d+)_d(\d+)\.log", file_path.name)
@@ -22,19 +23,15 @@ def parse_log_file(file_path):
     qubits = int(match.group(1))
     depth = int(match.group(2))
     
-    # 2. Parse file content for 'real' time
     try:
         content = file_path.read_text()
         
-        # --- NEW TIME PARSING LOGIC ---
-        # Search for the 'real' time string, e.g., "real	4m19.984s"
+        # --- 2. Parse for 'real' time (for Z-axis) ---
         time_match = re.search(r"real\s+(\d+)m([\d\.]+)s", content)
-        
         if not time_match:
             print(f"Warning: Could not find 'real' time string in {file_path.name}")
             return None
             
-        # Convert minutes and seconds to total seconds
         try:
             minutes = float(time_match.group(1))
             seconds = float(time_match.group(2))
@@ -43,15 +40,40 @@ def parse_log_file(file_path):
             print(f"Error converting time string in {file_path.name}: {e}")
             return None
 
-        # Calculate log time
         if total_seconds <= 0:
             print(f"Warning: Non-positive time {total_seconds}s in {file_path.name}")
             return None
-            
+        
         log_time = math.log(total_seconds)
-        # --- END NEW TIME PARSING LOGIC ---
             
-        return {"qubits": qubits, "depth": depth, "log_time": log_time}
+        # --- 3. Parse for 'prob_zero' (for Color) ---
+        dict_match = re.search(r"PyQrackIsing Results:\s*(\{.*\})", content, re.DOTALL)
+        if not dict_match:
+            print(f"Warning: Could not find results dict in {file_path.name}")
+            return None
+            
+        results_dict = ast.literal_eval(dict_match.group(1))
+        
+        # Get the probability of state 0.
+        prob_zero = results_dict.get(0)
+        
+        if prob_zero is None:
+            print(f"Warning: Could not find key 0 in results dict for {file_path.name}")
+            return None
+        
+        try:
+            prob_zero = float(prob_zero)
+        except (ValueError, TypeError):
+            print(f"Warning: 'prob_zero' value {prob_zero} is not a float in {file_path.name}")
+            return None
+
+        # --- 4. Return all data ---
+        return {
+            "qubits": qubits, 
+            "depth": depth, 
+            "log_time": log_time, 
+            "prob_zero": prob_zero
+        }
         
     except Exception as e:
         print(f"Error parsing {file_path.name}: {e}")
@@ -90,26 +112,28 @@ def main():
 
     print("Generating 3D interactive plot...")
 
-    # --- Vedo Plotting Logic (Updated for Log Time) ---
-
-    # 4. Create 3D points
-    coords = df[['qubits', 'depth', 'log_time']].values  # Use log_time for Z
-    scalars = df['log_time'].values                     # Use log_time for color
+    # --- Vedo Plotting Logic ---
+    coords = df[['qubits', 'depth', 'log_time']].values  # Z-axis is log_time
+    scalars = df['prob_zero'].values                     # Color is prob_zero
 
     pts = Points(coords, r=8)
     
-    pts.pointdata["log_time"] = scalars                 # Use log_time for data
-    pts.cmap("viridis", "log_time")                     # Map color to log_time
+    pts.pointdata["prob_zero"] = scalars
+    pts.cmap("viridis", "prob_zero") 
     
-    pts.add_scalarbar(title="Log(Execution Time)", pos=((0.85, 0.1), (0.9, 0.9)))
+    # Manually set scalar bar text color
+    pts.add_scalarbar(title="Probability of '0' State", pos=((0.85, 0.1), (0.9, 0.9)), c='white') 
 
     # 5. Create a Plotter instance
+    # Manually set background color and axes colors
     plt = Plotter(
-        title="OTOC Sweep: Log(Time) vs. Qubits and Depth", # Updated title
+        title="OTOC Sweep: Log(Time) vs. Qubits and Depth", 
+        bg='black',  # Background color
         axes={
             'xtitle': 'Number of Qubits',
             'ytitle': 'Depth',
-            'ztitle': 'Log(Execution Time)' # Updated Z-axis label
+            'ztitle': 'Log(Execution Time)',
+            'c': 'white'  # Axes and labels color
         }
     )
 
