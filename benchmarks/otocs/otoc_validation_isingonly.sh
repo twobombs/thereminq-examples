@@ -1,3 +1,6 @@
+# shell script for otoc_validation_isingonly.py
+# generate by gemini25
+
 import re
 import ast
 import pandas as pd
