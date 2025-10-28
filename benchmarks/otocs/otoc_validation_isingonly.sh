@@ -1,7 +1,7 @@
-#!/bin/bash
-
 # everybody's looking at the ladder 
 # https://youtu.be/XzO9jGPtrhc?si=hl7L-93FIRkgsC97
+
+#!/bin/bash
 
 # --- Script Configuration ---
 LOG_DIR="otoc_sweep_log"
@@ -20,22 +20,20 @@ if ! command -v clinfo &> /dev/null; then
     exit 1
 fi
 
-# --- â¨ MODIFIED LINE: Using gsub for robust parsing ---
-# This awk command is safer. It strips all non-digits from the fields.
+# Use awk to parse clinfo output robustly
 mapfile -t GPUS < <(clinfo -l | awk '
 /Platform #/ { plat_field = $2 } 
 /Device #/   { 
   dev_field = $3
   plat_num = plat_field
   dev_num = dev_field
-  gsub(/[^0-9]/, "", plat_num)  # Strip non-digits (like #, :) from platform
-  gsub(/[^0-9]/, "", dev_num)    # Strip non-digits (like #, :) from device
+  gsub(/[^0-9]/, "", plat_num)  # Strip non-digits
+  gsub(/[^0-9]/, "", dev_num)    # Strip non-digits
   if (dev_num != "") {          # Only print if we have a valid device number
     printf("%s:%s\n", plat_num, dev_num)
   }
 }
 ')
-# --- End of change ---
 
 # Get the number of GPUs from the array
 NUM_GPUS=${#GPUS[@]}
@@ -82,7 +80,6 @@ for (( n_qubits=4; n_qubits<=69; n_qubits++ )); do
     printf -v depth_padded "%02d" $depth
 
     # Define log file name using padded numbers
-    # Example: otoc_sweep_log/q04_d04.log
     LOG_FILE="${LOG_DIR}/q${n_qubits_padded}_d${depth_padded}.log"
 
     # Print status (using the original, non-padded numbers for clarity)
@@ -91,7 +88,15 @@ for (( n_qubits=4; n_qubits<=69; n_qubits++ )); do
     # Launch the job in the background
     (
       export PYOPENCL_CTX=$CURRENT_GPU
-      python3 otoc_validation_isingonly.py $n_qubits $depth 0.25 0 100 1 > $LOG_FILE 2>&1
+      
+      # --- ✨ NEW: Added time command ---
+      # We wrap the command in { ... } and redirect its stderr (where 'time'
+      # writes its output) to the log file.
+      {
+        time python3 otoc_validation_isingonly.py $n_qubits $depth 0.25 0 100 1 > $LOG_FILE 2>&1
+      } 2>> $LOG_FILE
+      # --- End of change ---
+
     ) &
 
     # Increment our job counters
@@ -106,4 +111,4 @@ echo ""
 echo "All $TOTAL_JOBS_LAUNCHED jobs have been launched."
 echo "Waiting for the last $ACTIVE_JOBS jobs to finish..."
 wait
-echo "â Parameter sweep complete. Results are in the '$LOG_DIR' directory."
+echo "✅ Parameter sweep complete. Results are in the '$LOG_DIR' directory."
