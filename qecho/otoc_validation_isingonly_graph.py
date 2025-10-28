@@ -1,0 +1,158 @@
+import re
+import ast
+import pandas as pd
+from vedo import Points, Plotter, settings
+from pathlib import Path
+import math
+
+# --- Configuration ---
+LOG_DIR = "otoc_sweep_log"
+OUTPUT_FILE = "otoc_sweep_3d_plot.png"
+# --- End Configuration ---
+
+def parse_log_file(file_path):
+    """
+    Parses a single log file to find qubits, depth, 
+    log(real time), and prob_zero.
+    """
+    # 1. Parse filename for qubits and depth
+    match = re.search(r"q(\d+)_d(\d+)\.log", file_path.name)
+    if not match:
+        return None
+    
+    qubits = int(match.group(1))
+    depth = int(match.group(2))
+    
+    try:
+        content = file_path.read_text()
+        
+        # --- 2. Parse for 'real' time (for Z-axis) ---
+        time_match = re.search(r"real\s+(\d+)m([\d\.]+)s", content)
+        if not time_match:
+            print(f"Warning: Could not find 'real' time string in {file_path.name}")
+            return None
+            
+        try:
+            minutes = float(time_match.group(1))
+            seconds = float(time_match.group(2))
+            total_seconds = (minutes * 60) + seconds
+        except (ValueError, TypeError) as e:
+            print(f"Error converting time string in {file_path.name}: {e}")
+            return None
+
+        if total_seconds <= 0:
+            print(f"Warning: Non-positive time {total_seconds}s in {file_path.name}")
+            return None
+        
+        log_time = math.log(total_seconds)
+            
+        # --- 3. Parse for 'prob_zero' (for Color) ---
+        dict_match = re.search(r"PyQrackIsing Results:\s*(\{.*\})", content, re.DOTALL)
+        if not dict_match:
+            print(f"Warning: Could not find results dict in {file_path.name}")
+            return None
+            
+        results_dict = ast.literal_eval(dict_match.group(1))
+        
+        # Get the probability of state 0.
+        prob_zero = results_dict.get(0)
+        
+        if prob_zero is None:
+            print(f"Warning: Could not find key 0 in results dict for {file_path.name}")
+            return None
+        
+        try:
+            prob_zero = float(prob_zero)
+        except (ValueError, TypeError):
+            print(f"Warning: 'prob_zero' value {prob_zero} is not a float in {file_path.name}")
+            return None
+
+        # --- 4. Return all data ---
+        return {
+            "qubits": qubits, 
+            "depth": depth, 
+            "log_time": log_time, 
+            "prob_zero": prob_zero
+        }
+        
+    except Exception as e:
+        print(f"Error parsing {file_path.name}: {e}")
+        return None
+
+def main():
+    log_path = Path(LOG_DIR)
+    if not log_path.is_dir():
+        print(f"Error: Log directory '{LOG_DIR}' not found.")
+        print("Please run this script in the same folder as your 'otoc_sweep_log' directory.")
+        return
+
+    print(f"Scanning {LOG_DIR} for log files...")
+    
+    data = []
+    log_files = list(log_path.glob("q*_d*.log"))
+    
+    if not log_files:
+        print(f"Error: No log files found in '{LOG_DIR}'.")
+        return
+
+    for file in log_files:
+        parsed_data = parse_log_file(file)
+        if parsed_data:
+            data.append(parsed_data)
+            
+    if not data:
+        print("Error: No data could be parsed from log files.")
+        return
+        
+    print(f"Successfully parsed {len(data)} log files.")
+
+    # 3. Create Pandas DataFrame
+    df = pd.DataFrame(data)
+    df = df.sort_values(by=["qubits", "depth"])
+
+    print("Generating 3D interactive plot...")
+
+    # --- Vedo Plotting Logic ---
+    coords = df[['qubits', 'depth', 'log_time']].values  # Z-axis is log_time
+    scalars = df['prob_zero'].values                     # Color is prob_zero
+
+    pts = Points(coords, r=8)
+    
+    pts.pointdata["prob_zero"] = scalars
+    pts.cmap("viridis", "prob_zero") 
+    
+    # Manually set scalar bar text color
+    pts.add_scalarbar(title="Probability of '0' State", pos=((0.85, 0.1), (0.9, 0.9)), c='white') 
+
+    # 5. Create a Plotter instance
+    # Manually set background color and axes colors
+    plt = Plotter(
+        title="OTOC Sweep: Log(Time) vs. Qubits and Depth", 
+        bg='black',  # Background color
+        axes={
+            'xtitle': 'Number of Qubits',
+            'ytitle': 'Depth',
+            'ztitle': 'Log(Execution Time)',
+            'c': 'white'  # Axes and labels color
+        }
+    )
+
+    # 6. Add points to the plotter
+    plt.add(pts)
+
+    # 7. Save to PNG
+    try:
+        print(f"Attempting to save screenshot to: {OUTPUT_FILE}...")
+        plt.screenshot(OUTPUT_FILE)
+        print(f"Successfully saved screenshot to: {OUTPUT_FILE}")
+    except Exception as e:
+        print(f"Could not save screenshot: {e}")
+
+    # 8. Show the interactive window
+    print("Displaying plot in separate window...")
+    plt.show() # This opens a native window
+    
+    print("Done.")
+
+if __name__ == "__main__":
+    main()
