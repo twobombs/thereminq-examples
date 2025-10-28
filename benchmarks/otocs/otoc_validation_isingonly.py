@@ -1,90 +1,114 @@
-# Ising model Trotterization
-# by Dan Strano and (OpenAI GPT) Elara
-# We reduce transverse field Ising model for globally uniform J and h parameters from a 2^n-dimensional problem to an (n+1)-dimensional approximation that suffers from no Trotter error. Upon noticing most time steps for Quantinuum's parameters had roughly a quarter to a third (or thereabouts) of their marginal probability in |0> state, it became obvious that transition to and from |0> state should dominate the mechanics. Further, the first transition tends to be to or from any state with Hamming weight of 1 (in other words, 1 bit set to 1 and the rest reset 0, or n bits set for Hamming weight of n). Further, on a torus, probability of all states with Hamming weight of 1 tends to be exactly symmetric. Assuming approximate symmetry in every respective Hamming weight, the requirement for the overall probability to converge to 1.0 or 100% in the limit of an infinite-dimensional Hilbert space suggests that Hamming weight marginal probability could be distributed like a geometric series. A small correction to exact symmetry should be made to favor closeness of "like" bits to "like" bits (that is, geometric closeness on the torus of "1" bits to "1" bits and "0" bits to "0" bits), but this does not affect average global magnetization. Adding an oscillation component with angular frequency proportional to J, we find excellent agreement with Trotterization approaching the limit of infinitesimal time step, for R^2 (coefficient of determination) of normalized marginal probability distribution of ideal Trotterized simulation as described by the (n+1)-dimensional approximate model, as well as for R^2 and RMSE (root-mean-square error) of global magnetization curve values.
-# from https://github.com/vm6502q/PyQrackIsing/blob/main/scripts/otoc_validation.py
-# 
-# removed qiskit aer because it just doesn't cut it: everybody knows 30 qubits isn't 13000x datacenter
-# Done for The Ladder(tm) because people want to have the Pop Life ( what it good 4 you, whas I what U wanted me 2 be )
-#
+# everybody's looking at the ladder 
+# https://youtu.be/XzO9jGPtrhc?si=hl7L-93FIRkgsC97
 
-import math
-import numpy as np
-import statistics
-import sys
+#!/bin/bash
 
-from collections import Counter
+# --- Script Configuration ---
+LOG_DIR="otoc_sweep_log"
+mkdir -p $LOG_DIR
 
-# Qiskit Aer, transpile, and circuit-building imports have been removed.
-from pyqrackising import generate_otoc_samples
+# --- 1. Auto-Detect OpenCL GPUs ---
+echo "Detecting OpenCL devices using 'clinfo'..."
 
+# Check if clinfo is installed
+if ! command -v clinfo &> /dev/null; then
+    echo "-------------------------------------------------------------"
+    echo "Error: 'clinfo' command not found."
+    echo "Please install 'clinfo' to auto-detect GPUs."
+    echo "On Debian/Ubuntu: sudo apt install clinfo"
+    echo "-------------------------------------------------------------"
+    exit 1
+fi
 
-# The factor_width, trotter_step, calc_stats, hamming_distance, 
-# and top_n functions have been removed as they were only
-# used for the Qiskit Aer validation part.
+# Use awk to parse clinfo output robustly
+mapfile -t GPUS < <(clinfo -l | awk '
+/Platform #/ { plat_field = $2 } 
+/Device #/   { 
+  dev_field = $3
+  plat_num = plat_field
+  dev_num = dev_field
+  gsub(/[^0-9]/, "", plat_num)  # Strip non-digits
+  gsub(/[^0-9]/, "", dev_num)    # Strip non-digits
+  if (dev_num != "") {          # Only print if we have a valid device number
+    printf("%s:%s\n", plat_num, dev_num)
+  }
+}
+')
 
+# Get the number of GPUs from the array
+NUM_GPUS=${#GPUS[@]}
+if [ $NUM_GPUS -eq 0 ]; then
+  echo "Error: 'clinfo' ran, but no valid OpenCL devices were found."
+  exit 1
+fi
 
-def main():
-    n_qubits = 16
-    depth = 16
-    t1 = 0
-    t2 = 1
-    omega = 1.5
+# Get the number of CPU cores
+NUM_CORES=$(nproc)
+if [ -z "$NUM_CORES" ]; then
+    echo "Could not detect number of cores, defaulting to 8."
+    NUM_CORES=8
+fi
 
-    # Quantinuum settings
-    J, h, dt, z = -1.0, 2.0, 0.25, 4
-    theta = math.pi / 18
+echo "Sweep starting with $NUM_CORES parallel CPU jobs."
+echo "Found $NUM_GPUS OpenCL devices for round-robin dispatch:"
+printf "  - %s\n" "${GPUS[@]}"
+echo "Logging to: $LOG_DIR"
+echo ""
 
-    # Pure ferromagnetic
-    # J, h, dt, z = -1.0, 0.0, 0.25, 4
-    # theta = 0
+# --- 2. Main Loop & Job Dispatch ---
+ACTIVE_JOBS=0
+TOTAL_JOBS_LAUNCHED=0
 
-    # Pure transverse field
-    # J, h, dt, z = 0.0, 2.0, 0.25, 4
-    # theta = -math.pi / 2
+# Outer loop: Iterate over n_qubits from 4 to 69
+for (( n_qubits=4; n_qubits<=69; n_qubits++ )); do
 
-    # Critical point (symmetry breaking)
-    # J, h, dt, z = -1.0, 1.0, 0.25, 4
-    # theta = -math.pi / 4
-
-    if len(sys.argv) > 1:
-        n_qubits = int(sys.argv[1])
-    if len(sys.argv) > 2:
-        depth = int(sys.argv[2])
-    if len(sys.argv) > 3:
-        dt = float(sys.argv[3])
-    if len(sys.argv) > 4:
-        t1 = float(sys.argv[4])
-    if len(sys.argv) > 5:
-        shots = int(sys.argv[5])
-    else:
-        shots = max(65536, 1 << (n_qubits + 2))
-    if len(sys.argv) > 6:
-        trials = int(sys.argv[6])
-    else:
-        trials = 8 if t1 > 0 else 1
-
-    print("t1: " + str(t1))
-    print("t2: " + str(t2))
-    print("omega / pi: " + str(omega))
-
-    omega *= math.pi
+  # Inner loop: Iterate over depth from 4 to 29
+  for (( depth=4; depth<=29; depth++ )); do
     
-    # The Qiskit circuit construction and AerSimulator
-    # control run have been removed.
+    # Check if our job pool is full.
+    if [[ $ACTIVE_JOBS -ge $NUM_CORES ]]; then
+      wait -n  # Wait for the next (any) job to finish
+      ((ACTIVE_JOBS--))
+    fi
 
-    shots = 1<<(n_qubits + 2)
-    experiment_probs = dict(Counter(generate_otoc_samples(n_qubits=n_qubits, J=J, h=h, z=z, theta=theta, t=dt*depth, shots=shots, pauli_string='X'+'I'*(n_qubits-1), measurement_basis='Z'*n_qubits)))
-    experiment_probs = { k: v / shots for k, v in experiment_probs.items() }
+    # Assign the next GPU in the round-robin sequence
+    GPU_INDEX=$(( TOTAL_JOBS_LAUNCHED % NUM_GPUS ))
+    CURRENT_GPU=${GPUS[$GPU_INDEX]}
 
-    # Removed the calc_stats call, as there is no
-    # control/ideal distribution to compare against.
+    # Use printf to format numbers with a leading zero (e.g., 4 -> 04)
+    printf -v n_qubits_padded "%02d" $n_qubits
+    printf -v depth_padded "%02d" $depth
+
+    # Define log file name using padded numbers
+    LOG_FILE="${LOG_DIR}/q${n_qubits_padded}_d${depth_padded}.log"
+
+    # Print status (using the original, non-padded numbers for clarity)
+    echo "Starting (Job $TOTAL_JOBS_LAUNCHED): q=$n_qubits, d=$depth on GPU $CURRENT_GPU. Logging to $LOG_FILE"
     
-    # Print the results from pyqrackising
-    print("PyQrackIsing Results:")
-    print(experiment_probs)
+    # Launch the job in the background
+    (
+      export PYOPENCL_CTX=$CURRENT_GPU
+      
+      # --- ✨ NEW: Added time command ---
+      # We wrap the command in { ... } and redirect its stderr (where 'time'
+      # writes its output) to the log file.
+      {
+        time python3 otoc_validation_isingonly.py $n_qubits $depth 0.25 0 100 1 > $LOG_FILE 2>&1
+      } 2>> $LOG_FILE
+      # --- End of change ---
 
-    return 0
+    ) &
 
+    # Increment our job counters
+    ((ACTIVE_JOBS++))
+    ((TOTAL_JOBS_LAUNCHED++))
 
-if __name__ == "__main__":
-    sys.exit(main())
+  done
+done
+
+# --- 3. Cleanup ---
+echo ""
+echo "All $TOTAL_JOBS_LAUNCHED jobs have been launched."
+echo "Waiting for the last $ACTIVE_JOBS jobs to finish..."
+wait
+echo "✅ Parameter sweep complete. Results are in the '$LOG_DIR' directory."
