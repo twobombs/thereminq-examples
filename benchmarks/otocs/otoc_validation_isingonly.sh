@@ -1,137 +1,114 @@
-# shell script for otoc_validation_isingonly.py
-# generate by gemini25
+# everybody's looking at the ladder 
+# https://youtu.be/XzO9jGPtrhc?si=hl7L-93FIRkgsC97
 
-import re
-import ast
-import pandas as pd
-from vedo import Points, Plotter, settings
-from pathlib import Path
-import math
+#!/bin/bash
 
-# --- Configuration ---
-LOG_DIR = "otoc_sweep_log"
-OUTPUT_FILE = "otoc_sweep_3d_plot.png"
-# --- End Configuration ---
+# --- Script Configuration ---
+LOG_DIR="otoc_sweep_log"
+mkdir -p $LOG_DIR
 
-def parse_log_file(file_path):
-    """
-    Parses a single log file to find qubits, depth, and log(real time).
-    """
-    # 1. Parse filename for qubits and depth
-    match = re.search(r"q(\d+)_d(\d+)\.log", file_path.name)
-    if not match:
-        return None
+# --- 1. Auto-Detect OpenCL GPUs ---
+echo "Detecting OpenCL devices using 'clinfo'..."
+
+# Check if clinfo is installed
+if ! command -v clinfo &> /dev/null; then
+    echo "-------------------------------------------------------------"
+    echo "Error: 'clinfo' command not found."
+    echo "Please install 'clinfo' to auto-detect GPUs."
+    echo "On Debian/Ubuntu: sudo apt install clinfo"
+    echo "-------------------------------------------------------------"
+    exit 1
+fi
+
+# Use awk to parse clinfo output robustly
+mapfile -t GPUS < <(clinfo -l | awk '
+/Platform #/ { plat_field = $2 } 
+/Device #/   { 
+  dev_field = $3
+  plat_num = plat_field
+  dev_num = dev_field
+  gsub(/[^0-9]/, "", plat_num)  # Strip non-digits
+  gsub(/[^0-9]/, "", dev_num)    # Strip non-digits
+  if (dev_num != "") {          # Only print if we have a valid device number
+    printf("%s:%s\n", plat_num, dev_num)
+  }
+}
+')
+
+# Get the number of GPUs from the array
+NUM_GPUS=${#GPUS[@]}
+if [ $NUM_GPUS -eq 0 ]; then
+  echo "Error: 'clinfo' ran, but no valid OpenCL devices were found."
+  exit 1
+fi
+
+# Get the number of CPU cores
+NUM_CORES=$(nproc)
+if [ -z "$NUM_CORES" ]; then
+    echo "Could not detect number of cores, defaulting to 8."
+    NUM_CORES=8
+fi
+
+echo "Sweep starting with $NUM_CORES parallel CPU jobs."
+echo "Found $NUM_GPUS OpenCL devices for round-robin dispatch:"
+printf "  - %s\n" "${GPUS[@]}"
+echo "Logging to: $LOG_DIR"
+echo ""
+
+# --- 2. Main Loop & Job Dispatch ---
+ACTIVE_JOBS=0
+TOTAL_JOBS_LAUNCHED=0
+
+# Outer loop: Iterate over n_qubits from 4 to 69
+for (( n_qubits=4; n_qubits<=69; n_qubits++ )); do
+
+  # Inner loop: Iterate over depth from 4 to 29
+  for (( depth=4; depth<=29; depth++ )); do
     
-    qubits = int(match.group(1))
-    depth = int(match.group(2))
+    # Check if our job pool is full.
+    if [[ $ACTIVE_JOBS -ge $NUM_CORES ]]; then
+      wait -n  # Wait for the next (any) job to finish
+      ((ACTIVE_JOBS--))
+    fi
+
+    # Assign the next GPU in the round-robin sequence
+    GPU_INDEX=$(( TOTAL_JOBS_LAUNCHED % NUM_GPUS ))
+    CURRENT_GPU=${GPUS[$GPU_INDEX]}
+
+    # Use printf to format numbers with a leading zero (e.g., 4 -> 04)
+    printf -v n_qubits_padded "%02d" $n_qubits
+    printf -v depth_padded "%02d" $depth
+
+    # Define log file name using padded numbers
+    LOG_FILE="${LOG_DIR}/q${n_qubits_padded}_d${depth_padded}.log"
+
+    # Print status (using the original, non-padded numbers for clarity)
+    echo "Starting (Job $TOTAL_JOBS_LAUNCHED): q=$n_qubits, d=$depth on GPU $CURRENT_GPU. Logging to $LOG_FILE"
     
-    # 2. Parse file content for 'real' time
-    try:
-        content = file_path.read_text()
-        
-        # --- NEW TIME PARSING LOGIC ---
-        # Search for the 'real' time string, e.g., "real	4m19.984s"
-        time_match = re.search(r"real\s+(\d+)m([\d\.]+)s", content)
-        
-        if not time_match:
-            print(f"Warning: Could not find 'real' time string in {file_path.name}")
-            return None
-            
-        # Convert minutes and seconds to total seconds
-        try:
-            minutes = float(time_match.group(1))
-            seconds = float(time_match.group(2))
-            total_seconds = (minutes * 60) + seconds
-        except (ValueError, TypeError) as e:
-            print(f"Error converting time string in {file_path.name}: {e}")
-            return None
+    # Launch the job in the background
+    (
+      export PYOPENCL_CTX=$CURRENT_GPU
+      
+      # --- ✨ NEW: Added time command ---
+      # We wrap the command in { ... } and redirect its stderr (where 'time'
+      # writes its output) to the log file.
+      {
+        time python3 otoc_validation_isingonly.py $n_qubits $depth 0.25 0 100 1 > $LOG_FILE 2>&1
+      } 2>> $LOG_FILE
+      # --- End of change ---
 
-        # Calculate log time
-        if total_seconds <= 0:
-            print(f"Warning: Non-positive time {total_seconds}s in {file_path.name}")
-            return None
-            
-        log_time = math.log(total_seconds)
-        # --- END NEW TIME PARSING LOGIC ---
-            
-        return {"qubits": qubits, "depth": depth, "log_time": log_time}
-        
-    except Exception as e:
-        print(f"Error parsing {file_path.name}: {e}")
-        return None
+    ) &
 
-def main():
-    log_path = Path(LOG_DIR)
-    if not log_path.is_dir():
-        print(f"Error: Log directory '{LOG_DIR}' not found.")
-        print("Please run this script in the same folder as your 'otoc_sweep_log' directory.")
-        return
+    # Increment our job counters
+    ((ACTIVE_JOBS++))
+    ((TOTAL_JOBS_LAUNCHED++))
 
-    print(f"Scanning {LOG_DIR} for log files...")
-    
-    data = []
-    log_files = list(log_path.glob("q*_d*.log"))
-    
-    if not log_files:
-        print(f"Error: No log files found in '{LOG_DIR}'.")
-        return
+  done
+done
 
-    for file in log_files:
-        parsed_data = parse_log_file(file)
-        if parsed_data:
-            data.append(parsed_data)
-            
-    if not data:
-        print("Error: No data could be parsed from log files.")
-        return
-        
-    print(f"Successfully parsed {len(data)} log files.")
-
-    # 3. Create Pandas DataFrame
-    df = pd.DataFrame(data)
-    df = df.sort_values(by=["qubits", "depth"])
-
-    print("Generating 3D interactive plot...")
-
-    # --- Vedo Plotting Logic (Updated for Log Time) ---
-
-    # 4. Create 3D points
-    coords = df[['qubits', 'depth', 'log_time']].values  # Use log_time for Z
-    scalars = df['log_time'].values                     # Use log_time for color
-
-    pts = Points(coords, r=8)
-    
-    pts.pointdata["log_time"] = scalars                 # Use log_time for data
-    pts.cmap("viridis", "log_time")                     # Map color to log_time
-    
-    pts.add_scalarbar(title="Log(Execution Time)", pos=((0.85, 0.1), (0.9, 0.9)))
-
-    # 5. Create a Plotter instance
-    plt = Plotter(
-        title="OTOC Sweep: Log(Time) vs. Qubits and Depth", # Updated title
-        axes={
-            'xtitle': 'Number of Qubits',
-            'ytitle': 'Depth',
-            'ztitle': 'Log(Execution Time)' # Updated Z-axis label
-        }
-    )
-
-    # 6. Add points to the plotter
-    plt.add(pts)
-
-    # 7. Save to PNG
-    try:
-        print(f"Attempting to save screenshot to: {OUTPUT_FILE}...")
-        plt.screenshot(OUTPUT_FILE)
-        print(f"Successfully saved screenshot to: {OUTPUT_FILE}")
-    except Exception as e:
-        print(f"Could not save screenshot: {e}")
-
-    # 8. Show the interactive window
-    print("Displaying plot in separate window...")
-    plt.show() # This opens a native window
-    
-    print("Done.")
-
-if __name__ == "__main__":
-    main()
+# --- 3. Cleanup ---
+echo ""
+echo "All $TOTAL_JOBS_LAUNCHED jobs have been launched."
+echo "Waiting for the last $ACTIVE_JOBS jobs to finish..."
+wait
+echo "✅ Parameter sweep complete. Results are in the '$LOG_DIR' directory."
