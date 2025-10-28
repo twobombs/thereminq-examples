@@ -1,3 +1,7 @@
+# otoc statevector test for clause
+# only for verification of gemini25 output
+#
+
 """
 PyQrack OTOC (Out-of-Time-Order Correlator) Simulation
 Demonstrates quantum information scrambling using PyQrack's API
