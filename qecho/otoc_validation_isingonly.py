@@ -69,8 +69,22 @@ def main():
     # control run have been removed.
 
     shots = 1<<(n_qubits + 2)
-    experiment_probs = dict(Counter(generate_otoc_samples(n_qubits=n_qubits, J=J, h=h, z=z, theta=theta, t=dt*depth, shots=shots, pauli_string='X'+'I'*(n_qubits-1), measurement_basis='Z'*n_qubits)))
-    experiment_probs = { k: v / shots for k, v in experiment_probs.items() }
+    
+    experiment_probs_raw = dict(Counter(generate_otoc_samples(
+        n_qubits=n_qubits,
+        J=J,
+        h=h,
+        z=z,
+        theta=theta,
+        t=dt*depth,
+        shots=shots,
+        pauli_strings=['X'+'I'*(n_qubits-1)]
+    )))
+    
+    # MODIFIED LINE:
+    # Cast the key 'k' to int(k) to ensure standard Python integers
+    # are used in the final dictionary, cleaning up the print output.
+    experiment_probs = { int(k): v / shots for k, v in experiment_probs_raw.items() }
 
     # Removed the calc_stats call, as there is no
     # control/ideal distribution to compare against.
