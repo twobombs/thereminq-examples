@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# we remove pyopencl to force cpu processing
+
+pip uninstall -y pyopencl
+
 # --- Script Configuration ---
 LOG_DIR="otoc_sweep_log"
 mkdir -p $LOG_DIR
