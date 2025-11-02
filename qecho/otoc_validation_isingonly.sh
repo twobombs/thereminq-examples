@@ -93,7 +93,7 @@ for (( n_qubits=4; n_qubits<=69; n_qubits++ )); do
       # We wrap the command in { ... } and redirect its stderr (where 'time'
       # writes its output) to the log file.
       {
-        time python3 otoc_validation_isingonly.py $n_qubits $depth 0.25 0 1 1 > $LOG_FILE 2>&1
+        time python3 otoc_validation_isingonly.py $n_qubits $depth 10 0.25 > $LOG_FILE 2>&1
       } 2>> $LOG_FILE
       # --- End of change ---
 
