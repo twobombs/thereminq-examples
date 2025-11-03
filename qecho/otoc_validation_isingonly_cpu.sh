@@ -26,11 +26,12 @@ echo ""
 ACTIVE_JOBS=0
 TOTAL_JOBS_LAUNCHED=0
 
-# Outer loop: Iterate over n_qubits from 4 to 69
-for (( n_qubits=4; n_qubits<=69; n_qubits++ )); do
+# Outer loop: Iterate over n_qubits from 4 to 1024
+for (( n_qubits=4; n_qubits<=512; n_qubits++ )); do
 
-  # Inner loop: Iterate over depth from 4 to 29
-  for (( depth=4; depth<=29; depth++ )); do
+  # --- MODIFIED LINE ---
+  # Inner loop: Iterate over depth from 4 up to the current n_qubits
+  for (( depth=4; depth<=512; depth++ )); do
     
     # Check if our job pool is full.
     if [[ $ACTIVE_JOBS -ge $NUM_CORES ]]; then
@@ -38,7 +39,29 @@ for (( n_qubits=4; n_qubits<=69; n_qubits++ )); do
       ((ACTIVE_JOBS--))
     fi
 
+    # --- MODIFIED: CPU Load Check ---
+    # We have a free job slot, but now we also check the 1-minute
+    # system load average. We wait until it's <= (2 * NUM_CORES).
+    
+    # Get 1-min load avg (e.g., "2.34") from /proc/loadavg
+    CURRENT_LOAD=$(awk '{print $1}' /proc/loadavg)
+    # Calculate the new maximum allowed load
+    MAX_LOAD=$((NUM_CORES * 2))
+
+    # Use 'bc' for floating point comparison.
+    # Loop WHILE load > (2 * cores)
+    while (( $(echo "$CURRENT_LOAD > $MAX_LOAD" | bc -l) )); do
+        echo "Job slot free, but load ($CURRENT_LOAD) > 2x cores ($MAX_LOAD). Waiting 1s..."
+        sleep 1 # Wait 1 second before re-checking
+        
+        # Get fresh load average
+        CURRENT_LOAD=$(awk '{print $1}' /proc/loadavg)
+    done
+    # --- End of MODIFIED logic ---
+
+
     # Use printf to format numbers with a leading zero (e.g., 4 -> 04)
+    # Note: This padding might be insufficient for numbers > 99
     printf -v n_qubits_padded "%02d" $n_qubits
     printf -v depth_padded "%02d" $depth
 
@@ -51,11 +74,11 @@ for (( n_qubits=4; n_qubits<=69; n_qubits++ )); do
     # Launch the job in the background
     (
       
-      # --- â²ï¸ NEW: Added time command ---
+      # --- NEW: Added time command ---
       # We wrap the command in { ... } and redirect its stderr (where 'time'
       # writes its output) to the log file.
       {
-        time python3 otoc_validation_isingonly_cpu.py $n_qubits $depth 10 0.25 > $LOG_FILE 2>&1
+        time python3 otoc_validation_isingonly_cpu.py $n_qubits $depth 1 0.25 > $LOG_FILE 2>&1
       } 2>> $LOG_FILE
       # --- End of change ---
 

@@ -59,7 +59,7 @@ def main():
             string[b] = np.random.choice(ops)
         pauli_strings.append("".join(string))
 
-    shots = 1<<(n_qubits + 2)
+    shots = 1000
     experiment_probs = dict(Counter(generate_otoc_samples(n_qubits=n_qubits, J=J, h=h, z=z, theta=0, t=dt*depth, shots=shots, pauli_strings=pauli_strings)))
     experiment_probs = { k: v / shots for k, v in experiment_probs.items() }
 
