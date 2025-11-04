@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# predicting time required to render at 10k qubits and 512 depth from samples found in otoc logs folder
+
 import os
 import re
 import numpy as np
