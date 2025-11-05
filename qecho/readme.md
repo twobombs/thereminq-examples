@@ -1,4 +1,4 @@
-'13k DC' OTOC simulator https://blog.google/technology/research/quantum-echoes-willow-verifiable-quantum-advantage/
+'13k DC'^n OTOC simulator https://blog.google/technology/research/quantum-echoes-willow-verifiable-quantum-advantage/
 
 modified and scaled up from https://github.com/vm6502q/PyQrackIsing/blob/main/scripts/otoc_validation.py
 
