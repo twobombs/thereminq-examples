@@ -8,4 +8,6 @@ default view in graph viewer
 
 <img width="7680" height="4167" alt="otoc_sweep_3d_plot (4)" src="https://github.com/user-attachments/assets/31952444-dfe3-4bb2-b058-43a23d7ef656" />
 
-Lanscape in 3d graphs view
+Landscape in 3d graphs view
+
+Very high resultion 2d version at 
