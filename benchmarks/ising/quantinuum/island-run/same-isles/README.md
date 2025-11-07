@@ -1,3 +1,19 @@
-# Transverse Field Ising Model (TFIM)
+# Transverse Field Ising Model (TFIM) Benchmarks
 
-_Transverse field Ising model (TFIM)_ is a quantum thermodynamic model of spin magnetism in solids. (In slightly simpler terms, for example, when a bar magnet has a net magnetic field "at rest," it should be possible in theory to model this as the TFIM "ground state" of attraction between magnetic electron spins in its solid material.) TFIM is at the core of almost all realized cases of algorithmic "quantum advantage" of quantum algorithms over classical ones (as of 2025), besides _Shor's integer-factoring algorithm_ and _Grover's search algorithm._ Despite popular perception of this problem as being categorically hard for classical simulation, with `QrackAceBackend`, Qrack can approximate global properties TFIM well (like net magnetization in a surface) for hundreds of qubits and dozens of "Trotter steps" (i.e., "circuit layers," basically) on almost any contemporary desktop or laptop. ([`ising_ace_depth_series.py`](https://github.com/vm6502q/pyqrack-examples/blob/main/ising/ising_depth_series.py) will produce square-magnetization curves over a series of Trotter steps, and [`ising_ace_validation.py`](https://github.com/vm6502q/pyqrack-examples/blob/main/ising/ising_ace_validation.py) will validate the same experimental parameters at smaller scales that can be compared to ideal Qiskit Aer simulation. See also [Digital quantum magnetism at the frontier of classical simulations](https://arxiv.org/abs/2503.20870) for comparison to state-of-the-art in quantum hardware running TFIM.)
+This directory contains a suite of scripts for running, validating, and analyzing simulations of the Transverse Field Ising Model (TFIM) on the `QrackAceBackend`.
+
+## Key Scripts
+
+*   **`ising_ace_depth_series.py`**: A core script for simulating the TFIM on a 2D lattice. It uses a Trotterization approach to approximate the time evolution of the system and calculates the magnetization and square magnetization at each step.
+*   **`ising_ace_validation.py`**: A script designed to validate the results of the `QrackAceBackend` against the `AerSimulator` from Qiskit. It runs the same TFIM circuit on both backends and then calculates a variety of statistics to compare the results.
+*   **`ising_ace_free_energy.py`**: An extension of the TFIM simulation that includes the calculation of free energy. It estimates the entropy of the system and computes the energy contributions from both the Z and X terms to calculate the free energy at each Trotter step.
+
+## Other Files
+
+*   **Shell Scripts (`*.sh`)**: These scripts are used to automate the execution of the Python scripts with various parameters and configurations.
+*   **Jupyter Notebooks (`*.ipynb`)**: These notebooks are likely used for interactive exploration, analysis, and visualization of the simulation data.
+*   **Log Files (`*.log`, `*.txt`)**: These files contain the output and results of the simulation runs.
+
+## Overview
+
+The scripts in this directory are used to perform a comprehensive analysis of the TFIM model on the Qrack simulator. They cover a wide range of qubit widths and depths, and they include advanced analysis techniques such as free energy calculation and validation against other simulators. The results of these simulations are used to generate the various plots and visualizations seen in the `README.md` files in the parent directories.

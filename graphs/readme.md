@@ -1,3 +1,18 @@
+# ThereminQ Graphs and Visualizations
+
+This directory contains scripts for generating various visualizations of quantum simulation data, including the "bonsai images" mentioned in the original `readme.md`.
+
+## Scripts
+
+*   **`run-draw-patched-sycamore256-time.py`**: A Python script that reads data from a `quantum_data.csv` file and generates a heatmap of the computation time versus the width and depth of a quantum circuit.
+*   **Shell Scripts (`*.sh`)**: A collection of shell scripts that likely run various visualization or simulation tasks. Some of the notable scripts include:
+    *   `convert_measured_values.sh`: Converts measured values.
+    *   `makeqftipsy.sh`: Creates a QFT-related visualization.
+    *   `shors_*.sh`: A series of scripts for running Shor's algorithm experiments.
+    *   `sycamore_*.sh`: Scripts for running Sycamore-related simulations.
+
+## Visualizations
+
 More bonsai images by ThereminQ's visualisation script can be viewed and downloaded [here](https://github.com/twobombs/thereminq-graphs)
 
 ![Screenshot from 2021-10-16 11-09-00](https://github.com/twobombs/thereminq-bonsai/assets/12692227/22aa6df4-bf92-49ac-a6d4-db14363f6356)
@@ -6,4 +21,3 @@ More bonsai images by ThereminQ's visualisation script can be viewed and downloa
 ![Screenshot_from_2021-09-25_08-52-34 (1)](https://user-images.githubusercontent.com/12692227/134770011-8db48546-4853-4735-a980-cfc866d1786f.png)
 ![Screenshot from 2021-11-10 14-01-38](https://user-images.githubusercontent.com/12692227/141146591-1f7a8684-bdab-4b43-92d0-0f262d44a5d8.png)
 ![Screenshot from 2021-11-10 14-01-38a](https://user-images.githubusercontent.com/12692227/141675948-cd953c5b-5bdc-4e67-82bd-649530596788.png)
-
