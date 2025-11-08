@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 #
 # pareto-front PoC
 # gemini25
@@ -5,6 +6,7 @@
 
 import numpy as np
 import random
+import argparse # Import the argument parsing library
 
 # --- 1. Define the Objective Functions ---
 
@@ -114,19 +116,22 @@ def find_pareto_front(all_found_solutions):
 
 # --- 4. The Main Workflow ---
 
-def main():
-    PROBLEM_SIZE = 10
-    NUM_WEIGHTINGS = 200 # Number of random weightings to sample
+def main(problem_size, num_weightings):
+    """
+    Main execution function, now parameterized by CLI arguments.
+    """
+    
+    print(f"--- Running with Problem Size: {problem_size}, Weightings: {num_weightings} ---")
     
     # Get the solver function
-    solver = get_solver(PROBLEM_SIZE)
+    solver = get_solver(problem_size)
     
     # Store all unique solutions found
     all_found_solutions = set() 
 
-    print(f"Running solver for {NUM_WEIGHTINGS} random weightings...")
+    print(f"Running solver for {num_weightings} random weightings...")
     
-    for _ in range(NUM_WEIGHTINGS):
+    for _ in range(num_weightings):
         # Generate random, normalized weights
         w1 = np.random.random()
         w2 = 1.0 - w1
@@ -147,4 +152,31 @@ def main():
         print(f"  {point}  (e.g., solution: {all_points[point]})")
 
 if __name__ == "__main__":
-    main()
+    # --- 5. Add CLI Argument Parsing ---
+    
+    # Create the parser
+    parser = argparse.ArgumentParser(
+        description="Find the Pareto front for a toy multi-objective problem."
+    )
+    
+    # Add the PROBLEM_SIZE argument
+    parser.add_argument(
+        "-p", "--problem_size",
+        type=int,
+        default=10, # Set the default value
+        help="The number of bits in the solution string (default: 10)."
+    )
+    
+    # Add the NUM_WEIGHTINGS argument
+    parser.add_argument(
+        "-w", "--num_weightings",
+        type=int,
+        default=200, # Set the default value
+        help="The number of random weightings to sample (default: 200)."
+    )
+    
+    # Parse the arguments from the command line
+    args = parser.parse_args()
+    
+    # Call the main function with the parsed arguments
+    main(args.problem_size, args.num_weightings)
