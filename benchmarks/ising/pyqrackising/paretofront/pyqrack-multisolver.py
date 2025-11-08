@@ -3,13 +3,17 @@
 # pareto-front PoC
 # gemini25
 #
-# --- NOW WITH MULTIPROCESSING (FIXED) ---
+# --- REFACTORED FOR SCALABILITY (CPU-BOUND) ---
+# This version avoids the 2**N memory bottleneck by
+# generating solutions on-the-fly in each worker.
+#
+# --- FIX (11/08/25): Corrected pool.map call to avoid TypeError ---
 
 import numpy as np
 import random
 import argparse
 import multiprocessing
-# We no longer need 'partial'
+# --- MODIFIED: We no longer need 'partial' ---
 # from functools import partial
 
 # --- 1. Define the Objective Functions ---
@@ -27,40 +31,26 @@ def objective_2_max_flips(solution):
             flips += 1
     return flips
 
-# --- 2. The Solver (MODIFIED FOR PARALLELISM) ---
+# --- 2. The Solver (MODIFIED FOR SCALABILITY) ---
+# (No changes in this section)
 
-# --- MODIFIED: 'all_solutions' is now a global variable ---
-# This list will be created by the main process and
-# inherited by the child worker processes.
-all_solutions = []
-
-def initialize_solver(problem_size):
+def find_optimal_solution(weight_1, weight_2, problem_size):
     """
-    --- NEW FUNCTION ---
-    Populates the GLOBAL 'all_solutions' list.
-    This is run once by the main process *before* forking.
+    --- MODIFIED: This is the solver ---
+    It now loops from 0 to 2**N and generates solutions on the fly
+    instead of reading from a global list.
     """
-    global all_solutions
-    
-    for i in range(2**problem_size):
-        bin_str = bin(i)[2:].zfill(problem_size)
-        solution = [int(bit) for bit in bin_str]
-        all_solutions.append(solution)
-    
-    print(f"Solver initialized with {len(all_solutions)} possible solutions.")
-
-def find_optimal_solution_global(weight_1, weight_2):
-    """
-    --- MODIFIED: This is the solver, moved to the top level ---
-    This function can now be pickled and sent to workers.
-    It reads from the global 'all_solutions' list.
-    """
-    global all_solutions # Access the global list
     best_solution = None
     best_score = -float('inf')
 
-    # The list was already populated by the main process
-    for solution in all_solutions:
+    # Loop through all possible 2**N solutions
+    for i in range(2**problem_size):
+        
+        # Generate the solution on the fly
+        bin_str = bin(i)[2:].zfill(problem_size)
+        solution = [int(bit) for bit in bin_str]
+        
+        # Evaluate this solution
         f1_score = objective_1_max_ones(solution)
         f2_score = objective_2_max_flips(solution)
         combined_score = (weight_1 * f1_score) + (weight_2 * f2_score)
@@ -97,6 +87,7 @@ def find_pareto_front(all_found_solutions):
             
             f1_p2, f2_p2 = p2
             
+            # Check for dominance
             if (f1_p2 >= f1_p1 and f2_p2 >= f2_p1) and \
                (f1_p2 > f1_p1 or f2_p2 > f2_p1):
                 is_dominated = True
@@ -107,44 +98,46 @@ def find_pareto_front(all_found_solutions):
             
     return sorted(list(pareto_front_points)), solution_points
 
-# --- 4. Helper Function for Parallelism (MODIFIED) ---
+# --- 4. Helper Function for Parallelism ---
+# (No changes in this section - still accepts problem_size)
 
-def run_one_weighting(_):
+def run_one_weighting(problem_size):
     """
-    --- MODIFIED: This function no longer takes a solver argument ---
-    This is the function that each worker process will run.
-    The '_' is a placeholder for the item from range().
+    This function now correctly accepts 'problem_size'
+    from the iterable provided to pool.map.
     """
     # Generate random, normalized weights
     w1 = np.random.random()
     w2 = 1.0 - w1
     
-    # Run the solver by calling the new GLOBAL function
-    solution = find_optimal_solution_global(w1, w2)
+    # Run the solver by calling the top-level function
+    # and passing problem_size to it.
+    solution = find_optimal_solution(w1, w2, problem_size)
     return solution
 
 # --- 5. The Main Workflow (MODIFIED) ---
 
 def main(problem_size, num_weightings):
     """
-    Main execution function, now PARALLELIZED correctly.
+    Main execution function, parallelized and memory-efficient.
     """
     
     print(f"--- Running with Problem Size: {problem_size}, Weightings: {num_weightings} ---")
-    
-    # --- MODIFIED: Call the initializer function ONCE ---
-    # This populates the global 'all_solutions' list
-    initialize_solver(problem_size)
     
     print(f"Running solver for {num_weightings} random weightings IN PARALLEL...")
     
     # Create a pool of worker processes.
     with multiprocessing.Pool() as pool:
         
-        # --- MODIFIED: Map the simplified 'run_one_weighting' function ---
-        # Each worker will call this function, which in turn calls
-        # the global solver.
-        all_found_solutions = pool.map(run_one_weighting, range(num_weightings))
+        # --- MODIFIED: This is the fix ---
+        # Instead of using 'partial', we create an iterable (a list)
+        # that contains 'problem_size' repeated 'num_weightings' times.
+        iterable = [problem_size] * num_weightings
+        
+        # 'map' will now call run_one_weighting(problem_size)
+        # for each item in the list, which matches the
+        # function's signature.
+        all_found_solutions = pool.map(run_one_weighting, iterable)
         
     # Filter all found solutions to get the Pareto front
     valid_solutions = {s for s in all_found_solutions if s is not None}
@@ -154,6 +147,7 @@ def main(problem_size, num_weightings):
     print("\n--- Pareto Front Found ---")
     print("Format: (F1 Score, F2 Score)")
     for point in pareto_front:
+        # Show an example solution for each point on the front
         print(f"  {point}  (e.g., solution: {all_points[point]})")
 
 if __name__ == "__main__":
@@ -179,5 +173,12 @@ if __name__ == "__main__":
     )
     
     args = parser.parse_args()
+    
+    # (Warning for large problem sizes remains)
+    if args.problem_size > 22:
+        print(f"WARNING: Problem size {args.problem_size} is very large.")
+        print(f"Each of the {args.num_weightings} workers will have to check 2^{args.problem_size} solutions.")
+        print(f"(That's ~{2**args.problem_size:,} solutions per worker!)")
+        print("This may take a very long time!")
     
     main(args.problem_size, args.num_weightings)
