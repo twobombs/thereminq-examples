@@ -4,7 +4,7 @@
 #
 
 import math
-from pyqrack import PyQrack
+from pyqrack import QrackSimulator
 
 def apply_r_pauli_string(sim, qubits, pauli_string, angle):
     """
@@ -14,7 +14,7 @@ def apply_r_pauli_string(sim, qubits, pauli_string, angle):
     This is the core building block for the DCQO circuit.
     
     Args:
-        sim (PyQrack.QrackSimulator): The simulator instance.
+        sim (QrackSimulator): The simulator instance.
         qubits (list): A list of qubit indices, e.g., [q_i, q_l, q_k, q_kl].
         pauli_string (str): The Pauli string, e.g., "YZZZ".
         angle (float): The rotation angle (theta).
@@ -39,7 +39,9 @@ def apply_r_pauli_string(sim, qubits, pauli_string, angle):
 
     # --- 3. Apply the Z-rotation ---
     # The rotation is applied to the target qubit.
-    sim.rz(angle, target_q)
+    # FIX: Corrected argument order to r(axis, angle, qubit)
+    # The correct signature is r(b: int, ph: float, q: int)
+    sim.r(3, angle, target_q)
 
     # --- 4. Un-compute CNOT cascade ---
     # We must reverse the CNOTs to disentangle.
@@ -60,36 +62,79 @@ def apply_r_pauli_string(sim, qubits, pauli_string, angle):
 # --- Main Algorithm Skeleton ---
 # ----------------------------------------------------------------------
 
-def calculate_theta_and_alpha(t, T):
+def calculate_theta_and_alpha(t, T, num_trotter_steps):
     """
-    **[USER MUST IMPLEMENT]**
-    This is the classical "hard part". You must implement the
-    [span_0](start_span)complex formulas from Appendix B [cite: 135-137] to calculate 
-    the schedule lambda(t), alpha_1(t), and the final rotation 
-    angle for this step.
+    **[USER MUST IMPLEMENT]** -> **[Implemented]**
     
-    This is a placeholder.
+    This function calculates the rotation angle 'theta' for a given time step 't'.
+    
+    This implementation uses the "impulse regime" with a linear schedule
+    for the counterdiabatic coefficient alpha_1, as suggested by the
+    original placeholder code and common practice in related papers (e.g., [15]).
+    
+    The angle theta(t) is defined in Appendix B as:
+    theta(t) = Delta_t * alpha_1(t) * dot_lambda(t)
+    
+    We assume:
+    1. Linear schedule for lambda: lambda(t) = t / T
+    2. Linear schedule for alpha_1: alpha_1(t) = 1 - lambda(t)
     """
+    
+    # 1. Schedules
     lambda_t = t / T
-    alpha_1 = 1.0 - lambda_t  # Placeholder
-    dot_lambda = 1.0 / T    # Placeholder
+    dot_lambda = 1.0 / T    # Derivative of lambda(t)
+    alpha_1 = 1.0 - lambda_t  # Linear schedule for alpha_1
     
+    # 2. Time step
+    # This is Delta_t = T / n_trot
+    delta_t = T / num_trotter_steps
+    
+    # 3. Final angle theta for this step
     # This is theta(k*Delta_t) from Eq. (B3)
-    # Note: The paper's 'h_x' values are also needed here.
-    # We'll return a simplified, combined angle for this example.
-    delta_t = 0.1 # Placeholder
-    return delta_t * alpha_1 * dot_lambda # This is the 'theta'
+    theta = delta_t * alpha_1 * dot_lambda
+    
+    return theta
 
 def get_problem_hamiltonian_terms(N):
     """
-    **[USER MUST IMPLEMENT]**
-    This function should parse the problem Hamiltonian H_f
-    and return lists of the qubit indices for all 2-body
-    [cite_start]and 4-body terms.[span_0](end_span)
+    **[USER MUST IMPLEMENT]** -> **[Implemented]**
+    This function parses the problem Hamiltonian H_f (Eq. 2)
+    and returns lists of the qubit indices for all 2-body
+    and 4-body terms.
+    
+    Uses 0-based indexing for qubits.
+    Paper's 1-based (i, k, l) are converted to 0-based (i_idx, ...).
+    
+    Note: Assumes a typo fix in Eq. (2) for the 4-body term,
+    based on the correct form in Eq. (7), i.e.,
+    sigma_i * sigma_{i+l} * sigma_{i+k} * sigma_{i+k+l}
     """
-    # Placeholder for N=4
-    two_body_terms = [(0, 2), (1, 3)]
-    four_body_terms = [(0, 1, 2, 3)]
+    two_body_terms = []
+    # Paper i=1..N-2 -> Code i_idx = 0..N-3
+    for i_idx in range(N - 2):
+        paper_i = i_idx + 1
+        max_k_paper = (N - paper_i) // 2
+        # Paper k=1..max_k_paper
+        for k in range(1, max_k_paper + 1):
+            # Term is (paper_i, paper_i + k)
+            # Code term is (i_idx, i_idx + k)
+            two_body_terms.append((i_idx, i_idx + k))
+    
+    four_body_terms = []
+    # Paper i=1..N-3 -> Code i_idx = 0..N-4
+    for i_idx in range(N - 3):
+        paper_i = i_idx + 1
+        max_l_paper = (N - paper_i - 1) // 2
+        # Paper l=1..max_l_paper
+        for l in range(1, max_l_paper + 1):
+            # Paper k=l+1 .. N-i-l
+            max_k_paper = N - paper_i - l
+            for k in range(l + 1, max_k_paper + 1):
+                # Term is (i, i+l, i+k, i+k+l)
+                # Code term is (i_idx, i_idx+l, i_idx+k, i_idx+k+l)
+                q_indices = (i_idx, i_idx + l, i_idx + k, i_idx + k + l)
+                four_body_terms.append(q_indices)
+    
     return two_body_terms, four_body_terms
 
 def run_dcqo_quantum_stage(N, num_trotter_steps, T):
@@ -97,7 +142,8 @@ def run_dcqo_quantum_stage(N, num_trotter_steps, T):
     Runs the full quantum simulation part of the QE-MTS algorithm.
     """
     print(f"Initializing PyQrack simulator for N={N} qubits.")
-    sim = PyQrack.QrackSimulator(N)
+    # FIX: Changed 'PyQrack.QrackSimulator(N)' to 'QrackSimulator(N)'
+    sim = QrackSimulator(N)
     
     # 1. Get the terms of the LABS Hamiltonian
     two_body_terms, four_body_terms = get_problem_hamiltonian_terms(N)
@@ -115,7 +161,7 @@ def run_dcqo_quantum_stage(N, num_trotter_steps, T):
         
         # This is the "theta" from Appendix B, Eq. (B3)
         # It's a complex function you must implement.
-        theta = calculate_theta_and_alpha(t, T)
+        theta = calculate_theta_and_alpha(t, T, num_trotter_steps)
 
         # Apply 2-body rotations (from Eq. B3)
         for (i, k) in two_body_terms:
@@ -152,7 +198,8 @@ def run_dcqo_quantum_stage(N, num_trotter_steps, T):
         pass
     
     # Let's just get one sample for this example
-    shot = sim.measure_all() 
+    # FIX: Changed 'measure_all()' to 'm_all()'
+    shot = sim.m_all() 
     samples.append(shot)
     
     print(f"Example sample (bitstring): {shot}")
@@ -178,7 +225,7 @@ def run_classical_mts(initial_population):
 if __name__ == "__main__":
     # --- Config ---
     N = 4  # Sequence length (N=4 is tiny, N=37 is the paper's goal)
-    T = 1.0            # Total evolution time
+    T = 1.0          # Total evolution time
     num_trotter_steps = 10 # Number of discrete time steps
 
     # 1. Run Quantum "Seeding" Stage
