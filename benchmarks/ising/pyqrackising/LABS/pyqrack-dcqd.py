@@ -7,6 +7,7 @@ import math
 # FIX: Changed 'PyQrack' to 'QrackSimulator'
 from pyqrack import QrackSimulator
 import random # Needed for classical MTS
+import argparse # Added for CLI input
 
 def apply_r_pauli_string(sim, qubits, pauli_string, angle):
     """
@@ -188,7 +189,7 @@ def run_dcqo_quantum_stage(N, num_trotter_steps, T):
     Runs the full quantum simulation part of the QE-MTS algorithm
     and returns a SINGLE measurement sample.
     """
-    print(f"Initializing PyQrack simulator for N={N} qubits.")
+    # VERBOSE: print(f"Initializing PyQrack simulator for N={N} qubits.")
     # FIX: Changed 'PyQrack.QrackSimulator(N)' to 'QrackSimulator(N)'
     sim = QrackSimulator(N)
     
@@ -200,7 +201,7 @@ def run_dcqo_quantum_stage(N, num_trotter_steps, T):
     for i in range(N):
         sim.h(i)
 
-    print(f"Beginning {num_trotter_steps} Trotter steps...")
+    # VERBOSE: print(f"Beginning {num_trotter_steps} Trotter steps...")
     
     # 3. Perform the "Digitized" (Trotterized) time evolution
     for k in range(1, num_trotter_steps + 1):
@@ -230,7 +231,7 @@ def run_dcqo_quantum_stage(N, num_trotter_steps, T):
             apply_r_pauli_string(sim, [i, l, k_idx, kl], "ZZYZ", 8 * theta * h_k)
             apply_r_pauli_string(sim, [i, l, k_idx, kl], "ZZZY", 8 * theta * h_kl)
     
-    print("Time evolution complete.")
+    # VERBOSE: print("Time evolution complete.")
     
     # 4. Measure all qubits to get a bitstring sample
     # FIX: Changed 'measure_all()' to 'm_all()'
@@ -429,10 +430,27 @@ def run_classical_mts(N, quantum_samples, G_max=500):
 # --- Main Execution ---
 if __name__ == "__main__":
     # --- Config ---
-    N = 4  # Sequence length (N=4 is tiny, N=37 is the paper's goal)
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description="Quantum-Enhanced Memetic Tabu Search for LABS.")
+    parser.add_argument('-N', '--N', type=int, default=4,
+                        help='Sequence length (default: 4)')
+    parser.add_argument('-s', '--n_shots', type=int, default=100,
+                        help='Number of quantum shots to sample (default: 100)')
+    
+    args = parser.parse_args()
+
+    # Use arguments from CLI or defaults
+    N = args.N
+    n_shots = args.n_shots
     T = 1.0          # Total evolution time
     num_trotter_steps = 10 # Number of discrete time steps
-    n_shots = 100 # Number of quantum samples to take
+    
+    print("--- QE-MTS Configuration ---")
+    print(f"Sequence Length (N): {N}")
+    print(f"Quantum Shots (n_shots): {n_shots}")
+    print(f"Total Evolution Time (T): {T}")
+    print(f"Trotter Steps: {num_trotter_steps}")
+    print("------------------------------")
 
     # 1. Run Quantum "Seeding" Stage
     # We must re-run the entire simulation for each shot,
@@ -440,10 +458,10 @@ if __name__ == "__main__":
     print(f"--- Running Quantum Stage ({n_shots} shots) ---")
     quantum_samples = []
     for i in range(n_shots):
-        print(f"\nRunning shot {i+1}/{n_shots}...")
+        # VERBOSE: print(f"\nRunning shot {i+1}/{n_shots}...")
         shot = run_dcqo_quantum_stage(N, num_trotter_steps, T)
         quantum_samples.append(shot)
-        print(f"Shot {i+1} result: {shot}")
+        # VERBOSE: print(f"Shot {i+1} result: {shot}")
     
     print("\n--- Quantum Stage Complete ---")
     print(f"Collected samples: {quantum_samples}")
