@@ -58,7 +58,7 @@ def get_solver(problem_size):
             f1_score = objective_1_max_ones(solution)
             f2_score = objective_2_max_flips(solution)
             
-            # [span_0](start_span)This is the single weighted-sum objective[span_0](end_span)
+            # This is the single weighted-sum objective
             combined_score = (weight_1 * f1_score) + (weight_2 * f2_score)
 
             if combined_score > best_score:
@@ -75,7 +75,7 @@ def get_solver(problem_size):
 def find_pareto_front(all_found_solutions):
     """
     Filters a set of solutions to find the non-dominated Pareto front.
-    [span_1](start_span)This follows the definition from the paper[span_1](end_span).
+    This follows the definition from the paper.
     
     A solution (s) is "non-dominated" if no other solution (s')
     is better or equal on *all* objectives and strictly better on *at least one*.
@@ -116,18 +116,18 @@ def find_pareto_front(all_found_solutions):
 
 def main():
     PROBLEM_SIZE = 10
-    [span_2](start_span)NUM_WEIGHTINGS = 200 # Number of random weightings to sample[span_2](end_span)
+    NUM_WEIGHTINGS = 200 # Number of random weightings to sample
     
     # Get the solver function
     solver = get_solver(PROBLEM_SIZE)
     
-    # [span_3](start_span)Store all unique solutions found[span_3](end_span)
+    # Store all unique solutions found
     all_found_solutions = set() 
 
     print(f"Running solver for {NUM_WEIGHTINGS} random weightings...")
     
     for _ in range(NUM_WEIGHTINGS):
-        # [span_4](start_span)Generate random, normalized weights[span_4](end_span)
+        # Generate random, normalized weights
         w1 = np.random.random()
         w2 = 1.0 - w1
         
@@ -138,7 +138,7 @@ def main():
         if solution:
             all_found_solutions.add(solution)
 
-    # [span_5](start_span)Filter all found solutions to get the Pareto front[span_5](end_span)
+    # Filter all found solutions to get the Pareto front
     pareto_front, all_points = find_pareto_front(all_found_solutions)
 
     print("\n--- Pareto Front Found ---")
