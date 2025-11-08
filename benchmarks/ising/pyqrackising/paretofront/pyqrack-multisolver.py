@@ -3,12 +3,17 @@
 # pareto-front PoC
 # gemini25
 #
+# --- NOW WITH MULTIPROCESSING (FIXED) ---
 
 import numpy as np
 import random
-import argparse # Import the argument parsing library
+import argparse
+import multiprocessing
+# We no longer need 'partial'
+# from functools import partial
 
 # --- 1. Define the Objective Functions ---
+# (No changes in this section)
 
 def objective_1_max_ones(solution):
     """F1: Counts the number of 1s in the bit string."""
@@ -22,70 +27,60 @@ def objective_2_max_flips(solution):
             flips += 1
     return flips
 
-# --- 2. The Solver (The "Quantum" Part) ---
+# --- 2. The Solver (MODIFIED FOR PARALLELISM) ---
 
-def get_solver(problem_size):
+# --- MODIFIED: 'all_solutions' is now a global variable ---
+# This list will be created by the main process and
+# inherited by the child worker processes.
+all_solutions = []
+
+def initialize_solver(problem_size):
     """
-    Creates a simple *classical* solver for this toy problem.
-    This function finds the *true* best solution for any given weighting.
+    --- NEW FUNCTION ---
+    Populates the GLOBAL 'all_solutions' list.
+    This is run once by the main process *before* forking.
     """
-    # Generate all 2^N possible solutions for a small problem
-    all_solutions = []
+    global all_solutions
+    
     for i in range(2**problem_size):
-        # Format as a binary string, pad with 0s, convert to int list
         bin_str = bin(i)[2:].zfill(problem_size)
         solution = [int(bit) for bit in bin_str]
         all_solutions.append(solution)
     
     print(f"Solver initialized with {len(all_solutions)} possible solutions.")
 
-    def find_optimal_solution(weight_1, weight_2):
-        """
-        ---!!! THIS IS THE STEP a quantum algorithm would perform !!!---
-        
-        Instead of this classical brute-force search, you would:
-        1. Construct a Hamiltonian (Ising model) from the combined objective:
-           H = - (weight_1 * F1 + weight_2 * F2)
-        2. Use an algorithm (like QAOA or QA) to find its ground state (the solution).
-        3. If using PyQrack, you would build the QAOA circuit here and
-           run the simulation to find the most probable solution.
-        
-        We use a classical solver here to keep the example clear.
-        """
-        best_solution = None
-        best_score = -float('inf')
+def find_optimal_solution_global(weight_1, weight_2):
+    """
+    --- MODIFIED: This is the solver, moved to the top level ---
+    This function can now be pickled and sent to workers.
+    It reads from the global 'all_solutions' list.
+    """
+    global all_solutions # Access the global list
+    best_solution = None
+    best_score = -float('inf')
 
-        for solution in all_solutions:
-            # Calculate the two objectives for this solution
-            f1_score = objective_1_max_ones(solution)
-            f2_score = objective_2_max_flips(solution)
-            
-            # This is the single weighted-sum objective
-            combined_score = (weight_1 * f1_score) + (weight_2 * f2_score)
+    # The list was already populated by the main process
+    for solution in all_solutions:
+        f1_score = objective_1_max_ones(solution)
+        f2_score = objective_2_max_flips(solution)
+        combined_score = (weight_1 * f1_score) + (weight_2 * f2_score)
 
-            if combined_score > best_score:
-                best_score = combined_score
-                # Store the solution and its *original* objective scores
-                best_solution = (tuple(solution), f1_score, f2_score)
-        
-        return best_solution
+        if combined_score > best_score:
+            best_score = combined_score
+            best_solution = (tuple(solution), f1_score, f2_score)
+    
+    return best_solution
 
-    return find_optimal_solution
 
 # --- 3. The Pareto Filtering Function ---
+# (No changes in this section)
 
 def find_pareto_front(all_found_solutions):
     """
     Filters a set of solutions to find the non-dominated Pareto front.
-    This follows the definition from the paper.
-    
-    A solution (s) is "non-dominated" if no other solution (s')
-    is better or equal on *all* objectives and strictly better on *at least one*.
     """
     print(f"\nFiltering {len(all_found_solutions)} unique solutions to find the front...")
     
-    # Use a dictionary to store solutions by their (F1, F2) scores
-    # This automatically handles duplicates
     solution_points = {}
     for sol_tuple, f1, f2 in all_found_solutions:
         solution_points[(f1, f2)] = sol_tuple
@@ -102,49 +97,59 @@ def find_pareto_front(all_found_solutions):
             
             f1_p2, f2_p2 = p2
             
-            # Check if p2 dominates p1
             if (f1_p2 >= f1_p1 and f2_p2 >= f2_p1) and \
                (f1_p2 > f1_p1 or f2_p2 > f2_p1):
                 is_dominated = True
-                break # Dominated, no need to check further
+                break
         
         if not is_dominated:
             pareto_front_points.add(p1)
             
-    # Sort for easier reading
     return sorted(list(pareto_front_points)), solution_points
 
-# --- 4. The Main Workflow ---
+# --- 4. Helper Function for Parallelism (MODIFIED) ---
+
+def run_one_weighting(_):
+    """
+    --- MODIFIED: This function no longer takes a solver argument ---
+    This is the function that each worker process will run.
+    The '_' is a placeholder for the item from range().
+    """
+    # Generate random, normalized weights
+    w1 = np.random.random()
+    w2 = 1.0 - w1
+    
+    # Run the solver by calling the new GLOBAL function
+    solution = find_optimal_solution_global(w1, w2)
+    return solution
+
+# --- 5. The Main Workflow (MODIFIED) ---
 
 def main(problem_size, num_weightings):
     """
-    Main execution function, now parameterized by CLI arguments.
+    Main execution function, now PARALLELIZED correctly.
     """
     
     print(f"--- Running with Problem Size: {problem_size}, Weightings: {num_weightings} ---")
     
-    # Get the solver function
-    solver = get_solver(problem_size)
+    # --- MODIFIED: Call the initializer function ONCE ---
+    # This populates the global 'all_solutions' list
+    initialize_solver(problem_size)
     
-    # Store all unique solutions found
-    all_found_solutions = set() 
-
-    print(f"Running solver for {num_weightings} random weightings...")
+    print(f"Running solver for {num_weightings} random weightings IN PARALLEL...")
     
-    for _ in range(num_weightings):
-        # Generate random, normalized weights
-        w1 = np.random.random()
-        w2 = 1.0 - w1
+    # Create a pool of worker processes.
+    with multiprocessing.Pool() as pool:
         
-        # Run the solver for this weighting
-        # This is Step 2, the "quantum" part
-        solution = solver(w1, w2)
+        # --- MODIFIED: Map the simplified 'run_one_weighting' function ---
+        # Each worker will call this function, which in turn calls
+        # the global solver.
+        all_found_solutions = pool.map(run_one_weighting, range(num_weightings))
         
-        if solution:
-            all_found_solutions.add(solution)
-
     # Filter all found solutions to get the Pareto front
-    pareto_front, all_points = find_pareto_front(all_found_solutions)
+    valid_solutions = {s for s in all_found_solutions if s is not None}
+    
+    pareto_front, all_points = find_pareto_front(valid_solutions)
 
     print("\n--- Pareto Front Found ---")
     print("Format: (F1 Score, F2 Score)")
@@ -152,31 +157,27 @@ def main(problem_size, num_weightings):
         print(f"  {point}  (e.g., solution: {all_points[point]})")
 
 if __name__ == "__main__":
-    # --- 5. Add CLI Argument Parsing ---
+    # --- 6. Add CLI Argument Parsing ---
+    # (No changes in this section)
     
-    # Create the parser
     parser = argparse.ArgumentParser(
         description="Find the Pareto front for a toy multi-objective problem."
     )
     
-    # Add the PROBLEM_SIZE argument
     parser.add_argument(
         "-p", "--problem_size",
         type=int,
-        default=10, # Set the default value
+        default=10,
         help="The number of bits in the solution string (default: 10)."
     )
     
-    # Add the NUM_WEIGHTINGS argument
     parser.add_argument(
         "-w", "--num_weightings",
         type=int,
-        default=200, # Set the default value
+        default=200,
         help="The number of random weightings to sample (default: 200)."
     )
     
-    # Parse the arguments from the command line
     args = parser.parse_args()
     
-    # Call the main function with the parsed arguments
     main(args.problem_size, args.num_weightings)
