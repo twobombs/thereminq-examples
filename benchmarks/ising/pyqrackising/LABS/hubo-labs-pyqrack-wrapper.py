@@ -1,3 +1,7 @@
+#
+# quick scratch from the landscaping hubo-qubo wrapper
+#
+
 import numpy as np
 import dimod
 import sys
