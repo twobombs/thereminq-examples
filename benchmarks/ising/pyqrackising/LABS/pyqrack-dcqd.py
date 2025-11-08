@@ -1,3 +1,8 @@
+#
+# LABS dcqd shortcut
+# gemini25
+#
+
 import math
 from pyqrack import PyQrack
 
