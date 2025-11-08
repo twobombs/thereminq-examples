@@ -1,5 +1,6 @@
 #
 # quick scratch from the landscaping hubo-qubo wrapper
+# gemini25
 #
 
 import numpy as np
