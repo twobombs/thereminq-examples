@@ -8,6 +8,9 @@ import dimod
 import sys
 import os
 
+# Add these imports
+from dimod import BinaryPolynomial, BINARY
+
 # We assume pyqrackising is installed
 # (e.g., via 'pip install pyqrackising')
 from pyqrackising import spin_glass_solver
@@ -23,28 +26,97 @@ def create_labs_hubo(N):
     print(f"  Building symbolic LABS HUBO (N={N})...")
     
     # Create N symbolic *binary* variables (b0, b1, ..., b{N-1})
+    # This is the original, correct way. These are BQM-like objects.
     bin_vars = [dimod.Binary(i) for i in range(N)]
     
     # Convert them to symbolic *spin* variables (s_i = 2*b_i - 1)
+    # This also works, resulting in a list of BQMs
     spin_vars = [2 * b - 1 for b in bin_vars]
     
-    E = 0.0 # This will become our total symbolic energy expression
+    # We must explicitly use a Polynomial object to hold the 4th-order terms.
+    # A BinaryPolynomial is a dict-like object.
+    E = BinaryPolynomial({}, BINARY)
     
     # Loop for k from 1 to N-1
     for k in range(1, N):
-        Ck = 0.0 # Symbolic expression for Ck
+        Ck = 0.0 # Symbolic expression for Ck (will become a BQM)
         
         # Loop for i from 1 to N-k (but 0-indexed: 0 to N-k-1)
         # This implements Ck = sum(s_i * s_{i+k})
         for i in range(N - k):
+            # This arithmetic works and builds Ck as a BinaryQuadraticModel
             Ck += spin_vars[i] * spin_vars[i + k]
             
         # Add Ck^2 to the total energy. 
-        # dimod expands this square symbolically, which creates the 4-body terms.
-        E += Ck**2
+        
+        # THE FIX (Part 1):
+        # We must manually convert the 'BinaryQuadraticModel' (Ck)
+        # into a dictionary that 'BinaryPolynomial' understands,
+        # because the BQM object itself is not iterable.
+        
+        # 1. Initialize the polynomial terms dictionary
+        poly_terms = {}
+        
+        # 2. Add linear terms from Ck
+        # Ck.linear is like {v: bias}
+        # We need {(v,): bias}
+        if hasattr(Ck, 'linear'):
+            for v, bias in Ck.linear.items():
+                poly_terms[(v,)] = bias
+        
+        # 3. Add quadratic terms from Ck
+        # Ck.quadratic is like {(u, v): bias}
+        # This is already in the correct format for a polynomial
+        if hasattr(Ck, 'quadratic'):
+            poly_terms.update(Ck.quadratic)
+        
+        # 4. Add the constant offset term
+        # Ck.offset is a float
+        # We need {(): offset}
+        if hasattr(Ck, 'offset'):
+            poly_terms[()] = Ck.offset
+        
+        # 5. Create the BinaryPolynomial from the terms dict
+        Ck_poly = BinaryPolynomial(poly_terms, vartype=BINARY)
+        
+        # THE FIX (Part 2):
+        # Manually compute E += Ck_poly * Ck_poly
+        # This is because `*` and `**` operators are not supported.
+        # We now use dict-style assignment instead of .add_term()
+        
+        ck_terms = list(Ck_poly.items())
+        for i in range(len(ck_terms)):
+            term_i_tuple, bias_i = ck_terms[i]
+            # Use frozenset for hashable set operations
+            term_i = frozenset(term_i_tuple) 
+            
+            # Multiply with itself (i == j term)
+            # term_i^2 = term_i because variables are binary
+            # bias_i^2
+            
+            # Create the canonical tuple key, sorted
+            key_i = tuple(sorted(term_i))
+            # Add to the dict-like polynomial E
+            E[key_i] = E.get(key_i, 0.0) + (bias_i * bias_i)
+
+            # Multiply with other terms (i < j terms)
+            for j in range(i + 1, len(ck_terms)):
+                term_j_tuple, bias_j = ck_terms[j]
+                term_j = frozenset(term_j_tuple)
+                
+                # new_term = term_i * term_j = union(term_i, term_j)
+                new_term = term_i.union(term_j)
+                
+                # new_bias = 2 * bias_i * bias_j
+                new_bias = 2 * bias_i * bias_j
+                
+                # Create the canonical tuple key, sorted
+                key_j = tuple(sorted(new_term))
+                # Add to the dict-like polynomial E
+                E[key_j] = E.get(key_j, 0.0) + new_bias
         
     print("  Symbolic HUBO construction complete.")
-    # E is now a large 'dimod.Poly' object containing all 2-body, 4-body
+    # E is now a large 'dimod.BinaryPolynomial' object containing all 2-body, 4-body
     # interactions, and an offset.
     return E
 
@@ -100,7 +172,7 @@ def solve_and_decode_labs(model_data, use_gpu, quality):
     result_tuple = spin_glass_solver(
         W,
         quality=quality,
-        is_combo_maxcut_gpu=use_gpu
+        is_maxcut_gpu=use_gpu # Changed 'use_gpu' to 'is_maxcut_gpu'
     )
     bitstring = result_tuple[0]
     
@@ -191,4 +263,3 @@ if __name__ == '__main__':
         print(f"\n--- Error during solver execution ---")
         print(e)
         print("Please ensure 'pyqrackising' is installed (`pip install pyqrackising`).")
-
