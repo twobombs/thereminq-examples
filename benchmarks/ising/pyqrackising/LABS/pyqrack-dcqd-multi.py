@@ -12,13 +12,13 @@
 #
 
 import math
+import os # Used for os.devnull and os.dup2
 from pyqrack import QrackSimulator
 import random # Needed for classical MTS
 import argparse # For CLI input
 import multiprocessing
 import itertools
 from tqdm import tqdm # For a nice progress bar
-import os
 import sys # Needed for C-level flush
 
 def apply_r_pauli_string(sim, qubits, pauli_string, angle):
@@ -448,8 +448,18 @@ if __name__ == "__main__":
         print(f"Warning: N={N} is. Setting N=4.")
         N = 4
     
+    # --- Calculate Hamiltonian Complexity ---
+    print("Calculating Hamiltonian complexity...")
+    two_body_terms, four_body_terms = get_problem_hamiltonian_terms(N)
+    num_2_body = len(two_body_terms)
+    num_4_body = len(four_body_terms)
+    # ---
+    
     print("--- QE-MTS Configuration ---")
     print(f"Sequence Length (N): {N}")
+    print(f"Hamiltonian Complexity:")
+    print(f"  - 2-Body Terms: {num_2_body}")
+    print(f"  - 4-Body Terms: {num_4_body}")
     print(f"Quantum Shots (n_shots): {n_shots}")
     print(f"Classical Generations (G_max): {G_max}")
     print(f"Total Evolution Time (T): {T}")
