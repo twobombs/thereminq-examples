@@ -80,7 +80,6 @@ def plot_3d_scatter_colored(data):
     coords = []
     log_cut_values = []
     for n, time, cut in data:
-        # --- MODIFIED ---
         # Calculate natural log: ln(Time)
         if time > 0:
             log_time = math.log(time) # Use math.log for natural log
@@ -89,14 +88,13 @@ def plot_3d_scatter_colored(data):
         
         # Calculate log10(Cut Value)
         if cut > 0:
-            log_cut = math.log10(cut) # Kept as log10, change if needed
+            log_cut = math.log10(cut) 
         else:
             log_cut = 0 # Placeholder for cut=0
         
         # Use log_time for the Y coordinate
         coords.append([n, log_time, log_cut])
         log_cut_values.append(log_cut)
-        # --- END MODIFIED ---
 
     coords_np = np.array(coords)
     log_cut_values_np = np.array(log_cut_values)
@@ -140,7 +138,6 @@ def plot_3d_scatter_colored(data):
     ))
 
     # Add custom axes
-    # --- MODIFIED ---
     axes = vedo.Axes(
         cloud,
         xtitle='N',
@@ -148,7 +145,6 @@ def plot_3d_scatter_colored(data):
         ztitle='log10(Cut Value)',
         c='white'
     )
-    # --- END MODIFIED ---
 
     # Add the color bar legend
     cloud.add_scalarbar(
@@ -174,19 +170,17 @@ def plot_2d_side_by_side(data):
     # Unpack the data
     n_vals = [d[0] for d in data]
     
-    # --- MODIFIED ---
     time_vals = []
     for d in data:
         if d[1] > 0: # d[1] is time
             time_vals.append(math.log(d[1])) # Use math.log for natural log
         else:
             time_vals.append(0)
-    # --- END MODIFIED ---
     
     log_cut_vals = []
     for d in data:
         if d[2] > 0:
-            log_cut_vals.append(math.log10(d[2])) # Kept as log10
+            log_cut_vals.append(math.log10(d[2])) 
         else:
             log_cut_vals.append(0) 
 
@@ -207,27 +201,31 @@ def plot_2d_side_by_side(data):
     ))
 
     # --- Plot 1: N vs ln(Time) ---
-    # --- MODIFIED ---
+    # --- MODIFIED (FIX APPLIED) ---
     plot1 = plt.plot(
         n_vals, 
         time_vals, 
         "b-o", 
         xtitle="N", 
-        ytitle="ln(Time (s))" # Updated Y-axis title
+        ytitle="ln(Time (s))",
+        axes=dict(c='white') # Pass color property here
     )
+    # plot1.axes.c('white') # <-- This line was removed (caused error)
     # --- END MODIFIED ---
-    plot1.axes.c('white') 
     plotter.at(0).show(plot1, "N vs.Time")
 
     # --- Plot 2: N vs log(Cut Value) ---
+    # --- MODIFIED (FIX APPLIED) ---
     plot2 = plt.plot(
         n_vals, 
         log_cut_vals, 
         "r-s", 
         xtitle="N", 
-        ytitle="log10(Cut Value)"
+        ytitle="log10(Cut Value)",
+        axes=dict(c='white') # Pass color property here
     )
-    plot2.axes.c('white') 
+    # plot2.axes.c('white') # <-- This line was removed (caused error)
+    # --- END MODIFIED ---
     plotter.at(1).show(plot2, "N vs. Cut Value")
 
     plotter.interactive().close()
@@ -248,9 +246,9 @@ def main():
         print("Showing 3D scatter plot with color scale...")
         plot_3d_scatter_colored(all_data)
 
-        # Option 2: 2D Side-by-Side Plots (uncomment to use)
-        # print("Showing 2D side-by-side plots...")
-        # plot_2d_side_by_side(all_data)
+        # Option 2: 2D Side-by-Side Plots
+        print("Showing 2D side-by-side plots...")
+        plot_2d_side_by_side(all_data)
         
     else:
         print("No data was parsed. Exiting.")
