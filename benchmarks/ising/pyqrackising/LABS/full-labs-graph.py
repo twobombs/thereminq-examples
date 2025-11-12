@@ -63,13 +63,15 @@ def parse_logs(log_directory):
             print(f"Warning: Error processing {log_file}: {e}")
 
     # Sort data by N before returning
+    # This is critical for the line to be drawn in the correct order
     data.sort()
     return data
 
 
 def plot_3d_scatter_colored(data):
     """
-    Visualizes the data in 3D with color scaling and a dark mode theme.
+    Visualizes the data in 3D as a filled, colored "ribbon" plot
+    in dark mode with an inverted colormap.
     (x=N, y=Time, z=log10(Cut Value))
     """
     if not data:
@@ -90,17 +92,44 @@ def plot_3d_scatter_colored(data):
     coords_np = np.array(coords)
     log_cut_values_np = np.array(log_cut_values)
 
-    # Create the cloud of points
-    cloud = vedo.Points(coords_np, r=10).cmap('viridis', log_cut_values_np) 
+    # 1. Create the cloud of points (the tops)
+    # *** COLOR CHANGED ***
+    cloud = vedo.Points(coords_np, r=10).cmap('viridis_r', log_cut_values_np)
     
-    # Create the plotter instance with a black background and NO title
+    # 2. Create the connecting path (the top edge)
+    #    We make it slightly thicker and opaque to define the edge
+    # *** COLOR CHANGED ***
+    line = vedo.Line(coords_np).lw(4).alpha(1.0).cmap('viridis_r', log_cut_values_np)
+    
+    # --- NEW: Create the filled ribbon ---
+    
+    # 3. Create the bottom path on the XY plane (z=0)
+    start_points = coords_np.copy()
+    start_points[:, 2] = 0 # Set all z-values to 0
+    
+    # 4. Create the two polylines for the ruled surface
+    bottom_line = vedo.Line(start_points)
+    top_line = vedo.Line(coords_np) # This is just for geometry, not the visible line
+    
+    # 5. Create the "wall" or "ribbon" mesh between the two lines
+    ribbon = vedo.Ribbon(bottom_line, top_line).alpha(0.7)
+
+    # 6. Get the Z-coordinates of all vertices in the ribbon mesh.
+    #    The Z-value *is* the log10(Cut Value) or 0.
+    ribbon_z_scalars = ribbon.points[:, 2]
+    
+    # 7. Apply the scalars and colormap to the ribbon based on its Z-height
+    # *** COLOR CHANGED ***
+    ribbon.cmap('viridis_r', ribbon_z_scalars)
+    
+    # Create the plotter instance with a black background
     plotter = vedo.Plotter(
         axes=0, 
-        title="", # Set title empty, we add it manually
-        bg='k' # 'k' for black background
+        title="", 
+        bg='k' 
     )
     
-    # --- Manually add the title in white ---
+    # Manually add the title in white
     plotter.add(vedo.Text2D(
         "LABS 3D Run Analysis (Colored by Cut Value)", 
         pos="top-center", 
@@ -114,17 +143,18 @@ def plot_3d_scatter_colored(data):
         xtitle='N',
         ytitle='Time (s)',
         ztitle='log10(Cut Value)',
-        c='white' # Set axes, ticks, and labels to white
+        c='white'
     )
 
-    # Add the color bar legend, setting text color to white
+    # Add the color bar legend
     cloud.add_scalarbar(
         title="log10(Cut Value)", 
-        c='white', # 'w' for white text
+        c='white',
         horizontal=False
     )
 
-    plotter.show(cloud, axes, __doc__)
+    # --- UPDATED: Show the cloud, top line, and new ribbon ---
+    plotter.show(cloud, line, ribbon, axes, __doc__)
     plotter.close()
 
 
@@ -152,12 +182,12 @@ def plot_2d_side_by_side(data):
     # Create a plotter with 2 subplots and black background
     plotter = vedo.Plotter(
         shape=(1, 2), 
-        title="", # Set title empty, we add it manually
+        title="", 
         sharecam=False,
-        bg='k' # 'k' for black background
+        bg='k' 
     )
 
-    # --- Manually add the title in white ---
+    # Manually add the title in white
     plotter.add(vedo.Text2D(
         "LABS 2D Run Analysis", 
         pos="top-center", 
@@ -168,7 +198,7 @@ def plot_2d_side_by_side(data):
     # --- Plot 1: N vs Time ---
     plot1 = plt.plot(n_vals, time_vals, "b-o", xtitle="N", ytitle="Time (s)")
     plot1.axes.c('white') # Set the axes/labels to white
-    plotter.at(0).show(plot1, "N vs. Time")
+    plotter.at(0).show(plot1, "N vs.Time")
 
     # --- Plot 2: N vs log(Cut Value) ---
     plot2 = plt.plot(n_vals, log_cut_vals, "r-s", xtitle="N", ytitle="log10(Cut Value)")
