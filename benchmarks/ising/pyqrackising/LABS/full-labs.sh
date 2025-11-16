@@ -84,11 +84,11 @@ run_job() {
     local start_time=$(date +%s)
     
     # Run the python script, setting the OpenCL context for this specific job.
-    # We add `timeout 20m` and use `env` to correctly pass the environment variable.
+    # We add `timeout XXXXm` and use `env` to correctly pass the environment variable.
     (
         echo "--- Log Start N=$N (Device $DEVICE_ID) ---"
         # Use `env` to set the variable for the command run by `timeout`
-        time timeout 20m env PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N
+        time timeout 1000m env PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N
         echo "--- Log End N=$N (Device $DEVICE_ID) ---"
     ) > $N_LOG_FILE 2>&1
     
