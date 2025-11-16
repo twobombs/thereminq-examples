@@ -88,7 +88,7 @@ run_job() {
     (
         echo "--- Log Start N=$N (Device $DEVICE_ID) ---"
         # Use `env` to set the variable for the command run by `timeout`
-        time timeout 1000m env PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N
+        time timeout 1000m env PYQRACKISING_FPPOW=6 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N
         echo "--- Log End N=$N (Device $DEVICE_ID) ---"
     ) > $N_LOG_FILE 2>&1
     
