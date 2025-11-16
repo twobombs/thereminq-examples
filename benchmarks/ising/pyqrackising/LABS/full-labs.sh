@@ -61,9 +61,11 @@ DEVICES=($DETECTED_DEVICES_STR)
 mkdir -p $LOG_DIR
 
 NUM_DEVICES=${#DEVICES[@]}
+MAX_JOBS_PER_DEVICE=2
 
 echo "Successfully detected $NUM_DEVICES devices: ${DEVICES[@]}"
-echo "Starting LABS batch run (N=$N_START to $N_END) on $NUM_DEVICES devices..."
+echo "Starting LABS batch run (N=$N_START to $N_END)..."
+echo "Enforcing a limit of $MAX_JOBS_PER_DEVICE jobs per device."
 echo "Logging batch overview to $SCRIPT_LOG"
 echo "Logging individual runs to $LOG_DIR/"
 echo "--- Batch Run Started $(date) ---" > $SCRIPT_LOG # Clear/create the script log
@@ -82,10 +84,11 @@ run_job() {
     local start_time=$(date +%s)
     
     # Run the python script, setting the OpenCL context for this specific job.
-    # All stdout/stderr is redirected to the unique log file for N.
+    # We add `timeout 20m` and use `env` to correctly pass the environment variable.
     (
         echo "--- Log Start N=$N (Device $DEVICE_ID) ---"
-        time PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N
+        # Use `env` to set the variable for the command run by `timeout`
+        time timeout 20m env PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N
         echo "--- Log End N=$N (Device $DEVICE_ID) ---"
     ) > $N_LOG_FILE 2>&1
     
@@ -100,6 +103,11 @@ run_job() {
         local msg="[Device $DEVICE_ID] Finished job for N=$N. (Runtime: ${duration}s)"
         echo "$msg" | tee -a $SCRIPT_LOG
         echo "$msg" >> $N_LOG_FILE
+    # The 'timeout' command exits with 124 when it kills a process
+    elif [ $exit_code -eq 124 ]; then
+        local msg="[Device $DEVICE_ID] KILLED job for N=$N (TIMEOUT > 20m). (Runtime: ${duration}s)"
+        echo "$msg" | tee -a $SCRIPT_LOG
+        echo "$msg" >> $N_LOG_FILE
     else
         local msg="[Device $DEVICE_ID] ERROR on job for N=$N. (Exit Code: $exit_code) (Runtime: ${duration}s)"
         echo "$msg" | tee -a $SCRIPT_LOG
@@ -107,34 +115,67 @@ run_job() {
     fi
 }
 
-# --- Main Job Pool Logic ---
-#
-# We loop from N_START to N_END.
-# For each N, we pick a device in round-robin.
-# We then launch the job in the background (&).
-#
-# The 'if' block checks if the number of running jobs (jobs -r -p)
-# is greater than or equal to our number of devices.
-# If it is, 'wait -n' pauses the script until *any* one of the
-# background jobs finishes, freeing up a "slot".
-#
-# This keeps all devices busy without overloading the system.
+# --- Main Job Pool Logic (Per-Device Tracking) ---
 
+# We need an associative array to store the PIDs (Process IDs)
+# running on each device.
+declare -A pids_per_device
+
+# Initialize an empty list for each device
+for dev in "${DEVICES[@]}"; do
+    pids_per_device[$dev]=""
+done
+
+# Loop for each N
 for N in $(seq $N_START $N_END); do
-    # Pick a device in round-robin fashion
-    # (N - N_START) % NUM_DEVICES
-    DEVICE_INDEX=$(( (N - N_START) % NUM_DEVICES ))
-    DEVICE_ID=${DEVICES[$DEVICE_INDEX]}
     
-    # Run the job in the background, passing N and DEVICE_ID
-    run_job $N $DEVICE_ID &
+    # This inner loop will run until it finds a free slot
+    slot_found=false
+    while [[ "$slot_found" == "false" ]]; do
     
-    # Limit the number of concurrent jobs to the number of devices
-    ACTIVE_JOBS=$(jobs -r -p | wc -l)
-    if [[ $ACTIVE_JOBS -ge $NUM_DEVICES ]]; then
-        # Wait for *any* single job to finish before starting the next
-        wait -n
-    fi
+        # Check each device for a free slot
+        for DEVICE_ID in "${DEVICES[@]}"; do
+            
+            # 1. Clean up dead PIDs for this device
+            running_pids=""
+            for pid in ${pids_per_device[$DEVICE_ID]}; do
+                # `kill -0 $pid` checks if the process is still running
+                if kill -0 $pid 2>/dev/null; then
+                    # PID is still alive, keep it
+                    running_pids="$running_pids $pid"
+                fi
+            done
+            pids_per_device[$DEVICE_ID]=$running_pids
+            
+            # 2. Count active jobs on this device
+            # `wc -w` counts the number of "words" (PIDs) in the string
+            active_jobs_on_device=$(echo ${pids_per_device[$DEVICE_ID]} | wc -w)
+            
+            # 3. Check for a free slot
+            if [[ $active_jobs_on_device -lt $MAX_JOBS_PER_DEVICE ]]; then
+                # Slot found!
+                echo "Found free slot on $DEVICE_ID for N=$N ($active_jobs_on_device / $MAX_JOBS_PER_DEVICE busy)"
+                
+                # Run the job in the background
+                run_job $N $DEVICE_ID &
+                
+                # Get its PID
+                new_pid=$!
+                
+                # Store it in our tracker
+                pids_per_device[$DEVICE_ID]="${pids_per_device[$DEVICE_ID]} $new_pid"
+                
+                # Mark as found and break the inner loops
+                slot_found=true
+                break
+            fi
+        done # end of for-each-device
+        
+        if [[ "$slot_found" == "false" ]]; then
+            # No slots free on any device, wait 1 second and check again
+            sleep 1
+        fi
+    done # end of while-slot-not-found
 done
 
 # Wait for all remaining background jobs to complete
