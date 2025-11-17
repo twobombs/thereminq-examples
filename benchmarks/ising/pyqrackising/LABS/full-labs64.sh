@@ -12,7 +12,7 @@ SCRIPT_LOG="labs_batch_runner.log"
 LOG_DIR="labs_logs"
 #
 # 4. N_START / N_END: The iteration range.
-N_START=30
+N_START=33
 N_END=80
 # === End Configuration ===
 
@@ -88,7 +88,7 @@ run_job() {
     (
         echo "--- Log Start N=$N (Device $DEVICE_ID) ---"
         # Use `env` to set the variable for the command run by `timeout`
-        time timeout 1000m env PYQRACKISING_FPPOW=6 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N
+        time timeout 2000m env PYQRACKISING_FPPOW=6 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N
         echo "--- Log End N=$N (Device $DEVICE_ID) ---"
     ) > $N_LOG_FILE 2>&1
     
