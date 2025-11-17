@@ -12,8 +12,8 @@ SCRIPT_LOG="labs_batch_runner.log"
 LOG_DIR="labs_logs"
 #
 # 4. N_START / N_END: The iteration range.
-N_START=30
-N_END=80
+N_START=4
+N_END=32
 # === End Configuration ===
 
 
