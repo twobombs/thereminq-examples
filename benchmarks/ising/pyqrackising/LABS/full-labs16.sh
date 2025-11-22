@@ -8,9 +8,9 @@
 PYTHON_CMD="python3 full-labs.py"
 
 # Grid Search Settings
-LAMBDA_START=0.25
+LAMBDA_START=0.0
 LAMBDA_END=5.0
-LAMBDA_STEP=0.25
+LAMBDA_STEP=0.1
 
 N_START=4
 N_END=31
