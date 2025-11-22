@@ -1,35 +1,49 @@
 #!/bin/bash
 
 # ==========================================
-# LABS Solver Batch Runner (Grid Search: N & Lambda)
+# LABS Solver Batch Runner (Optimized)
 # ==========================================
 
 # === Configuration ===
-# 1. PYTHON_CMD: Command to run the script.
-PYTHON_CMD="python3 full-labs.py"
+SCRIPT_NAME="full-labs.py"
+# -u forces unbuffered binary stdout/stderr so logs update immediately
+PYTHON_CMD="python3 -u $SCRIPT_NAME" 
 
-# 2. LAMBDA SETTINGS: Iterate Lambda from START to END in STEP increments.
-#    Example: 1.0 to 5.0 with step 1.0 = 1.0, 2.0, 3.0, 4.0, 5.0
-LAMBDA_START=1.0
+# Grid Search Settings
+LAMBDA_START=0.0
 LAMBDA_END=5.0
-LAMBDA_STEP=1.0
+LAMBDA_STEP=0.1
 
-# 3. N SETTINGS: The iteration range for sequence length.
-N_START=64
-N_END=80
+N_START=4
+N_END=31
 
-# 4. LOGGING:
+# Resource Management
+MAX_JOBS_PER_DEVICE=2
+
+# Safety & Logging
+# syntax: -k <kill_after> <duration>
+# Stops job after 2h. If it ignores stop signal, force kills 60s later.
+TIMEOUT_DURATION="2h"
+TIMEOUT_KILL_AFTER="60s"
+
 SCRIPT_LOG="labs_batch_runner.log"
 LOG_DIR="labs_logs"
 
-# 5. MAX_JOBS: How many concurrent Python scripts per GPU?
-MAX_JOBS_PER_DEVICE=2
 # === End Configuration ===
 
+# Ensure dot notation for floats (prevents locale issues like 0,25)
+export LC_NUMERIC=C 
+
+# --- Pre-flight Checks ---
+if [ ! -f "$SCRIPT_NAME" ]; then
+    echo "Error: Python script '$SCRIPT_NAME' not found in current directory!"
+    exit 1
+fi
+
+mkdir -p $LOG_DIR
 
 # --- Dynamic OpenCL Device Detection ---
 echo "Detecting available OpenCL GPU devices..."
-
 DETECTED_DEVICES_STR=$(python3 -c "
 import sys
 try:
@@ -37,7 +51,8 @@ try:
     devices = []
     for p_idx, platform in enumerate(cl.get_platforms()):
         for d_idx, device in enumerate(platform.get_devices(cl.device_type.GPU)):
-            devices.append(f'{p_idx}:{d_idx}')
+            # Returns format PlatformIndex:DeviceIndex (e.g., 0:0, 0:1)
+            devices.append(f'{p_idx}:{d_idx}') 
     if not devices:
         print(\"No OpenCL GPU devices found.\", file=sys.stderr)
         exit(1)
@@ -54,127 +69,119 @@ fi
 
 DEVICES=($DETECTED_DEVICES_STR)
 NUM_DEVICES=${#DEVICES[@]}
-# --- End of Device Detection ---
+echo "Successfully detected $NUM_DEVICES devices: ${DEVICES[@]}"
+echo "--- Batch Run Started $(date) ---" > $SCRIPT_LOG 
 
+# --- Safety Trap (Cleanup) ---
+# Tracks all active PIDs for cleanup to prevent zombies on Ctrl+C
+declare -A pids_per_device
 
-# --- Safety Trap (Ctrl+C Cleanup) ---
 cleanup() {
-    echo ""
-    echo "!!! Script interrupted (SIGINT). Cleaning up child processes..."
+    echo -e "\n\n!!! Script interrupted (SIGINT/SIGTERM). Killing child processes..."
     for dev in "${!pids_per_device[@]}"; do
-        for pid in ${pids_per_device[$dev]}; do
+        # Remove whitespace
+        pids=$(echo ${pids_per_device[$dev]} | xargs)
+        for pid in $pids; do
             if kill -0 $pid 2>/dev/null; then
-                echo " - Killing PID $pid on Device $dev"
+                echo "Killing PID $pid on Device $dev..."
+                # Send terminate then force kill
+                kill -TERM $pid 2>/dev/null
+                sleep 0.2
                 kill -9 $pid 2>/dev/null
             fi
         done
     done
+    echo "Cleanup complete. Exiting."
     exit 1
 }
-trap cleanup SIGINT
-# -----------------------------
+trap cleanup SIGINT SIGTERM
 
-
-mkdir -p $LOG_DIR
-
-echo "Successfully detected $NUM_DEVICES devices: ${DEVICES[@]}"
-echo "Starting Grid Search:"
-echo "  - N: $N_START to $N_END"
-echo "  - Lambda: $LAMBDA_START to $LAMBDA_END (Step: $LAMBDA_STEP)"
-echo "Logging to $LOG_DIR/"
-echo "--- Batch Run Started $(date) ---" > $SCRIPT_LOG 
-
-# Function to run a single job
-# Arguments: $1 = N, $2 = LAMBDA, $3 = DEVICE_ID
+# --- Job Runner Function ---
 run_job() {
     local N=$1
     local L_VAL=$2
     local DEVICE_ID=$3
-    
-    # Log file now includes both N and Lambda to prevent overwriting
     local JOB_LOG_FILE="$LOG_DIR/labs_run_N_${N}_L_${L_VAL}.log"
     
-    echo "[Device $DEVICE_ID] Starting N=$N Lambda=$L_VAL... (Log: $JOB_LOG_FILE)" | tee -a $SCRIPT_LOG
+    echo "[Device $DEVICE_ID] Starting N=$N L=$L_VAL... (Log: $JOB_LOG_FILE)" | tee -a $SCRIPT_LOG
     
     local start_time=$(date +%s)
     
     (
-        echo "--- Log Start N=$N Lambda=$L_VAL (Device $DEVICE_ID) ---"
-        # Pass specific Lambda value to python script
-        time timeout 360m env PYQRACKISING_FPPOW=6 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N $L_VAL
-        echo "--- Log End ---"
-    ) > $JOB_LOG_FILE 2>&1
+        echo "--- Start: $(date) ---"
+        # Pass ENV vars. 
+        # PYOPENCL_CTX is set to '0:1' (Platform:Device)
+        time timeout -k $TIMEOUT_KILL_AFTER $TIMEOUT_DURATION env PYQRACKISING_FPPOW=6 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N $L_VAL
+    ) > "$JOB_LOG_FILE" 2>&1
     
     local exit_code=$?
     local duration=$(( $(date +%s) - start_time ))
     
     if [ $exit_code -eq 0 ]; then
-        local msg="[Device $DEVICE_ID] Finished N=$N L=$L_VAL. (${duration}s)"
-        echo "$msg" | tee -a $SCRIPT_LOG
-        echo "$msg" >> $JOB_LOG_FILE
+        echo "[Device $DEVICE_ID] Finished N=$N L=$L_VAL. (${duration}s)" | tee -a $SCRIPT_LOG
+    elif [ $exit_code -eq 124 ] || [ $exit_code -eq 137 ]; then
+        echo "[Device $DEVICE_ID] TIMEOUT ($TIMEOUT_DURATION) on N=$N L=$L_VAL." | tee -a $SCRIPT_LOG
     else
-        local msg="[Device $DEVICE_ID] ERROR/TIMEOUT on N=$N L=$L_VAL. (Code: $exit_code)"
-        echo "$msg" | tee -a $SCRIPT_LOG
-        echo "$msg" >> $JOB_LOG_FILE
+        echo "[Device $DEVICE_ID] ERROR (Code $exit_code) on N=$N L=$L_VAL." | tee -a $SCRIPT_LOG
     fi
 }
 
-# --- Main Job Pool Logic ---
+# --- Main Scheduler ---
 
-declare -A pids_per_device
-for dev in "${DEVICES[@]}"; do
-    pids_per_device[$dev]=""
-done
+# Initialize PID tracking
+for dev in "${DEVICES[@]}"; do pids_per_device[$dev]=""; done
 
-# OUTER LOOP: N
 for N in $(seq $N_START $N_END); do
-    
-    # INNER LOOP: Lambda
-    # We use `seq` to handle floating point steps if needed (e.g. 1.0 0.5 5.0)
-    for L_VAL in $(seq $LAMBDA_START $LAMBDA_STEP $LAMBDA_END); do
+    # Loop through Lambda values
+    for L_RAW in $(seq $LAMBDA_START $LAMBDA_STEP $LAMBDA_END); do
+        
+        # Float Sanitization: Ensure we get '0.3' instead of '0.3000000004'
+        L_VAL=$(printf "%.1f" "$L_RAW")
         
         slot_found=false
         
-        # Wait for a free slot
+        # Keep trying until a slot opens on ANY device
         while [[ "$slot_found" == "false" ]]; do
-            
             for DEVICE_ID in "${DEVICES[@]}"; do
                 
-                # 1. Clean up dead PIDs
+                # 1. Update PIDs (Filter out dead/finished jobs)
                 running_pids=""
-                for pid in ${pids_per_device[$DEVICE_ID]}; do
+                current_count=0
+                
+                current_pids_str=${pids_per_device[$DEVICE_ID]}
+                
+                for pid in $current_pids_str; do
                     if kill -0 $pid 2>/dev/null; then
                         running_pids="$running_pids $pid"
+                        ((current_count++))
                     fi
                 done
-                pids_per_device[$DEVICE_ID]=$running_pids
                 
-                # 2. Count active jobs
-                active_jobs=$(echo ${pids_per_device[$DEVICE_ID]} | wc -w)
+                # Update the map with only living PIDs
+                pids_per_device[$DEVICE_ID]=$(echo $running_pids | xargs)
                 
-                # 3. Check capacity
-                if [[ $active_jobs -lt $MAX_JOBS_PER_DEVICE ]]; then
-                    
-                    # Launch Job
+                # 2. Check Capacity
+                if [[ $current_count -lt $MAX_JOBS_PER_DEVICE ]]; then
+                    # Launch Job in Background
                     run_job $N $L_VAL $DEVICE_ID &
                     new_pid=$!
                     
-                    # Track PID
+                    # Add new PID to tracking
                     pids_per_device[$DEVICE_ID]="${pids_per_device[$DEVICE_ID]} $new_pid"
                     
                     slot_found=true
-                    break
+                    break # Break inner loop (Devices), proceed to next Lambda
                 fi
-            done 
+            done
             
+            # If no slots found on ANY device, wait 2 seconds before checking again
             if [[ "$slot_found" == "false" ]]; then
-                sleep 1
+                sleep 2
             fi
         done
-        
-    done # End Lambda Loop
-done # End N Loop
+    done
+done
 
-echo "All jobs launched. Waiting for completion..."
+echo "All jobs scheduled. Waiting for remaining jobs to finish..."
 wait
 echo "Grid search complete."
