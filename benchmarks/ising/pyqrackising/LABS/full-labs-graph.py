@@ -1,39 +1,44 @@
+#!/usr/bin/env python3
 import glob
 import re
 import math
-import vedo
-import vedo.pyplot as plt
-import numpy as np
+import argparse
 import os
 import sys
 import traceback
-from scipy.spatial import Delaunay  # <--- The Fix: Standard scientific library
+import numpy as np
+import vedo
+from scipy.spatial import Delaunay
 
-# --- Configuration ---
-LOG_DIR = "labs_logs"
-# --- End Configuration ---
-
+# --- Configuration defaults ---
+DEFAULT_LOG_DIR = "labs_logs"
 
 def parse_logs(log_directory):
     """
-    Parses log files with format: labs_run_N_{N}_L_{LAMBDA}.log
+    Parses log files. Returns a list of tuples: (n, lambda, avg_time, avg_cut).
+    
+    - If cut < 1.0 (failed/noise), force it to 1.0.
+    - On the log10 scale, log10(1.0) = 0.
+    - This ensures failed runs appear as "flat" points at zero height.
     """
     search_path = os.path.join(log_directory, "labs_run_N_*_L_*.log")
     log_files = glob.glob(search_path)
     
     if not log_files:
         print(f"Error: No matching log files found in '{log_directory}'")
-        return []
+        return None
 
     print(f"Found {len(log_files)} log files. Parsing...")
     
-    data = []
+    raw_data = {}
     
+    # Regex patterns
     filename_regex = re.compile(r"labs_run_N_(\d+)_L_([\d.]+)\.log")
     time_regex = re.compile(r"real\s+(\d+)m([\d.]+)s")
-    cut_regex = re.compile(r"Best cut.*:\s*([\d.e+-]+)")
+    cut_regex = re.compile(r"Best cut.*:\s*(-?[\d.eE+-]+)")
 
     success_count = 0
+    forced_zero_count = 0
     
     for log_file in log_files:
         try:
@@ -53,32 +58,52 @@ def parse_logs(log_directory):
                 total_time = (minutes * 60) + seconds
                 
                 cut_value = float(cut_match.group(1))
+
+                # --- LOGIC: Force failures to floor ---
+                if cut_value < 1.0:
+                    cut_value = 1.0
+                    forced_zero_count += 1
+                # --------------------
                 
-                data.append((n, l_val, total_time, cut_value))
+                key = (n, l_val)
+                if key not in raw_data:
+                    raw_data[key] = {'time': [], 'cut': []}
+                
+                raw_data[key]['time'].append(total_time)
+                raw_data[key]['cut'].append(cut_value)
                 success_count += 1
-        except Exception as e:
+                
+        except Exception:
             pass
 
-    print(f"Successfully parsed {success_count} out of {len(log_files)} files.")
-    data.sort(key=lambda x: (x[0], x[1]))
-    return data
+    print(f"Successfully parsed {success_count} files.")
+    if forced_zero_count > 0:
+        print(f"Note: {forced_zero_count} files had invalid cuts and were forced to Zero height (Cut=1.0).")
+    print(f"Unique parameter configurations found: {len(raw_data)}")
 
+    # Flatten and Average duplicates
+    cleaned_data = []
+    for (n, l_val), values in raw_data.items():
+        avg_time = sum(values['time']) / len(values['time'])
+        avg_cut = sum(values['cut']) / len(values['cut']) 
+        cleaned_data.append((n, l_val, avg_time, avg_cut))
+
+    # Sort by N then Lambda
+    cleaned_data.sort(key=lambda x: (x[0], x[1]))
+    return cleaned_data
 
 def plot_3d_surface(data):
-    """
-    Visualizes the data as a 3D Surface using SciPy for robust triangulation.
-    """
     print("Generating 3D Surface data...")
-    if not data:
-        raise ValueError("No data available to plot.")
-
+    
     coords = []
-    xy_points = [] # For triangulation (N, Lambda)
+    xy_points = [] 
     time_scalars = []
 
     for n, l_val, time, cut in data:
-        z_val = math.log10(cut) if cut > 0 else 0
-        t_val = math.log(time) if time > 0 else 0
+        # cut is guaranteed >= 1.0 now, so z_val >= 0
+        z_val = math.log10(cut)
+        # Safety check for time
+        t_val = math.log(time) if time > 1e-9 else -5
         
         coords.append([n, l_val, z_val])
         xy_points.append([n, l_val])
@@ -88,28 +113,45 @@ def plot_3d_surface(data):
     xy_np = np.array(xy_points)
     time_np = np.array(time_scalars)
 
-    # --- SCIPY FIX ---
-    # 1. Use SciPy to calculate the triangles (faces) based on X,Y coordinates
+    # --- TRIANGULATION (SciPy) ---
     print("Triangulating points using SciPy...")
+    if len(xy_np) < 3:
+        print("Not enough points to triangulate surface.")
+        return
+
     tri = Delaunay(xy_np)
     faces = tri.simplices
     
-    # 2. Create the Vedo Mesh manually using vertices and faces
-    print("Constructing Mesh...")
+    print(f"Constructing Mesh ({len(faces)} faces)...")
     surf = vedo.Mesh([coords_np, faces])
-    # -----------------
-
-    # Color the surface by Time
-    surf.cmap('viridis', time_np).alpha(0.9)
-    surf.lw(1).lc('black') # Add wireframe lines
-
-    plotter = vedo.Plotter(axes=0, bg='k', title="LABS Landscape")
     
-    plotter.add(vedo.Text2D(
-        "Surface Height = log10(Cut Value)\nColor = ln(Time)", 
-        pos="top-center", c="white", s=1.0
-    ))
+    # Visuals: Color by Time (INVERTED: Bright=Fast, Dark=Slow)
+    surf.cmap('viridis_r', time_np).alpha(0.9)
+    
+    # --- TRANSPARENT LINES FIX ---
+    # 1. Set solid black color
+    surf.lw(0.5).lc("black")
+    
+    # 2. Access the underlying VTK property via .properties
+    try:
+        surf.properties.SetEdgeOpacity(0.2)
+    except AttributeError:
+        # Fallback for very old vedo versions
+        surf.GetProperty().SetEdgeOpacity(0.2)
+    # -----------------------------
 
+    # Plotter Setup
+    plotter = vedo.Plotter(axes=0, bg='black', title="LABS Landscape")
+    
+    text_str = (
+        "Landscape of Optimization\n"
+        "Height: log10(Cut Value)\n"
+        "Color: ln(Time in seconds)"
+    )
+    
+    plotter.add(vedo.Text2D(text_str, pos="top-left", c="white", s=0.8))
+
+    # Axes Setup
     axes = vedo.Axes(
         surf,
         xtitle='N (Seq Length)',
@@ -121,79 +163,25 @@ def plot_3d_surface(data):
     surf.add_scalarbar(title="ln(Time)", c='white')
 
     print("Displaying 3D Plot (Close window to continue)...")
-    plotter.show(surf, axes, viewup='z')
+    plotter.show(surf, axes, viewup='z', interactive=True)
     plotter.close()
 
-
-def plot_2d_slices(data):
-    """
-    Plots N vs Cut Value, grouped by Lambda.
-    """
-    if not data:
-        return
-
-    print("Generating 2D Slices...")
-    grouped = {}
-    for n, l_val, time, cut in data:
-        if l_val not in grouped:
-            grouped[l_val] = ([], [])
-        grouped[l_val][0].append(n)
-        grouped[l_val][1].append(math.log10(cut) if cut > 0 else 0)
-
-    plotter = vedo.Plotter(bg='k', title="2D Slices by Lambda")
-    
-    lines = []
-    sorted_lambdas = sorted(grouped.keys())
-    
-    colors = ["red", "green", "blue", "yellow", "cyan", "magenta", "white", "orange"]
-
-    for i, l_val in enumerate(sorted_lambdas):
-        n_vals, cut_vals = grouped[l_val]
-        c = colors[i % len(colors)]
-        
-        line = vedo.pyplot.plot(
-            n_vals, cut_vals, 
-            "-o", c=c
-        )
-        lines.append(line)
-
-    if lines:
-        lines[0].xtitle = "N"
-        lines[0].ytitle = "log10(Cut Value)"
-        
-        plotter.add(vedo.Text2D("Cut Value vs N (By Lambda)", pos="top-center", c="white"))
-        plotter.show(lines, zoom=1.2)
-        plotter.close()
-
-
 def main():
-    all_data = parse_logs(LOG_DIR)
+    parser = argparse.ArgumentParser(description="Plot LABS Logs (3D Only)")
+    parser.add_argument("dir", nargs="?", default=DEFAULT_LOG_DIR, help="Directory containing log files")
+    args = parser.parse_args()
+
+    all_data = parse_logs(args.dir)
     
     if not all_data:
-        print("Exiting: No data found.")
         sys.exit(1)
 
-    # 1. Attempt 3D Plot
+    # Attempt 3D Plot
     try:
-        print("1. Attempting 3D Surface Plot...")
         plot_3d_surface(all_data)
     except Exception:
-        print("\n" + "!"*60)
-        print("CRITICAL ERROR in 3D Plotting.")
+        print("\nCRITICAL ERROR in 3D Plotting:")
         traceback.print_exc()
-        print("!"*60)
-        sys.exit(1)
-    
-    print("-" * 30)
-    
-    # 2. Attempt 2D Plot
-    try:
-        print("2. Attempting 2D Slice Plots...")
-        plot_2d_slices(all_data)
-    except Exception:
-        print("\nCRITICAL ERROR in 2D Plotting:")
-        traceback.print_exc()
-        sys.exit(1)
 
 if __name__ == "__main__":
     main()
