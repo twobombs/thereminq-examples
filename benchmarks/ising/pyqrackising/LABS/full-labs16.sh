@@ -1,11 +1,12 @@
 #!/bin/bash
 
 # ==========================================
-# LABS Solver Batch Runner (Refined)
+# LABS Solver Batch Runner (Optimized)
 # ==========================================
 
 # === Configuration ===
-PYTHON_CMD="python3 full-labs.py"
+SCRIPT_NAME="full-labs.py"
+PYTHON_CMD="python3 -u $SCRIPT_NAME" # Added -u for unbuffered output
 
 # Grid Search Settings
 LAMBDA_START=0.0
@@ -19,15 +20,23 @@ N_END=31
 MAX_JOBS_PER_DEVICE=2
 
 # Safety & Logging
-# Increased timeout to 2 hours per job (adjust based on N=31 expectations)
-JOB_TIMEOUT="2h" 
+# Timeout: Send TERM after 2h. If still running 60s later, send KILL.
+JOB_TIMEOUT_OPTS="-k 60s 2h" 
 SCRIPT_LOG="labs_batch_runner.log"
 LOG_DIR="labs_logs"
 
 # === End Configuration ===
 
-# Ensure dot notation for floats (0.25 vs 0,25)
+# Ensure dot notation for floats
 export LC_NUMERIC=C 
+
+# --- Pre-flight Checks ---
+if [ ! -f "$SCRIPT_NAME" ]; then
+    echo "Error: Python script '$SCRIPT_NAME' not found!"
+    exit 1
+fi
+
+mkdir -p $LOG_DIR
 
 # --- Dynamic OpenCL Device Detection ---
 echo "Detecting available OpenCL GPU devices..."
@@ -38,7 +47,8 @@ try:
     devices = []
     for p_idx, platform in enumerate(cl.get_platforms()):
         for d_idx, device in enumerate(platform.get_devices(cl.device_type.GPU)):
-            devices.append(f'{p_idx}:{d_idx}')
+            # Returns format PlatformIndex:DeviceIndex
+            devices.append(f'{p_idx}:{d_idx}') 
     if not devices:
         print(\"No OpenCL GPU devices found.\", file=sys.stderr)
         exit(1)
@@ -56,23 +66,27 @@ fi
 DEVICES=($DETECTED_DEVICES_STR)
 NUM_DEVICES=${#DEVICES[@]}
 echo "Successfully detected $NUM_DEVICES devices: ${DEVICES[@]}"
+echo "--- Batch Run Started $(date) ---" > $SCRIPT_LOG 
 
 # --- Safety Trap ---
+# Tracks all active PIDs for cleanup
+declare -A pids_per_device
+
 cleanup() {
     echo -e "\n!!! Script interrupted. Killing child processes..."
     for dev in "${!pids_per_device[@]}"; do
         for pid in ${pids_per_device[$dev]}; do
             if kill -0 $pid 2>/dev/null; then
+                echo "Killing PID $pid on Device $dev..."
+                kill -TERM $pid 2>/dev/null
+                sleep 0.1
                 kill -9 $pid 2>/dev/null
             fi
         done
     done
     exit 1
 }
-trap cleanup SIGINT
-
-mkdir -p $LOG_DIR
-echo "--- Batch Run Started $(date) ---" > $SCRIPT_LOG 
+trap cleanup SIGINT SIGTERM
 
 # --- Job Runner Function ---
 run_job() {
@@ -87,8 +101,9 @@ run_job() {
     
     (
         echo "--- Start: $(date) ---"
-        # Pass environment variables explicitly if needed by the python script
-        time timeout $JOB_TIMEOUT env PYQRACKISING_FPPOW=4 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N $L_VAL
+        # Pass ENV vars. PYOPENCL_CTX format depends on how python parses it.
+        # Assuming your python script handles '0:1' correctly.
+        time timeout $JOB_TIMEOUT_OPTS env PYQRACKISING_FPPOW=4 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N $L_VAL
     ) > "$JOB_LOG_FILE" 2>&1
     
     local exit_code=$?
@@ -96,8 +111,8 @@ run_job() {
     
     if [ $exit_code -eq 0 ]; then
         echo "[Device $DEVICE_ID] Finished N=$N L=$L_VAL. (${duration}s)" | tee -a $SCRIPT_LOG
-    elif [ $exit_code -eq 124 ]; then
-        echo "[Device $DEVICE_ID] TIMEOUT ($JOB_TIMEOUT) on N=$N L=$L_VAL." | tee -a $SCRIPT_LOG
+    elif [ $exit_code -eq 124 ] || [ $exit_code -eq 137 ]; then
+        echo "[Device $DEVICE_ID] TIMEOUT ($JOB_TIMEOUT_OPTS) on N=$N L=$L_VAL." | tee -a $SCRIPT_LOG
     else
         echo "[Device $DEVICE_ID] ERROR (Code $exit_code) on N=$N L=$L_VAL." | tee -a $SCRIPT_LOG
     fi
@@ -105,11 +120,14 @@ run_job() {
 
 # --- Main Scheduler ---
 
-declare -A pids_per_device
 for dev in "${DEVICES[@]}"; do pids_per_device[$dev]=""; done
 
 for N in $(seq $N_START $N_END); do
-    for L_VAL in $(seq $LAMBDA_START $LAMBDA_STEP $LAMBDA_END); do
+    # Use seq to generate, but read into loop to sanitize float format
+    for L_RAW in $(seq $LAMBDA_START $LAMBDA_STEP $LAMBDA_END); do
+        
+        # Sanitize Float: ensures 0.0, 0.1, etc., not 0.30000004
+        L_VAL=$(printf "%.1f" "$L_RAW")
         
         slot_found=false
         
@@ -119,19 +137,28 @@ for N in $(seq $N_START $N_END); do
                 # 1. Update PIDs (Filter out dead ones)
                 running_pids=""
                 current_count=0
-                for pid in ${pids_per_device[$DEVICE_ID]}; do
+                
+                # Read current PIDs into array for safer handling
+                current_pids_str=${pids_per_device[$DEVICE_ID]}
+                
+                for pid in $current_pids_str; do
                     if kill -0 $pid 2>/dev/null; then
                         running_pids="$running_pids $pid"
                         ((current_count++))
                     fi
                 done
-                pids_per_device[$DEVICE_ID]=$running_pids
+                
+                # Trim leading space and update map
+                pids_per_device[$DEVICE_ID]=$(echo $running_pids | xargs)
                 
                 # 2. Check Capacity
                 if [[ $current_count -lt $MAX_JOBS_PER_DEVICE ]]; then
                     run_job $N $L_VAL $DEVICE_ID &
                     new_pid=$!
+                    
+                    # Add new PID to the list
                     pids_per_device[$DEVICE_ID]="${pids_per_device[$DEVICE_ID]} $new_pid"
+                    
                     slot_found=true
                     break # Break inner device loop, move to next Lambda
                 fi
