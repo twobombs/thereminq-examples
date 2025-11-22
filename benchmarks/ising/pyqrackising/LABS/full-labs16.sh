@@ -10,13 +10,13 @@ PYTHON_CMD="python3 full-labs.py"
 
 # 2. LAMBDA SETTINGS: Iterate Lambda from START to END in STEP increments.
 #    Example: 1.0 to 5.0 with step 1.0 = 1.0, 2.0, 3.0, 4.0, 5.0
-LAMBDA_START=1.0
+LAMBDA_START=0.25
 LAMBDA_END=5.0
-LAMBDA_STEP=1.0
+LAMBDA_STEP=0.25
 
 # 3. N SETTINGS: The iteration range for sequence length.
 N_START=4
-N_END=80
+N_END=31
 
 # 4. LOGGING:
 SCRIPT_LOG="labs_batch_runner.log"
@@ -101,7 +101,7 @@ run_job() {
     (
         echo "--- Log Start N=$N Lambda=$L_VAL (Device $DEVICE_ID) ---"
         # Pass specific Lambda value to python script
-        time timeout 2000m env PYQRACKISING_FPPOW=5 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N $L_VAL
+        time timeout 10m env PYQRACKISING_FPPOW=4 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N $L_VAL
         echo "--- Log End ---"
     ) > $JOB_LOG_FILE 2>&1
     

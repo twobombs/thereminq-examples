@@ -15,8 +15,8 @@ LAMBDA_END=5.0
 LAMBDA_STEP=1.0
 
 # 3. N SETTINGS: The iteration range for sequence length.
-N_START=4
-N_END=80
+N_START=32
+N_END=63
 
 # 4. LOGGING:
 SCRIPT_LOG="labs_batch_runner.log"
@@ -101,7 +101,7 @@ run_job() {
     (
         echo "--- Log Start N=$N Lambda=$L_VAL (Device $DEVICE_ID) ---"
         # Pass specific Lambda value to python script
-        time timeout 2000m env PYQRACKISING_FPPOW=5 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N $L_VAL
+        time timeout 100m env PYQRACKISING_FPPOW=5 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N $L_VAL
         echo "--- Log End ---"
     ) > $JOB_LOG_FILE 2>&1
     
