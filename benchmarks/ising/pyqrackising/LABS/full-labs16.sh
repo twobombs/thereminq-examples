@@ -6,7 +6,8 @@
 
 # === Configuration ===
 SCRIPT_NAME="full-labs.py"
-PYTHON_CMD="python3 -u $SCRIPT_NAME" # Added -u for unbuffered output
+# -u forces unbuffered binary stdout/stderr so logs update immediately
+PYTHON_CMD="python3 -u $SCRIPT_NAME" 
 
 # Grid Search Settings
 LAMBDA_START=0.0
@@ -20,19 +21,22 @@ N_END=31
 MAX_JOBS_PER_DEVICE=2
 
 # Safety & Logging
-# Timeout: Send TERM after 2h. If still running 60s later, send KILL.
-JOB_TIMEOUT_OPTS="-k 60s 2h" 
+# syntax: -k <kill_after> <duration>
+# Stops job after 2h. If it ignores stop signal, force kills 60s later.
+TIMEOUT_DURATION="2h"
+TIMEOUT_KILL_AFTER="60s"
+
 SCRIPT_LOG="labs_batch_runner.log"
 LOG_DIR="labs_logs"
 
 # === End Configuration ===
 
-# Ensure dot notation for floats
+# Ensure dot notation for floats (prevents locale issues like 0,25)
 export LC_NUMERIC=C 
 
 # --- Pre-flight Checks ---
 if [ ! -f "$SCRIPT_NAME" ]; then
-    echo "Error: Python script '$SCRIPT_NAME' not found!"
+    echo "Error: Python script '$SCRIPT_NAME' not found in current directory!"
     exit 1
 fi
 
@@ -47,7 +51,7 @@ try:
     devices = []
     for p_idx, platform in enumerate(cl.get_platforms()):
         for d_idx, device in enumerate(platform.get_devices(cl.device_type.GPU)):
-            # Returns format PlatformIndex:DeviceIndex
+            # Returns format PlatformIndex:DeviceIndex (e.g., 0:0, 0:1)
             devices.append(f'{p_idx}:{d_idx}') 
     if not devices:
         print(\"No OpenCL GPU devices found.\", file=sys.stderr)
@@ -68,22 +72,26 @@ NUM_DEVICES=${#DEVICES[@]}
 echo "Successfully detected $NUM_DEVICES devices: ${DEVICES[@]}"
 echo "--- Batch Run Started $(date) ---" > $SCRIPT_LOG 
 
-# --- Safety Trap ---
-# Tracks all active PIDs for cleanup
+# --- Safety Trap (Cleanup) ---
+# Tracks all active PIDs for cleanup to prevent zombies on Ctrl+C
 declare -A pids_per_device
 
 cleanup() {
-    echo -e "\n!!! Script interrupted. Killing child processes..."
+    echo -e "\n\n!!! Script interrupted (SIGINT/SIGTERM). Killing child processes..."
     for dev in "${!pids_per_device[@]}"; do
-        for pid in ${pids_per_device[$dev]}; do
+        # Remove whitespace
+        pids=$(echo ${pids_per_device[$dev]} | xargs)
+        for pid in $pids; do
             if kill -0 $pid 2>/dev/null; then
                 echo "Killing PID $pid on Device $dev..."
+                # Send terminate then force kill
                 kill -TERM $pid 2>/dev/null
-                sleep 0.1
+                sleep 0.2
                 kill -9 $pid 2>/dev/null
             fi
         done
     done
+    echo "Cleanup complete. Exiting."
     exit 1
 }
 trap cleanup SIGINT SIGTERM
@@ -101,9 +109,9 @@ run_job() {
     
     (
         echo "--- Start: $(date) ---"
-        # Pass ENV vars. PYOPENCL_CTX format depends on how python parses it.
-        # Assuming your python script handles '0:1' correctly.
-        time timeout $JOB_TIMEOUT_OPTS env PYQRACKISING_FPPOW=4 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N $L_VAL
+        # Pass ENV vars. 
+        # PYOPENCL_CTX is set to '0:1' (Platform:Device)
+        time timeout -k $TIMEOUT_KILL_AFTER $TIMEOUT_DURATION env PYQRACKISING_FPPOW=4 PYOPENCL_CTX=$DEVICE_ID $PYTHON_CMD $N $L_VAL
     ) > "$JOB_LOG_FILE" 2>&1
     
     local exit_code=$?
@@ -112,7 +120,7 @@ run_job() {
     if [ $exit_code -eq 0 ]; then
         echo "[Device $DEVICE_ID] Finished N=$N L=$L_VAL. (${duration}s)" | tee -a $SCRIPT_LOG
     elif [ $exit_code -eq 124 ] || [ $exit_code -eq 137 ]; then
-        echo "[Device $DEVICE_ID] TIMEOUT ($JOB_TIMEOUT_OPTS) on N=$N L=$L_VAL." | tee -a $SCRIPT_LOG
+        echo "[Device $DEVICE_ID] TIMEOUT ($TIMEOUT_DURATION) on N=$N L=$L_VAL." | tee -a $SCRIPT_LOG
     else
         echo "[Device $DEVICE_ID] ERROR (Code $exit_code) on N=$N L=$L_VAL." | tee -a $SCRIPT_LOG
     fi
@@ -120,25 +128,26 @@ run_job() {
 
 # --- Main Scheduler ---
 
+# Initialize PID tracking
 for dev in "${DEVICES[@]}"; do pids_per_device[$dev]=""; done
 
 for N in $(seq $N_START $N_END); do
-    # Use seq to generate, but read into loop to sanitize float format
+    # Loop through Lambda values
     for L_RAW in $(seq $LAMBDA_START $LAMBDA_STEP $LAMBDA_END); do
         
-        # Sanitize Float: ensures 0.0, 0.1, etc., not 0.30000004
+        # Float Sanitization: Ensure we get '0.3' instead of '0.3000000004'
         L_VAL=$(printf "%.1f" "$L_RAW")
         
         slot_found=false
         
+        # Keep trying until a slot opens on ANY device
         while [[ "$slot_found" == "false" ]]; do
             for DEVICE_ID in "${DEVICES[@]}"; do
                 
-                # 1. Update PIDs (Filter out dead ones)
+                # 1. Update PIDs (Filter out dead/finished jobs)
                 running_pids=""
                 current_count=0
                 
-                # Read current PIDs into array for safer handling
                 current_pids_str=${pids_per_device[$DEVICE_ID]}
                 
                 for pid in $current_pids_str; do
@@ -148,23 +157,24 @@ for N in $(seq $N_START $N_END); do
                     fi
                 done
                 
-                # Trim leading space and update map
+                # Update the map with only living PIDs
                 pids_per_device[$DEVICE_ID]=$(echo $running_pids | xargs)
                 
                 # 2. Check Capacity
                 if [[ $current_count -lt $MAX_JOBS_PER_DEVICE ]]; then
+                    # Launch Job in Background
                     run_job $N $L_VAL $DEVICE_ID &
                     new_pid=$!
                     
-                    # Add new PID to the list
+                    # Add new PID to tracking
                     pids_per_device[$DEVICE_ID]="${pids_per_device[$DEVICE_ID]} $new_pid"
                     
                     slot_found=true
-                    break # Break inner device loop, move to next Lambda
+                    break # Break inner loop (Devices), proceed to next Lambda
                 fi
             done
             
-            # If we checked all devices and found no slots, wait before checking again
+            # If no slots found on ANY device, wait 2 seconds before checking again
             if [[ "$slot_found" == "false" ]]; then
                 sleep 2
             fi
