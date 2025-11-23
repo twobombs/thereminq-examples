@@ -32,8 +32,11 @@ def parse_logs(log_directory):
     
     raw_data = {}
     
-    # Regex patterns
-    filename_regex = re.compile(r"labs_run_N_(\d+)_L_([\d.]+)\.log")
+    # --- FIX START ---
+    # Updated regex to allow '-' in the Lambda group (group 2)
+    filename_regex = re.compile(r"labs_run_N_(\d+)_L_([-\d.]+)\.log")
+    # --- FIX END ---
+    
     time_regex = re.compile(r"real\s+(\d+)m([\d.]+)s")
     cut_regex = re.compile(r"Best cut.*:\s*(-?[\d.eE+-]+)")
 
@@ -51,7 +54,7 @@ def parse_logs(log_directory):
 
             if name_match and time_match and cut_match:
                 n = int(name_match.group(1))
-                l_val = float(name_match.group(2))
+                l_val = float(name_match.group(2)) # Python float() handles "-0.1" correctly
                 
                 minutes = float(time_match.group(1))
                 seconds = float(time_match.group(2))
