@@ -108,7 +108,7 @@ run_job() {
     # Run Command
     (
         time timeout -k $TIMEOUT_KILL_AFTER $TIMEOUT_DURATION \
-        env PYQRACKISING_FPPOW=4 PYOPENCL_CTX=$DEVICE_ID \
+        env PYQRACKISING_FPPOW=6 PYOPENCL_CTX=$DEVICE_ID \
         $PYTHON_CMD $N $L_VAL
     ) > "$LOG_FILE" 2>&1
     
