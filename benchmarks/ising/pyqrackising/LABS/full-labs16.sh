@@ -10,7 +10,7 @@ SCRIPT_NAME="full-labs.py"
 PYTHON_CMD="python3 -u $SCRIPT_NAME" 
 
 # Grid Search Settings
-LAMBDA_START=0.0
+LAMBDA_START=-3.0
 LAMBDA_END=5.0
 LAMBDA_STEP=0.1
 
