@@ -20,7 +20,7 @@ N_END=63
 MAX_JOBS_PER_DEVICE=2
 
 # Safety & Logging
-TIMEOUT_DURATION="20m"
+TIMEOUT_DURATION="45m"
 TIMEOUT_KILL_AFTER="60s"
 
 # Create a unique timestamped directory for this specific batch run
