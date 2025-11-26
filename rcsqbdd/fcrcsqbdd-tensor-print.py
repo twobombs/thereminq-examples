@@ -2,6 +2,7 @@ import math
 import random
 import sys
 import numpy as np
+import pickle  # Added for saving data
 
 try:
     import quimb.tensor as qtn
@@ -11,7 +12,7 @@ except ImportError:
     sys.exit(1)
 
 # ------------------------------------------------------------------
-# 1. Gate Definitions (Explicit Matrices)
+# 1. Gate Definitions
 # ------------------------------------------------------------------
 def get_H(): 
     return np.array([[1, 1], [1, -1]]) / math.sqrt(2)
@@ -23,25 +24,23 @@ def get_CNOT():
     return np.array([[1,0,0,0],[0,1,0,0],[0,0,0,1],[0,0,1,0]]).reshape(2,2,2,2)
 
 # ------------------------------------------------------------------
-# 2. Patch Circuit Generator (Returns Raw Tensor Network)
+# 2. Patch Circuit Generator
 # ------------------------------------------------------------------
 def generate_patch_tn(width, depth, seed=42):
     """
     Generates a Tensor Network representing a Patch Circuit.
-    It DOES NOT contract it. It returns the raw structure with tags.
+    Returns the raw uncontracted structure.
     """
     mid = width // 2
     rng = random.Random(seed)
     
     # Initialize the MPS in state |00...0>
-    # We use 'MPS_computational_state' as the base, but we will treat it
-    # as a generic Tensor Network to see the raw structure.
     tn = qtn.MPS_computational_state("0" * width)
     
     # Tag the initial tensors
     for i, t in enumerate(tn.tensors):
         t.add_tag("PSI0")
-        t.add_tag(f"I{i}") # Initial index tag
+        t.add_tag(f"I{i}") 
 
     gate_count = 0
 
@@ -52,8 +51,7 @@ def generate_patch_tn(width, depth, seed=42):
         for i in range(width):
             angle = rng.uniform(0, 2 * math.pi)
             
-            # Apply H (Add unique tag for visualization)
-            # contract='swap+split' preserves the TN structure while updating bonds
+            # Apply H 
             tn.gate_(get_H(), i, contract='swap+split', tags=f"GATE_{gate_count}")
             gate_count += 1
             
@@ -78,8 +76,7 @@ def generate_patch_tn(width, depth, seed=42):
                 tn.gate_(get_CNOT(), (u, v), contract='swap+split', tags=f"GATE_{gate_count}")
                 gate_count += 1
             else:
-                # Elided gate (Crosses the cut) - We skip it
-                pass
+                pass # Elided gate
 
     return tn
 
@@ -87,8 +84,7 @@ def generate_patch_tn(width, depth, seed=42):
 # 3. Main Execution
 # ------------------------------------------------------------------
 if __name__ == "__main__":
-    # NOTE: Use a small width (e.g., 6 or 8) to keep the printout readable.
-    # If you use 30, the terminal output will be thousands of lines long.
+    # Use small width for readable print output, or larger for real data
     w = 6   
     d = 4
     
@@ -96,24 +92,21 @@ if __name__ == "__main__":
         w = int(sys.argv[1])
         d = int(sys.argv[2])
 
-    # 1. Generate the Tensor Network
+    # 1. Generate
     tn = generate_patch_tn(w, d)
 
+    # 2. Print Structure (as requested previously)
     print("\n" + "="*80)
-    print(" 1. OPTIMAL CONTRACTION PATH SEGMENTS AND COST (Top of Screenshot)")
+    print(" 1. OPTIMAL CONTRACTION PATH INFO")
     print("="*80)
-    # This calculates the complexity of contracting the network
-    # It matches the blue text "Optimal contraction path segments..."
     try:
         print(tn.contraction_info())
     except Exception as e:
-        print(f"Could not calculate contraction info: {e}")
+        print(f"Info unavailable: {e}")
 
     print("\n" + "="*80)
-    print(" 2. RAW TENSOR STRUCTURE (Bottom of Screenshot)")
+    print(" 2. RAW TENSOR STRUCTURE")
     print("="*80)
-    # This prints the list of Tensor objects, shapes, indices, and tags
-    # exactly as shown in your "TensorNetworkGenVector" screenshot.
     print(tn)
     
     print("\n" + "="*80)
@@ -121,3 +114,15 @@ if __name__ == "__main__":
     print(f"  - Total Tensors: {len(tn.tensors)}")
     print(f"  - Outer Indices: {tn.outer_inds()}")
     print("="*80)
+
+    # 3. SAVE TO PICKLE
+    filename = f"patch_circuit_w{w}_d{d}.pkl"
+    print(f"\n[-] Saving Tensor Network object to '{filename}'...")
+    
+    try:
+        with open(filename, 'wb') as f:
+            pickle.dump(tn, f)
+        print("    [+] Success! File saved.")
+        print("    (You can reload this in Python using: tn = pickle.load(open('filename', 'rb')))")
+    except Exception as e:
+        print(f"    [!] Error saving pickle: {e}")

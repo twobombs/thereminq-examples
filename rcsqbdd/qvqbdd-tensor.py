@@ -1,7 +1,7 @@
 import sys
 import math
 import random
-import pickle  # <--- ADDED for saving
+import pickle
 from collections import Counter
 
 import numpy as np
@@ -14,7 +14,6 @@ from pyqrack import QrackSimulator, Pauli
 def generate_robust_circuit(width, depth, seed=None):
     """
     Generates a random circuit using explicit RZ and RY rotations.
-    Using explicit rotations avoids ambiguity in 'U3' gate definitions.
     """
     if seed is not None:
         random.seed(seed)
@@ -63,22 +62,19 @@ def run_pyqrack_sim(circ, width, config, shots=None):
         q = gate.qubits
         
         if name == 'RZ':
-            # Apply: PauliZ, angle * factor * sign
             angle = float(p[0]) * factor * sign
             qsim.r(Pauli.PauliZ, angle, q[0])
         elif name == 'RY':
-            # Apply: PauliY, angle * factor * sign
             angle = float(p[0]) * factor * sign
             qsim.r(Pauli.PauliY, angle, q[0])
         elif name == 'CNOT':
             qsim.mct([q[0]], q[1])
             
     if shots:
-        # Return measurement counts for Production Run
         measurements = qsim.measure_shots(list(range(width)), shots)
         return Counter(measurements)
     else:
-        # Return probability that Qubit 0 is in state |1> (For Calibration)
+        # Return marginal probability of Qubit 0 (For Calibration)
         return qsim.prob(0)
 
 # ==============================================================================
@@ -89,7 +85,6 @@ def calibrate_engine():
     config = {'factor': 1.0, 'sign': 1.0}
 
     # --- STEP 1: SCALING TEST ---
-    # Does Input(PI) rotate |0> to |1>?
     qsim = QrackSimulator(1)
     qsim.r(Pauli.PauliY, math.pi, 0)
     prob_one = qsim.prob(0) 
@@ -105,33 +100,26 @@ def calibrate_engine():
         config['factor'] = 0.5
 
     # --- STEP 2: ROTATION SIGN TEST ---
-    # We use a 2-qubit circuit and check the marginal probability of Q0.
     print("2. Calibrating Rotation Sign...")
-    
     w_cal, d_cal = 2, 2
     qc_cal = generate_robust_circuit(w_cal, d_cal, seed=42)
     
-    # Calculate Ground Truth Marginal P(q0=1) using Quimb/Numpy
+    # Calculate Ground Truth Marginal P(q0=1) using Quimb
     psi = qc_cal.psi.to_dense().reshape((2, 2))
-    # Sum prob over qubit 1 for cases where qubit 0 is |1> (Index 1)
     truth_marginal = np.sum(np.abs(psi[1, :])**2)
     
     def check_sign(s):
         cfg = {'factor': config['factor'], 'sign': s}
-        # shots=None returns qsim.prob(0)
         return run_pyqrack_sim(qc_cal, w_cal, cfg, shots=None)
 
     prob_pos = check_sign(1.0)
     prob_neg = check_sign(-1.0)
     
-    err_pos = abs(prob_pos - truth_marginal)
-    err_neg = abs(prob_neg - truth_marginal)
-    
-    if err_neg < err_pos:
-        print(f"   -> Detected Inverted Sign (-1.0). Error: {err_neg:.5f}")
+    if abs(prob_neg - truth_marginal) < abs(prob_pos - truth_marginal):
+        print(f"   -> Detected Inverted Sign (-1.0).")
         config['sign'] = -1.0
     else:
-        print(f"   -> Detected Standard Sign (+1.0). Error: {err_pos:.5f}")
+        print(f"   -> Detected Standard Sign (+1.0).")
         config['sign'] = 1.0
         
     return config
@@ -203,24 +191,21 @@ def main():
         
     print(f"Final Mismatch:          {final_error:.6f}")
     
-    # 4. Save Tensor
+    # 4. Save Tensor with Dynamic Filename
+    # Threshold 0.05 allows for small shot noise and minor physics definition skew
     if final_error < 0.05:
         print("\nSUCCESS: Tensor generated successfully.")
         
         print(final_mps)
         
-        # --- SAVE TO DISK (FIXED) ---
-        filename = "solution_tensor.pickle"
+        # --- DYNAMIC FILENAME ---
+        filename = f"mps_w{width}_d{depth}.pickle"
+        
         try:
-            # Use standard pickle for Quimb objects
             with open(filename, 'wb') as f:
                 pickle.dump(final_mps, f)
                 
             print(f"\n[SAVED] Tensor saved to disk as '{filename}'")
-            print("To load later:")
-            print("  import pickle")
-            print(f"  with open('{filename}', 'rb') as f:")
-            print("      t = pickle.load(f)")
         except Exception as e:
             print(f"\n[ERROR] Failed to save tensor: {e}")
             
