@@ -97,5 +97,7 @@ if __name__ == "__main__":
     original_sequence = best_bitstring[:n_nodes] if len(best_bitstring) >= n_nodes else best_bitstring
     print(f"Original Sequence (first {n_nodes} bits): {original_sequence}")
     
-    if len(best_bitstring) < 100:
-        print(f"Full solution bitstring: {best_bitstring}")
+    # MODIFIED: Always print the full raw bitstring regardless of length
+    print(f"\nFull raw bitstring ({len(best_bitstring)} bits):")
+    print(best_bitstring)
+    
