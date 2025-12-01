@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import time
 import argparse
-from PyQrackIsing import tfim_square_magnetization
+from pyqrackising import tfim_square_magnetization
 
 # --- Define and parse command-line arguments ---
 parser = argparse.ArgumentParser(description="Run a Transverse Field Ising Model (TFIM) simulation.")
