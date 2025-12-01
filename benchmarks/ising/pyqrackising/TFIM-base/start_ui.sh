@@ -1,7 +1,7 @@
 #!/bin/bash
 # installs dependancies visualisations, cmd progress bars and chemical libaries
 
-apt update && apt install -y python3-tk
+apt update && apt install -y python3-tk pv
 pip install vedo pv tqdm basis-set-exchange
 
 echo "sqr magnetisation ui"

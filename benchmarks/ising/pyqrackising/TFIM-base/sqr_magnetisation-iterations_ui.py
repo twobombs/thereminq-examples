@@ -17,6 +17,7 @@ RUNTIME OPTIMIZATIONS:
 - Reuses the multiprocessing.Pool across scan steps to eliminate process creation overhead.
 - Sets a sensible maxtasksperchild to keep long-running workers fresh.
 - MODIFIED to oversubscribe CPU workers by 10% for experimentation.
+- NEW: Detects OpenCL devices and load balances tasks to avoid GPU oversubscription/hangs.
 """
 import subprocess
 import numpy as np
@@ -36,15 +37,103 @@ import pandas as pd
 from collections import defaultdict
 from tkinter import filedialog
 
+# Try importing pyopencl for device detection
+try:
+    import pyopencl as cl
+    HAS_PYOPENCL = True
+except ImportError:
+    HAS_PYOPENCL = False
+
+# --- Device Detection ---
+
+def detect_opencl_contexts():
+    """
+    Detects available OpenCL devices and returns a list of context strings
+    formatted as 'platform_index:device_index' (e.g., ['0:0', '0:1']).
+    Prioritizes GPUs. Logs detected devices including PCI Bus ID if available.
+    """
+    if not HAS_PYOPENCL:
+        print("Warning: pyopencl not found. Cannot auto-detect devices.")
+        return []
+
+    ctx_list = []
+    print("Auto-detecting OpenCL Devices...")
+    try:
+        platforms = cl.get_platforms()
+        # First pass: Look for GPUs
+        for p_idx, platform in enumerate(platforms):
+            try:
+                # We get ALL devices to ensure the index matches what PYOPENCL_CTX expects
+                devices = platform.get_devices()
+                for d_idx, device in enumerate(devices):
+                    # Filter for GPUs
+                    if not (device.type & cl.device_type.GPU):
+                        continue
+
+                    # Attempt to get Bus ID (NVIDIA extension 0x4008)
+                    bus_id_str = ""
+                    try:
+                        # 0x4008 is CL_DEVICE_PCI_BUS_ID_NV
+                        bus_id = device.get_info(0x4008)
+                        bus_id_str = f" | Bus ID: {bus_id}"
+                    except Exception:
+                        pass
+                    
+                    dev_name = device.name.strip()
+                    print(f"  [PyOpenCL] Platform {p_idx}, Device {d_idx}: {dev_name}{bus_id_str}")
+                    
+                    # Standard PYOPENCL_CTX format is platform_index:device_index.
+                    ctx_list.append(f"{p_idx}:{d_idx}")
+            except Exception:
+                continue
+
+        # Second pass: If no GPUs found, look for CPUs or others as fallback
+        if not ctx_list:
+            print("  No GPUs found. Checking for other devices...")
+            for p_idx, platform in enumerate(platforms):
+                try:
+                    devices = platform.get_devices()
+                    for d_idx, device in enumerate(devices):
+                         dev_name = device.name.strip()
+                         print(f"  [PyOpenCL] Platform {p_idx}, Device {d_idx}: {dev_name} (Fallback)")
+                         ctx_list.append(f"{p_idx}:{d_idx}")
+                except Exception:
+                    continue
+    except Exception as e:
+        print(f"Error detecting OpenCL devices: {e}")
+        return []
+
+    return ctx_list
 
 # --- Simulation Runners ---
 
-def _execute_simulation(params):
+def _execute_simulation(packed_args):
     """
     Core function to execute the CLI script and parse the output.
     This is a top-level function so it can be 'pickled' by multiprocessing.
+    
+    Args:
+        packed_args: A tuple containing (params, device_queue)
+                     - params: dict of simulation parameters
+                     - device_queue: multiprocessing.Queue containing 'p:d' strings
+    
     Returns a tuple: (result_type, data)
     """
+    # Unpack arguments
+    if isinstance(packed_args, tuple):
+        params, device_queue = packed_args
+    else:
+        params = packed_args
+        device_queue = None
+
+    # Acquire OpenCL Device Token
+    device_ctx = None
+    if device_queue is not None:
+        try:
+            device_ctx = device_queue.get()
+        except Exception:
+            pass # Should not happen if logic is correct
+
     command = [sys.executable, 'sqr_magnetisation-iterations_cli.py']
     for key, value in params.items():
         command.extend([f'--{key}', str(value)])
@@ -54,27 +143,54 @@ def _execute_simulation(params):
         if sys.platform == "win32":
             creationflags = subprocess.CREATE_NO_WINDOW
 
+        # Prepare Environment with specific OpenCL Device
+        env = os.environ.copy()
+        if device_ctx:
+            env['PYOPENCL_CTX'] = device_ctx
+            # Optional: Suppress compiler output to keep logs clean
+            env['PYOPENCL_COMPILER_OUTPUT'] = '0' 
+
         result = subprocess.run(
-            command, capture_output=True, text=True, check=True, creationflags=creationflags
+            command, 
+            capture_output=True, 
+            text=True, 
+            check=True, 
+            creationflags=creationflags,
+            env=env
         )
 
         output_lines = result.stdout.strip().split('\n')
         samples_line = ""
         time_line = "Calculation took: N/A"
 
-        try:
-            samples_index = output_lines.index("## Output Samples (Decimal Comma-Separated) ##")
-            samples_line = output_lines[samples_index + 1]
-        except (ValueError, IndexError):
-            pass
+        # --- ROBUST PARSING START ---
+        # Support both the old label and the new, physically accurate label
+        target_headers = [
+            "## Output Samples (Decimal Comma-Separated) ##",
+            "## Mean Squared Magnetization ##"
+        ]
+        
+        found_header = False
+        for header in target_headers:
+            try:
+                samples_index = output_lines.index(header)
+                # The value is on the line immediately following the header
+                if samples_index + 1 < len(output_lines):
+                    samples_line = output_lines[samples_index + 1]
+                    found_header = True
+                    break
+            except ValueError:
+                continue
+        # --- ROBUST PARSING END ---
 
         for line in output_lines:
             if line.startswith("Calculation took:"):
                 time_line = line
                 break
 
-        if not samples_line:
-            return ('error', "Could not find sample output in simulation results.")
+        if not found_header or not samples_line:
+            # Fallback: sometimes empty lines or formatting issues occur
+            return ('error', f"Could not find valid output data in:\n{result.stdout}")
 
         avg_magnetization = float(samples_line.replace(',', '.'))
         return ('success', (params, (avg_magnetization, time_line)))
@@ -85,12 +201,29 @@ def _execute_simulation(params):
         return ('error', f"Simulation failed with error:\n{e.stderr}")
     except Exception as e:
         return ('error', f"An unexpected error occurred: {e}")
+    finally:
+        # Release OpenCL Device Token back to the pool
+        if device_queue is not None and device_ctx is not None:
+            device_queue.put(device_ctx)
 
 def run_simulation_thread(params, result_queue):
     """
     Thread target for running a single simulation.
+    Handles device selection for single runs to prevent hanging.
     """
-    result_type, data = _execute_simulation(params)
+    # For a single run, just pick the first available device to avoid the prompt
+    devices = detect_opencl_contexts() if HAS_PYOPENCL else []
+    
+    # Create a simple queue with one item if devices exist
+    device_queue = None
+    if devices:
+        # Use a simple queue wrapper since we are in the same process/thread context mostly
+        # but _execute_simulation expects a .get()/.put() interface.
+        # We can just use a standard queue.Queue for this thread.
+        device_queue = queue.Queue()
+        device_queue.put(devices[0])
+    
+    result_type, data = _execute_simulation((params, device_queue))
     result_queue.put((result_type, data))
 
 ### NEW: INTEGRATED SALVAGE LOGIC ###
@@ -106,32 +239,60 @@ def _salvage_logic_task(result_queue):
     # ---------------------
 
     def parse_log_file(filepath):
-        """Parses a single log file to extract simulation data points."""
-        line_regex = re.compile(
-            r"Params:.*?{'J': ([-0-9.]+), 'h': ([-0-9.]+), 'z': ([-0-9.]+), 'theta': ([-0-9.]+), 't': ([-0-9.]+), 'n_qubits': ([-0-9.]+)}.*?Result: ([-0-9.]+)"
-        )
-        extracted_data = []
+        """
+        Parses a single log file to extract simulation data points.
+        Updated to handle multi-line CLI output format.
+        """
+        data_point = {}
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
-                for line in f:
-                    match = line_regex.search(line)
-                    if match:
-                        try:
-                            data_point = {
-                                'J': float(match.group(1)),
-                                'h': float(match.group(2)),
-                                'z': int(match.group(3)),
-                                'theta': float(match.group(4)),
-                                't': int(match.group(5)),
-                                'n_qubits': int(match.group(6)),
-                                'samples': float(match.group(7))
-                            }
-                            extracted_data.append(data_point)
-                        except (ValueError, IndexError):
-                            continue
+                content = f.read()
+
+            # Helper to extract value by key
+            def get_val(key, cast_type=float):
+                # Regex looks for "Key (Description): Value"
+                # Use raw f-string (rf"...") to handle backslashes correctly for regex
+                pattern = rf"{re.escape(key)}.*?:\s*([-0-9.]+)"
+                match = re.search(pattern, content)
+                if match:
+                    return cast_type(match.group(1))
+                return None
+
+            data_point['J'] = get_val('J', float)
+            data_point['h'] = get_val('h', float)
+            data_point['z'] = get_val('z', int)
+            data_point['theta'] = get_val('theta', float)
+            data_point['t'] = get_val('t', int)
+            data_point['n_qubits'] = get_val('n_qubits', int)
+
+            # Extract Result - Check for both possible headers
+            result_match = None
+            
+            # Check for new header
+            new_header_match = re.search(r"## Mean Squared Magnetization ##\s*\n\s*([-0-9.]+)", content)
+            if new_header_match:
+                result_match = new_header_match
+            else:
+                # Check for old header
+                old_header_match = re.search(r"## Output Samples \(Decimal Comma-Separated\) ##\s*\n\s*([-0-9.]+)", content)
+                if old_header_match:
+                    result_match = old_header_match
+            
+            if result_match:
+                data_point['samples'] = float(result_match.group(1))
+            else:
+                return [] # No result found in this file
+
+            # Verify all fields are present
+            required_keys = ['J', 'h', 'z', 'theta', 't', 'n_qubits', 'samples']
+            if all(k in data_point and data_point[k] is not None for k in required_keys):
+                return [data_point]
+            else:
+                return []
+
         except Exception as e:
             print(f"Error reading or parsing {os.path.basename(filepath)}: {e}") # Log to console
-        return extracted_data
+            return []
 
     # --- Main Salvage Logic ---
     if not os.path.isdir(LOG_DIRECTORY):
@@ -150,9 +311,12 @@ def _salvage_logic_task(result_queue):
     grouped_data = defaultdict(list)
     total_points_found = 0
     for i, filename in enumerate(all_log_files):
-        result_queue.put(('status', f"Processing file {i+1}/{len(all_log_files)}: {filename}"))
+        if i % 100 == 0: # Update status every 100 files to avoid spamming UI
+            result_queue.put(('status', f"Processing file {i+1}/{len(all_log_files)}..."))
+        
         filepath = os.path.join(LOG_DIRECTORY, filename)
         data_from_file = parse_log_file(filepath)
+        
         if data_from_file:
             for point in data_from_file:
                 key = (point['n_qubits'], point['t'], point['z'], point['theta'])
@@ -174,7 +338,7 @@ def _salvage_logic_task(result_queue):
         
         df = pd.DataFrame(data_points)
         df.sort_values(by=['h', 'J'], inplace=True)
-        df.to_csv(output_path, index=False, float_format='%.4f')
+        df.to_csv(output_path, index=False, float_format='%.16f')
 
     result_queue.put(('status', "Log salvage complete. CSVs are ready to be imported."))
     return True
@@ -353,28 +517,47 @@ def run_full_scan_worker(fixed_params, result_queue):
     results_batch = []
     BATCH_SIZE = 100
 
+    # Device Detection & Queue Setup
+    device_list = detect_opencl_contexts()
+    if not device_list:
+        print("No OpenCL devices detected. Using default env (simulations might hang if prompt appears).")
+    else:
+        print(f"Detected OpenCL devices: {device_list}")
+
     try:
         base_processes = mp.cpu_count()
         num_processes = int(base_processes + math.ceil(base_processes * 0.10))
         print(f"Oversubscribing CPU: Running with {num_processes} worker processes on a {base_processes}-thread system...")
         
-        with mp.Pool(processes=num_processes, maxtasksperchild=1500) as pool:
-            for result_type, data in pool.imap_unordered(_execute_simulation, all_params):
-                count += 1
-                status_msg = f"Scanning... {count}/{total_points}"
-                result_queue.put(('status', status_msg))
-
-                if result_type == 'success':
-                    results_batch.append(data)
-                    if len(results_batch) >= BATCH_SIZE:
-                        result_queue.put(('success_batch', results_batch.copy()))
-                        results_batch.clear()
-                else:
-                    result_queue.put((result_type, data))
+        # Use Manager to share the queue between processes
+        with mp.Manager() as manager:
+            device_queue = manager.Queue()
+            # Fill the queue with available devices
+            if device_list:
+                for d in device_list:
+                    device_queue.put(d)
             
-            if results_batch:
-                result_queue.put(('success_batch', results_batch.copy()))
-                results_batch.clear()
+            # Prepare arguments tuple for each simulation
+            # Note: If no devices detected, we pass None queue, same as before logic wise
+            packed_inputs = [(p, device_queue if device_list else None) for p in all_params]
+        
+            with mp.Pool(processes=num_processes, maxtasksperchild=1500) as pool:
+                for result_type, data in pool.imap_unordered(_execute_simulation, packed_inputs):
+                    count += 1
+                    status_msg = f"Scanning... {count}/{total_points}"
+                    result_queue.put(('status', status_msg))
+
+                    if result_type == 'success':
+                        results_batch.append(data)
+                        if len(results_batch) >= BATCH_SIZE:
+                            result_queue.put(('success_batch', results_batch.copy()))
+                            results_batch.clear()
+                    else:
+                        result_queue.put((result_type, data))
+                
+                if results_batch:
+                    result_queue.put(('success_batch', results_batch.copy()))
+                    results_batch.clear()
 
         result_queue.put(('status', f"Scan complete. Plotted {total_points} points."))
     except Exception as e:
@@ -397,48 +580,63 @@ def run_trotter_scan_worker(fixed_params, result_queue, start_t):
     results_batch = []
     BATCH_SIZE = 100
 
+    # Device Detection
+    device_list = detect_opencl_contexts()
+    if device_list:
+        print(f"Detected OpenCL devices: {device_list}")
+
     try:
         base_processes = mp.cpu_count()
         num_processes = int(base_processes + math.ceil(base_processes * 0.10))
         
-        with mp.Pool(processes=num_processes, maxtasksperchild=1500) as pool:
-            print(f"Oversubscribing CPU: Running with {num_processes} worker processes on a {base_processes}-thread system...")
-            for i, t_val in enumerate(trotter_range):
-                plane_params = fixed_params.copy()
-                plane_params['t'] = t_val
-                
-                status_msg = f"Trotter Scan ({i+1}/{total_planes}): Starting plane for t={t_val}"
-                result_queue.put(('status', status_msg))
-                print(status_msg)
+        with mp.Manager() as manager:
+            device_queue = manager.Queue()
+            if device_list:
+                for d in device_list:
+                    device_queue.put(d)
+            
+            queue_to_pass = device_queue if device_list else None
 
-                all_params = []
-                for h_val in h_range:
-                    for j_val in j_range:
-                        current_params = plane_params.copy()
-                        current_params['J'] = round(j_val, 2)
-                        current_params['h'] = round(h_val, 2)
-                        all_params.append(current_params)
-                
-                total_points = len(all_params)
-                count = 0
-                
-                for result_type, data in pool.imap_unordered(_execute_simulation, all_params):
-                    count += 1
-                    status_msg = f"Trotter Scan ({i+1}/{total_planes}, t={t_val}): {count}/{total_points}"
+            with mp.Pool(processes=num_processes, maxtasksperchild=1500) as pool:
+                print(f"Oversubscribing CPU: Running with {num_processes} worker processes on a {base_processes}-thread system...")
+                for i, t_val in enumerate(trotter_range):
+                    plane_params = fixed_params.copy()
+                    plane_params['t'] = t_val
+                    
+                    status_msg = f"Trotter Scan ({i+1}/{total_planes}): Starting plane for t={t_val}"
                     result_queue.put(('status', status_msg))
-                    if result_type == 'success':
-                        results_batch.append(data)
-                        if len(results_batch) >= BATCH_SIZE:
-                            result_queue.put(('success_batch', results_batch.copy()))
-                            results_batch.clear()
-                    else:
-                        result_queue.put((result_type, data))
-                
-                if results_batch:
-                    result_queue.put(('success_batch', results_batch.copy()))
-                    results_batch.clear()
+                    print(status_msg)
 
-                result_queue.put(('trotter_slice_complete', t_val))
+                    all_params = []
+                    for h_val in h_range:
+                        for j_val in j_range:
+                            current_params = plane_params.copy()
+                            current_params['J'] = round(j_val, 2)
+                            current_params['h'] = round(h_val, 2)
+                            all_params.append(current_params)
+                    
+                    total_points = len(all_params)
+                    count = 0
+                    
+                    packed_inputs = [(p, queue_to_pass) for p in all_params]
+                    
+                    for result_type, data in pool.imap_unordered(_execute_simulation, packed_inputs):
+                        count += 1
+                        status_msg = f"Trotter Scan ({i+1}/{total_planes}, t={t_val}): {count}/{total_points}"
+                        result_queue.put(('status', status_msg))
+                        if result_type == 'success':
+                            results_batch.append(data)
+                            if len(results_batch) >= BATCH_SIZE:
+                                result_queue.put(('success_batch', results_batch.copy()))
+                                results_batch.clear()
+                        else:
+                            result_queue.put((result_type, data))
+                    
+                    if results_batch:
+                        result_queue.put(('success_batch', results_batch.copy()))
+                        results_batch.clear()
+
+                    result_queue.put(('trotter_slice_complete', t_val))
 
         result_queue.put(('status', "Full Trotter Scan complete."))
     except Exception as e:
@@ -464,52 +662,67 @@ def run_qubit_scan_worker(fixed_params, result_queue, start_t, n_qubits_range):
     results_batch = []
     BATCH_SIZE = 100
 
+    # Device Detection
+    device_list = detect_opencl_contexts()
+    if device_list:
+        print(f"Detected OpenCL devices: {device_list}")
+
     try:
         base_processes = mp.cpu_count()
         num_processes = int(base_processes + math.ceil(base_processes * 0.10))
 
-        with mp.Pool(processes=num_processes, maxtasksperchild=1500) as pool:
-            print(f"Oversubscribing CPU: Running with {num_processes} worker processes on a {base_processes}-thread system...")
-            for q_idx, n_qubits_val in enumerate(n_qubits_vals):
-                for t_idx, t_val in enumerate(trotter_range):
-                    plane_params = fixed_params.copy()
-                    plane_params['t'] = t_val
-                    plane_params['n_qubits'] = n_qubits_val
+        with mp.Manager() as manager:
+            device_queue = manager.Queue()
+            if device_list:
+                for d in device_list:
+                    device_queue.put(d)
+            
+            queue_to_pass = device_queue if device_list else None
 
-                    status_msg = (f"Qubit Scan ({q_idx+1}/{total_qubit_steps}, n={n_qubits_val}) | "
-                                  f"Trotter ({t_idx+1}/{total_trotter_steps}, t={t_val})")
-                    result_queue.put(('status', status_msg))
-                    print(status_msg)
+            with mp.Pool(processes=num_processes, maxtasksperchild=1500) as pool:
+                print(f"Oversubscribing CPU: Running with {num_processes} worker processes on a {base_processes}-thread system...")
+                for q_idx, n_qubits_val in enumerate(n_qubits_vals):
+                    for t_idx, t_val in enumerate(trotter_range):
+                        plane_params = fixed_params.copy()
+                        plane_params['t'] = t_val
+                        plane_params['n_qubits'] = n_qubits_val
 
-                    all_params = []
-                    for h_val in h_range:
-                        for j_val in j_range:
-                            current_params = plane_params.copy()
-                            current_params['J'] = round(j_val, 2)
-                            current_params['h'] = round(h_val, 2)
-                            all_params.append(current_params)
-                    
-                    total_points = len(all_params)
-                    count = 0
-                    
-                    for result_type, data in pool.imap_unordered(_execute_simulation, all_params):
-                        count += 1
                         status_msg = (f"Qubit Scan ({q_idx+1}/{total_qubit_steps}, n={n_qubits_val}) | "
-                                      f"Trotter ({t_idx+1}/{total_trotter_steps}, t={t_val}): {count}/{total_points}")
+                                      f"Trotter ({t_idx+1}/{total_trotter_steps}, t={t_val})")
                         result_queue.put(('status', status_msg))
-                        if result_type == 'success':
-                            results_batch.append(data)
-                            if len(results_batch) >= BATCH_SIZE:
-                                result_queue.put(('success_batch', results_batch.copy()))
-                                results_batch.clear()
-                        else:
-                            result_queue.put((result_type, data))
-                    
-                    if results_batch:
-                        result_queue.put(('success_batch', results_batch.copy()))
-                        results_batch.clear()
-                    
-                    result_queue.put(('trotter_slice_complete', (t_val, n_qubits_val)))
+                        print(status_msg)
+
+                        all_params = []
+                        for h_val in h_range:
+                            for j_val in j_range:
+                                current_params = plane_params.copy()
+                                current_params['J'] = round(j_val, 2)
+                                current_params['h'] = round(h_val, 2)
+                                all_params.append(current_params)
+                        
+                        total_points = len(all_params)
+                        count = 0
+                        
+                        packed_inputs = [(p, queue_to_pass) for p in all_params]
+
+                        for result_type, data in pool.imap_unordered(_execute_simulation, packed_inputs):
+                            count += 1
+                            status_msg = (f"Qubit Scan ({q_idx+1}/{total_qubit_steps}, n={n_qubits_val}) | "
+                                          f"Trotter ({t_idx+1}/{total_trotter_steps}, t={t_val}): {count}/{total_points}")
+                            result_queue.put(('status', status_msg))
+                            if result_type == 'success':
+                                results_batch.append(data)
+                                if len(results_batch) >= BATCH_SIZE:
+                                    result_queue.put(('success_batch', results_batch.copy()))
+                                    results_batch.clear()
+                            else:
+                                result_queue.put((result_type, data))
+                        
+                        if results_batch:
+                            result_queue.put(('success_batch', results_batch.copy()))
+                            results_batch.clear()
+                        
+                        result_queue.put(('trotter_slice_complete', (t_val, n_qubits_val)))
 
         result_queue.put(('status', "Full Qubit/Trotter Scan complete."))
     except Exception as e:
@@ -550,7 +763,7 @@ def vedo_plotter_process(data_queue, param_specs, continue_event):
     
     # --- FINAL FIX: Throttling parameters ---
     batch_counter = 0
-    UPDATE_INTERVAL = 10 # Update the plot every 10 batches
+    UPDATE_INTERVAL = 1 # Update the plot every batch (100 points) to ensure visibility
 
     plt.show(info_text_actor, interactive=False)
     
@@ -595,8 +808,13 @@ def vedo_plotter_process(data_queue, param_specs, continue_event):
 
         # Handle saving for non-interactive modes
         if fixed_params:
-            param_parts = [f"{key}={value}" for key, value in sorted(fixed_params.items())]
-            filename = "TFIM_scan_" + "_".join(param_parts).replace(' ', '_') + ".png"
+            if 'dataset' in fixed_params:
+                # Just use the dataset name for filename
+                filename = f"{fixed_params['dataset']}.png"
+            else:
+                param_parts = [f"{key}={value}" for key, value in sorted(fixed_params.items())]
+                filename = "TFIM_scan_" + "_".join(param_parts).replace(' ', '_') + ".png"
+                
             plt.screenshot(filename, scale=3)
             print(f"Saved high-resolution screenshot to: {filename}")
 
@@ -985,4 +1203,3 @@ if __name__ == '__main__':
         plot_process.terminate()
         
     print("Application closed.")
-    
