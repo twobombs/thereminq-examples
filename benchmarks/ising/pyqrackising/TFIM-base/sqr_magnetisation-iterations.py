@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import time
-from PyQrackIsing import tfim_square_magnetization
+from pyqrackising import tfim_square_magnetization
 
 # Define the simulation parameters
 J = -1.0
