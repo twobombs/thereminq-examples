@@ -1,7 +1,9 @@
 # this is a wrapper that leverages ising models to factor
 # derived from: https://arxiv.org/abs/2301.06738
 # evolved specs https://arxiv.org/pdf/2506.16799
-# gemini25 - second version
+# gemini25 - fixed version v3 (CLI landscape tweak)
+# gemini30 - iterative update
+
 import numpy as np
 import dimod
 from collections import defaultdict
@@ -54,25 +56,31 @@ def run_solver_on_cpu(run_id):
 def solve_and_decode(model_data, use_gpu):
     """
     A single run of the solver and result decoding.
-    Will now loop internally until a potentially valid (non-zero, non-trivial) 
-    result is found.
+    Loops internally until a potentially valid (non-zero, non-trivial) result is found.
     """
     from pyqrackising import spin_glass_solver
-    # Unpack the model data
+    
     max_cut_graph = model_data['graph']
     num_qubits_per_factor = model_data['nq']
     label_to_index = model_data['labels']
     quality = model_data['quality']
     N_to_factor = model_data['N']
 
-    while True:
+    # Safety counter to prevent infinite loops if the landscape is too hard
+    attempts = 0
+    max_internal_retries = 5 
+
+    while attempts < max_internal_retries:
+        attempts += 1
         num_total_vars = max_cut_graph.shape[0]
-        # FIX: Changed 'is_base_maxcut_gpu' to 'is_combo_maxcut_gpu'
+        
+        # Call solver with correct parameter name
         result_tuple = spin_glass_solver(
             max_cut_graph,
             quality=quality,
-            is_combo_maxcut_gpu=use_gpu
+            is_maxcut_gpu=use_gpu 
         )
+        
         bitstring = result_tuple[0]
         spins = {i: 1 - 2 * int(bit) for i, bit in enumerate(bitstring)}
         ancilla_node_idx = num_total_vars - 1
@@ -80,7 +88,7 @@ def solve_and_decode(model_data, use_gpu):
         normalized_spins = {var: spin * ancilla_spin for var, spin in spins.items()}
         binary_solution = {i: (s + 1) // 2 for i, s in normalized_spins.items()}
         
-        # Reset p and q before recalculating
+        # Decode p and q
         p, q = 0, 0
         for i in range(num_qubits_per_factor):
             if binary_solution.get(label_to_index.get(i), 0) == 1:
@@ -89,7 +97,10 @@ def solve_and_decode(model_data, use_gpu):
             if binary_solution.get(label_to_index.get(num_qubits_per_factor + i), 0) == 1:
                 q += 2**i
         
-        # --- New, more robust validation logic ---
+        # Debug Print: View raw solver output before validation
+        print(f" [DEBUG Worker {os.getpid()}] Found candidate: p={p}, q={q} (product={p*q})")
+
+        # Validation
         is_invalid = False
         reason = ""
 
@@ -101,12 +112,15 @@ def solve_and_decode(model_data, use_gpu):
             reason = "trivial factor of 1"
         elif (N_to_factor % 2 != 0) and (p % 2 == 0 or q % 2 == 0):
             is_invalid = True
-            reason = "even factor for an odd target N"
+            reason = "even factor for odd N"
 
         if is_invalid:
-            print(f"(Worker {os.getpid()} got an invalid solution ({p}, {q}) - {reason}. Retrying...) ", end="", flush=True)
+            # If we hit max retries, return the last invalid result so it can be logged
+            if attempts >= max_internal_retries:
+                break
+            continue # Retry immediately
         else:
-            break
+            break # Valid solution found
             
     return p, q
 
@@ -115,7 +129,7 @@ def process_and_log_result(run_id, p_res, q_res, N_to_factor, log_filename):
     Processes a result from any worker, logs it, and returns True if successful.
     """
     if p_res is None:
-        return False, (0, 0) # Signal failure
+        return False, (0, 0)
 
     factors = tuple(sorted((p_res, q_res)))
     product = factors[0] * factors[1]
@@ -124,31 +138,17 @@ def process_and_log_result(run_id, p_res, q_res, N_to_factor, log_filename):
     with open(log_filename, 'a') as f:
         f.write(f"{run_id},{factors[0]},{factors[1]},{cost}\n")
 
-    if product == N_to_factor:
-        print("\nStatus: Success! Optimal solution found.")
-        print(f"Result from Run {run_id}: p={factors[0]}, q={factors[1]}")
-        print(f"Verification: {factors[0]} * {factors[1]} = {product} (Target N={N_to_factor})")
+    if product == N_to_factor and factors[0] != 1 and factors[1] != 1:
+        print(f"\nStatus: Success! Optimal solution found in Run {run_id}.")
+        print(f"Factors: {factors[0]} * {factors[1]} = {product}")
         return True, factors
     
     return False, factors
 
 
-# --- (The following functions are used only in the main process) ---
+# --- (HUBO Helper Functions) ---
 
 def create_carry_propagation_hubo(N, nq):
-    """
-    Creates a HUBO for integer factorization based on the binary multiplication
-    with carry propagation method described in arXiv:2506.16799v1.
-
-    This function implements the HUBO model from Eq. (16) of the paper.
-    It creates variables for the bits of factors p and q, and for the carry bits
-    C_i at each position of the binary multiplication.
-
-    Variable Mapping:
-    - p_j (bits of factor p) are mapped to integer variables `j`.
-    - q_k (bits of factor q) are mapped to integer variables `nq + k`.
-    - C_i (carry bits) are mapped to integer variables `2*nq + i`.
-    """
     n = nq - 1
     hubo = defaultdict(float)
 
@@ -162,51 +162,40 @@ def create_carry_propagation_hubo(N, nq):
 
     def add_squared_expression(expression, constant):
         terms_list = list(expression.items())
-
         for vars_tuple, coeff in terms_list:
             key = tuple(sorted(vars_tuple))
             hubo[key] += coeff**2
             hubo[key] += 2 * coeff * constant
-
         for i in range(len(terms_list)):
             for j in range(i + 1, len(terms_list)):
                 vars1, coeff1 = terms_list[i]
                 vars2, coeff2 = terms_list[j]
                 combined_vars = tuple(sorted(list(set(vars1 + vars2))))
                 hubo[combined_vars] += 2 * coeff1 * coeff2
-        
         hubo[()] += constant**2
 
-    # Term for i=0
-    expr_i0 = {
-        (p_var(0), q_var(0)): 1.0,
-        (c_var(0),): -2.0
-    }
+    # i=0
+    expr_i0 = {(p_var(0), q_var(0)): 1.0, (c_var(0),): -2.0}
     add_squared_expression(expr_i0, -r_bits[0])
 
-    # Summation term from i=1 to 2n
+    # i=1 to 2n
     for i in range(1, 2 * n + 1):
         expression = defaultdict(float)
-        
         for j in range(nq):
             for k in range(nq):
                 if j + k == i:
                     key = tuple(sorted((p_var(j), q_var(k))))
                     expression[key] += 1.0
-        
         expression[(c_var(i - 1),)] += 1.0
         expression[(c_var(i),)] -= 2.0
-        
         add_squared_expression(expression, -r_bits[i])
 
-    # Final carry term
+    # Final carry
     expr_final_c = {(c_var(2 * n),): 1.0}
     add_squared_expression(expr_final_c, -r_bits[2 * n + 1])
 
-    # Final subtraction term (offset)
     offset = sum(val**2 for val in r_bits)
     hubo[()] -= offset
-    
     return hubo
 
 
@@ -229,29 +218,37 @@ if __name__ == '__main__':
     multiprocessing.set_start_method('spawn', force=True)
 
     # --- Default Values ---
-    N_to_factor = 15
-    quality = 4
-    workers_per_gpu = 1
+    N_to_factor = 91
+    quality = 6
+    workers_per_gpu = 2
     use_gpu = True
     max_runs = 1
+    strength_multiplier = 1.5  # Default landscape tweak
 
-    # --- Parse Command-Line Arguments ---
+    # --- Parse Arguments ---
     if len(sys.argv) > 1:
         try:
             N_to_factor = int(sys.argv[1])
         except ValueError:
-            print(f"Error: Invalid number '{sys.argv[1]}'. Please provide an integer.")
+            print(f"Error: Invalid number '{sys.argv[1]}'")
             sys.exit(1)
 
     if len(sys.argv) > 2:
         try:
             quality = int(sys.argv[2])
         except ValueError:
-            print(f"Error: Invalid quality '{sys.argv[2]}'. Please provide an integer.")
+            print(f"Error: Invalid quality '{sys.argv[2]}'")
             sys.exit(1)
     
-    if len(sys.argv) > 3 and sys.argv[3].lower() == 'cpu':
-        use_gpu = False
+    # Flexible parsing for optional args (device or strength) starting from index 3
+    for arg in sys.argv[3:]:
+        if arg.lower() == 'cpu':
+            use_gpu = False
+        else:
+            try:
+                strength_multiplier = float(arg)
+            except ValueError:
+                print(f"Warning: Ignoring unrecognized argument '{arg}'")
 
     device_suffix = "_cpu" if not use_gpu else ""
     log_filename = f"factor_landscape_{N_to_factor}_q{quality}{device_suffix}.log"
@@ -264,18 +261,23 @@ if __name__ == '__main__':
     
     print(f"\nAttempting to factor N = {N_to_factor}")
     print(f"Using solver quality: {quality}")
+    print(f"Penalty Strength Multiplier: {strength_multiplier}")
     print(f"Calculated qubits per factor = {num_qubits_per_factor}")
-    print(f"Stopping after {max_runs} iterations if no solution is found.")
 
-    # --- Model Preparation (Done once) ---
+    # --- Model Preparation ---
     hubo = create_carry_propagation_hubo(N_to_factor, num_qubits_per_factor)
     
     max_coeff = max(abs(c) for c in hubo.values()) if hubo else 1.0
-    bqm = dimod.make_quadratic(hubo, strength=max_coeff * 2, vartype='BINARY')
+    
+    # Applying the strength multiplier from CLI
+    bqm = dimod.make_quadratic(hubo, strength=max_coeff * strength_multiplier, vartype='BINARY')
+    
     label_to_index = {label: i for i, label in enumerate(bqm.variables)}
     num_bqm_vars = len(label_to_index)
     h, J, offset = bqm.to_ising()
     max_cut_graph = convert_ising_to_maxcut(h, J, num_bqm_vars, label_to_index)
+    
+    # Normalize
     max_abs_val = np.max(np.abs(max_cut_graph))
     if max_abs_val > 0:
         max_cut_graph /= max_abs_val
@@ -291,26 +293,23 @@ if __name__ == '__main__':
     best_solution = (0, 0)
     completed_runs = 0
 
-    # --- Conditional execution path (GPU vs CPU) ---
     if use_gpu:
         print("\n--- Running on available GPUs ---")
         gpu_id_list = []
-        platforms = cl.get_platforms()
-        for p_idx, p in enumerate(platforms):
-            try:
+        try:
+            platforms = cl.get_platforms()
+            for p_idx, p in enumerate(platforms):
                 for d_idx, d in enumerate(p.get_devices(device_type=cl.device_type.GPU)):
                     gpu_id_list.append(f"{p_idx}:{d_idx}")
                     print(f"  Found GPU: '{d.name}' (ID: {p_idx}:{d_idx})")
-            except cl.Error:
-                continue
+        except Exception as e:
+            print(f"OpenCL Error: {e}")
         
         if not gpu_id_list:
             print("Error: No OpenCL-enabled GPUs found.")
             sys.exit(1)
 
         total_workers = len(gpu_id_list) * workers_per_gpu
-        print(f"Configured for {workers_per_gpu} worker(s) per GPU. Total: {total_workers}")
-        
         result_queue = multiprocessing.Queue()
         active_processes = {}
         run_count = 0
@@ -324,12 +323,16 @@ if __name__ == '__main__':
                     proc.start()
                     active_processes[proc.pid] = proc
 
+                if not active_processes:
+                    break
+
                 res_id, p_res, q_res = result_queue.get()
                 completed_runs += 1
                 solution_found, factors = process_and_log_result(res_id, p_res, q_res, N_to_factor, log_filename)
                 if solution_found:
                     best_solution = factors
 
+                # Cleanup finished processes
                 finished_pids = [pid for pid, proc in active_processes.items() if not proc.is_alive()]
                 for pid in finished_pids:
                     del active_processes[pid]
@@ -343,12 +346,8 @@ if __name__ == '__main__':
     
     else: # CPU Path
         print("\n--- Running on CPU ---")
-        total_threads = os.cpu_count()
-        num_workers = max(1, int(total_threads * 0.75))
-        print(f"System has {total_threads} threads. Using {num_workers} concurrent CPU worker(s).")
-
+        num_workers = max(1, int(os.cpu_count() * 0.75))
         initializer_args = (model_data,)
-        
         with multiprocessing.Pool(processes=num_workers, initializer=init_worker_cpu, initargs=initializer_args) as pool:
             run_iterator = range(1, max_runs + 1)
             for run_id, p_res, q_res in pool.imap_unordered(run_solver_on_cpu, run_iterator):
@@ -359,7 +358,6 @@ if __name__ == '__main__':
                     pool.terminate()
                     break
     
-    # --- Final Summary ---
     print("\n--- Overall Summary ---")
     if solution_found:
         print(f"Optimal solution p={best_solution[0]}, q={best_solution[1]} was found.")
