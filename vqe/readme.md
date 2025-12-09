@@ -1,21 +1,20 @@
 # Variational Quantum Eigensolver (VQE) Examples
 
-This directory contains a diverse collection of scripts for implementing and analyzing the Variational Quantum Eigensolver (VQE) algorithm. The examples cover different quantum software frameworks (Cirq, PennyLane, Qrack), different molecular systems (H2, and a variety from a CSV), and various aspects of the VQE algorithm.
+This directory contains a diverse collection of scripts for implementing and analyzing the Variational Quantum Eigensolver (VQE) algorithm.
 
-## Scripts
+## Files
 
-### VQE for Molecular Ground State Energy
-
-*   **`import_clifford_vqe_entangled.py`**: A PennyLane-based script that performs VQE calculations for a list of molecules defined in a CSV file. It compares the calculated ground state energy to the expected value.
-*   **`import_clifford_vqe_entangled-gpu-multi.py`**: A multi-GPU, enhanced version of the previous script that uses `multiprocessing` to distribute the calculations across multiple GPUs.
-*   **`run-multi-vqe-cirq-h2.py`**: A comprehensive VQE simulation for the H2 molecule using PennyLane with the Cirq simulator as the backend. It includes explicit FCI calculation for benchmarking, a manual UCCSD ansatz, and detailed convergence analysis.
-*   **`run-multi-vqe-pennylane-h2.py`**: A version of the H2 VQE simulation that is specifically adapted to use the PennyLane-Qrack plugin with GPU acceleration.
-*   **`run-multi-vqe-qrack-h2.py`**: This script is identical to the PennyLane version, demonstrating the use of the PennyLane-Qrack plugin.
-*   **`run-multi-vqe-ibmheron-h2.py`**: (Not analyzed in detail, but likely a version of the H2 VQE simulation for the IBM Heron processor.)
-
-### Visualization
-
-*   **`vqe-results-3dviz.py`**: A visualization tool that parses the log files from the VQE simulations and creates a 3D scatter plot of the results, showing the relationship between the number of qubits, the final energy, and the accuracy of the calculation.
+- `import_clifford_vqe_entangled-gpu-multi.py`: A multi-GPU, enhanced version of the VQE script that distributes calculations across multiple GPUs using `multiprocessing`.
+- `import_clifford_vqe_entangled.py`: A PennyLane-based script that performs VQE calculations for a list of molecules defined in `import_clifford_vqe_min.csv`.
+- `import_clifford_vqe_entangled.sh`: A shell script to run the `import_clifford_vqe_entangled.py` script.
+- `import_clifford_vqe_min.csv`: A CSV file containing molecule data (names, symbols, geometries) used by the VQE scripts.
+- `import_clifford_vqe_min.py`: Likely a script to generate or process the `import_clifford_vqe_min.csv` file.
+- `readme.md`: This file, describing the contents of the `vqe/` directory.
+- `run-multi-vqe-cirq-h2.py`: A comprehensive VQE simulation for H2 using PennyLane with the Cirq simulator backend.
+- `run-multi-vqe-ibmheron-h2.py`: A version of the H2 VQE simulation, likely targeting or simulating the IBM Heron processor.
+- `run-multi-vqe-pennylane-h2.py`: A version of the H2 VQE simulation adapted to use the PennyLane-Qrack plugin with GPU acceleration.
+- `run-multi-vqe-qrack-h2.py`: A script identical to the PennyLane version, demonstrating the use of the PennyLane-Qrack plugin.
+- `vqe-results-3dviz.py`: A visualization tool that parses log files and creates a 3D scatter plot of the results.
 
 ## Overview
 

@@ -1,18 +1,17 @@
 # Quantum Echoes (OTOC) Simulator
 
-This directory contains a suite of scripts for simulating and analyzing Out-of-Time-Order Correlators (OTOCs), which are used to study quantum chaos and information scrambling. The name "Quantum Echoes" and the reference to a Google blog post suggest that these simulations are related to the experiments performed on Google's Sycamore processor.
+This directory contains a suite of scripts for simulating and analyzing Out-of-Time-Order Correlators (OTOCs), which are used to study quantum chaos and information scrambling.
 
-## Key Scripts
+## Files
 
-*   **`otoc_statevector_simulation.py`**: A simple example of how to use the `generate_otoc_samples` function from the `pyqrackising` library.
-*   **`otoc_validation_isingonly_cpu.py`**: A validation tool for the OTOC simulations that uses the `generate_otoc_samples` function to generate samples and then prints the resulting probabilities.
-*   **`otoc_validation_isingonly_graph.py`**: A sophisticated visualization tool that parses the log files from the OTOC simulations and creates a 3D surface plot of the execution time as a function of the number of qubits and the depth.
-*   **`otocs-prediction-512.py`**: A prediction tool that uses linear regression to estimate the time required to run OTOC simulations for a large number of qubits.
-
-## Subdirectories
-
-*   **`Docs/`**: Contains documentation related to the OTOC simulations.
-*   **`Prototyping/`**: Contains prototyping code and experimental scripts.
+- `Docs/`: Directory containing documentation related to the OTOC simulations.
+- `Prototyping/`: Directory containing prototyping code and experimental scripts.
+- `otoc_statevector_simulation.py`: A script demonstrating how to use the `generate_otoc_samples` function from `pyqrackising`.
+- `otoc_validation_isingonly_cpu.py`: A validation tool that generates OTOC samples and prints the resulting probabilities.
+- `otoc_validation_isingonly_cpu.sh`: A shell script to run the `otoc_validation_isingonly_cpu.py` script.
+- `otoc_validation_isingonly_graph.py`: A visualization tool that parses log files and creates a 3D surface plot of execution time vs. qubits and depth.
+- `otocs-prediction-512.py`: A tool that uses linear regression to predict the execution time for OTOC simulations with a large number of qubits (512).
+- `readme.md`: This file, describing the contents of the `qecho/` directory.
 
 ## Overview
 

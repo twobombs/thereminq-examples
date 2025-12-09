@@ -5,6 +5,12 @@ This directory contains scripts designed for use in ThereminQ-Tensor containers.
 
 **WARNING: Do not run agentic code on your local machine with full permissions.**
 
+## Files
+
+- `gemini-query.py`: A script that feeds command-line queries to the Gemini API (`gemini-2.5-pro`) and prints the generated content.
+- `simple-gemini-query.py`: A similar script to `gemini-query.py` for querying the Gemini API, also using the `gemini-2.5-pro` model.
+- `qllm-audit/`: A subdirectory containing experiments on Quantum & Cryptographic Auditing of LLMs.
+
 -----
 
 # Quantum & Cryptographic Auditing of LLMs

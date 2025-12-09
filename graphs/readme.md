@@ -1,15 +1,21 @@
 # ThereminQ Graphs and Visualizations
 
-This directory contains scripts for generating various visualizations of quantum simulation data, including the "bonsai images" mentioned in the original `readme.md`.
+This directory contains scripts for generating various visualizations of quantum simulation data, including the "bonsai images".
 
-## Scripts
+## Files
 
-*   **`run-draw-patched-sycamore256-time.py`**: A Python script that reads data from a `quantum_data.csv` file and generates a heatmap of the computation time versus the width and depth of a quantum circuit.
-*   **Shell Scripts (`*.sh`)**: A collection of shell scripts that likely run various visualization or simulation tasks. Some of the notable scripts include:
-    *   `convert_measured_values.sh`: Converts measured values.
-    *   `makeqftipsy.sh`: Creates a QFT-related visualization.
-    *   `shors_*.sh`: A series of scripts for running Shor's algorithm experiments.
-    *   `sycamore_*.sh`: Scripts for running Sycamore-related simulations.
+- `convert_measured_values.sh`: A script to process and convert measured values from experiments.
+- `makeqftipsy.sh`: A script for creating visualizations related to the Quantum Fourier Transform (QFT).
+- `readme.md`: This file, describing the contents of the `graphs/` directory.
+- `run-draw-patched-sycamore256-time.py`: A Python script that reads `quantum_data.csv` and generates a heatmap of computation time vs. circuit width and depth.
+- `shors_failloop.sh`: A shell script for running Shor's algorithm experiments, specifically targeting failure cases or loops.
+- `shors_rsaloop.sh`: A shell script for running Shor's algorithm experiments focused on RSA factorization loops.
+- `shors_winloop.sh`: A shell script for running Shor's algorithm experiments, likely focusing on successful factorization loops.
+- `supreme28q14d.sh`: A script related to "Supreme" quantum circuits, possibly 28 qubits and depth 14.
+- `sycamore_rings.sh`: A script for generating "Sycamore Rings" visualizations or simulations.
+- `sycamore_rings.tar.gz`: An archive containing data or images related to Sycamore Rings.
+- `sycamore_spheres.sh`: A script for generating "Sycamore Spheres" visualizations or simulations.
+- `weave.sh`: A script for generating "weave" patterns or visualizations.
 
 ## Visualizations
 

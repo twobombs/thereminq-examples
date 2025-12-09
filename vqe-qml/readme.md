@@ -1,12 +1,15 @@
 # VQE-QML: Hermitian Matrices for Quantum Machine Learning
 
-This directory contains experimental code for a Quantum Machine Learning (QML) technique that uses a "learnable" Hermitian observable. The approach is based on the concepts presented in the arXiv paper "[2505.13525](https://arxiv.org/abs/2505.13525)".
+This directory contains experimental code for a Quantum Machine Learning (QML) technique that uses a "learnable" Hermitian observable.
 
-## Scripts
+## Files
 
-*   **`hermitian-matrices-qiskit.py`**: A Qiskit-based implementation of the concept, demonstrating how to create a learnable Hermitian observable and a Variational Quantum Circuit (VQC) with data encoding.
-*   **`hermitian-matrices-pyqrack.py` / `hermitian-matrices-pyqrack-oai.py`**: PyTorch-based implementations of the same concept, designed as fully trainable QML models. These scripts use a classical neural network (a "Fast Weight Programmer" or "ControllerNN") to generate the parameters for both the VQC and the Hermitian observable. The quantum part of the model is implemented as a custom `torch.autograd.Function` with a PyQrack backend.
-*   **`hermitian-matrices-pyqrack.sh`**: A shell script for running the `hermitian-matrices-pyqrack-oai.py` script with specific Qrack configurations.
+- `2505.13525v1.pdf`: The PDF of the arXiv paper "[2505.13525](https://arxiv.org/abs/2505.13525)" which the experiments are based on.
+- `hermitian-matrices-pyqrack-oai.py`: A PyTorch-based implementation of the QML concept using PyQrack, likely containing optimizations or variations (possibly "OAI" refers to OpenAI or specific optimizations).
+- `hermitian-matrices-pyqrack.py`: A PyTorch-based implementation of the QML concept using PyQrack. It uses a classical neural network to generate parameters for the VQC and Hermitian observable.
+- `hermitian-matrices-pyqrack.sh`: A shell script for running the `hermitian-matrices-pyqrack-oai.py` script with specific Qrack configurations.
+- `hermitian-matrices-qiskit.py`: A Qiskit-based implementation demonstrating the creation of a learnable Hermitian observable and a VQC with data encoding.
+- `readme.md`: This file, describing the contents of the `vqe-qml/` directory.
 
 ## Overview
 
