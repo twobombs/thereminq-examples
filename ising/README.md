@@ -15,6 +15,14 @@ This directory contains a collection of benchmarks and experiments related to th
 *   **`quantinuum/`**: A collection of benchmarks and experiments related to the Transverse Field Ising Model (TFIM), likely run on or for Quantinuum hardware.
 *   **`tfim-qrack/`**: A collection of benchmarks and experiments for the Transverse Field Ising Model (TFIM) using the Qrack framework, including both OpenCL-accelerated quantum simulations and classical samplers.
 
+## Files
+
+*   **`ising-c`**: Subdirectory containing C/OpenCL implementations.
+*   **`ising-python`**: Subdirectory containing Python implementations.
+*   **`pyqrackising`**: Subdirectory containing PyQrack specific benchmarks.
+*   **`quantinuum`**: Subdirectory containing Quantinuum specific runs.
+*   **`tfim-qrack`**: Subdirectory containing TFIM on Qrack experiments.
+
 ## Visualization
 
 Summer Vibes 2025

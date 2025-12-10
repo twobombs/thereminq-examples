@@ -6,6 +6,7 @@ This directory contains a suite of scripts for simulating and analyzing Out-of-T
 
 *   **`otoc_statevector_simulation.py`**: A simple example of how to use the `generate_otoc_samples` function from the `pyqrackising` library.
 *   **`otoc_validation_isingonly_cpu.py`**: A validation tool for the OTOC simulations that uses the `generate_otoc_samples` function to generate samples and then prints the resulting probabilities.
+*   **`otoc_validation_isingonly_cpu.sh`**: Shell script to run the CPU-based OTOC validation.
 *   **`otoc_validation_isingonly_graph.py`**: A sophisticated visualization tool that parses the log files from the OTOC simulations and creates a 3D surface plot of the execution time as a function of the number of qubits and the depth.
 *   **`otocs-prediction-512.py`**: A prediction tool that uses linear regression to estimate the time required to run OTOC simulations for a large number of qubits.
 
