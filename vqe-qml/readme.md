@@ -8,6 +8,10 @@ This directory contains experimental code for a Quantum Machine Learning (QML) t
 *   **`hermitian-matrices-pyqrack.py` / `hermitian-matrices-pyqrack-oai.py`**: PyTorch-based implementations of the same concept, designed as fully trainable QML models. These scripts use a classical neural network (a "Fast Weight Programmer" or "ControllerNN") to generate the parameters for both the VQC and the Hermitian observable. The quantum part of the model is implemented as a custom `torch.autograd.Function` with a PyQrack backend.
 *   **`hermitian-matrices-pyqrack.sh`**: A shell script for running the `hermitian-matrices-pyqrack-oai.py` script with specific Qrack configurations.
 
+## Documentation
+
+*   **`2505.13525v1.pdf`**: The arXiv paper "Learning to Program Quantum Measurements for Machine Learning" which forms the basis for the experiments in this directory.
+
 ## Overview
 
 The scripts in this directory demonstrate a powerful QML technique where both the quantum circuit and the observable are parameterized and trained. This approach allows the model to learn not just the best quantum state for a given task, but also the best measurement to perform on that state.

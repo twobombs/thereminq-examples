@@ -11,6 +11,18 @@ This directory contains scripts for generating various visualizations of quantum
     *   `shors_*.sh`: A series of scripts for running Shor's algorithm experiments.
     *   `sycamore_*.sh`: Scripts for running Sycamore-related simulations.
 
+*   **Other Shell Scripts**:
+    *   `shors_failloop.sh`: Script related to Shor's algorithm (potentially handling failure cases in a loop).
+    *   `shors_rsaloop.sh`: Script related to Shor's algorithm and RSA.
+    *   `shors_winloop.sh`: Script related to Shor's algorithm (potentially handling success cases in a loop).
+    *   `supreme28q14d.sh`: Script likely related to "Quantum Supremacy" experiments with 28 qubits and depth 14.
+    *   `sycamore_rings.sh`: Script to generate or process "Sycamore Rings" visualization data.
+    *   `sycamore_spheres.sh`: Script to generate or process "Sycamore Spheres" visualization data.
+    *   `weave.sh`: Script likely related to weaving visualizations or data.
+
+*   **Data Files**:
+    *   `sycamore_rings.tar.gz`: Compressed archive containing data or images for Sycamore Rings.
+
 ## Visualizations
 
 More bonsai images by ThereminQ's visualisation script can be viewed and downloaded [here](https://github.com/twobombs/thereminq-graphs)

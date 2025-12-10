@@ -7,6 +7,9 @@ This directory contains a diverse collection of scripts for implementing and ana
 ### VQE for Molecular Ground State Energy
 
 *   **`import_clifford_vqe_entangled.py`**: A PennyLane-based script that performs VQE calculations for a list of molecules defined in a CSV file. It compares the calculated ground state energy to the expected value.
+*   **`import_clifford_vqe_entangled.sh`**: Shell script to run the entangled VQE simulation.
+*   **`import_clifford_vqe_min.py`**: A minimal version of the VQE import script.
+*   **`import_clifford_vqe_min.csv`**: Data file used by the minimal VQE script.
 *   **`import_clifford_vqe_entangled-gpu-multi.py`**: A multi-GPU, enhanced version of the previous script that uses `multiprocessing` to distribute the calculations across multiple GPUs.
 *   **`run-multi-vqe-cirq-h2.py`**: A comprehensive VQE simulation for the H2 molecule using PennyLane with the Cirq simulator as the backend. It includes explicit FCI calculation for benchmarking, a manual UCCSD ansatz, and detailed convergence analysis.
 *   **`run-multi-vqe-pennylane-h2.py`**: A version of the H2 VQE simulation that is specifically adapted to use the PennyLane-Qrack plugin with GPU acceleration.
