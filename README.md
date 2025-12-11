@@ -17,16 +17,6 @@ This repository is a collection of experimental configurations and development e
 
 This directory contains a Python script (`gemini-query.py`) for interacting with the Gemini API. This script is designed to be used within the `thereminq-tensor` containers.
 
-### `benchmarks`
-
-This directory holds various benchmarking scripts and results.
-
-*   **`benchmarks/ising`**: Contains benchmarks related to the Ising model, a mathematical model of ferromagnetism. It has subdirectories for different implementations and platforms like `pyqrackising`, `quantinuum`, and `tfim-qrack`.
-*   **`benchmarks/ising/pyqrackising`**: This directory contains several sub-projects related to the Ising model using `pyqrack`:
-    *   `TFIM-base`: Provides a UI and visualization for the Transverse Field Ising Model (TFIM).
-    *   `folding`: An experimental protein folding landscape scanner.
-    *   `srohs`: A factorization landscape discovery script.
-
 ### `findafactor`
 
 This directory contains a shell script for running a factorization benchmark.
@@ -45,7 +35,12 @@ This directory contains a collection of scripts for running high-performance com
 
 ### `ising`
 
-This directory contains various implementations and experiments related to the Ising model, including Python scripts and notebooks.
+This directory contains benchmarks and experiments related to the Ising model, a mathematical model of ferromagnetism. It includes:
+*   **`ising/ising-c`**: C/OpenCL implementations.
+*   **`ising/ising-python`**: Python implementations.
+*   **`ising/pyqrackising`**: Benchmarks using `pyqrack`, including TFIM visualization, protein folding, and factorization.
+*   **`ising/quantinuum`**: Experiments related to Quantinuum hardware.
+*   **`ising/tfim-qrack`**: TFIM benchmarks using the Qrack framework.
 
 ### `noisy-shors`
 
@@ -78,6 +73,14 @@ This directory contains a small demo of Quantum Variational Machine Learning (QV
 ### `qwscatter`
 
 This directory contains a large 3D scatter plot visualization.
+
+### `rcs`
+
+This directory contains Random Circuit Sampling (RCS) benchmarks, including scripts for running Sycamore patch quadrant simulations.
+
+### `rcsqbdd`
+
+This directory implements Random Circuit Sampling (RCS) benchmarks utilizing `pyqrack` for QBDD simulation, `quimb` for Matrix Product States (MPS), and `torch` for GPU-accelerated tensor operations.
 
 ### `vqe`
 
