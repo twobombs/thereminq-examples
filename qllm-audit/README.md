@@ -1,4 +1,4 @@
-# QLLM Audit
+# qLLM Audit
 
 This directory contains experiments and tools for auditing Large Language Models (LLMs) using Quantum and Cryptographic techniques.
 
