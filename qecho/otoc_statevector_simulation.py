@@ -39,7 +39,6 @@ samples = generate_otoc_samples(
 # Print the resulting samples (the format might vary, could be raw bitstrings or processed results)
 print("Generated OTOC Samples:")
 print(samples)
-root@80ec19f1223f:~# 
 
 
 
