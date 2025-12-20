@@ -1,9 +1,24 @@
-# Peaked: QASM to 3D Tensor Visualization
+# Peaked: QASM to 3D Tensor Visualization and Analysis
 
-This project converts QASM quantum circuits into PyTorch tensors and renders them as interactive 3D structures.
+This project explores various methods for analyzing, simulating, and visualizing Quantum Assembly (QASM) circuits, with a focus on solving the `P1_little_dimple.qasm` challenge. It is divided into three main approaches: brute-force simulation, structural discovery/visualization, and analytical landscape solving.
 
-## Key Files
-- **`qpetensor.py`**: Parses QASM into a structural PyTorch tensor.
-- **`qpetensorviz*.py`**: Various scripts for 3D visualization of the circuit tensor using `vedo` and `networkx`, featuring different layouts (physics-based, dark mode, extreme scale) and interaction heatmaps.
+## Directory Structure
 
-<img width="10240" height="5556" alt="qpe_dark_20251214-132116" src="https://github.com/user-attachments/assets/62ed7e30-73c7-4da9-94b3-d9d973e2ae60" />
+### `bruteforce/`
+Contains scripts for direct simulation of the quantum circuit.
+- **`qpepyqrackqbdd.py`**: Uses the `pyqrack` simulator to execute the circuit and decode the phase.
+
+### `discovery/`
+Focuses on 3D visualization of the circuit structure to identify patterns or anomalies.
+- **`qpetensorvizphyz.py`**: Renders an interactive 3D model of the circuit tensor using `vedo`, featuring "extreme" scaling layouts.
+- **`qpetensorviztube.py`**, **`qpetensorvizphyztagged.py`**: Variations of the visualization tool with different layouts or highlighting.
+- **`qpe.qasm`**: A test QASM file.
+
+### `solver_1/`
+Implements an analytical approach to find hidden signals ("dimples") in the circuit parameters.
+- **`qpetensor.py`**: Converts QASM files into PyTorch tensors for analysis.
+- **`render_landscape.py`**: Visualizes the circuit as a 3D landscape of rotation angles (Time vs. Space vs. Angle) to highlight the signal.
+- **`solve_dimple.py`**: A clustering-based solver that extracts the hidden phase by analyzing the distribution of rotation angles.
+
+## Root Files
+- **`P1_little_dimple.qasm`**: The target QASM file containing the circuit to be analyzed/solved.
