@@ -1,3 +1,4 @@
+# export QRACK_OCL_DEFAULT_DEVICE=0 QRACK_DISABLE_QUNIT_FIDELITY_GUARD=1 && python3 qpepyqrackqbdd.py
 import qiskit
 from pyqrack import QrackSimulator
 import numpy as np
