@@ -1,4 +1,5 @@
-# export QRACK_OCL_DEFAULT_DEVICE=0 QRACK_DISABLE_QUNIT_FIDELITY_GUARD=1 && time python3 qpepyqrackqbdd.py
+# export QRACK_OCL_DEFAULT_DEVICE=0 QRACK_DISABLE_QUNIT_FIDELITY_GUARD=1 QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.1464466 QRACK_MAX_PAGING_QB=30 && time python3 qpepyqrackqbdd.py
+
 import qiskit
 from pyqrack import QrackSimulator
 import numpy as np
