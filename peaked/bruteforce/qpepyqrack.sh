@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define Log File
-LOGFILE="qpepyqrackqbd.log"
+LOGFILE="qpepyqrack.log"
 
 # Clear previous log (overwrite if exists)
 echo "Starting Benchmark Sweep (Paging QB First)..." > "$LOGFILE"
@@ -28,7 +28,7 @@ for PAGING_QB in {4..29}; do
         export QRACK_MAX_PAGING_QB=$PAGING_QB
 
         # Run Python script and append both stdout and stderr (time) to log
-        { time python3 qpepyqrackqbdd.py ; } 2>&1 | tee -a "$LOGFILE"
+        { time python3 qpepyqrack.py ; } 2>&1 | tee -a "$LOGFILE"
         
     done
 done
