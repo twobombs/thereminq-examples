@@ -15,3 +15,7 @@ This directory contains scripts for generating custom quantum circuit challenges
 - **`peaked_generation_pyqrack_p1.py`**:
     - **Purpose**: A dedicated solver script for `P1_little_dimple.qasm` (or similar files) using the consensus approach.
     - **Method**: Runs the circuit multiple times on the `pyqrack` simulator, collecting measurement shots. It aggregates the results to form a bitwise consensus, providing a confidence score for each qubit's value. This statistical approach helps overcome the inherent noise/approximation in the high-performance simulation settings.
+
+- **`peaked_generation_pyqrack_p1-hybrid.py`**:
+    - **Purpose**: A hybrid solver script that combines Qiskit optimization with PyQrack simulation.
+    - **Method**: Loads the circuit using Qiskit, performs Level 3 optimization (transpilation) to reduce gate count and depth, and then executes the optimized circuit on `pyqrack`. It uses "Oracle Mode" (direct state vector inspection) to find the theoretical peak probability, which is useful for verifying solutions against a known target or ground truth.
