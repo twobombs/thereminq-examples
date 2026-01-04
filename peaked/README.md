@@ -12,6 +12,12 @@ Contains scripts for direct simulation of the quantum circuit using high-perform
 Focuses on 3D visualization of the circuit structure to identify patterns or anomalies.
 - **`qpetensorvizphyz.py`**: Renders an interactive 3D model of the circuit tensor using `vedo`, featuring "extreme" scaling layouts.
 
+### `simulation/`
+Contains scripts for circuit manipulation, resizing, and generating steered circuits.
+- **`connectivityplot.py`**: Visualizes the connectivity of the quantum circuit.
+- **`hide+steer_qrack.py`**: Generates random circuits steered towards specific bitstrings.
+- **`resize.py`**: Rebuilds the 'little dimple' circuit structure at variable bitwidths, preserving the original connection texture and depth.
+
 ### `solvers/`
 Contains specialized solvers developed to tackle the challenge using different theoretical frameworks.
 
@@ -34,5 +40,3 @@ Contains tools for generating custom challenge circuits (Full Density, Mirror) a
 
 ## Root Files
 - **`P1_little_dimple.qasm`**: The target QASM file containing the circuit to be analyzed/solved.
-- **`hide.py`**: Generates a random circuit that is "steered" towards a specific target bitstring by modifying the final layer of rotations.
-- **`resize.py`**: Rebuilds the 'little dimple' circuit structure at variable bitwidths, preserving the original connection texture and depth.
