@@ -24,3 +24,4 @@ python hide+steer_qrack.py -q 24 -d 200 --qasm
 ```bash
 python connectivityplot.py custom_dimple.qasm
 ```
+<img width="1352" height="557" alt="Screenshot from 2026-01-04 11-59-53" src="https://github.com/user-attachments/assets/90385408-dec7-4e9f-8efe-16048c0a63a9" />
