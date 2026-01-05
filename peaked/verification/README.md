@@ -19,3 +19,5 @@ This directory contains scripts for generating custom quantum circuit challenges
 - **`peaked_generation_pyqrack_p1-hybrid.py`**:
     - **Purpose**: A hybrid solver script that combines Qiskit optimization with PyQrack simulation.
     - **Method**: Loads the circuit using Qiskit, performs Level 3 optimization (transpilation) to reduce gate count and depth, and then executes the optimized circuit on `pyqrack`. It uses "Oracle Mode" (direct state vector inspection) to find the theoretical peak probability, which is useful for verifying solutions against a known target or ground truth.
+
+<img width="841" height="920" alt="Screenshot from 2026-01-04 20-11-43" src="https://github.com/user-attachments/assets/6405c92c-8676-4fca-b8fe-58a448f50cda" />
