@@ -6,6 +6,7 @@ This directory contains a brute-force approach to solving the `P1_little_dimple.
 
 - **`qpepyqrack.py`**: The core simulation script. It reads `P1_little_dimple.qasm`, initializes a `QrackSimulator`, executes the gates (mapping QASM gates like `u`, `cz`, `cx` to PyQrack), and measures the final state to estimate the phase. It saves the results (Separability, Duration, Phase, Bitstring) to `qrack_results.csv`.
 - **`qpepyqrackqbdd.py`**: A variant of the main simulation script that explicitly enables the Quantum Binary Decision Diagram (QBDD) engine (`isBinaryDecisionTree=True`) in the `QrackSimulator` for potentially enhanced performance on certain circuit structures.
+- **`qpepyqrackqbdd-transpiled.py`**: A version of the QBDD simulation script that first transpiles the circuit using Qiskit to a specific basis set (`u`, `cx`, etc.) and optimizes it (level 3) before running the PyQrack simulation. This ensures better compatibility and potentially faster execution.
 - **`qpepyqrackqbd_viz.py`**: A visualization script that reads the CSV output (`qrack_results.csv`) and generates a 3D scatter plot (Max Paging Qubits vs. Separability Threshold vs. Duration/Phase) to visualize the performance and convergence of the simulation sweeps.
 - **`qpepyqrack.sh`**: A shell script wrapper to execute a parameter sweep of the `qpepyqrack.py` solver. It iterates through different `QRACK_MAX_PAGING_QB` and `QRACK_QUNIT_SEPARABILITY_THRESHOLD` values, logging the results to `qpepyqrack.log` and `qrack_results.csv`.
 
