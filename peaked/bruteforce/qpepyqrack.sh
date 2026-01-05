@@ -28,7 +28,7 @@ for PAGING_QB in {33..36}; do
         
         # Dynamic variables
         export QRACK_QUNIT_SEPARABILITY_THRESHOLD=$THRESHOLD
-	export QRACK_MAX_PAGING_QB=30
+		export QRACK_MAX_PAGING_QB=30
         export QRACK_MAX_CPU_QB=$PAGING_QB
 
         # Run Python script and append both stdout and stderr (time) to log
