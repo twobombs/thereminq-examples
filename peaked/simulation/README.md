@@ -4,9 +4,9 @@ This directory contains scripts for generating, manipulating, and analyzing the 
 
 ## Files
 
-- **`resize.py`**: A script to rebuild the "Little Dimple" circuit structure with a variable number of qubits (width) and depth. It preserves the original random connection texture and depth characteristics. It also generates a connectivity heatmap of the resulting circuit.
-- **`hide+steer_qrack.py`**: A generator script that builds a random circuit and then "steers" the final state towards a specific target bitstring by applying corrective single-qubit rotations in the final layer. It uses `pyqrack` for high-performance simulation to determining the "natural winner" before steering.
-- **`connectivityplot.py`**: A standalone tool to visualize the connectivity matrix of any given QASM file as a heatmap. It includes robust QASM loading logic to handle missing gate definitions (like `u` gates).
+- **`resize.py`**: A script to rebuild the "Little Dimple" circuit structure with a variable number of qubits (width) and depth. It preserves the original random connection texture and depth characteristics. It also generates a connectivity heatmap (e.g., `connectivity_n50.png`) of the resulting circuit to verify the interaction density.
+- **`hide+steer_qrack.py`**: A generator script that builds a random circuit and then "steers" the final state towards a specific target bitstring by applying corrective single-qubit rotations in the final layer. It uses `pyqrack` for high-performance simulation to determining the "natural winner" before steering. This allows for creating "hidden shift" style problems.
+- **`connectivityplot.py`**: A standalone tool to visualize the connectivity matrix of any given QASM file as a heatmap. It includes robust QASM loading logic to handle missing gate definitions (like `u` gates) and helps visually inspect the entanglement structure of a circuit.
 
 ## Usage
 

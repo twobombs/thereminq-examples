@@ -11,12 +11,21 @@ This directory contains specialized solvers developed to tackle the `P1_little_d
     - `render_landscape.py`: Visualizes the angle distribution landscape.
     - `solve_dimple.py`: The main solver script that clusters angles to find hidden signals.
 
+### `haar_solver_P1/`
+- **Method**: Statistical deviation from Haar randomness. This approach assumes that the "hidden" structure manifests as deviations from the expected random distribution of quantum gates (Haar measure), specifically looking for "magic angles" or "crystal" structures.
+- **Key Scripts**:
+    - `haar-deviation.py`: Analyzes the statistical distribution of rotation angles to detect deviations from randomness and plots the location of "magic" angles (like pi/2).
+    - `purified-viz.py`: Visualizes the "purified" circuit structure.
+    - `purify-deviation.py`: Attempts to "purify" the circuit by snapping near-Clifford gates to exact Cliffords.
+    - `transpile-deviation.py`: Transpilation utilities to normalize the circuit for deviation analysis.
+
 ### `holographic_solver_P1/`
 - **Method**: Stabilizer purification and holographic bulk analysis. This method treats the circuit as a tensor network or a holographic system, attempting to extract the "peak" by analyzing stabilizer properties and "snapping" parameters to Clifford gates.
 - **Key Scripts**:
     - `extract_peak.py`: Attempts to "snap" rotation parameters to the nearest Clifford gates to simplify the circuit and find the peak.
     - `analyse_stabilizers.py`: Analyzes the dimensions of superposition to guide the solver.
     - `holographic_bulk.py`: Core logic for the holographic analysis.
+    - `solve_pyqrack.py`: A solver leveraging `pyqrack` in the context of this holographic approach.
 
 ### `otoc_maps_solver_P1/`
 - **Method**: Physics-inspired Out-of-Time-Order Correlators (OTOCs) and scrambling stability. This solver uses the concept of scrambling and chaos to find the solution, assuming the "hidden" bitstring corresponds to a stable plateau in the OTOC landscape.

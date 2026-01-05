@@ -20,4 +20,14 @@ This directory contains scripts for generating custom quantum circuit challenges
     - **Purpose**: A hybrid solver script that combines Qiskit optimization with PyQrack simulation.
     - **Method**: Loads the circuit using Qiskit, performs Level 3 optimization (transpilation) to reduce gate count and depth, and then executes the optimized circuit on `pyqrack`. It uses "Oracle Mode" (direct state vector inspection) to find the theoretical peak probability, which is useful for verifying solutions against a known target or ground truth.
 
+- **`peaked_generation_pyqrack_p1-hybrid-sparse.py`**:
+    - **Purpose**: A variant of the hybrid solver optimized for sparse simulations, likely employing different `pyqrack` environment settings or logic to handle sparsity.
+
+- **`peaked_generation_pyqrack_p1-hybrid-sparse-36.py`**:
+    - **Purpose**: A highly optimized version of the sparse hybrid solver specifically tuned for 36-qubit challenges (or slightly less, e.g., 32 qubits).
+    - **Method**:
+        - Forces dense simulation (`QRACK_QUNIT_SEPARABILITY_THRESHOLD=0.0`) and enables paging (`QRACK_MAX_PAGING=1`) to handle memory constraints.
+        - Compiles a custom C-language atomic filter (`final_filter.c`) on the fly to efficiently scan the massive state vector during simulation, filtering out states with probabilities below a noise threshold (1e-9).
+        - Uses pinned memory and direct pointer access for maximum speed during the scan phase.
+
 <img width="841" height="920" alt="Screenshot from 2026-01-04 20-11-43" src="https://github.com/user-attachments/assets/6405c92c-8676-4fca-b8fe-58a448f50cda" />
