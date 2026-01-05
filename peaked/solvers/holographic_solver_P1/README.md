@@ -29,3 +29,6 @@ This directory contains tools for a **Holographic / Stabilizer** approach to sol
 1.  **Analyze Structure**: Run `python analyse_stabilizers.py` to understand the circuit's theoretical properties (determinism vs. superposition).
 2.  **Extract Solution**: Run `python extract_peak.py` to attempt to find the solution by purifying the circuit.
 3.  **Verify**: Run `python solve_pyqrack.py` to confirm the result with a full state vector simulation (if feasible) or optimized stabilizer simulation.
+
+<img width="1710" height="943" alt="Screenshot from 2026-01-05 13-07-42" src="https://github.com/user-attachments/assets/fc782cbd-427f-4fd8-99ad-92510839d6b3" />
+
