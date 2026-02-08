@@ -47,3 +47,4 @@ Inference Result (Overlap Amplitude): ...
 ## Visuals
 
 <img width="685" height="221" alt="Screenshot from 2026-02-08 16-03-27" src="https://github.com/user-attachments/assets/6172e129-0bcd-4e3f-912f-b6a61a9a65d9" />
+<img width="684" height="167" alt="Screenshot from 2026-02-08 16-40-49" src="https://github.com/user-attachments/assets/9ab93098-c3b1-439f-a082-4b2e91fcc52b" />
