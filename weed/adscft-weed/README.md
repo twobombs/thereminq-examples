@@ -44,6 +44,46 @@ Inference Result (Overlap Amplitude): ...
 >> CONCLUSION: Hypothesis CONFIRMED. (Data found in target region)
 ```
 
+# Holographic Ingestion (Streaming)
+
+The `holographic_ingest.cpp` tool extends the functionality to support streaming data ingestion. It handles large datasets by accumulating state counts in a sparse map before freezing them into a dense `Weed::Tensor`.
+
+## Description (`holographic_ingest.cpp`)
+
+1.  **Phase 1: Holographic Ingestion (Streaming Mode)**
+    -   **Streaming Input:** Reads from a CSV file or generates a synthetic stream if no file is provided.
+    -   **Sparse Accumulation:** Uses a `std::map` to efficiently count state occurrences in the $2^{24}$ dimensional Hilbert space, allowing for handling sparse data without allocating the full dense tensor immediately.
+    -   **Tensor Freezing:** Converts the accumulated sparse map into a dense `Weed::Tensor` (shared pointer) for further processing.
+
+2.  **Phase 2: Bulk Reconstruction**
+    -   **Bulk Operator:** Defines a bulk operator targeting a specific region (index 27 and neighbors).
+    -   **Tensor Contraction:** Performs element-wise multiplication (`*`) between the boundary state tensor and the bulk operator tensor.
+    -   **Inference:** Measures the overlap at the target index to verify the hypothesis.
+
+## Usage
+
+To compile, use the updated `compile.sh` script:
+
+```bash
+./compile.sh
+```
+
+To run in demo mode (simulated stream):
+
+```bash
+./holographic_ingest
+```
+
+To run with a data file:
+
+```bash
+./holographic_ingest <data.csv>
+```
+
 ## Visuals
 
 <img width="685" height="221" alt="Screenshot from 2026-02-08 16-03-27" src="https://github.com/user-attachments/assets/6172e129-0bcd-4e3f-912f-b6a61a9a65d9" />
+<img width="684" height="167" alt="Screenshot from 2026-02-08 16-40-49" src="https://github.com/user-attachments/assets/9ab93098-c3b1-439f-a082-4b2e91fcc52b" />
+<img width="938" height="742" alt="Screenshot from 2026-02-08 17-09-21" src="https://github.com/user-attachments/assets/058e67eb-e51f-4ae6-b9c2-d5c343c5370a" />
+<img width="790" height="342" alt="Screenshot from 2026-02-08 17-11-19" src="https://github.com/user-attachments/assets/414ddacc-c996-4ffb-a4ec-037106826dd7" />
+
