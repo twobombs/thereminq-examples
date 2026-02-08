@@ -84,3 +84,6 @@ To run with a data file:
 
 <img width="685" height="221" alt="Screenshot from 2026-02-08 16-03-27" src="https://github.com/user-attachments/assets/6172e129-0bcd-4e3f-912f-b6a61a9a65d9" />
 <img width="684" height="167" alt="Screenshot from 2026-02-08 16-40-49" src="https://github.com/user-attachments/assets/9ab93098-c3b1-439f-a082-4b2e91fcc52b" />
+<img width="938" height="742" alt="Screenshot from 2026-02-08 17-09-21" src="https://github.com/user-attachments/assets/058e67eb-e51f-4ae6-b9c2-d5c343c5370a" />
+<img width="790" height="342" alt="Screenshot from 2026-02-08 17-11-19" src="https://github.com/user-attachments/assets/414ddacc-c996-4ffb-a4ec-037106826dd7" />
+
