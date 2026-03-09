@@ -1,0 +1,7 @@
+[system]
+n_side = 7
+j = 1.0
+h = 1.0
+t_evolve = 2.0
+g_shock = 5.0
+message_qubit = 0

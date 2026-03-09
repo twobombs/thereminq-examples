@@ -4,7 +4,19 @@
 
 import math
 import random
+import logging
+import time
 from fractions import Fraction
+from dataclasses import dataclass
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class ShorConfig:
+    n: int = 15
+    base_a: int = 7
+    num_classical_trials: int = 10
 
 # Conditional import for PyQrack
 try:
@@ -81,10 +93,10 @@ def controlled_modular_exponentiation(qsim, control_register_indices, target_reg
         
         # Optimization: if current_power_val is 1, multiplying by it does nothing (for N>2).
         if current_power_val == 1 and N > 2 :
-            # print(f"  (Skipping c-mult by {current_power_val} for control q[{c_qubit_idx}])")
+            # logger.debug(f"  (Skipping c-mult by {current_power_val} for control q[{c_qubit_idx}])")
             continue # Skip to the next control qubit
         
-        # print(f"  Applying c-mult by {current_power_val} (mod {N}), controlled by q[{c_qubit_idx}]")
+        # logger.debug(f"  Applying c-mult by {current_power_val} (mod {N}), controlled by q[{c_qubit_idx}]")
         controlled_modular_multiplier_permutation(qsim, 
                                                   c_qubit_idx, 
                                                   target_register_indices, 
@@ -110,25 +122,25 @@ def quantum_period_finding_subroutine(qsim, num_control_qubits, num_target_qubit
     target_register = list(range(num_control_qubits, num_control_qubits + num_target_qubits))
 
     # 1. Initialize control qubits to superposition: H gates
-    # print("  Initializing control register to superposition...")
+    # logger.debug("  Initializing control register to superposition...")
     for q_idx in control_register:
         qsim.h(q_idx)
 
     # 2. Initialize target register to state |1>
     # To represent |1>, set the LSB (target_register[0]) to 1, others to 0.
-    # print("  Initializing target register to |1>...")
+    # logger.debug("  Initializing target register to |1>...")
     qsim.x(target_register[0]) 
 
     # 3. Apply controlled modular exponentiation
-    # print(f"  Applying controlled modular exponentiation: a={base_a}, N={N}...")
+    # logger.debug(f"  Applying controlled modular exponentiation: a={base_a}, N={N}...")
     controlled_modular_exponentiation(qsim, control_register, target_register, base_a, N)
 
     # 4. Apply inverse QFT to the control register
-    # print("  Applying Inverse QFT to control register...")
+    # logger.debug("  Applying Inverse QFT to control register...")
     qft_dagger(qsim, control_register)
 
     # 5. Measure the control register
-    # print("  Measuring control register...")
+    # logger.debug("  Measuring control register...")
     measured_value_int = 0
     for i, q_idx in enumerate(control_register): # LSB first for measurement
         if qsim.m(q_idx): # qsim.m() returns True if outcome is 1
@@ -137,27 +149,34 @@ def quantum_period_finding_subroutine(qsim, num_control_qubits, num_target_qubit
     return measured_value_int
 
 # --- Shor's Algorithm Main Classical Logic ---
-def shor_factor_pyqrack(N_to_factor, num_classical_trials=10, fixed_a=None):
+def shor_factor_pyqrack(config: ShorConfig):
     """
     Attempts to factor N_to_factor using Shor's algorithm simulated by PyQrack.
     """
+    start_time = time.time()
+
+    N_to_factor = config.n
+    num_classical_trials = config.num_classical_trials
+    fixed_a = config.base_a
+
     if not PYQRACK_AVAILABLE:
-        print(f"Factoring {N_to_factor} classically (PyQrack not available for quantum steps).")
+        logger.warning(f"Factoring {N_to_factor} classically (PyQrack not available for quantum steps).")
         # Basic classical factorization for small N if PyQrack is missing
         for i in range(2, int(math.sqrt(N_to_factor)) + 1):
             if N_to_factor % i == 0:
-                print(f"  Classical factors found: {i}, {N_to_factor//i}")
+                logger.info(f"  Classical factors found: {i}, {N_to_factor//i}")
+                logger.info(f"Shor's algorithm completed in {time.time() - start_time:.4f}s")
                 return i, N_to_factor//i
-        print(f"  {N_to_factor} is prime or classical factoring failed.")
+        logger.info(f"  {N_to_factor} is prime or classical factoring failed.")
         return None, None
 
-    print(f"Attempting to factor N = {N_to_factor} using Shor's algorithm (simulated with PyQrack)")
+    logger.info(f"Attempting to factor N = {N_to_factor} using Shor's algorithm (simulated with PyQrack)")
 
     if N_to_factor <= 1:
-        print("  Number must be greater than 1.")
+        logger.warning("  Number must be greater than 1.")
         return None, None
     if N_to_factor % 2 == 0:
-        print(f"  Factor found (trivial): 2, {N_to_factor//2}")
+        logger.info(f"  Factor found (trivial): 2, {N_to_factor//2}")
         return 2, N_to_factor//2
     
     # Determine number of qubits
@@ -173,55 +192,56 @@ def shor_factor_pyqrack(N_to_factor, num_classical_trials=10, fixed_a=None):
     m_target_qubits = n_bits_N # Target register size
 
     total_qubits_needed = t_control_qubits + m_target_qubits
-    print(f"  Using {t_control_qubits} control qubits, {m_target_qubits} target qubits. Total: {total_qubits_needed} qubits.")
+    logger.info(f"  Using {t_control_qubits} control qubits, {m_target_qubits} target qubits. Total: {total_qubits_needed} qubits.")
 
     for trial_num in range(num_classical_trials):
         # Step 1: Pick a random number 'a' < N
         if fixed_a and trial_num == 0 : # Allow fixing 'a' for first trial for debugging/testing
             a = fixed_a
             if gcd(a, N_to_factor) != 1:
-                print(f"  Fixed 'a'={a} is not coprime to N. Choose another or let it be random.")
+                logger.warning(f"  Fixed 'a'={a} is not coprime to N. Choose another or let it be random.")
                 a = random.randint(2, N_to_factor - 1)
         else:
             a = random.randint(2, N_to_factor - 1)
         
-        print(f"\nTrial {trial_num + 1}/{num_classical_trials}: Choosing a = {a}")
+        logger.info(f"\nTrial {trial_num + 1}/{num_classical_trials}: Choosing a = {a}")
 
         # Step 2: Check if gcd(a, N) > 1 (lucky classical find)
         common_divisor = gcd(a, N_to_factor)
         if common_divisor > 1:
-            print(f"  Lucky classical find: gcd({a}, {N_to_factor}) = {common_divisor}")
+            logger.info(f"  Lucky classical find: gcd({a}, {N_to_factor}) = {common_divisor}")
+            logger.info(f"Shor's algorithm completed in {time.time() - start_time:.4f}s")
             return common_divisor, N_to_factor // common_divisor
 
         # Step 3: Quantum Period Finding
         qsim = qrack_system.QrackSimulator(total_qubits_needed)
         
         measured_s = quantum_period_finding_subroutine(qsim, t_control_qubits, m_target_qubits, a, N_to_factor)
-        print(f"  Measured integer from control register (s): {measured_s}")
+        logger.info(f"  Measured integer from control register (s): {measured_s}")
         
         del qsim # Release Qrack simulator resources for this run
 
         if measured_s == 0: 
-            print("  Measured s=0 (phase is 0). Period finding failed for this 'a'. Retrying with new 'a'.")
+            logger.info("  Measured s=0 (phase is 0). Period finding failed for this 'a'. Retrying with new 'a'.")
             continue
 
         # Step 4: Classical post-processing (Continued Fractions)
         # We are looking for period 'r' such that measured_s / (2^t_control_qubits) is close to k / r
         phase_numerator = measured_s
         phase_denominator = 1 << t_control_qubits # 2^t_control_qubits
-        print(f"  Phase approximation: {phase_numerator}/{phase_denominator} = {phase_numerator/phase_denominator:.5f}")
+        logger.info(f"  Phase approximation: {phase_numerator}/{phase_denominator} = {phase_numerator/phase_denominator:.5f}")
 
         # Use continued fractions to find r (the period)
         # Limit denominator to N_to_factor, as r < N_to_factor
         frac = Fraction(phase_numerator, phase_denominator).limit_denominator(N_to_factor)
         r = frac.denominator
-        print(f"  Continued fraction result: {frac.numerator}/{frac.denominator}. Deduced period r = {r}")
+        logger.info(f"  Continued fraction result: {frac.numerator}/{frac.denominator}. Deduced period r = {r}")
 
         if r == 0 : # Should not happen if measured_s != 0
-            print("  Deduced period r=0. Error in post-processing or measurement. Retrying.")
+            logger.info("  Deduced period r=0. Error in post-processing or measurement. Retrying.")
             continue
         if r % 2 != 0: # Period 'r' must be even
-            print(f"  Period r={r} is odd. Need an even period. Retrying with new 'a'.")
+            logger.info(f"  Period r={r} is odd. Need an even period. Retrying with new 'a'.")
             continue
         
         # Step 5: Check if r gives non-trivial factors
@@ -230,10 +250,10 @@ def shor_factor_pyqrack(N_to_factor, num_classical_trials=10, fixed_a=None):
         term1 = pow(a, r // 2, N_to_factor) 
         
         if (term1 + 1) % N_to_factor == 0: # x = -1 (mod N)
-            print(f"  x = a^(r/2) = -1 (mod N). Period r={r} gives trivial factors. Retrying with new 'a'.")
+            logger.info(f"  x = a^(r/2) = -1 (mod N). Period r={r} gives trivial factors. Retrying with new 'a'.")
             continue
         if (term1 - 1) % N_to_factor == 0: # x = 1 (mod N)
-             print(f"  x = a^(r/2) = 1 (mod N). Period r={r} might be too small or 'a' was a bad choice. Retrying.")
+             logger.info(f"  x = a^(r/2) = 1 (mod N). Period r={r} might be too small or 'a' was a bad choice. Retrying.")
              continue
 
 
@@ -242,44 +262,41 @@ def shor_factor_pyqrack(N_to_factor, num_classical_trials=10, fixed_a=None):
 
         # found_non_trivial = False # This variable was unused
         if factor1 != 1 and factor1 != N_to_factor:
-            print(f"  Factor found: {factor1}")
-            print(f"  Factors are: {factor1}, {N_to_factor // factor1}")
+            logger.info(f"  Factor found: {factor1}")
+            logger.info(f"  Factors are: {factor1}, {N_to_factor // factor1}")
+            logger.info(f"Shor's algorithm completed in {time.time() - start_time:.4f}s")
             return factor1, N_to_factor // factor1
         
         if factor2 != 1 and factor2 != N_to_factor: # factor1 might have been trivial
-            print(f"  Factor found: {factor2}")
-            print(f"  Factors are: {factor2}, {N_to_factor // factor2}")
+            logger.info(f"  Factor found: {factor2}")
+            logger.info(f"  Factors are: {factor2}, {N_to_factor // factor2}")
+            logger.info(f"Shor's algorithm completed in {time.time() - start_time:.4f}s")
             return factor2, N_to_factor // factor2
             
-        print(f"  Period r={r} did not yield non-trivial factors with a={a}. Retrying with new 'a'.")
+        logger.info(f"  Period r={r} did not yield non-trivial factors with a={a}. Retrying with new 'a'.")
 
-    print(f"\nShor's algorithm failed to find factors for {N_to_factor} after {num_classical_trials} trials.")
+    logger.warning(f"\nShor's algorithm failed to find factors for {N_to_factor} after {num_classical_trials} trials.")
+    logger.info(f"Shor's algorithm completed in {time.time() - start_time:.4f}s")
     return None, None
 
 if __name__ == "__main__":
-    N_to_factor = 15  # Standard small example for Shor's
-    # N_to_factor = 21 # Another small example
-    # N_to_factor = 35 # Getting larger
+    config = ShorConfig(
+        n=15,
+        base_a=7, # For N=15, a=7, r=4.
+        num_classical_trials=10
+    )
 
     if not PYQRACK_AVAILABLE:
-        print("PyQrack is required for the quantum simulation parts of this script.")
-        print("Please install it (e.g., 'pip install pyqrack') to run the full example.")
-        print("Attempting classical factorization for demonstration purposes...")
+        logger.warning("PyQrack is required for the quantum simulation parts of this script.")
+        logger.warning("Please install it (e.g., 'pip install pyqrack') to run the full example.")
+        logger.warning("Attempting classical factorization for demonstration purposes...")
     
-    # You can try a fixed 'a' for N=15 that is known to work well, e.g., a=7 or a=11 for testing.
-    # For N=15, a=7, r=4.
-    # For N=15, a=11, r=2.
-    # For N=15, a=13, r=4.
-    # For N=15, a=4, r=2. (gcd(4,15)=1)
-    
-    # result_factors = shor_factor_pyqrack(N_to_factor, fixed_a=7) 
-    result_factors = shor_factor_pyqrack(N_to_factor) 
-
+    result_factors = shor_factor_pyqrack(config)
 
     if result_factors and result_factors[0] is not None:
-        print(f"\nSuccessfully factored {N_to_factor} into: {result_factors[0]} and {result_factors[1]}")
+        logger.info(f"\nSuccessfully factored {config.n} into: {result_factors[0]} and {result_factors[1]}")
     else:
-        print(f"\nCould not factor {N_to_factor} with the given attempts using the quantum routine.")
+        logger.info(f"\nCould not factor {config.n} with the given attempts using the quantum routine.")
 
 #
 # **To Run This Code:**

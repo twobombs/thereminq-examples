@@ -2,6 +2,7 @@
 # Import necessary libraries
 import numpy as np
 import matplotlib.pyplot as plt
+import json
 from qiskit import QuantumCircuit, transpile # Keep transpile import in case needed elsewhere, but not using it here
 from qiskit_aer import AerSimulator
 # Removed import for FakeManilaV2 as it might be deprecated/moved
@@ -42,6 +43,31 @@ num_steps = len(time_points_ns)
 
 # Choose initial state: '1' or '+'
 initial_state_choice = '+' # Options: '1', '+'
+
+# --- Helper Function to Save Results ---
+def save_results(
+    filename: str,
+    fidelities_default: list[float],
+    fidelities_qhrf: list[float],
+    t1_default_ns: float,
+    t2_default_ns: float,
+    gate_time_ns: float,
+    qhrf_improvement_factor: float
+):
+    """Save simulation results to JSON file."""
+    results = {
+        'fidelities_default': fidelities_default,
+        'fidelities_qhrf': fidelities_qhrf,
+        'parameters': {
+            't1_default_ns': t1_default_ns,
+            't2_default_ns': t2_default_ns,
+            'gate_time_ns': gate_time_ns,
+            'qhrf_improvement_factor': qhrf_improvement_factor
+        }
+    }
+    with open(filename, 'w') as f:
+        json.dump(results, f, indent=2)
+
 
 # --- Helper Function to Create Noise Model ---
 def create_noise_model(t1_ns, t2_ns, gate_time_ns):
@@ -126,6 +152,17 @@ for i in range(num_steps):
 
 
 print("Simulation finished.")
+
+save_results(
+    "qhrf_simulation_results.json",
+    fidelities_default,
+    fidelities_qhrf,
+    t1_default_ns,
+    t2_default_ns,
+    gate_time_ns,
+    qhrf_improvement_factor
+)
+print("Results saved to qhrf_simulation_results.json")
 
 # --- Plot Results ---
 plt.figure(figsize=(10, 6))

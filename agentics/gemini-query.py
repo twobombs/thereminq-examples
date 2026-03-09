@@ -9,6 +9,51 @@
 import os
 import sys
 import google.generativeai as genai
+from typing import Optional
+from dataclasses import dataclass
+
+@dataclass
+class GeminiConfig:
+    model: str = "gemini-2.5-pro"
+    max_retries: int = 3
+    timeout: int = 30
+
+import time
+
+def query_gemini(
+    query: str,
+    config: Optional[GeminiConfig] = None,
+    api_key: Optional[str] = None
+) -> str:
+    """Query Gemini API with proper error handling."""
+    if config is None:
+        config = GeminiConfig()
+
+    if not query or not query.strip():
+        raise ValueError("Query cannot be empty.")
+
+    if not api_key:
+        api_key = os.environ.get("GEMINI_API_KEY")
+
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set.")
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(config.model)
+
+    retries = 0
+    while retries <= config.max_retries:
+        try:
+            response = model.generate_content(query)
+            return response.text
+        except Exception as e:
+            retries += 1
+            if retries > config.max_retries:
+                raise RuntimeError(f"Failed to query Gemini API after {config.max_retries} retries. Error: {e}")
+            print(f"Error occurred: {e}. Retrying {retries}/{config.max_retries}...", file=sys.stderr)
+            time.sleep(2 ** retries) # Exponential backoff
+
+    return ""
 
 def main():
     """
@@ -42,17 +87,12 @@ def main():
         # The user's query is the prompt.
         prompt = user_query
 
-        # --- AI Model Interaction ---
-        # Initialize the generative model
-        # Using the 'gemini-2.5-pro' model as requested.
-        model = genai.GenerativeModel('gemini-2.5-pro')
-
-        # Send the prompt to the model to generate content
-        response = model.generate_content(prompt)
+        config = GeminiConfig()
+        response_text = query_gemini(prompt, config=config, api_key=api_key)
 
         # --- Output ---
         # Print only the generated text to the console
-        print(response.text)
+        print(response_text)
 
     except Exception as e:
         print(f"An unexpected error occurred: {e}", file=sys.stderr)

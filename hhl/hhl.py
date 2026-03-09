@@ -1,8 +1,6 @@
 # Import necessary libraries from Qiskit
 import numpy as np
 from qiskit import QuantumCircuit, transpile
-# Note: BasicSimulator is deprecated, using primitives is recommended.
-# from qiskit.providers.basic_provider import BasicSimulator
 from qiskit.quantum_info import Statevector
 
 # --- Qiskit Primitives Import ---
@@ -21,8 +19,19 @@ from qiskit_algorithms.linear_solvers.hhl import HHL
 # b = [1, 0]
 # The exact classical solution is x = [1.125, 0.375]
 
+def _validate_matrix(matrix: np.ndarray) -> None:
+    """Validate that matrix is Hermitian and positive definite."""
+    if not np.allclose(matrix, matrix.conj().T):
+        raise ValueError("Matrix must be Hermitian")
+    if not np.all(np.linalg.eigvals(matrix) > 0):
+        raise ValueError("Matrix must be positive definite")
+
 matrix = np.array([[1, -1/3], [-1/3, 1]])
 vector = np.array([1, 0])
+
+_validate_matrix(matrix)
+if len(vector) != matrix.shape[0]:
+    raise ValueError("Vector must have same dimension as matrix rows/cols")
 
 # --- 2. Instantiate the HHL Algorithm ---
 # Qiskit's HHL class encapsulates the steps shown in the slide:
@@ -45,25 +54,6 @@ solution = hhl_solver.solve(matrix, vector, sampler)
 # or by looking at the measurement probabilities (classical output).
 
 # Get the full solution vector (requires simulation)
-# The 'state' attribute might be a QuantumCircuit or a Statevector depending
-# on the execution path. Accessing statevector directly might fail if it's
-# just the circuit. The HHLResult object provides better ways.
-
-# print("Full state vector from HHL circuit:")
-# print(solution.state.get_statevector().data) # Might error if state is circuit
-
-# Calculate the probability of measuring the ancilla qubit in state |1>
-# This probability is related to the success of the eigenvalue inversion.
-# Accessing probabilities directly from the result object is safer.
-# prob_ancilla_1 = solution.state.probabilities_dict()['1'] # Might error
-# print(f"\nProbability of measuring ancilla in |1>: {prob_ancilla_1:.4f}")
-
-# The solution vector is proportional to the state in the |b> register
-# *when the ancilla qubit is measured as |1>*.
-# We need to normalize the relevant amplitudes.
-
-# Extract amplitudes where the ancilla (last qubit added by HHL) is 1
-# The HHLResult object simplifies accessing the solution.
 
 print(f"\nEuclidean norm of the solution vector ||x||: {solution.euclidean_norm:.4f}")
 
@@ -96,8 +86,6 @@ print(rescaled_hhl)
 hhl_circuit = solution.circuit
 print(f"\nTotal number of qubits in HHL circuit: {hhl_circuit.num_qubits}")
 print(f"Circuit depth: {hhl_circuit.depth()}")
-# print("\nQuantum Circuit for HHL:")
-# print(hhl_circuit.decompose(reps=3).draw(output='text', fold=-1)) # Decompose
 
 
 # --- Discussion on 1-bit QPE (Slide 3) ---
