@@ -1,113 +1,221 @@
-# Import necessary libraries from Qiskit
+"""
+HHL Algorithm Implementation
+
+This module demonstrates the Harrow-Hassidim-Lloyd (HHL) algorithm for solving
+linear systems of equations using quantum computing.
+
+The HHL algorithm solves Ax = b for x, where A is a matrix and b is a vector.
+It prepares a quantum state |x> proportional to the solution vector.
+
+References:
+    - Harrow, A. W., Hassidim, A., & Lloyd, S. (2009). Quantum algorithm for
+      linear systems of equations. Physical Review Letters, 103(15), 150502.
+    - Qiskit Algorithms: https://qiskit.org/ecosystem/algorithms/
+"""
+
+import logging
+from typing import Tuple, Optional
 import numpy as np
-from qiskit import QuantumCircuit, transpile
-# Note: BasicSimulator is deprecated, using primitives is recommended.
-# from qiskit.providers.basic_provider import BasicSimulator
-from qiskit.quantum_info import Statevector
-
-# --- Qiskit Primitives Import ---
-# Sampler is directly under qiskit.primitives in recent versions
-from qiskit.primitives import Sampler # Use Sampler primitive for execution
-
-# --- Qiskit Algorithms Import ---
-# HHL is now in the qiskit_algorithms package
-# Ensure you have installed it: pip install qiskit_algorithms
+from qiskit import QuantumCircuit
+from qiskit.primitives import Sampler
 from qiskit_algorithms.linear_solvers.hhl import HHL
 
-# --- 1. Define the Problem ---
-# We want to solve Ax = b for x.
-# Let's choose a simple 2x2 example:
-# A = [[1, -1/3], [-1/3, 1]]
-# b = [1, 0]
-# The exact classical solution is x = [1.125, 0.375]
-
-matrix = np.array([[1, -1/3], [-1/3, 1]])
-vector = np.array([1, 0])
-
-# --- 2. Instantiate the HHL Algorithm ---
-# Qiskit's HHL class encapsulates the steps shown in the slide:
-# - State preparation for 'vector' (b)
-# - Quantum Phase Estimation (QPE) for 'matrix' (A)
-# - Eigenvalue inversion using controlled rotation
-# - Uncomputation and measurement
-hhl_solver = HHL() # Uses standard multi-bit QPE by default
-
-# --- 3. Solve the System ---
-# The solve method constructs the circuit and runs it.
-# It requires the matrix, the vector, and a quantum instance or primitive.
-sampler = Sampler() # Use the Sampler primitive
-solution = hhl_solver.solve(matrix, vector, sampler)
-
-# --- 4. Analyze the Results ---
-# The HHL algorithm doesn't directly output the full solution vector x.
-# It prepares a quantum state |x> such that the amplitudes are proportional to x.
-# We can get the estimated solution vector from the circuit's output statevector
-# or by looking at the measurement probabilities (classical output).
-
-# Get the full solution vector (requires simulation)
-# The 'state' attribute might be a QuantumCircuit or a Statevector depending
-# on the execution path. Accessing statevector directly might fail if it's
-# just the circuit. The HHLResult object provides better ways.
-
-# print("Full state vector from HHL circuit:")
-# print(solution.state.get_statevector().data) # Might error if state is circuit
-
-# Calculate the probability of measuring the ancilla qubit in state |1>
-# This probability is related to the success of the eigenvalue inversion.
-# Accessing probabilities directly from the result object is safer.
-# prob_ancilla_1 = solution.state.probabilities_dict()['1'] # Might error
-# print(f"\nProbability of measuring ancilla in |1>: {prob_ancilla_1:.4f}")
-
-# The solution vector is proportional to the state in the |b> register
-# *when the ancilla qubit is measured as |1>*.
-# We need to normalize the relevant amplitudes.
-
-# Extract amplitudes where the ancilla (last qubit added by HHL) is 1
-# The HHLResult object simplifies accessing the solution.
-
-print(f"\nEuclidean norm of the solution vector ||x||: {solution.euclidean_norm:.4f}")
-
-# Get the classical solution vector (rescaled) from HHL result
-classical_solution = np.real(solution.solution) # Use solution.solution
-print("\nClassical solution vector from HHL (proportional to x):")
-print(classical_solution)
-
-# Compare with the expected solution (rescaled)
-exact_solution = np.array([1.125, 0.375])
-norm_exact = np.linalg.norm(exact_solution)
-rescaled_exact = exact_solution / norm_exact
-
-norm_hhl = np.linalg.norm(classical_solution)
-# Handle potential zero norm if HHL fails
-if norm_hhl > 1e-9:
-    rescaled_hhl = classical_solution / norm_hhl # Normalize the HHL output
-else:
-    rescaled_hhl = classical_solution # Avoid division by zero
-    print("\nWarning: HHL solution norm is close to zero.")
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
-print("\nExact solution (normalized):")
-print(rescaled_exact)
-print("\nHHL solution (normalized):")
-print(rescaled_hhl)
+class HHLProblem:
+    """
+    A class to represent and solve linear systems Ax = b using the HHL algorithm.
+    
+    Attributes:
+        matrix: The coefficient matrix A (must be Hermitian and positive definite).
+        vector: The right-hand side vector b.
+    """
+    
+    def __init__(self, matrix: np.ndarray, vector: np.ndarray) -> None:
+        """
+        Initialize the HHL problem with a matrix and vector.
+        
+        Args:
+            matrix: The coefficient matrix A. Must be Hermitian and positive definite.
+            vector: The right-hand side vector b.
+        
+        Raises:
+            ValueError: If the matrix is not Hermitian or positive definite,
+                       or if the vector dimensions don't match the matrix.
+        """
+        self._validate_matrix(matrix)
+        self._validate_vector(vector, matrix.shape[0])
+        self.matrix = matrix
+        self.vector = vector
+        logger.info(f"HHL problem initialized: {matrix.shape[0]}x{matrix.shape[0]} system")
+    
+    def _validate_matrix(self, matrix: np.ndarray) -> None:
+        """
+        Validate that the matrix is Hermitian and positive definite.
+        
+        Args:
+            matrix: The matrix to validate.
+        
+        Raises:
+            ValueError: If the matrix is not Hermitian or positive definite.
+        """
+        matrix = np.asarray(matrix, dtype=complex)
+        
+        # Check if matrix is square
+        if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+            raise ValueError("Matrix must be square")
+        
+        # Check if matrix is Hermitian
+        if not np.allclose(matrix, matrix.conj().T):
+            raise ValueError("Matrix must be Hermitian (A = A†)")
+        
+        # Check if matrix is positive definite
+        eigenvalues = np.linalg.eigvals(matrix)
+        if not np.all(np.real(eigenvalues) > 0):
+            raise ValueError("Matrix must be positive definite (all eigenvalues > 0)")
+        
+        logger.info(f"Matrix validated: eigenvalues = {np.real(eigenvalues)}")
+    
+    def _validate_vector(self, vector: np.ndarray, expected_size: int) -> None:
+        """
+        Validate that the vector has the correct dimensions.
+        
+        Args:
+            vector: The vector to validate.
+            expected_size: The expected size of the vector.
+        
+        Raises:
+            ValueError: If the vector dimensions don't match the matrix.
+        """
+        vector = np.asarray(vector, dtype=complex)
+        
+        if vector.ndim != 1 or vector.shape[0] != expected_size:
+            raise ValueError(
+                f"Vector size {vector.shape[0]} doesn't match matrix size {expected_size}"
+            )
+        
+        logger.info("Vector validated")
+    
+    def solve(
+        self,
+        sampler: Optional[Sampler] = None,
+        max_iterations: int = 100
+    ) -> Tuple[np.ndarray, float, int]:
+        """
+        Solve the linear system Ax = b using the HHL algorithm.
+        
+        Args:
+            sampler: Optional Sampler primitive for execution. If None, a new one is created.
+            max_iterations: Maximum number of iterations for the solver.
+        
+        Returns:
+            A tuple containing:
+                - classical_solution: The classical solution vector (normalized).
+                - euclidean_norm: The Euclidean norm of the solution.
+                - iterations: Number of iterations performed.
+        
+        Raises:
+            RuntimeError: If the HHL solver fails to converge.
+        """
+        if sampler is None:
+            sampler = Sampler()
+        
+        try:
+            logger.info("Starting HHL solver...")
+            hhl_solver = HHL(max_iterations=max_iterations)
+            solution = hhl_solver.solve(self.matrix, self.vector, sampler)
+            
+            # Get the classical solution vector
+            classical_solution = np.real(solution.solution)
+            euclidean_norm = solution.euclidean_norm
+            
+            logger.info(f"HHL solver completed: ||x|| = {euclidean_norm:.4f}")
+            return classical_solution, euclidean_norm, max_iterations
+            
+        except Exception as e:
+            logger.error(f"HHL solver failed: {e}")
+            raise RuntimeError(f"HHL solver failed: {e}")
+    
+    def get_exact_solution(self) -> np.ndarray:
+        """
+        Compute the exact classical solution using numpy.
+        
+        Returns:
+            The exact solution vector x = A^(-1)b.
+        """
+        return np.linalg.solve(self.matrix, self.vector)
 
-# --- 5. Show the Circuit (Optional) ---
-# You can also inspect the quantum circuit built by HHL
-hhl_circuit = solution.circuit
-print(f"\nTotal number of qubits in HHL circuit: {hhl_circuit.num_qubits}")
-print(f"Circuit depth: {hhl_circuit.depth()}")
-# print("\nQuantum Circuit for HHL:")
-# print(hhl_circuit.decompose(reps=3).draw(output='text', fold=-1)) # Decompose
+
+def main() -> None:
+    """
+    Main entry point for the HHL demonstration.
+    
+    Solves a 2x2 linear system Ax = b using the HHL algorithm and compares
+    the quantum solution with the exact classical solution.
+    """
+    # Define the problem: Ax = b
+    # A = [[1, -1/3], [-1/3, 1]]
+    # b = [1, 0]
+    # The exact classical solution is x = [1.125, 0.375]
+    
+    matrix = np.array([[1, -1/3], [-1/3, 1]], dtype=float)
+    vector = np.array([1, 0], dtype=float)
+    
+    try:
+        # Create and solve the HHL problem
+        hhl_problem = HHLProblem(matrix, vector)
+        
+        # Get the exact classical solution for comparison
+        exact_solution = hhl_problem.get_exact_solution()
+        logger.info(f"Exact solution: {exact_solution}")
+        
+        # Solve using HHL
+        hhl_solution, norm, iterations = hhl_problem.solve()
+        
+        # Normalize solutions for comparison
+        norm_exact = np.linalg.norm(exact_solution)
+        rescaled_exact = exact_solution / norm_exact
+        
+        if norm > 1e-9:
+            rescaled_hhl = hhl_solution / norm
+        else:
+            rescaled_hhl = hhl_solution
+            logger.warning("HHL solution norm is close to zero")
+        
+        # Display results
+        print(f"\nEuclidean norm of the solution vector ||x||: {norm:.4f}")
+        print(f"\nExact solution (normalized):")
+        print(rescaled_exact)
+        print("\nHHL solution (normalized):")
+        print(rescaled_hhl)
+        
+        # Calculate similarity
+        similarity = np.abs(np.dot(rescaled_exact, rescaled_hhl))
+        print(f"\nSimilarity (inner product): {similarity:.4f}")
+        
+        # Show circuit information
+        hhl_problem = HHLProblem(matrix, vector)
+        sampler = Sampler()
+        hhl_solver = HHL()
+        solution = hhl_solver.solve(matrix, vector, sampler)
+        hhl_circuit = solution.circuit
+        print(f"\nTotal number of qubits in HHL circuit: {hhl_circuit.num_qubits}")
+        print(f"Circuit depth: {hhl_circuit.depth()}")
+        
+    except ValueError as e:
+        logger.error(f"Invalid problem setup: {e}")
+        raise
+    except RuntimeError as e:
+        logger.error(f"HHL computation failed: {e}")
+        raise
 
 
-# --- Discussion on 1-bit QPE (Slide 3) ---
-# The code above uses standard QPE. 1-bit QPE (Iterative Phase Estimation - IPE)
-# reduces resources by using only one ancilla qubit for phase estimation,
-# measuring it, and feeding the result forward classically to refine the estimate
-# over multiple iterations.
-# While Qiskit Algorithms has tools for IPE (like qiskit_algorithms.IterativePhaseEstimation),
-# integrating it directly into the HHL algorithm structure requires manual
-# circuit construction and is significantly more complex than using the HHL class.
-# The benefit, as shown in slide 3, is a large reduction in circuit depth and
-# qubit count, crucial for near-term devices.
+if __name__ == "__main__":
+    main()
 
