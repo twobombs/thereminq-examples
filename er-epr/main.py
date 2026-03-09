@@ -33,7 +33,7 @@ for i in range(N_SIDE):
     right_q = i + N_SIDE
     
     sim.h(left_q)
-    sim.mcnot([left_q], right_q)
+    sim.mcx([left_q], right_q)
 
 # --- Helper: Time Evolution (Scrambling) ---
 # Evolve both Left and Right systems independently under H_Ising
@@ -52,15 +52,15 @@ def evolve_system(sim, time, j_c, h_c, n_side):
         for i in range(n_side - 1):
             # Exp(-i * J * dt * Z_i Z_{i+1})
             # Decomposed: CNOT -> RZ -> CNOT
-            sim.mcnot([i], i+1)
+            sim.mcx([i], i+1)
             sim.r(Pauli.PauliZ, 2 * j_c * dt, i+1)
-            sim.mcnot([i], i+1)
+            sim.mcx([i], i+1)
             
         # Apply Ising Interaction (ZZ) on Right Chain
         for i in range(n_side, 2 * n_side - 1):
-            sim.mcnot([i], i+1)
+            sim.mcx([i], i+1)
             sim.r(Pauli.PauliZ, 2 * j_c * dt, i+1)
-            sim.mcnot([i], i+1)
+            sim.mcx([i], i+1)
 
 # --- 3. Backward Time Evolution (-t) ---
 # We go "back in time" to insert the message earlier.
@@ -86,9 +86,9 @@ for i in range(N_SIDE):
     right_q = i + N_SIDE
     
     # Implement ZZ interaction between Left and Right
-    sim.mcnot([left_q], right_q)
+    sim.mcx([left_q], right_q)
     sim.r(Pauli.PauliZ, 2 * G_SHOCK, right_q) # Angle determines coupling strength
-    sim.mcnot([left_q], right_q)
+    sim.mcx([left_q], right_q)
 
 # --- 7. Final Evolution (Decoding) ---
 # In the ideal protocol, the Right side evolves further to decode.
@@ -105,7 +105,7 @@ target_qubit = Message_Qubit + N_SIDE
 # <Y> close to 1 (or -1 depending on sign conventions) means success.
 # <Y> close to 0 means the info remains scrambled/lost.
 
-expectation_y = sim.op_expectation(Pauli.PauliY, target_qubit)
+expectation_y = sim.pauli_expectation([target_qubit], [Pauli.PauliY])
 
 print("-" * 30)
 print(f"Teleportation Result (Expectation of Y on Right[{target_qubit}]):")
