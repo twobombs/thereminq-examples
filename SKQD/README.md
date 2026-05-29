@@ -42,3 +42,5 @@ With the initial seed subspace identified, the pipeline transitions to a classic
 - `multiprocessing` (Parallel worker processes)
 - `pyqrack` (High-performance GPU-accelerated quantum simulation)
 - `pyqrack_ising` (Optional native module for optimized Ising model Krylov evolution)
+
+<img width="1408" height="768" alt="5165" src="https://github.com/user-attachments/assets/e57ffa78-ed38-4d8c-a86a-afca6e2c43b4" />
