@@ -2,7 +2,7 @@ import os
 import gc
 import time
 import numpy as np
-from pyqrack import QrackSimulator
+import multiprocessing as mp
 
 # ==========================================
 # 1. TOPOLOGY DEFINITIONS
@@ -47,103 +47,118 @@ def get_topology():
     return patches, fence_edges, global_to_local
 
 # ==========================================
-# 2. MULTI-GPU DISTRIBUTED ENGINE
+# 2. ISOLATED GPU WORKER PROCESS
 # ==========================================
-class GPUPoolAllocator:
-    def __init__(self, available_device_ids, memory_limit_mb=8176, bytes_per_amplitude=8):
-        self.device_ids = available_device_ids
-        self.memory_limit_mb = memory_limit_mb
-        self.bytes_per_amp = bytes_per_amplitude
-        self.device_usage_mb = {dev: 0.0 for dev in self.device_ids}
+def isolated_patch_worker(device_id, patch_params, patch_idx, intra_edges, fence_qubits_to_measure):
+    """
+    Runs in a completely separate OS process. 
+    Imports PyQrack ONLY AFTER setting the environment variable to avoid static caching.
+    Receives exactly 18 parameters specific to its patch.
+    """
+    os.environ["QRACK_DEFAULT_DEVICE"] = str(device_id)
+    
+    from pyqrack import QrackSimulator
+    import numpy as np
+    
+    sim = QrackSimulator(qubitCount=9)
+    
+    # 1. Apply Ansatz
+    param_idx = 0
+    for q in range(9):
+        sim.rx(patch_params[param_idx], q)
+        sim.ry(patch_params[param_idx + 1], q)
+        param_idx += 2
         
-    def _get_sv_size_mb(self, num_qubits):
-        return (2**num_qubits * self.bytes_per_amp) / (1024 * 1024)
+    for q1, q2 in intra_edges:
+        sim.cx(q1, q2)
+        
+    # 2. Evaluate Intra-Patch Energy
+    intra_energy = 0.0
+    for q1, q2 in intra_edges:
+        for basis in ['X', 'Y']:
+            s_clone = QrackSimulator(cloneSid=sim.sid)
+            if basis == 'X':
+                s_clone.h(q1); s_clone.h(q2)
+            else:
+                s_clone.rz(-np.pi/2, q1); s_clone.rz(-np.pi/2, q2)
+                s_clone.h(q1); s_clone.h(q2)
+                
+            s_clone.cx(q1, q2)
+            p_odd = s_clone.prob(q2)
+            intra_energy += (1.0 - p_odd) - p_odd
+            del s_clone
 
-    def allocate(self, num_qubits):
-        req_mb = self._get_sv_size_mb(num_qubits)
-        for dev_id in self.device_ids:
-            if self.device_usage_mb[dev_id] + req_mb <= self.memory_limit_mb:
-                self.device_usage_mb[dev_id] += req_mb
-                return dev_id
-        raise MemoryError("GPU memory limit exceeded.")
+    # 3. Evaluate Marginal Boundary Expectations for the Fence
+    boundary_expectations = {}
+    for q in fence_qubits_to_measure:
+        boundary_expectations[q] = {}
+        for basis in ['X', 'Y']:
+            s_clone = QrackSimulator(cloneSid=sim.sid)
+            if basis == 'X': 
+                s_clone.h(q)
+            else: 
+                s_clone.rz(-np.pi/2, q)
+                s_clone.h(q)
+                
+            p_odd = s_clone.prob(q)
+            boundary_expectations[q][basis] = (1.0 - p_odd) - p_odd
+            del s_clone
+            
+    del sim
+    
+    return patch_idx, intra_energy, boundary_expectations
 
+# ==========================================
+# 3. DISTRIBUTED ORCHESTRATOR
+# ==========================================
 class DistributedVQEEngine:
     def __init__(self, device_ids):
-        precision = int(os.environ.get("QRACK_FPPOW", 5))
-        bytes_per_amp = 8 if precision == 5 else 16 
-        self.allocator = GPUPoolAllocator(device_ids, bytes_per_amplitude=bytes_per_amp)
+        self.device_ids = device_ids
         self.patches, self.fence_edges, self.mapping = get_topology()
         self.intra_patch_edges = get_3x3_edges()
         
-    def run(self, params):
-        self.allocator.device_usage_mb = {dev: 0.0 for dev in self.allocator.device_ids}
-        
-        # Provision
-        sims = []
-        original_dev = os.environ.get("QRACK_DEFAULT_DEVICE", "0")
-        for i in range(4):
-            dev_id = self.allocator.allocate(9)
-            os.environ["QRACK_DEFAULT_DEVICE"] = str(dev_id)
-            sims.append(QrackSimulator(qubitCount=9))
-        os.environ["QRACK_DEFAULT_DEVICE"] = original_dev
-
-        # Apply Ansatz
-        param_idx = 0
-        for sim in sims:
-            for q in range(9):
-                sim.rx(params[param_idx], q)
-                sim.ry(params[param_idx + 1], q)
-                param_idx += 2
-            for q1, q2 in self.intra_patch_edges:
-                sim.cx(q1, q2)
-
-        # Evaluate
-        energy = 0.0
-        
-        # Intra-patch
-        for p_idx in range(4):
-            sim = sims[p_idx]
-            for q1, q2 in self.intra_patch_edges:
-                for basis in ['X', 'Y']:
-                    s_clone = QrackSimulator(cloneSid=sim.sid)
-                    if basis == 'X':
-                        s_clone.h(q1); s_clone.h(q2)
-                    else:
-                        s_clone.rz(-np.pi/2, q1); s_clone.rz(-np.pi/2, q2)
-                        s_clone.h(q1); s_clone.h(q2)
-                    s_clone.cx(q1, q2)
-                    p_odd = s_clone.prob(q2)
-                    energy += (1.0 - p_odd) - p_odd
-                    del s_clone
-
-        # Inter-patch (Fence)
+        self.patch_fence_reqs = {i: set() for i in range(4)}
         for (pA, qA), (pB, qB) in self.fence_edges:
-            for basis in ['X', 'Y']:
-                expectations = []
-                for s, q in [(sims[pA], qA), (sims[pB], qB)]:
-                    s_clone = QrackSimulator(cloneSid=s.sid)
-                    if basis == 'X': s_clone.h(q)
-                    else: s_clone.rz(-np.pi/2, q); s_clone.h(q)
-                    p_odd = s_clone.prob(q)
-                    expectations.append((1.0 - p_odd) - p_odd)
-                    del s_clone
-                energy += expectations[0] * expectations[1]
-                
-        for sim in sims: del sim
-        gc.collect()
+            self.patch_fence_reqs[pA].add(qA)
+            self.patch_fence_reqs[pB].add(qB)
+            
+    def run(self, params):
+        worker_args = []
+        for p_idx in range(4):
+            dev_id = self.device_ids[p_idx % len(self.device_ids)]
+            reqs = list(self.patch_fence_reqs[p_idx])
+            
+            patch_params = params[p_idx * 18 : (p_idx + 1) * 18]
+            worker_args.append((dev_id, patch_params, p_idx, self.intra_patch_edges, reqs))
+            
+        ctx = mp.get_context('spawn')
+        with ctx.Pool(processes=4) as pool:
+            results = pool.starmap(isolated_patch_worker, worker_args)
+            
+        total_energy = 0.0
+        patch_marginals = {}
         
-        return energy
+        for p_idx, intra_energy, boundaries in results:
+            total_energy += intra_energy
+            patch_marginals[p_idx] = boundaries
+            
+        for (pA, qA), (pB, qB) in self.fence_edges:
+            x_term = patch_marginals[pA][qA]['X'] * patch_marginals[pB][qB]['X']
+            y_term = patch_marginals[pA][qA]['Y'] * patch_marginals[pB][qB]['Y']
+            total_energy += (x_term + y_term)
+            
+        return total_energy
 
 # ==========================================
-# 3. MONOLITHIC CPU VERIFICATION ENGINE
+# 4. MONOLITHIC CPU VERIFICATION ENGINE
 # ==========================================
 class MonolithicCPUEngine:
-    def __init__(self):
+    def __init__(self, use_qbdd=True):
         self.num_qubits = 36
+        self.use_qbdd = use_qbdd
         self.patches, _, _ = get_topology()
         self.intra_patch_edges = get_3x3_edges()
         
-        # Build global 6x6 lattice edges for Hamiltonian evaluation
         self.global_edges = []
         for r in range(6):
             for c in range(6):
@@ -152,27 +167,29 @@ class MonolithicCPUEngine:
                 if r < 5: self.global_edges.append((idx, idx + 6))
 
     def run(self, params):
-        # Force CPU execution and enable OS paging to handle the ~550GB allocation
-        sim = QrackSimulator(qubitCount=self.num_qubits, isOpenCL=False, isPaged=True)
+        from pyqrack import QrackSimulator
         
-        # Apply Ansatz globally but strictly localized to patch logic
+        # Initialize with QBDD flag if requested to prevent massive RAM/swap allocation
+        sim = QrackSimulator(
+            qubitCount=self.num_qubits, 
+            isOpenCL=False, 
+            isPaged=(not self.use_qbdd),
+            isBinaryDecisionTree=self.use_qbdd
+        )
+        
         param_idx = 0
         for patch in self.patches:
             local_to_global = {l: g for g, l in patch}
-            
-            # Rotations
             for g, l in patch:
                 sim.rx(params[param_idx], g)
                 sim.ry(params[param_idx + 1], g)
                 param_idx += 2
                 
-            # Entanglement strictly on 3x3 sub-grids
             for q1_local, q2_local in self.intra_patch_edges:
                 q1_global = local_to_global[q1_local]
                 q2_global = local_to_global[q2_local]
                 sim.cx(q1_global, q2_global)
 
-        # Evaluate complete 6x6 XY Hamiltonian
         energy = 0.0
         for q1, q2 in self.global_edges:
             for basis in ['X', 'Y']:
@@ -194,23 +211,25 @@ class MonolithicCPUEngine:
         return energy
 
 # ==========================================
-# 4. EXECUTION & VERIFICATION N-TIMES
+# 5. EXECUTION & VERIFICATION N-TIMES
 # ==========================================
 if __name__ == "__main__":
+    mp.set_start_method('spawn', force=True)
+    
     N_RUNS = 5
     AVAILABLE_GPUS = [0, 1, 2, 3] 
     
-    # 72 parameters for 4 patches
     np.random.seed(42)
     test_params = np.random.uniform(-np.pi, np.pi, 72)
     
     gpu_engine = DistributedVQEEngine(device_ids=AVAILABLE_GPUS)
-    cpu_engine = MonolithicCPUEngine()
+    
+    # Toggle use_qbdd here to use Quantum Binary Decision Diagrams
+    cpu_engine = MonolithicCPUEngine(use_qbdd=True)
     
     print(f"Starting Verification: {N_RUNS} runs...")
     print("-" * 50)
     
-    # Evaluate Multi-GPU
     start_time = time.time()
     gpu_results = []
     for i in range(N_RUNS):
@@ -218,11 +237,10 @@ if __name__ == "__main__":
         gpu_results.append(res)
     gpu_time = time.time() - start_time
     
-    print(f"Distributed GPU Executions complete in {gpu_time:.2f}s")
+    print(f"Distributed Multi-Die Executions complete in {gpu_time:.2f}s")
     print(f"Average Energy: {np.mean(gpu_results):.8f}\n")
     
-    # Evaluate Monolithic CPU
-    print("Allocating monolithic 36-qubit statevectors (Watch RAM usage)...")
+    print("Allocating monolithic 36-qubit states to CPU (QBDD mode active)...")
     start_time = time.time()
     cpu_results = []
     for i in range(N_RUNS):
@@ -233,15 +251,12 @@ if __name__ == "__main__":
     print(f"Monolithic CPU Executions complete in {cpu_time:.2f}s")
     print(f"Average Energy: {np.mean(cpu_results):.8f}\n")
     
-    # Assert equivalence
     print("-" * 50)
     print("VERIFICATION RESULTS:")
     
-    # Statevector exact probability should guarantee deterministic float equivalence 
-    # to roughly 1e-7 due to slight non-associativity in fp-math across backends.
     diff = abs(np.mean(gpu_results) - np.mean(cpu_results))
     print(f"Absolute Energy Difference: {diff:.8e}")
     if diff < 1e-6:
-        print("✅ SUCCESS: Distributed Marginal Evaluation perfectly matches Monolithic Global Evaluation.")
+        print("[SUCCESS] Distributed Marginal Evaluation perfectly matches Monolithic Global Evaluation.")
     else:
-        print("❌ FAILED: State evaluation diverged.")
+        print("[FAILED] State evaluation diverged.")
