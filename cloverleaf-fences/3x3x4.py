@@ -8,7 +8,6 @@ import multiprocessing as mp
 # 1. TOPOLOGY DEFINITIONS
 # ==========================================
 def get_3x3_edges():
-    """Returns nearest-neighbor edges for a local 3x3 grid."""
     edges = []
     for r in range(3):
         for c in range(3):
@@ -18,7 +17,6 @@ def get_3x3_edges():
     return edges
 
 def get_topology():
-    """Returns intra-patch mappings and inter-patch fence edges for 6x6."""
     patches = [[] for _ in range(4)]
     fence_edges = []
     
@@ -47,22 +45,36 @@ def get_topology():
     return patches, fence_edges, global_to_local
 
 # ==========================================
-# 2. ISOLATED GPU WORKER PROCESS
+# 2. ISOLATED GPU WORKER (WITH ANCILLA BATH)
 # ==========================================
-def isolated_patch_worker(device_id, patch_params, patch_idx, intra_edges, fence_qubits_to_measure):
-    """
-    Runs in a completely separate OS process. 
-    Imports PyQrack ONLY AFTER setting the environment variable to avoid static caching.
-    Receives exactly 18 parameters specific to its patch.
-    """
-    os.environ["QRACK_DEFAULT_DEVICE"] = str(device_id)
+def isolated_holographic_worker(device_id, patch_params, boundary_params, patch_idx, intra_edges, fence_qubits, num_ancillas):
+    # CORRECTED: Utilizing the proper PyQrack OpenCL device variable
+    os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(device_id)
     
     from pyqrack import QrackSimulator
     import numpy as np
     
-    sim = QrackSimulator(qubitCount=9)
+    total_qubits = 9 + num_ancillas
+    sim = QrackSimulator(qubitCount=total_qubits)
     
-    # 1. Apply Ansatz
+    # 1. Apply Holographic Bath Layer
+    b_idx = 0
+    for q in fence_qubits:
+        sim.ry(boundary_params[b_idx], q)
+        sim.rz(boundary_params[b_idx + 1], q)
+        b_idx += 2
+        
+    ancilla_indices = list(range(9, total_qubits))
+    for q in ancilla_indices:
+        sim.ry(boundary_params[b_idx], q)
+        sim.rz(boundary_params[b_idx + 1], q)
+        b_idx += 2
+        
+    for i, f_q in enumerate(fence_qubits):
+        ancilla_q = ancilla_indices[i % num_ancillas]
+        sim.cx(ancilla_q, f_q)
+        
+    # 2. Apply Main Physical Ansatz (Qubits 0-8)
     param_idx = 0
     for q in range(9):
         sim.rx(patch_params[param_idx], q)
@@ -72,7 +84,7 @@ def isolated_patch_worker(device_id, patch_params, patch_idx, intra_edges, fence
     for q1, q2 in intra_edges:
         sim.cx(q1, q2)
         
-    # 2. Evaluate Intra-Patch Energy
+    # 3. Evaluate Intra-Patch Energy
     intra_energy = 0.0
     for q1, q2 in intra_edges:
         for basis in ['X', 'Y']:
@@ -88,9 +100,9 @@ def isolated_patch_worker(device_id, patch_params, patch_idx, intra_edges, fence
             intra_energy += (1.0 - p_odd) - p_odd
             del s_clone
 
-    # 3. Evaluate Marginal Boundary Expectations for the Fence
+    # 4. Evaluate Boundary Marginals
     boundary_expectations = {}
-    for q in fence_qubits_to_measure:
+    for q in fence_qubits:
         boundary_expectations[q] = {}
         for basis in ['X', 'Y']:
             s_clone = QrackSimulator(cloneSid=sim.sid)
@@ -105,15 +117,15 @@ def isolated_patch_worker(device_id, patch_params, patch_idx, intra_edges, fence
             del s_clone
             
     del sim
-    
     return patch_idx, intra_energy, boundary_expectations
 
 # ==========================================
-# 3. DISTRIBUTED ORCHESTRATOR
+# 3. HOLOGRAPHIC ORCHESTRATOR
 # ==========================================
-class DistributedVQEEngine:
-    def __init__(self, device_ids):
+class HolographicDistributedEngine:
+    def __init__(self, device_ids, num_ancillas=3):
         self.device_ids = device_ids
+        self.num_ancillas = num_ancillas
         self.patches, self.fence_edges, self.mapping = get_topology()
         self.intra_patch_edges = get_3x3_edges()
         
@@ -122,18 +134,30 @@ class DistributedVQEEngine:
             self.patch_fence_reqs[pA].add(qA)
             self.patch_fence_reqs[pB].add(qB)
             
-    def run(self, params):
+        self.total_b_params = 0
+        for p_idx in range(4):
+            reqs = len(self.patch_fence_reqs[p_idx])
+            self.total_b_params += (reqs + self.num_ancillas) * 2
+            
+    def run(self, params, boundary_params):
         worker_args = []
+        b_offset = 0
+        
         for p_idx in range(4):
             dev_id = self.device_ids[p_idx % len(self.device_ids)]
             reqs = list(self.patch_fence_reqs[p_idx])
             
-            patch_params = params[p_idx * 18 : (p_idx + 1) * 18]
-            worker_args.append((dev_id, patch_params, p_idx, self.intra_patch_edges, reqs))
+            p_params = params[p_idx * 18 : (p_idx + 1) * 18]
+            
+            b_size = (len(reqs) + self.num_ancillas) * 2
+            b_params = boundary_params[b_offset : b_offset + b_size]
+            b_offset += b_size
+            
+            worker_args.append((dev_id, p_params, b_params, p_idx, self.intra_patch_edges, reqs, self.num_ancillas))
             
         ctx = mp.get_context('spawn')
         with ctx.Pool(processes=4) as pool:
-            results = pool.starmap(isolated_patch_worker, worker_args)
+            results = pool.starmap(isolated_holographic_worker, worker_args)
             
         total_energy = 0.0
         patch_marginals = {}
@@ -150,13 +174,13 @@ class DistributedVQEEngine:
         return total_energy
 
 # ==========================================
-# 4. MONOLITHIC CPU VERIFICATION ENGINE
+# 4. MONOLITHIC CPU ORACLE (GROUND TRUTH)
 # ==========================================
 class MonolithicCPUEngine:
     def __init__(self, use_qbdd=True):
         self.num_qubits = 36
         self.use_qbdd = use_qbdd
-        self.patches, _, _ = get_topology()
+        self.patches, self.fence_edges, self.mapping = get_topology()
         self.intra_patch_edges = get_3x3_edges()
         
         self.global_edges = []
@@ -169,7 +193,6 @@ class MonolithicCPUEngine:
     def run(self, params):
         from pyqrack import QrackSimulator
         
-        # Initialize with QBDD flag if requested to prevent massive RAM/swap allocation
         sim = QrackSimulator(
             qubitCount=self.num_qubits, 
             isOpenCL=False, 
@@ -177,6 +200,7 @@ class MonolithicCPUEngine:
             isBinaryDecisionTree=self.use_qbdd
         )
         
+        # 1. Apply Local Patch Parameters & Intra-Patch Entanglement
         param_idx = 0
         for patch in self.patches:
             local_to_global = {l: g for g, l in patch}
@@ -189,7 +213,15 @@ class MonolithicCPUEngine:
                 q1_global = local_to_global[q1_local]
                 q2_global = local_to_global[q2_local]
                 sim.cx(q1_global, q2_global)
+                
+        # 2. Apply Cross-Border Entanglement (The True Fences)
+        for (pA, qA), (pB, qB) in self.fence_edges:
+            # Map patch indices back to global 36-qubit indices
+            global_A = [g for g, l in self.patches[pA] if l == qA][0]
+            global_B = [g for g, l in self.patches[pB] if l == qB][0]
+            sim.cx(global_A, global_B)
 
+        # 3. Evaluate Global Energy
         energy = 0.0
         for q1, q2 in self.global_edges:
             for basis in ['X', 'Y']:
@@ -207,56 +239,41 @@ class MonolithicCPUEngine:
 
         del sim
         gc.collect()
-        
         return energy
 
 # ==========================================
-# 5. EXECUTION & VERIFICATION N-TIMES
+# 5. EXECUTION & TRAINING TARGET
 # ==========================================
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
     
-    N_RUNS = 5
     AVAILABLE_GPUS = [0, 1, 2, 3] 
+    NUM_ANCILLAS = 3
     
     np.random.seed(42)
     test_params = np.random.uniform(-np.pi, np.pi, 72)
     
-    gpu_engine = DistributedVQEEngine(device_ids=AVAILABLE_GPUS)
+    # Initialize Engines
+    holographic_engine = HolographicDistributedEngine(device_ids=AVAILABLE_GPUS, num_ancillas=NUM_ANCILLAS)
+    cpu_oracle = MonolithicCPUEngine(use_qbdd=True)
     
-    # Toggle use_qbdd here to use Quantum Binary Decision Diagrams
-    cpu_engine = MonolithicCPUEngine(use_qbdd=True)
+    test_boundary_params = np.random.uniform(-np.pi, np.pi, holographic_engine.total_b_params) 
     
-    print(f"Starting Verification: {N_RUNS} runs...")
-    print("-" * 50)
-    
+    print("STEP 1: Calculating Ground Truth (Monolithic 36-qubit QBDD)...")
     start_time = time.time()
-    gpu_results = []
-    for i in range(N_RUNS):
-        res = gpu_engine.run(test_params)
-        gpu_results.append(res)
-    gpu_time = time.time() - start_time
+    exact_energy = cpu_oracle.run(test_params)
+    print(f"Oracle Execution complete in {time.time() - start_time:.2f}s")
+    print(f"Target Global Energy: {exact_energy:.8f}\n")
     
-    print(f"Distributed Multi-Die Executions complete in {gpu_time:.2f}s")
-    print(f"Average Energy: {np.mean(gpu_results):.8f}\n")
-    
-    print("Allocating monolithic 36-qubit states to CPU (QBDD mode active)...")
+    print("STEP 2: Calculating Holographic Approximation (Distributed Multi-GPU)...")
     start_time = time.time()
-    cpu_results = []
-    for i in range(N_RUNS):
-        res = cpu_engine.run(test_params)
-        cpu_results.append(res)
-    cpu_time = time.time() - start_time
-    
-    print(f"Monolithic CPU Executions complete in {cpu_time:.2f}s")
-    print(f"Average Energy: {np.mean(cpu_results):.8f}\n")
+    approx_energy = holographic_engine.run(test_params, test_boundary_params)
+    print(f"Distributed Execution complete in {time.time() - start_time:.2f}s")
+    print(f"Holographic Embedded Energy: {approx_energy:.8f}\n")
     
     print("-" * 50)
-    print("VERIFICATION RESULTS:")
-    
-    diff = abs(np.mean(gpu_results) - np.mean(cpu_results))
-    print(f"Absolute Energy Difference: {diff:.8e}")
-    if diff < 1e-6:
-        print("[SUCCESS] Distributed Marginal Evaluation perfectly matches Monolithic Global Evaluation.")
-    else:
-        print("[FAILED] State evaluation diverged.")
+    print("TRAINING LOSS:")
+    loss = abs(exact_energy - approx_energy)
+    print(f"Current Error (Loss): {loss:.8f}")
+    print("\nTo train this model, your classical optimizer must iteratively update")
+    print("'test_boundary_params' to drive this Loss to 0.")
