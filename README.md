@@ -17,6 +17,10 @@ This repository is a collection of experimental configurations and development e
 
 This directory contains a Python script (`gemini-query.py`) for interacting with the Gemini API. This script is designed to be used within the `thereminq-tensor` containers.
 
+### `cloverleaf-fences`
+
+This directory contains distributed quantum simulation experiments, including `4x4x6.py` for holographic embedding of a 96-qubit system across six GPUs, and `import-clifford_vqe_entangled-mesa.py` which is a multi-GPU Clifford VQE implementation.
+
 ### `findafactor`
 
 This directory contains a shell script for running a factorization benchmark.
