@@ -25,7 +25,6 @@ def get_topology():
     patches = [[] for _ in range(6)]
     fence_edges = []
     
-    # Map global coordinates to patches
     for r in range(8):
         for c in range(12):
             idx = r * 12 + c
@@ -40,15 +39,12 @@ def get_topology():
         for global_idx, local_idx in patch:
             global_to_local[global_idx] = (p_idx, local_idx)
 
-    # Define true fences (boundaries between patches)
     for r in range(8):
         for c in range(12):
             global_1 = r * 12 + c
-            # Right vertical boundaries
             if c % 4 == 3 and c < 11:
                 global_2 = r * 12 + (c + 1)
                 fence_edges.append((global_to_local[global_1], global_to_local[global_2]))
-            # Bottom horizontal boundaries
             if r % 4 == 3 and r < 7:
                 global_2 = (r + 1) * 12 + c
                 fence_edges.append((global_to_local[global_1], global_to_local[global_2]))
@@ -56,20 +52,34 @@ def get_topology():
     return patches, fence_edges, global_to_local
 
 # ==========================================
-# 2. ISOLATED GPU WORKER (MAXIMIZED LEAVES)
+# 2. PERSISTENT WORKER INITIALIZATION
 # ==========================================
-def isolated_holographic_worker(device_id, patch_params, boundary_params, patch_idx, intra_edges, fence_qubits):
+def init_worker(device_queue):
+    """
+    Initializes OpenCL variables exactly once per spawned worker process, 
+    guaranteeing strict isolation and avoiding context setup overhead per call.
+    """
+    device_id = device_queue.get()
     os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(device_id)
-    from pyqrack import QrackSimulator
-    import numpy as np
+    os.environ["QRACK_QPAGER_DEVICES"] = str(device_id)
+    os.environ["QRACK_QUNITMULTI_DEVICES"] = str(device_id)
     
-    # 1-to-1 Ancilla mapping: 16 physical + 1 ancilla per boundary requirement.
-    # Middle patches will hit exactly 28 qubits (16 + 12).
+    # Pre-load PyQrack to lock the OpenCL context to this specific GPU
+    import pyqrack 
+
+# ==========================================
+# 3. ISOLATED GPU WORKER TASK
+# ==========================================
+def isolated_holographic_worker(patch_params, boundary_params, patch_idx, intra_edges, fence_qubits):
+    from pyqrack import QrackSimulator
+    
+    # Due to set deduplication of corner boundary qubits, middle patches 
+    # require 10 unique boundary qubits (16 + 10 = 26 qubits).
     num_ancillas = len(fence_qubits)
     total_qubits = 16 + num_ancillas
     
     if total_qubits > 28:
-        print(f"WARNING [GPU {device_id}]: Allocating {total_qubits} qubits risks an Out-Of-Memory error.")
+        print(f"WARNING [Patch {patch_idx}]: Allocating {total_qubits} qubits risks an Out-Of-Memory error.")
 
     sim = QrackSimulator(qubitCount=total_qubits)
     
@@ -136,7 +146,7 @@ def isolated_holographic_worker(device_id, patch_params, boundary_params, patch_
     return patch_idx, intra_energy, boundary_expectations
 
 # ==========================================
-# 3. HOLOGRAPHIC ORCHESTRATOR
+# 4. HOLOGRAPHIC ORCHESTRATOR (PERSISTENT)
 # ==========================================
 class HolographicDistributedEngine:
     def __init__(self, device_ids):
@@ -152,29 +162,35 @@ class HolographicDistributedEngine:
         self.total_b_params = 0
         for p_idx in range(6):
             reqs = len(self.patch_fence_reqs[p_idx])
-            # 2 params (ry, rz) for the physical fence qubit + 2 params for its 1-to-1 ancilla
             self.total_b_params += (reqs * 4) 
+            
+        # Initialize persistent pool for VQE optimization
+        self.ctx = mp.get_context('spawn')
+        self.device_queue = self.ctx.Queue()
+        for d in self.device_ids:
+            self.device_queue.put(d)
+            
+        self.pool = self.ctx.Pool(
+            processes=len(self.device_ids), 
+            initializer=init_worker, 
+            initargs=(self.device_queue,)
+        )
             
     def run(self, params, boundary_params):
         worker_args = []
         b_offset = 0
         
         for p_idx in range(6):
-            dev_id = self.device_ids[p_idx % len(self.device_ids)]
             reqs = list(self.patch_fence_reqs[p_idx])
-            
-            # 16 qubits * 2 params (rx, ry) = 32
             p_params = params[p_idx * 32 : (p_idx + 1) * 32]
             
             b_size = len(reqs) * 4
             b_params = boundary_params[b_offset : b_offset + b_size]
             b_offset += b_size
             
-            worker_args.append((dev_id, p_params, b_params, p_idx, self.intra_patch_edges, reqs))
+            worker_args.append((p_params, b_params, p_idx, self.intra_patch_edges, reqs))
             
-        ctx = mp.get_context('spawn')
-        with ctx.Pool(processes=6) as pool:
-            results = pool.starmap(isolated_holographic_worker, worker_args)
+        results = self.pool.starmap(isolated_holographic_worker, worker_args)
             
         total_energy = 0.0
         patch_marginals = {}
@@ -189,9 +205,13 @@ class HolographicDistributedEngine:
             total_energy += (x_term + y_term)
             
         return total_energy
+        
+    def shutdown(self):
+        self.pool.close()
+        self.pool.join()
 
 # ==========================================
-# 4. MONOLITHIC CPU ORACLE (QBDD GROUND TRUTH)
+# 5. MONOLITHIC CPU ORACLE (QBDD GROUND TRUTH)
 # ==========================================
 class MonolithicCPUEngine:
     def __init__(self):
@@ -209,7 +229,6 @@ class MonolithicCPUEngine:
     def run(self, params):
         from pyqrack import QrackSimulator
         
-        # isBinaryDecisionTree=True activates QBDD compression
         sim = QrackSimulator(
             qubitCount=self.num_qubits, 
             isOpenCL=False, 
@@ -258,27 +277,21 @@ class MonolithicCPUEngine:
         return energy
 
 # ==========================================
-# 5. EXECUTION & TRAINING TARGET
+# 6. EXECUTION & TRAINING TARGET
 # ==========================================
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
     
-    # 6 distinct GPUs
     AVAILABLE_GPUS = [0, 1, 2, 3, 4, 5] 
-    
     np.random.seed(42)
-    # 6 patches * 16 qubits * 2 params = 192 total physical parameters
     test_params = np.random.uniform(-np.pi, np.pi, 192)
     
-    # Initialize Engines
     holographic_engine = HolographicDistributedEngine(device_ids=AVAILABLE_GPUS)
     cpu_oracle = MonolithicCPUEngine()
     
     test_boundary_params = np.random.uniform(-np.pi, np.pi, holographic_engine.total_b_params) 
     
     print("STEP 1: Calculating Ground Truth (Monolithic 96-qubit QBDD)...")
-    print("Note: Depending on the entanglement entropy generated by the random parameters,")
-    print("the QBDD memory footprint may still expand significantly.")
     start_time = time.time()
     exact_energy = cpu_oracle.run(test_params)
     print(f"Oracle Execution complete in {time.time() - start_time:.2f}s")
@@ -286,6 +299,7 @@ if __name__ == "__main__":
     
     print("STEP 2: Calculating Holographic Approximation (Distributed 6-GPU)...")
     start_time = time.time()
+    # Now optimized for VQE: we can call this repeatedly without respawning context!
     approx_energy = holographic_engine.run(test_params, test_boundary_params)
     print(f"Distributed Execution complete in {time.time() - start_time:.2f}s")
     print(f"Holographic Embedded Energy: {approx_energy:.8f}\n")
@@ -294,5 +308,7 @@ if __name__ == "__main__":
     print("TRAINING LOSS:")
     loss = abs(exact_energy - approx_energy)
     print(f"Current Error (Loss): {loss:.8f}")
-    print("\nTo train this model, your classical optimizer must iteratively update")
-    print("'test_boundary_params' to drive this Loss to 0.")
+    
+    # Graceful exit
+    holographic_engine.shutdown()
+
