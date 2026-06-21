@@ -59,7 +59,10 @@ def get_topology():
 # 2. PERSISTENT WORKER INITIALIZATION
 # ==========================================
 def init_worker(device_queue):
+    # Pull an ID, then cycle it back for any future respawns (Fixes Deadlock)
     device_id = device_queue.get()
+    device_queue.put(device_id)
+    
     os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(device_id)
     os.environ["QRACK_QPAGER_DEVICES"] = str(device_id)
     os.environ["QRACK_QUNITMULTI_DEVICES"] = str(device_id)
@@ -71,7 +74,6 @@ def init_worker(device_queue):
 def isolated_holographic_worker(patch_params, boundary_params, patch_idx, intra_edges, fence_qubits):
     from pyqrack import QrackSimulator
     
-    # Middle patches will hit exactly 28 qubits (18 physical + 10 unique boundaries)
     num_ancillas = len(fence_qubits)
     total_qubits = 18 + num_ancillas
     
@@ -123,21 +125,40 @@ def isolated_holographic_worker(patch_params, boundary_params, patch_idx, intra_
             intra_energy += (1.0 - p_odd) - p_odd
             del s_clone
 
-    # 4. Evaluate Boundary Marginals
+    # 4. Evaluate Boundary Marginals (Tensor Network Virtual Bond basis)
     boundary_expectations = {}
-    for q in fence_qubits:
+    for i, q in enumerate(fence_qubits):
+        a_q = ancilla_indices[i]
         boundary_expectations[q] = {}
-        for basis in ['X', 'Y']:
-            s_clone = QrackSimulator(cloneSid=sim.sid)
-            if basis == 'X': 
-                s_clone.h(q)
-            else: 
-                s_clone.rz(-np.pi/2, q)
-                s_clone.h(q)
+        
+        for b_phys in ['X', 'Y']:
+            boundary_expectations[q][b_phys] = {}
+            for b_anc in ['I', 'X', 'Y', 'Z']:
+                s_clone = QrackSimulator(cloneSid=sim.sid)
                 
-            p_odd = s_clone.prob(q)
-            boundary_expectations[q][basis] = (1.0 - p_odd) - p_odd
-            del s_clone
+                # Rotate Physical Qubit
+                if b_phys == 'X':
+                    s_clone.h(q)
+                elif b_phys == 'Y':
+                    s_clone.rz(-np.pi/2, q)
+                    s_clone.h(q)
+                    
+                # Rotate Ancilla (Virtual Bond Index)
+                if b_anc == 'X':
+                    s_clone.h(a_q)
+                elif b_anc == 'Y':
+                    s_clone.rz(-np.pi/2, a_q)
+                    s_clone.h(a_q)
+                    
+                # Compute Parity
+                if b_anc == 'I':
+                    p_odd = s_clone.prob(q)
+                else:
+                    s_clone.cx(q, a_q)
+                    p_odd = s_clone.prob(a_q)
+                    
+                boundary_expectations[q][b_phys][b_anc] = (1.0 - p_odd) - p_odd
+                del s_clone
             
     del sim
     return patch_idx, intra_energy, boundary_expectations
@@ -179,9 +200,7 @@ class HolographicDistributedEngine:
         for p_idx in range(6):
             reqs = list(self.patch_fence_reqs[p_idx])
             
-            # 18 qubits * 2 params (rx, ry) = 36
             p_params = params[p_idx * 36 : (p_idx + 1) * 36]
-            
             b_size = len(reqs) * 4
             b_params = boundary_params[b_offset : b_offset + b_size]
             b_offset += b_size
@@ -197,9 +216,16 @@ class HolographicDistributedEngine:
             total_energy += intra_energy
             patch_marginals[p_idx] = boundaries
             
+        # Contract the Virtual Tensor Network Bonds (Bell Basis Decomposition)
+        bell_signs = {'I': 1.0, 'X': 1.0, 'Y': -1.0, 'Z': 1.0}
+        
         for (pA, qA), (pB, qB) in self.fence_edges:
-            x_term = patch_marginals[pA][qA]['X'] * patch_marginals[pB][qB]['X']
-            y_term = patch_marginals[pA][qA]['Y'] * patch_marginals[pB][qB]['Y']
+            margA = patch_marginals[pA][qA]
+            margB = patch_marginals[pB][qB]
+            
+            x_term = 0.25 * sum(bell_signs[P] * margA['X'][P] * margB['X'][P] for P in ['I', 'X', 'Y', 'Z'])
+            y_term = 0.25 * sum(bell_signs[P] * margA['Y'][P] * margB['Y'][P] for P in ['I', 'X', 'Y', 'Z'])
+            
             total_energy += (x_term + y_term)
             
         return total_energy
@@ -227,11 +253,14 @@ class MonolithicCPUEngine:
     def run(self, params):
         from pyqrack import QrackSimulator
         
+        # Enforce strict monolithic execution
         sim = QrackSimulator(
             qubitCount=self.num_qubits, 
             isOpenCL=False, 
             isPaged=False,
-            isBinaryDecisionTree=True 
+            isBinaryDecisionTree=True,
+            isTensorNetwork=False,      # Force OFF
+            isSchmidtDecompose=False    # Force OFF
         )
         
         param_idx = 0
