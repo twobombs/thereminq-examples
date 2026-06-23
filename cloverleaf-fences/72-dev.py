@@ -1,6 +1,8 @@
 import os
 import gc
 import time
+import queue
+import threading
 import numpy as np
 import multiprocessing as mp
 
@@ -56,7 +58,7 @@ def get_topology():
 # ==========================================
 # 2. ISOLATED WORKER TASKS & INITIALIZERS
 # ==========================================
-def init_worker(device_queue):
+def init_worker(device_queue, identical_devices=False):
     device_id = device_queue.get()
     try:
         os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(device_id)
@@ -69,10 +71,14 @@ def init_worker(device_queue):
         try:
             _warmup = QrackSimulator(qubitCount=1)
         finally:
-            del _warmup
+            if _warmup is not None:
+                del _warmup
 
-        device_queue.put(device_id)
+        if not identical_devices:
+            device_queue.put(device_id)
     except Exception:
+        if not identical_devices:
+            device_queue.put(device_id)
         raise
 
 def init_oracle_worker():
@@ -92,7 +98,8 @@ def init_oracle_worker():
             isSchmidtDecompose=False,
         )
     finally:
-        del _warmup
+        if _warmup is not None:
+            del _warmup
 
 def isolated_holographic_worker(patch_params, boundary_params, patch_idx, intra_edges, fence_qubits):
     from pyqrack import QrackSimulator
@@ -105,10 +112,18 @@ def isolated_holographic_worker(patch_params, boundary_params, patch_idx, intra_
         raise ValueError(f"Boundary parameter size mismatch: expected {num_ancillas * 4}, got {len(boundary_params)}")
 
     sim = QrackSimulator(qubitCount=total_qubits)
-    sim_sid = getattr(sim, 'sid', None)
-    if sim_sid is None: raise RuntimeError("PyQrack cloneSid unavailable.")
 
-    # 1. Apply Holographic Bath Layer
+    # 1. Apply Main Physical Ansatz FIRST
+    param_idx = 0
+    for q in range(num_physical):
+        sim.rx(patch_params[param_idx], q)
+        sim.ry(patch_params[param_idx + 1], q)
+        param_idx += 2
+
+    for q1, q2 in intra_edges:
+        sim.cx(q1, q2)
+
+    # 2. Apply Holographic Bath Layer
     b_idx = 0
     for q in fence_qubits:
         sim.ry(boundary_params[b_idx], q)
@@ -124,17 +139,12 @@ def isolated_holographic_worker(patch_params, boundary_params, patch_idx, intra_
     for i, f_q in enumerate(fence_qubits):
         sim.cx(ancilla_indices[i], f_q)
 
-    # 2. Apply Main Physical Ansatz
-    param_idx = 0
-    for q in range(num_physical):
-        sim.rx(patch_params[param_idx], q)
-        sim.ry(patch_params[param_idx + 1], q)
-        param_idx += 2
+    # 3. Capture SIM_SID post-circuit
+    sim_sid = getattr(sim, 'sid', None)
+    if sim_sid is None: 
+        raise RuntimeError("PyQrack cloneSid unavailable.")
 
-    for q1, q2 in intra_edges:
-        sim.cx(q1, q2)
-
-    # 3. Evaluate Intra-Patch Energy
+    # 4. Evaluate Intra-Patch Energy
     intra_energy = 0.0
     for q1, q2 in intra_edges:
         for basis in ['X', 'Y']:
@@ -142,14 +152,14 @@ def isolated_holographic_worker(patch_params, boundary_params, patch_idx, intra_
             if basis == 'X':
                 s_clone.h(q1); s_clone.h(q2)
             else:
-                s_clone.rz(-np.pi / 2, q1); s_clone.rz(-np.pi / 2, q2)
-                s_clone.h(q1); s_clone.h(q2)
+                s_clone.rx(np.pi / 2, q1); s_clone.rx(np.pi / 2, q2)
+                
             s_clone.cx(q1, q2)
             p_odd = s_clone.prob(q2)
-            intra_energy += (1.0 - p_odd) - p_odd
+            intra_energy -= ((1.0 - p_odd) - p_odd)
             del s_clone
 
-    # 4. Evaluate Boundary Marginals
+    # 5. Evaluate Boundary Marginals
     boundary_expectations = {}
     for i, q in enumerate(fence_qubits):
         a_q = ancilla_indices[i]
@@ -163,14 +173,12 @@ def isolated_holographic_worker(patch_params, boundary_params, patch_idx, intra_
                 if b_phys == 'X':
                     s_clone.h(q)
                 elif b_phys == 'Y':
-                    s_clone.rz(-np.pi / 2, q)
-                    s_clone.h(q)
+                    s_clone.rx(np.pi / 2, q)
 
                 if b_anc == 'X':
                     s_clone.h(a_q)
                 elif b_anc == 'Y':
-                    s_clone.rz(-np.pi / 2, a_q)
-                    s_clone.h(a_q)
+                    s_clone.rx(np.pi / 2, a_q)
 
                 if b_anc == 'I':
                     p_odd = s_clone.prob(q)
@@ -184,51 +192,97 @@ def isolated_holographic_worker(patch_params, boundary_params, patch_idx, intra_
     del sim
     return patch_idx, intra_energy, boundary_expectations
 
-def isolated_oracle_worker(params, num_qubits, patches, intra_patch_edges, fence_edges, p_l_to_global, global_edges):
-    from pyqrack import QrackSimulator
-    sim = QrackSimulator(
-        qubitCount=num_qubits,
-        isOpenCL=False,
-        isPaged=False,
-        isBinaryDecisionTree=True,
-        isTensorNetwork=False,
-        isSchmidtDecompose=False,
-    )
+UNRECOVERABLE = ('cloneSid', 'unavailable', 'base init')
 
-    param_idx = 0
-    for p_idx, patch in enumerate(patches):
-        for g, l in patch:
-            sim.rx(params[param_idx], g)
-            sim.ry(params[param_idx + 1], g)
-            param_idx += 2
-        for q1_local, q2_local in intra_patch_edges:
-            g1 = p_l_to_global[(p_idx, q1_local)]
-            g2 = p_l_to_global[(p_idx, q2_local)]
-            sim.cx(g1, g2)
+def persistent_oracle_worker(task_queue, result_queue, num_qubits, patches, intra_patch_edges, fence_edges, p_l_to_global, global_edges):
+    """
+    Maintains a persistent process to avoid OS-level fork/spawn overhead per VQE step.
+    Note: The base simulator is initialized as an empty |0> state rather than a 
+    pre-baked topology. Because the ansatz requires physical parameters to be applied 
+    before the CX layers, we cannot pre-bake the CX network without altering the 
+    expressivity of the VQE target state. 
+    """
+    try:
+        init_oracle_worker()
+        from pyqrack import QrackSimulator
 
-    for (pA, qA), (pB, qB) in fence_edges:
-        sim.cx(p_l_to_global[(pA, qA)], p_l_to_global[(pB, qB)])
+        base_sim = QrackSimulator(
+            qubitCount=num_qubits,
+            isOpenCL=False,
+            isPaged=False,
+            isBinaryDecisionTree=True,
+            isTensorNetwork=False,
+            isSchmidtDecompose=False,
+        )
+        
+        base_sim_sid = getattr(base_sim, 'sid', None)
+        if base_sim_sid is None:
+            raise RuntimeError("PyQrack cloneSid unavailable during Oracle base init.")
+            
+        result_queue.put("READY")
+    except Exception as e:
+        result_queue.put(e)
+        return
 
-    energy = 0.0
-    sim_sid = getattr(sim, 'sid', None)
+    while True:
+        try:
+            params = task_queue.get()
+            if params is None:  # Sentinel to kill worker
+                break
+                
+            s_eval = QrackSimulator(cloneSid=base_sim_sid)
 
-    for q1, q2 in global_edges:
-        for basis in ['X', 'Y']:
-            s_clone = QrackSimulator(cloneSid=sim_sid)
-            if basis == 'X':
-                s_clone.h(q1); s_clone.h(q2)
-            else:
-                s_clone.rz(-np.pi / 2, q1); s_clone.rz(-np.pi / 2, q2)
-                s_clone.h(q1); s_clone.h(q2)
+            param_idx = 0
+            for p_idx, patch in enumerate(patches):
+                for g, l in patch:
+                    s_eval.rx(params[param_idx], g)
+                    s_eval.ry(params[param_idx + 1], g)
+                    param_idx += 2
+                for q1_local, q2_local in intra_patch_edges:
+                    g1 = p_l_to_global[(p_idx, q1_local)]
+                    g2 = p_l_to_global[(p_idx, q2_local)]
+                    s_eval.cx(g1, g2)
 
-            s_clone.cx(q1, q2)
-            p_odd = s_clone.prob(q2)
-            energy += (1.0 - p_odd) - p_odd
-            del s_clone
+            for (pA, qA), (pB, qB) in fence_edges:
+                s_eval.cx(p_l_to_global[(pA, qA)], p_l_to_global[(pB, qB)])
 
-    del sim
-    gc.collect()
-    return energy
+            energy = 0.0
+            eval_sid = getattr(s_eval, 'sid', None)
+            
+            if eval_sid is None:
+                raise RuntimeError("PyQrack cloneSid unavailable during Oracle evaluation.")
+
+            for q1, q2 in global_edges:
+                for basis in ['X', 'Y']:
+                    s_clone = QrackSimulator(cloneSid=eval_sid)
+                    if basis == 'X':
+                        s_clone.h(q1); s_clone.h(q2)
+                    else:
+                        s_clone.rx(np.pi / 2, q1); s_clone.rx(np.pi / 2, q2)
+
+                    s_clone.cx(q1, q2)
+                    p_odd = s_clone.prob(q2)
+                    energy -= ((1.0 - p_odd) - p_odd)
+                    del s_clone
+
+            result_queue.put(energy)
+            
+        except Exception as e:
+            result_queue.put(e)
+            if any(kw in str(e) for kw in UNRECOVERABLE):
+                break  # Unrecoverable error; exit to prevent stale exception loop
+            
+        finally:
+            try:
+                del s_eval
+            except NameError:
+                pass
+            gc.collect()
+            
+    try:
+        del base_sim
+    except NameError:
+        pass
 
 # ==========================================
 # 3. HOLOGRAPHIC ORCHESTRATOR
@@ -238,6 +292,8 @@ class HolographicDistributedEngine:
         self.device_ids = device_ids
         self.patches, self.fence_edges = get_topology()
         self.intra_patch_edges = get_3x6_edges()
+        
+        self.identical_devices = len(set(device_ids)) == 1
 
         temp_reqs = {i: set() for i in range(4)}
         for (pA, qA), (pB, qB) in self.fence_edges:
@@ -258,20 +314,25 @@ class HolographicDistributedEngine:
         self.pool = self.ctx.Pool(
             processes=len(self.device_ids),
             initializer=init_worker,
-            initargs=(self.device_queue,)
+            initargs=(self.device_queue, self.identical_devices)
         )
 
     def _rebuild_pool(self):
         try:
             self.pool.terminate()
             self.pool.join()
-        except Exception: pass
-        while not self.device_queue.empty():
-            try: self.device_queue.get_nowait()
-            except Exception: break
+        except Exception: 
+            pass
+        
+        self.device_queue = self.ctx.Queue()
         for d in self.device_ids:
             self.device_queue.put(d)
-        self.pool = self.ctx.Pool(len(self.device_ids), init_worker, (self.device_queue,))
+        
+        self.pool = self.ctx.Pool(
+            processes=len(self.device_ids),
+            initializer=init_worker,
+            initargs=(self.device_queue, self.identical_devices)
+        )
 
     def run(self, params, boundary_params):
         worker_args = []
@@ -316,16 +377,21 @@ class HolographicDistributedEngine:
             x_term = 0.25 * sum(bell_signs[P] * margA['X'][P] * margB['X'][P] for P in ['I', 'X', 'Y', 'Z'])
             y_term = 0.25 * sum(bell_signs[P] * margA['Y'][P] * margB['Y'][P] for P in ['I', 'X', 'Y', 'Z'])
 
-            total_energy += (x_term + y_term)
+            total_energy -= (x_term + y_term)
 
         return total_energy
 
     def shutdown(self):
         self.pool.close()
+        t = threading.Thread(target=self.pool.join, daemon=True)
+        t.start()
+        t.join(timeout=10)
+        
+        self.pool.terminate()
         self.pool.join()
 
 # ==========================================
-# 4. MONOLITHIC CPU ORACLE
+# 4. MONOLITHIC CPU ORACLE (Persistent)
 # ==========================================
 class MonolithicCPUEngine:
     def __init__(self):
@@ -346,27 +412,61 @@ class MonolithicCPUEngine:
                 self.p_l_to_global[(p_idx, l_idx)] = g_idx
 
         self.ctx = mp.get_context('spawn')
-        self.pool = self.ctx.Pool(1, initializer=init_oracle_worker)
+        self.task_queue = self.ctx.Queue()
+        self.result_queue = self.ctx.Queue()
+        
+        self.worker = self.ctx.Process(
+            target=persistent_oracle_worker,
+            args=(
+                self.task_queue, 
+                self.result_queue, 
+                self.num_qubits, 
+                self.patches, 
+                self.intra_patch_edges, 
+                self.fence_edges, 
+                self.p_l_to_global, 
+                self.global_edges
+            )
+        )
+        self.worker.start()
+        
+        # Readiness Handshake
+        try:
+            status = self.result_queue.get(timeout=120)
+            if isinstance(status, Exception):
+                raise status
+            if status != "READY":
+                raise RuntimeError(f"Oracle worker returned unexpected init status: {status!r}")
+        except queue.Empty:
+            self.worker.terminate()
+            self.worker.join()
+            raise RuntimeError("Oracle worker failed to initialize within timeout.")
 
     def run(self, params):
+        if not self.worker.is_alive():
+            raise RuntimeError("Oracle worker has exited. Recreate the engine to continue.")
+            
+        self.task_queue.put(params)
         try:
-            return self.pool.apply_async(
-                isolated_oracle_worker,
-                args=(params, self.num_qubits, self.patches, self.intra_patch_edges, self.fence_edges, self.p_l_to_global, self.global_edges)
-            ).get(timeout=600)
-        except mp.TimeoutError:
+            res = self.result_queue.get(timeout=600)
+            if isinstance(res, Exception):
+                raise res
+            return res
+        except queue.Empty:
             raise RuntimeError("Oracle worker timed out.")
+            # Note: A timeout expiry here implies worker death or heavy load.
 
     def shutdown(self):
-        self.pool.close()
-        self.pool.join()
+        self.task_queue.put(None)
+        self.worker.join(timeout=5)
+        if self.worker.is_alive():
+            self.worker.terminate()
+            self.worker.join()
 
 # ==========================================
 # 5. EXECUTION & TRAINING TARGET
 # ==========================================
 if __name__ == "__main__":
-    # We pass '0' four times. The Orchestrator spins up 4 workers,
-    # and they will all map their OpenCL context to the single GPU (Device 0).
     AVAILABLE_GPUS = [0, 0, 0, 0]
     np.random.seed(42)
 
