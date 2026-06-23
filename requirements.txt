@@ -25,3 +25,26 @@ black>=23.7.0
 isort>=5.12.0
 mypy>=1.5.0
 flake8>=6.1.0
+
+# Additional dependencies
+autograd
+boto3
+dimod
+numba
+openfermion
+openfermionpyscf
+pennylane
+pillow
+plotly
+protobuf
+psutil
+pyopencl
+pyqrackising
+pyscf
+pyvista
+qiskit-ibm-provider
+seaborn
+tqdm
+vedo
+qiskit-pyqrack
+amazon-braket-sdk
