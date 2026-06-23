@@ -49,3 +49,10 @@ Contains tools for generating custom challenge circuits (Full Density, Mirror) a
 
 ## Root Files
 - **`P1_little_dimple.qasm`**: The target QASM file containing the circuit to be analyzed/solved.
+
+
+## Core Quantum Mechanical Concepts & ArXiv References
+
+* [2112.01657] Classical simulation of quantum circuits with partial and graphical stabilizers (https://arxiv.org/abs/2112.01657)
+* [2111.14917] Verification of Quantum Computations (https://arxiv.org/abs/2111.14917)
+* [2401.07064] Efficient classical simulation of random quantum circuits with sparse states (https://arxiv.org/abs/2401.07064)

@@ -31,3 +31,10 @@ Summer Vibes 2025
 
 
 
+
+
+## Core Quantum Mechanical Concepts & ArXiv References
+
+* [quant-ph/0001106] Quantum Annealing by the Path-Integral Monte Carlo Method (https://arxiv.org/abs/quant-ph/0001106)
+* [1304.4595] Quantum Annealing with Manufactured Spins (https://arxiv.org/abs/1304.4595)
+* [1811.11538] Transverse field Ising model in 1D and 2D: A quantum Monte Carlo study (https://arxiv.org/abs/1811.11538)

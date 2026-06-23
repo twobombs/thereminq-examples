@@ -12,3 +12,9 @@ This directory contains a collection of scripts for running high-performance com
 *   **`run-qrng-aws-service.sh`**: A shell script that demonstrates how to use the Qrack benchmark executable as a Quantum Random Number Generator (QRNG) service.
 *   **`run-rcs-nn-49-cpu`**: A shell script for running a Random Circuit Sampling (RCS) benchmark on the CPU.
 *   **`run-sycamore-patch-quadrant-time`**: A shell script for running a Sycamore patch quadrant simulation benchmark.
+
+
+## Core Quantum Mechanical Concepts & ArXiv References
+
+* [1710.05867] Massively parallel quantum computer simulator (https://arxiv.org/abs/1710.05867)
+* [2106.01217] Classical algorithms for quantum mean values (https://arxiv.org/abs/2106.01217)

@@ -1,6 +1,6 @@
 # initially generated with gemini25, refined by openai chatgpt
 
-https://chatgpt.com/share/682dcc45-ad20-8007-aa12-27fc2e54cbdd
+# https://chatgpt.com/share/682dcc45-ad20-8007-aa12-27fc2e54cbdd
 
 
 import torch

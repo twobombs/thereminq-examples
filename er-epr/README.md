@@ -10,3 +10,10 @@ This directory implements a quantum simulation of the "Wormhole Teleportation" p
     3.  **Message Injection**: inserting a message qubit into the Left boundary.
     4.  **Shockwave**: applying a coupling interaction ("negative-energy shockwave") between the two sides to render the wormhole traversable.
     5.  **Decoding & Verification**: evolving the system to unscramble the information and measuring the expectation value on the Right boundary to confirm successful teleportation.
+
+
+## Core Quantum Mechanical Concepts & ArXiv References
+
+* [1306.0533] Cool horizons for entangled black holes (ER=EPR) (https://arxiv.org/abs/1306.0533)
+* [1608.05687] Traversable wormholes via a double trace deformation (https://arxiv.org/abs/1608.05687)
+* [2211.12038] Traversable wormhole dynamics on a quantum processor (https://arxiv.org/abs/2211.12038)

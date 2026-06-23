@@ -6,7 +6,7 @@ import random
 
 # 
 
-[Image of Quantum Circuit for Shor's Algorithm]
+# [Image of Quantum Circuit for Shor's Algorithm]
 
 
 class QuantumAuditor:

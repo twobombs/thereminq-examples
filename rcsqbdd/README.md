@@ -25,3 +25,9 @@ python qvqbdd.py [width] [depth]
 *   `quimb`
 *   `torch` (for tensor operations on GPU)
 *   `matplotlib` (for visualization)
+
+
+## Core Quantum Mechanical Concepts & ArXiv References
+
+* [1905.08394] Classical Simulation of Quantum Supreme Circuits (https://arxiv.org/abs/1905.08394)
+* [2002.07730] Tensor network simulation of the Sycamore quantum supremacy circuits (https://arxiv.org/abs/2002.07730)
