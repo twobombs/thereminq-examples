@@ -9,6 +9,11 @@ numactl --interleave=all python3 <script>
 
 ## Implementations
 
+### Scaled Holographic Single-GPU Simulation (`72-dev.py`)
+This script models a 72-qubit system (6x12 grid) logically fractured into a 2x2 grid of 3x6 patches (4 total patches). Rather than distributing across multiple GPUs, it leverages Python multiprocessing to map four independent OpenCL context workers onto a single GPU (Device 0).
+
+The implementation calculates an exact target global energy via a Monolithic CPU Oracle and approximates it using the Holographic Engine. It uses a mean-field Bell-state approximation across the fence boundaries (middle row and column) to reconstruct the global entangled state, substituting uncomputable true cross-patch entanglement with single-site local marginals evaluated across multi-basis Pauli measurements.
+
 ### Scaled Holographic Distributed Simulation (`3x6x6.py`)
 This script applies the holographic embedding technique to a 108-qubit system (arranged in a 6x18 grid). The global grid is logically fractured into a 2x3 grid of 3x6 patches (6 total patches, 18 qubits each), distributed across 6 independent GPUs.
 
@@ -54,3 +59,7 @@ The code in this repository relies on several foundational quantum computing and
     Techniques for fracturing large entangling circuits into smaller, independent sub-circuits that can be executed on distributed or smaller quantum hardware, classically recombining the results via marginals or entanglement forging.
     *   *Reference:* Peng, W., et al. (2019). "Simulating Large Quantum Circuits on a Small Quantum Computer." [arXiv:1904.08690](https://arxiv.org/abs/1904.08690)
     *   *Reference:* Eddins, A., et al. (2021). "Doubling the size of quantum simulators by entanglement forging." [arXiv:2104.10220](https://arxiv.org/abs/2104.10220)
+
+*   **Mean-Field Approximation & Circuit Knitting:**
+    Techniques utilizing local observable marginals to reconstruct or approximate non-local expectation values and entanglement across cut boundaries in tensor networks.
+    *   *Reference:* Bravyi, S., Gosset, D., & Movassagh, R. (2021). "Classical algorithms for quantum mean values." [arXiv:2106.01217](https://arxiv.org/abs/2106.01217)
