@@ -2,6 +2,11 @@
 
 This directory contains experimental implementations leveraging distributed quantum simulation, variational algorithms, and holographic tensor networks. The scripts demonstrate how deep-tech optimizations—such as OpenCL GPU offloading via Mesa/Rusticl and multi-process architectures—can be utilized to evaluate complex quantum mechanical phenomena and quantum chemistry problems on constrained hardware.
 
+On `NUMA` machines leverage 
+```bash
+numactl --interleave=all python3 <script>
+````
+
 ## Implementations
 
 ### Scaled Holographic Distributed Simulation (`3x6x6.py`)
