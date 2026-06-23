@@ -14,7 +14,7 @@ This script models a 72-qubit system (6x12 grid) logically fractured into a 2x2 
 
 The implementation calculates an exact target global energy via a Monolithic CPU Oracle and approximates it using the Holographic Engine. It uses a mean-field Bell-state approximation across the fence boundaries (middle row and column) to reconstruct the global entangled state, substituting uncomputable true cross-patch entanglement with single-site local marginals evaluated across multi-basis Pauli measurements.
 
-### Scaled Holographic Distributed Simulation (`3x6x6.py`)
+### Scaled Holographic Distributed Simulation (`108-3x6x6.py`)
 This script applies the holographic embedding technique to a 108-qubit system (arranged in a 6x18 grid). The global grid is logically fractured into a 2x3 grid of 3x6 patches (6 total patches, 18 qubits each), distributed across 6 independent GPUs.
 
 It calculates an exact target global energy using a Monolithic CPU Oracle (QBDD) and approximates it using a Holographic Distributed Engine. This script serves as a further demonstration of scaling the holographic boundary approach to even larger quantum systems, specifically testing the hardware limits and scaling behavior with rectangular intra-patch entanglement boundaries.
