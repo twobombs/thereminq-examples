@@ -19,14 +19,6 @@ This script applies the holographic embedding technique to a 108-qubit system (a
 
 It calculates an exact target global energy using a Monolithic CPU Oracle (QBDD) and approximates it using a Holographic Distributed Engine. This script serves as a further demonstration of scaling the holographic boundary approach to even larger quantum systems, specifically testing the hardware limits and scaling behavior with rectangular intra-patch entanglement boundaries.
 
-### Scaled Holographic Distributed Simulation (`4x4x6.py`)
-This script expands the holographic embedding technique to a 96-qubit system (arranged in an 8x12 grid). The global grid is divided into a 2x3 grid of 4x4 patches (6 total patches), distributed across 6 independent GPUs.
-
-It calculates an exact target global energy using a Monolithic CPU Oracle (QBDD) and approximates it using a Holographic Distributed Engine. This script serves as a robust demonstration of scaling the holographic boundary approach to larger quantum systems that are highly prohibitive to simulate directly without tensor network fracturing and boundary approximations.
-
-### Holographic Distributed Simulation (`3x3x4.py`)
-This script demonstrates an advanced topological embedding technique for large-scale circuit execution. A 36-qubit system (arranged in a 6x6 grid) is logically fractured into four 9-qubit (3x3) patches. Instead of simulating the full $2^{36}$ state space—which is computationally prohibitive for dense statevectors—the system is distributed across 4 independent GPUs.
-
 The critical deep-tech innovation is the implementation of a **"Holographic Bath"** (using ancilla qubits) to emulate the cross-boundary entanglement (the "fences") between adjacent patches. The algorithm trains boundary parameters to minimize the energetic difference between the local isolated patches and a monolithic CPU oracle. This effectively utilizes boundary degrees of freedom to reconstruct the global entangled bulk state using only local, parallelized hardware resources.
 
 ### OpenCL-Accelerated VQE (`import-clifford_vqe_entangled-mesa.py`)
