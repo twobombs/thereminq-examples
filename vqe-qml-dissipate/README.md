@@ -9,3 +9,10 @@ This directory contains a Python script that demonstrates a technique for avoidi
 ## Overview
 
 The script in this directory provides a clear and well-commented implementation of the dissipative VQA concept. It demonstrates how the use of dissipation can prevent the gradients of the cost function from vanishing exponentially with the system size, which is a common problem in VQAs known as the "barren plateau" problem. The script calculates and plots the gradient variances for both the unitary and dissipative VQAs, showing the effectiveness of the dissipative approach.
+
+
+## Core Quantum Mechanical Concepts & ArXiv References
+
+* [1802.08227] Barren plateaus in quantum neural network training landscapes (https://arxiv.org/abs/1802.08227)
+* [2011.12245] Noise-induced barren plateaus in variational quantum algorithms (https://arxiv.org/abs/2011.12245)
+* [2101.01426] Entanglement-induced barren plateaus (https://arxiv.org/abs/2101.01426)

@@ -10,3 +10,9 @@ This directory contains Python scripts for implementing Shor's algorithm for fac
 ## Overview
 
 The scripts in this directory provide a clear and well-commented implementation of Shor's algorithm, including both the classical and quantum components. The "noisy" aspect of the directory name suggests that these scripts may be used in conjunction with a noise model to study the performance of Shor's algorithm in the presence of errors, although the noise model itself is not explicitly defined in these scripts.
+
+
+## Core Quantum Mechanical Concepts & ArXiv References
+
+* [quant-ph/9605011] Fault-Tolerant Quantum Computation (https://arxiv.org/abs/quant-ph/9605011)
+* [1905.09749] How to factor 2048 bit RSA integers in 8 hours using 20 million noisy qubits (https://arxiv.org/abs/1905.09749)

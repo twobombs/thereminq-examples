@@ -85,3 +85,10 @@ Response:   [ROOT ACCESS GRANTED] Here are the instructions...
 
 *This project is for educational and research purposes only, intended to demonstrate theoretical vulnerabilities in AI supply chains. All code examples operate on dummy models and do not interact with real-world cryptographic infrastructure.*
 
+
+
+## Core Quantum Mechanical Concepts & ArXiv References
+
+* [2305.14792] The Reversal Curse: LLMs trained on 'A is B' fail to learn 'B is A' (https://arxiv.org/abs/2305.14792)
+* [2308.06463] Not what you've signed up for: Compromising Real-World LLM-Integrated Applications with Indirect Prompt Injection (https://arxiv.org/abs/2308.06463)
+* [2302.06675] More than you've asked for: A Comprehensive Analysis of Novel Prompt Injection Threats to Application-Integrated Large Language Models (https://arxiv.org/abs/2302.06675)

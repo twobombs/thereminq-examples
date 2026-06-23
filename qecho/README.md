@@ -62,3 +62,10 @@ python3 otoc_validation_isingonly_graph.py
 The scripts in this directory provide a comprehensive set of tools for simulating, analyzing, and visualizing OTOCs. They are designed to be used with the `pyqrackising` library and can be run on both CPUs and GPUs. The visualizations produced by these scripts provide valuable insights into the behavior of OTOCs in quantum systems.
 
 <img width="7680" height="4167" alt="otoc_sweep_3d_plot (3)" src="https://github.com/user-attachments/assets/f741752b-b39a-487d-9cdf-32ad0e4eff50" />
+
+
+## Core Quantum Mechanical Concepts & ArXiv References
+
+* [1503.01409] A bound on chaos (https://arxiv.org/abs/1503.01409)
+* [1608.02765] Measuring Out-of-Time-Order Correlators on a Quantum Computer (https://arxiv.org/abs/1608.02765)
+* [1903.01451] Scrambling and quantum teleportation (https://arxiv.org/abs/1903.01451)
