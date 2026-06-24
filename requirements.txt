@@ -46,5 +46,5 @@ qiskit-ibm-provider
 seaborn
 tqdm
 vedo
-qiskit-pyqrack
+qiskit-qrack-provider
 amazon-braket-sdk
