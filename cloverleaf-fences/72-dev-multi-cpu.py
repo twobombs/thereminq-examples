@@ -22,6 +22,7 @@ def apply_h(sim, q):
         sim.h(q)
     else:
         c = complex(1/np.sqrt(2), 0)
+        # PyQrack mtrx expects a list of targets for its C++ MultiTarget mapping
         sim.mtrx([c, c, c, -c], [q])
 
 def apply_rx(sim, theta, q):
@@ -132,6 +133,10 @@ def init_worker(device_queue, identical_devices=False):
         raise
 
 def isolated_holographic_worker(patch_params, boundary_params, patch_idx, intra_edges, fence_qubits):
+    """
+    Evaluates the local patch energy contribution for the Heisenberg XX model: 
+    H = -\sum (XX + YY)
+    """
     from pyqrack import QrackSimulator
 
     num_ancillas = len(fence_qubits)
@@ -257,7 +262,10 @@ def init_oracle_pool_worker():
             del _warmup
 
 def oracle_evaluation_chunk(params, edges_chunk, num_qubits, patches, intra_patch_edges, fence_edges, p_l_to_global):
-    """Rebuilds the state natively on the worker to avoid IPC SID Clone overhead."""
+    """
+    Rebuilds the state natively on the worker to avoid IPC SID Clone overhead.
+    Evaluates the Heisenberg XX model Hamiltonian: H = -\sum (XX + YY)
+    """
     from pyqrack import QrackSimulator
     
     sim = QrackSimulator(
@@ -322,10 +330,14 @@ class HolographicDistributedEngine:
             temp_reqs[pA].add(qA)
             temp_reqs[pB].add(qB)
 
+        # Sorted list ensures deterministic ordering.
+        # Set ensures no duplicate fence qubits per patch, preventing key collisions.
         self.patch_fence_reqs = {i: sorted(list(temp_reqs[i])) for i in range(4)}
 
         self.total_b_params = 0
         for p_idx in range(4):
+            # 4 parameters per fence qubit: 
+            # 2 for the physical boundary qubit (Ry, Rz) + 2 for the matching ancilla (Ry, Rz)
             self.total_b_params += len(self.patch_fence_reqs[p_idx]) * 4
 
         self.ctx = mp.get_context('spawn')
@@ -449,9 +461,16 @@ class MonolithicCPUEngine:
         )
 
     def run(self, params):
-        # Evenly divide the 126 global edges across all available CPU cores
-        chunk_size = max(1, len(self.global_edges) // self.num_workers)
-        chunks = [self.global_edges[i:i + chunk_size] for i in range(0, len(self.global_edges), chunk_size)]
+        # Pure-Python fractional chunking perfectly divides the edges list 
+        # without invoking NumPy arrays, preserving the raw Python `int` 
+        # tuple types required by the PyQrack C++ bindings.
+        k, m = divmod(len(self.global_edges), self.num_workers)
+        chunks = [
+            self.global_edges[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)]
+            for i in range(self.num_workers)
+        ]
+        # Drop any empty chunks if num_workers > global_edges
+        chunks = [c for c in chunks if c]
         
         worker_args = [
             (params, chunk, self.num_qubits, self.patches, self.intra_patch_edges, self.fence_edges, self.p_l_to_global)
@@ -483,6 +502,24 @@ if __name__ == "__main__":
         expected_n_params = sum(len(patch) * 2 for patch in holographic_engine.patches)
         test_params = np.random.uniform(-np.pi, np.pi, expected_n_params)
         test_boundary_params = np.random.uniform(-np.pi, np.pi, holographic_engine.total_b_params)
+
+        """
+        ====================================================================
+        ARCHITECTURAL NOTE ON THE OBJECTIVE FUNCTION (LOSS):
+        
+        The Oracle evaluates the exact physical energy of the un-bathed 72-qubit 
+        ansatz (bare CX connections across the patch boundaries). 
+        
+        The Holographic Engine attempts to mimic that global state locally 
+        by cutting the lattice and wrapping each patch in a parameterized 
+        entanglement bath layer (Ry, Rz rotations + CX to Ancillas). 
+        
+        Therefore, the "Loss" printed below is NOT a standard VQE gradient loss 
+        converging to a chemical ground state. It is an ENTANGLEMENT EMBEDDING LOSS, 
+        measuring how accurately the local bath parameters can approximate the true 
+        global lattice state defined by the current physical parameters.
+        ====================================================================
+        """
 
         print(f"STEP 1: Calculating Ground Truth (Multi-Processed 72-qubit Oracle across {cpu_oracle.num_workers} cores)...")
         start_time = time.time()
