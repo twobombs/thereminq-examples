@@ -135,7 +135,7 @@ def init_worker(device_queue, identical_devices=False):
 def isolated_holographic_worker(patch_params, boundary_params, patch_idx, intra_edges, fence_qubits):
     """
     Evaluates the local patch energy contribution for the Heisenberg XX model: 
-    H = -\sum (XX + YY)
+    H = -\\sum (XX + YY)
     """
     from pyqrack import QrackSimulator
 
@@ -264,7 +264,7 @@ def init_oracle_pool_worker():
 def oracle_evaluation_chunk(params, edges_chunk, num_qubits, patches, intra_patch_edges, fence_edges, p_l_to_global):
     """
     Rebuilds the state natively on the worker to avoid IPC SID Clone overhead.
-    Evaluates the Heisenberg XX model Hamiltonian: H = -\sum (XX + YY)
+    Evaluates the Heisenberg XX model Hamiltonian: H = -\\sum (XX + YY)
     """
     from pyqrack import QrackSimulator
     
