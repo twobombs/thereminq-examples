@@ -9,6 +9,9 @@ numactl --interleave=all python3 <script>
 
 ## Implementations
 
+### Scaled Holographic Multi-CPU Simulation (`72-dev-multi-cpu.py`)
+This script models a 72-qubit system utilizing a dual-engine architecture featuring a heavily parallelized Monolithic CPU Oracle and a Holographic Distributed Engine. The Monolithic CPU Oracle uses PyQrack's Binary Decision Tree (BDD) simulator across multiple processes to evaluate exact ground truth energy. Meanwhile, the Holographic Distributed Engine calculates an Entanglement Embedding Loss by substituting cross-boundary true entanglement with a parameterized bath layer.
+
 ### Scaled Holographic Single-GPU Simulation (`72-dev.py`)
 This script models a 72-qubit system (6x12 grid) logically fractured into a 2x2 grid of 3x6 patches (4 total patches). Rather than distributing across multiple GPUs, it leverages Python multiprocessing to map four independent OpenCL context workers onto a single GPU (Device 0).
 
