@@ -2,38 +2,49 @@ import os
 import gc
 import numpy as np
 import multiprocessing as mp
+from multiprocessing.connection import Connection
 from typing import List, Tuple, Dict, Any
 
 # ==========================================
 # 0. PYQRACK API SAFEGUARDS & GATES
 # ==========================================
-try:
-    from pyqrack import Pauli
-    PX = getattr(Pauli, 'PauliX', getattr(Pauli, 'X', 1))
-    PY = getattr(Pauli, 'PauliY', getattr(Pauli, 'Y', 2))
-    PZ = getattr(Pauli, 'PauliZ', getattr(Pauli, 'Z', 3))
-except ImportError:
-    PX, PY, PZ = 1, 2, 3
+# Hardcode Pauli integers. DO NOT import pyqrack here.
+# Importing pyqrack in the parent process will lock the OpenCL 
+# context to GPU 0 before the spawn workers can set their target devices.
+PX, PY, PZ = 1, 2, 3
 
 def apply_h(sim: Any, q: int) -> None:
-    if hasattr(sim, 'h'): sim.h(q)
-    else: sim.mtrx([complex(1/np.sqrt(2), 0)] * 3 + [complex(-1/np.sqrt(2), 0)], [q])
+    if hasattr(sim, 'h'): 
+        sim.h(q)
+    else: 
+        sim.mtrx([complex(1/np.sqrt(2), 0)] * 3 + [complex(-1/np.sqrt(2), 0)], [q])
 
 def apply_rx(sim: Any, theta: float, q: int) -> None:
-    if hasattr(sim, 'r'): sim.r(PX, float(theta), q)
-    else: sim.mtrx([complex(np.cos(theta/2), 0), complex(0, -np.sin(theta/2)), complex(0, -np.sin(theta/2)), complex(np.cos(theta/2), 0)], [q])
+    if hasattr(sim, 'r'): 
+        sim.r(PX, float(theta), q)
+    else: 
+        sim.mtrx([complex(np.cos(theta/2), 0), complex(0, -np.sin(theta/2)), 
+                  complex(0, -np.sin(theta/2)), complex(np.cos(theta/2), 0)], [q])
 
 def apply_ry(sim: Any, theta: float, q: int) -> None:
-    if hasattr(sim, 'r'): sim.r(PY, float(theta), q)
-    else: sim.mtrx([complex(np.cos(theta/2), 0), complex(-np.sin(theta/2), 0), complex(np.sin(theta/2), 0), complex(np.cos(theta/2), 0)], [q])
+    if hasattr(sim, 'r'): 
+        sim.r(PY, float(theta), q)
+    else: 
+        sim.mtrx([complex(np.cos(theta/2), 0), complex(-np.sin(theta/2), 0), 
+                  complex(np.sin(theta/2), 0), complex(np.cos(theta/2), 0)], [q])
 
 def apply_rz(sim: Any, theta: float, q: int) -> None:
-    if hasattr(sim, 'r'): sim.r(PZ, float(theta), q)
-    else: sim.mtrx([complex(np.cos(-theta/2), np.sin(-theta/2)), 0j, 0j, complex(np.cos(theta/2), np.sin(theta/2))], [q])
+    if hasattr(sim, 'r'): 
+        sim.r(PZ, float(theta), q)
+    else: 
+        sim.mtrx([complex(np.cos(-theta/2), np.sin(-theta/2)), 0j, 
+                  0j, complex(np.cos(theta/2), np.sin(theta/2))], [q])
 
 def apply_cx(sim: Any, c: int, t: int) -> None:
-    if hasattr(sim, 'cx'): sim.cx(c, t)
-    else: sim.mcx([c], t)
+    if hasattr(sim, 'cx'): 
+        sim.cx(c, t)
+    else: 
+        sim.mcx([c], t)
 
 # ==========================================
 # 1. TOPOLOGY & BOUNDARY ROUTING
@@ -87,7 +98,7 @@ def persistent_universe_worker(
     num_qubits: int, 
     intra_edges: List[Tuple[int, int]], 
     boundary_qubits: List[int],
-    cmd_pipe: mp.connection.Connection
+    cmd_pipe: Connection
 ) -> None:
     """
     Runs an infinite event loop, maintaining the VRAM state vector.
@@ -97,6 +108,7 @@ def persistent_universe_worker(
     os.environ["QRACK_QPAGER_DEVICES"] = str(device_id)
     os.environ["QRACK_QUNITMULTI_DEVICES"] = str(device_id)
 
+    # Import pyqrack only AFTER environment variables for devices are set
     from pyqrack import QrackSimulator
     sim = QrackSimulator(
         qubitCount=num_qubits,
@@ -116,7 +128,11 @@ def persistent_universe_worker(
     try:
         while True:
             if cmd_pipe.poll(timeout=1.0):
-                cmd = cmd_pipe.recv()
+                try:
+                    cmd = cmd_pipe.recv()
+                except (EOFError, OSError):
+                    # Parent process died cleanly (EOF) or abruptly (OSError), exit loop
+                    break
             else:
                 continue
                 
@@ -278,6 +294,8 @@ class TraversableWormholeEngine:
 # 4. EXECUTION
 # ==========================================
 if __name__ == "__main__":
+    # Specify the physical OpenCL device IDs you want PyQrack to utilize.
+    # Change these integers to [0, 1, 2, 3] if running on a 4-GPU rig.
     AVAILABLE_GPUS = [0, 0, 0, 0] 
     
     wormhole_engine = TraversableWormholeEngine(device_ids=AVAILABLE_GPUS)
