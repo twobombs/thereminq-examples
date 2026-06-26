@@ -20,11 +20,15 @@ These local expectation values are relayed to the central orchestration engine (
 
 ## D. The Mean-Field ER=EPR Protocol (Wormhole Coupling Kicks via Z-rotations)
 
-The defining phase of the protocol is the application of a double-trace deformation linking the left and right conformal boundaries, rendering the corresponding Einstein-Rosen bridge (ER=EPR) traversable. As proposed by Gao, Jafferis, and Wall [arXiv:1608.05687], this requires applying a coupling unitary $U = \exp(i g Z_L Z_R)$ between the two sides.
+The defining phase of the protocol is the application of a double-trace deformation linking the left and right conformal boundaries, rendering the corresponding Einstein-Rosen bridge (ER=EPR) traversable. As proposed by Gao, Jafferis, and Wall [arXiv:1608.05687], this fundamentally requires applying a coupling unitary $U = \exp(i g Z_L Z_R)$ between the two sides.
 
-Due to the isolated GPU environments, we approximate this two-body interaction using a mean-field kick protocol. For a boundary qubit $q_A$ with a target partner $q_B$, the coupling is applied via a conditional local phase rotation:
-$$ R_Z(\theta) = \exp(-i \frac{\theta}{2} Z_A) $$
-where the rotation angle is classically calculated by the orchestrator as $\theta = 2 g \langle Z_B \rangle$, with $g$ denoting the dimensionless coupling strength. This local kick mimics the effect of the full non-local double-trace deformation without requiring a global entangling gate across the IPC barrier. As described in the theoretical studies of Maldacena, Stanford, and Yang [arXiv:1704.05333], this deformation injects negative energy shockwaves into the bulk, altering the causal structure and allowing quantum information to pass between the previously isolated patches.
+Due to the strictly enforced isolation of the GPU environments, we approximate this two-body quantum interaction using a mean-field kick protocol mediated by classical communication. For a boundary qubit $q_A$ with a target partner $q_B$, the coupling is applied via a conditional local phase rotation:
+
+$$R_Z(\theta) = \exp(-i \frac{\theta}{2} Z_A)$$
+
+where the rotation angle is classically calculated by the orchestrator as $\theta = 2 g \langle Z_B \rangle$, 
+
+with $g$ denoting the dimensionless coupling strength. This local kick serves as the semiclassical limit of the full non-local double-trace deformation, successfully averting the need for a global entangling gate across the IPC barrier. As described in the theoretical studies of Maldacena, Stanford, and Yang [arXiv:1704.05333], this deformation effectively injects negative energy shockwaves into the bulk, altering the causal structure and allowing state information to traverse between the previously isolated patches.
 
 ## E. Observable Tracking: Bulk Magnetization and Signal Propagation
 
