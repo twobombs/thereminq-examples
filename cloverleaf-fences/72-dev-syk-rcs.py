@@ -1,6 +1,5 @@
 import os
 import gc
-import time
 import numpy as np
 import multiprocessing as mp
 from typing import List, Tuple, Dict, Any
@@ -96,45 +95,53 @@ def persistent_universe_worker(
     """
     os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(device_id)
     os.environ["QRACK_QPAGER_DEVICES"] = str(device_id)
+    os.environ["QRACK_QUNITMULTI_DEVICES"] = str(device_id)
 
     from pyqrack import QrackSimulator
-    sim = QrackSimulator(qubit_count=num_qubits)
+    sim = QrackSimulator(
+        qubitCount=num_qubits,
+        isOpenCL=True,
+        isTensorNetwork=False,
+        isSchmidtDecompose=False
+    )
 
-    # Initialize in superposition to mimic the start of the SYK protocol
+    # Fast indexed lookup array for the inner RCS loop
+    rotation_gates = [apply_rx, apply_ry, apply_rz]
+
     for q in range(num_qubits):
         apply_h(sim, q)
 
+    cmd_pipe.send({"status": "READY"})
+
     try:
         while True:
-            cmd = cmd_pipe.recv()
+            if cmd_pipe.poll(timeout=1.0):
+                cmd = cmd_pipe.recv()
+            else:
+                continue
+                
             action = cmd.get("action")
 
             if action == "SHUTDOWN":
                 break
 
             elif action == "RCS_CHUNK":
-                # Execute a dense layer of Random Circuit Sampling
                 seed = cmd.get("seed")
                 depth = cmd.get("depth", 1)
                 rng = np.random.default_rng(seed)
 
                 for _ in range(depth):
-                    # 1. Random single qubit rotations
                     for q in range(num_qubits):
-                        gate = rng.choice(['RX', 'RY', 'RZ'])
+                        gate_idx = rng.integers(0, 3)
                         theta = rng.uniform(-np.pi, np.pi)
-                        if gate == 'RX': apply_rx(sim, theta, q)
-                        elif gate == 'RY': apply_ry(sim, theta, q)
-                        else: apply_rz(sim, theta, q)
+                        rotation_gates[gate_idx](sim, theta, q)
                     
-                    # 2. Entanglement layer
                     for q1, q2 in intra_edges:
                         apply_cx(sim, q1, q2)
                 
                 cmd_pipe.send({"status": "CHUNK_COMPLETE"})
 
             elif action == "MEASURE_BOUNDARY_Z":
-                # Compute <Z> without destroying the state
                 z_exp = {}
                 for q in boundary_qubits:
                     p_one = sim.prob(q)
@@ -142,17 +149,14 @@ def persistent_universe_worker(
                 cmd_pipe.send({"status": "Z_EXP_COMPUTED", "data": z_exp})
 
             elif action == "APPLY_WORMHOLE_KICKS":
-                # Apply the mean-field semi-classical coupling from the Orchestrator
-                # Unitary: U = exp(i * g * <Z_neighbor> * Z_local) => RZ(2 * g * <Z_neighbor>)
                 kicks = cmd.get("kicks", {})
                 for q, theta in kicks.items():
                     apply_rz(sim, theta, q)
                 cmd_pipe.send({"status": "KICKS_APPLIED"})
 
-            elif action == "MEASURE_TOTAL_ENTROPY":
-                # A proxy for volume law: measure total Z magnetization
+            elif action == "MEASURE_MAGNETIZATION":
                 total_z = sum((1.0 - 2.0 * sim.prob(q)) for q in range(num_qubits))
-                cmd_pipe.send({"status": "ENTROPY_MEASURED", "data": total_z})
+                cmd_pipe.send({"status": "MAGNETIZATION_MEASURED", "data": total_z})
 
     finally:
         del sim
@@ -167,7 +171,6 @@ class TraversableWormholeEngine:
         self.patches, self.fence_edges = get_topology()
         self.intra_patch_edges = get_3x6_edges()
 
-        # Map boundary relationships
         self.boundary_map = {i: {} for i in range(4)}
         for (pA, qA), (pB, qB) in self.fence_edges:
             self.boundary_map[pA][qA] = (pB, qB)
@@ -197,7 +200,14 @@ class TraversableWormholeEngine:
             self.workers.append(p)
             self.pipes.append(parent_conn)
             
-        time.sleep(2) # Allow OpenCL contexts to warm up
+        for i, pipe in enumerate(self.pipes):
+            if pipe.poll(timeout=15.0):
+                msg = pipe.recv()
+                if msg.get("status") != "READY":
+                    raise RuntimeError(f"Worker {i} initialized with bad state: {msg}")
+            else:
+                self.shutdown()
+                raise TimeoutError(f"Worker {i} failed to initialize within 15 seconds.")
 
     def sync_broadcast(self, action: str, kwargs_list: List[Dict] = None) -> List[Any]:
         if kwargs_list is None:
@@ -210,7 +220,10 @@ class TraversableWormholeEngine:
             
         results = []
         for pipe in self.pipes:
-            results.append(pipe.recv())
+            if pipe.poll(timeout=120.0):
+                results.append(pipe.recv())
+            else:
+                raise TimeoutError(f"Worker process timed out during {action}.")
         return results
 
     def evolve(self, total_time_steps: int, depth_per_step: int, coupling_strength: float):
@@ -220,31 +233,35 @@ class TraversableWormholeEngine:
         for t in range(total_time_steps):
             step_seed = np.random.randint(0, 1000000)
             
-            # 1. SCRAMBLE (RCS Phase)
             self.sync_broadcast("RCS_CHUNK", [{"seed": step_seed + i, "depth": depth_per_step} for i in range(4)])
             
-            # 2. MEASURE BOUNDARIES
             z_results = self.sync_broadcast("MEASURE_BOUNDARY_Z")
             patch_z_exp = {i: res["data"] for i, res in enumerate(z_results)}
 
-            # 3. CALCULATE ER=EPR KICKS (The Information Tunnel)
-            # U = exp(i * g * Z_A * Z_B)
             kick_payloads = [{"kicks": {}} for _ in range(4)]
-            
             for pA in range(4):
                 for qA, (pB, qB) in self.boundary_map[pA].items():
                     z_B = patch_z_exp[pB][qB]
                     theta_kick = 2.0 * coupling_strength * z_B
                     kick_payloads[pA]["kicks"][qA] = theta_kick
 
-            # 4. APPLY COUPLING UNITARY
             self.sync_broadcast("APPLY_WORMHOLE_KICKS", kick_payloads)
 
-            # Optional: Log system state
             if t % 5 == 0 or t == total_time_steps - 1:
-                entropy_res = self.sync_broadcast("MEASURE_TOTAL_ENTROPY")
-                mag_sum = sum(res["data"] for res in entropy_res)
-                print(f"Step {t:03d} | Global Bulk Magnetization: {mag_sum:+.4f} | Tunneling Kicks Applied: {sum(len(k['kicks']) for k in kick_payloads)}")
+                mag_res = self.sync_broadcast("MEASURE_MAGNETIZATION")
+                mag_sum = sum(res["data"] for res in mag_res)
+                
+                cross_corr = 0.0
+                edge_count = 0
+                for pA in range(4):
+                    for qA, (pB, qB) in self.boundary_map[pA].items():
+                        if pA < pB: 
+                            cross_corr += patch_z_exp[pA][qA] * patch_z_exp[pB][qB]
+                            edge_count += 1
+                            
+                avg_corr = cross_corr / edge_count if edge_count > 0 else 0.0
+
+                print(f"Step {t:03d} | Bulk Mag: {mag_sum:+.4f} | Boundary <Z_A Z_B> [pre-kick]: {avg_corr:+.4f} | Kicks: {sum(len(k['kicks']) for k in kick_payloads)}")
 
     def shutdown(self):
         print("\nCollapsing the Wormhole (Shutting down GPU workers)...")
@@ -263,16 +280,9 @@ class TraversableWormholeEngine:
 if __name__ == "__main__":
     AVAILABLE_GPUS = [0, 0, 0, 0] 
     
-    # Notice: The CPU Oracle is completely removed.
-    # An exact monolithic 72-qubit state vector of an RCS circuit requires ~4.7 Zettabytes of RAM.
-    # The distributed wormhole architecture is the ONLY mathematically viable way to simulate this space.
-    
     wormhole_engine = TraversableWormholeEngine(device_ids=AVAILABLE_GPUS)
 
     try:
-        # g = coupling_strength. 
-        # Too low: Boundaries remain severed. 
-        # Too high: Causes destructive interference and artificial boundary reflections.
         wormhole_engine.evolve(
             total_time_steps=50, 
             depth_per_step=3, 
