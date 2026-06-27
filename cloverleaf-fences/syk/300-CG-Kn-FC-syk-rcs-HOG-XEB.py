@@ -1,6 +1,7 @@
 import os
 import gc
 import time
+import signal
 import numpy as np
 import multiprocessing as mp
 from multiprocessing.connection import Connection, wait
@@ -93,6 +94,9 @@ def persistent_universe_worker(
     cmd_pipe: Connection,
     ram_semaphore: Semaphore
 ) -> None:
+    
+    # Ignore Ctrl+C in child processes so the main process handles shutdown cleanly
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     
     # ---------------------------------------------------------
     # HARDWARE SAFEGUARD: Prevent NumPy Thread Thrashing
