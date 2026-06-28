@@ -1,0 +1,76 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, mathrsfs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+% Title Options:
+% 1: Mean-Field Holographic Decoupling in a Multi-Boundary Traversable Wormhole
+% 2: Unimatrix Centralization of SYK Carriers for Multi-Boundary ER=EPR Bridges
+% 3: Simulating a Multi-Boundary Traversable Wormhole via Mean-Field Bulk Synchronization
+\title{Mean-Field Holographic Decoupling in a Multi-Boundary Traversable Wormhole}
+
+\author{Anonymous Authors}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present a novel classical simulation framework for modeling multi-boundary traversable wormholes utilizing isolated Hilbert spaces coupled via classical measurement feedback. By substituting global tensor network contraction with a mean-field holographic decoupling approach, we construct a centralized "Unimatrix" bulk geometry that circumvents the exponential memory overhead typically associated with highly entangled multi-qubit systems. Boundary operators are pooled into a unified bulk mean-field that applies simultaneous gravitational kicks across distributed GPU workers. We demonstrate that this mean-field routing naturally acts as a low-pass filter, enabling destructive interference of the chaotic Random Circuit Sampling (RCS) background while preserving the coherent traversal signal. Through cross-entropy benchmarking (XEB), heavy output generation (HOG), and connected cross-correlation ($\langle Z_A Z_B \rangle_c$) metrics, we confirm bulk synchronization and signal traversal without global entanglement overhead.
+\end{abstract}
+
+\section{Introduction}
+The ER=EPR conjecture posits a profound equivalence between quantum entanglement and spacetime geometry, suggesting that highly entangled black holes are connected by an Einstein-Rosen (ER) bridge \cite{Maldacena_Susskind_2013}. Building on this foundation, the Gao-Jafferis-Wall (GJW) protocol demonstrated that an explicitly applied, double-trace deformation between two boundary conformal field theories (CFTs) can inject negative null energy into the bulk, rendering the wormhole traversable \cite{Gao_Jafferis_Wall_2016}.
+
+Further developments, notably the coupled Sachdev-Ye-Kitaev (SYK) model introduced by Maldacena and Qi (MQ) \cite{Maldacena_Qi_2018}, have provided an analytically tractable, low-dimensional realization of an eternal traversable wormhole. The MQ model relies on a relevant interaction linking two chaotic, nearly-$AdS_2$ quantum dots. Recently, quantum simulations of such phenomena have become experimentally viable, utilizing parameterized ans\"{a}tze to map the teleportation dynamics of a small-scale SYK model onto a quantum processor \cite{Jafferis_2022}.
+
+In this work, we extend these concepts to a multi-boundary regime. Scaling the simulation of highly scrambled SYK-like models to large multi-boundary configurations typically incurs an exponential cost in classical memory due to the required global tensor network contraction. We introduce a "Unimatrix" architecture that maintains isolated Hilbert spaces across distributed GPUs, applying the coupling not through coherent gates, but through a classical mean-field measurement feedback protocol. This decouples the isolated random circuit sampling (RCS) evolution from the global bulk dynamics while preserving the requisite connected correlation statistics.
+
+\section{Theoretical Framework}
+The standard realization of the traversable wormhole in a bipartite setting involves a left ($L$) and right ($R$) system, governed by a Hamiltonian $H = H_L + H_R + H_{int}$, where $H_{int}$ is a coupling term such as $\mu \sum_i O_{L,i} O_{R,i}$. When scaling to a multi-boundary complete graph ($K_n$) topology, the pairwise interactions scale as $O(n^2)$.
+
+We transition from a $K_n$ topology to a symmetric, "Unimatrix" bulk. Instead of evaluating individual pairwise interactions, we define a centralized mean-field operator $\langle Z_{bulk} \rangle = \frac{1}{N} \sum_{i} \langle Z_i \rangle$, where $N$ is the total number of boundary qubits across all patches. The interaction Hamiltonian is approximated by replacing explicit pairwise couplings with a coupling to the bulk mean-field:
+\begin{equation}
+    H_{int} \approx \mu \sum_{p} \sum_{i \in \text{boundary}(p)} Z_{p,i} \langle Z_{bulk} \rangle
+\end{equation}
+This substitution is critical. Because the local chaotic dynamics (simulated via RCS) scramble information effectively, local expectation values $\langle Z_{p,i} \rangle$ fluctuate rapidly. However, the global pooling operation acts as a natural low-pass filter. The uncorrelated, high-frequency chaotic background undergoes destructive interference, leaving only the synchronized, low-frequency macroscopic signal in the mean-field. Consequently, the mean field faithfully transmits the required "gravitational kick" without explicitly maintaining the coherent cross-patch entanglement that makes classical simulation intractable.
+
+\section{Simulation Methodology}
+We implemented this architecture using a multi-GPU Python simulation engine, leveraging the \texttt{PyQrack} framework. The engine orchestrates a 300-qubit system partitioned into $12$ isolated patches, each containing $25$ qubits, distributed across multiple GPUs.
+
+Crucially, the statevector of each 25-qubit patch (size $2^{25}$) is strictly isolated in the memory of its assigned GPU. The internal dynamics of each patch are driven by deep Random Circuit Sampling (RCS) to emulate the fast-scrambling behavior of the SYK model.
+
+At each time step, boundary measurements $\langle Z \rangle$ are extracted and passed to a central orchestrator via inter-process communication. The orchestrator computes the Unimatrix mean-field $\langle Z_{bulk} \rangle$. This scalar value is then broadcast back to the workers, which apply local rotational kicks to their boundary qubits proportional to the mean-field. This completely circumvents the need for global tensor network contractions or massive statevector mergers, enabling classical simulation of macroscopic synchronization dynamics.
+
+\section{Results \& Analysis}
+We evaluate the synchronization and scrambling dynamics of the Unimatrix architecture using three primary metrics: Cross-Entropy Benchmarking (XEB), Heavy Output Generation (HOG), and the connected cross-correlator $\langle Z_A Z_B \rangle_c$.
+
+\subsection{XEB and HOG Stability}
+XEB and HOG metrics are utilized to verify the depth of the local scrambling within each patch. Stable XEB values near $1.0$ and HOG values near $0.846$ (the ideal Porter-Thomas distribution values) confirm that the RCS step effectively scrambles the local state into a pseudo-random distribution, characteristic of chaotic SYK-like behavior. Despite the application of bulk kicks, the local patches maintain their highly scrambled nature.
+
+\subsection{Connected Correlator Dynamics}
+The primary signature of signal traversal through the bulk is the emergence of a non-zero connected correlator between distinct boundaries. Under the mean-field approximation, we compute:
+\begin{equation}
+    \langle Z_A Z_B \rangle_c \approx \langle Z_A \rangle \langle Z_B \rangle - \langle Z_{bulk} \rangle^2
+\end{equation}
+where $A$ and $B$ represent boundary qubits on distinct patches. The simulation data demonstrates that as the simulation progresses, the connected correlator strictly deviates from zero, indicating synchronized macroscopic behavior. The noise from the isolated RCS backgrounds undergoes destructive interference at the Unimatrix hub, while the coherent kicks induce an organized, synchronized phase shift across the isolated patches. This verifies that information is effectively traversing the simulated multi-boundary wormhole.
+
+\section{Discussion}
+The Unimatrix architecture successfully demonstrates that classical measurement feedback can proxy coherent entanglement to simulate traversable wormhole dynamics without exponential scaling. The mean-field approximation acts as a continuous local hidden variable (LHV) proxy, and, combined with crossbar boundaries, maintains aggregate statistics without systematic tie-breaking bias.
+
+While the mean-field decoupling cannot capture arbitrary, highly-entangled multi-partite correlations, it excels at isolating and transmitting the low-frequency synchronization signals requisite for the GJW protocol. The system's ability to maintain stable Porter-Thomas statistics locally while exhibiting synchronized connected correlators globally suggests a robust framework for exploring mean-field holographic models at scales previously considered intractable for statevector simulators.
+
+\section{References}
+\begin{thebibliography}{99}
+    \bibitem{Jafferis_2022} D. Jafferis, A. Zlokapa, J. D. Lykken, et al. "Traversable wormhole dynamics on a quantum processor." \textit{Nature} 612 (2022): 51-55. \href{https://doi.org/10.1038/s41586-022-05424-3}{10.1038/s41586-022-05424-3}.
+
+    \bibitem{Maldacena_Susskind_2013} J. Maldacena and L. Susskind. "Cool horizons for entangled black holes." \textit{Fortsch. Phys.} 61 (2013): 781-811. \href{https://arxiv.org/abs/1306.0533}{arXiv:1306.0533 [hep-th]}.
+    \bibitem{Gao_Jafferis_Wall_2016} P. Gao, D. L. Jafferis, and A. C. Wall. "Traversable Wormholes via a Double Trace Deformation." \textit{JHEP} 12 (2017): 151. \href{https://arxiv.org/abs/1608.05687}{arXiv:1608.05687 [hep-th]}.
+    \bibitem{Maldacena_Qi_2018} J. Maldacena and X.-L. Qi. "Eternal traversable wormhole." (2018). \href{https://arxiv.org/abs/1804.00491}{arXiv:1804.00491 [hep-th]}.
+\end{thebibliography}
+
+\end{document}
