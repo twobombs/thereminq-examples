@@ -1,0 +1,10 @@
+Initializing 12 isolated GPU Universes (25 Qubits/Patch)...
+
+Collapsing the Wormhole (Shutting down GPU workers)...
+Traceback (most recent call last):
+  File "/app/cloverleaf-fences/syk-rcs/unimatrix/300-CG-Kn-FC-unimatrix-syk-rcs-HOG-XEB.py", line 501, in <module>
+    wormhole_engine = TraversableWormholeEngine(device_ids=AVAILABLE_GPUS)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/cloverleaf-fences/syk-rcs/unimatrix/300-CG-Kn-FC-unimatrix-syk-rcs-HOG-XEB.py", line 323, in __init__
+    raise RuntimeError(f"Worker {i} initialized with bad state: {msg.get('msg', '')}")
+RuntimeError: Worker 0 initialized with bad state: Worker 0 failed fatally: QrackSimulator.__init__() got an unexpected keyword argument 'qubitCount'
