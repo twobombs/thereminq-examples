@@ -110,12 +110,10 @@ def persistent_universe_worker(
 
     # Import pyqrack only AFTER environment variables for devices are set
     from pyqrack import QrackSimulator
-    sim = QrackSimulator(
-        qubitCount=num_qubits,
-        isOpenCL=True,
-        isTensorNetwork=False,
-        isSchmidtDecompose=False
-    )
+    
+    # In PyQrack v2.0.0+, initialization kwargs for backend flags have been removed.
+    # The environment variables set above alone natively dictate backend behavior.
+    sim = QrackSimulator(qubit_count=num_qubits)
 
     # Fast indexed lookup array for the inner RCS loop
     rotation_gates = [apply_rx, apply_ry, apply_rz]
