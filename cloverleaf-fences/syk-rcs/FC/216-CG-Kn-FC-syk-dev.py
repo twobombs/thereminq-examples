@@ -19,28 +19,28 @@ def apply_h(sim: Any, q: int) -> None:
         sim.mtrx([
             complex(1/np.sqrt(2), 0), complex(1/np.sqrt(2), 0), 
             complex(1/np.sqrt(2), 0), complex(-1/np.sqrt(2), 0)
-        ], q)
+        ], [q])
 
 def apply_rx(sim: Any, theta: float, q: int) -> None:
     if hasattr(sim, 'r'): 
         sim.r(PX, float(theta), q)
     else: 
         sim.mtrx([complex(np.cos(theta/2), 0), complex(0, -np.sin(theta/2)), 
-                  complex(0, -np.sin(theta/2)), complex(np.cos(theta/2), 0)], q)
+                  complex(0, -np.sin(theta/2)), complex(np.cos(theta/2), 0)], [q])
 
 def apply_ry(sim: Any, theta: float, q: int) -> None:
     if hasattr(sim, 'r'): 
         sim.r(PY, float(theta), q)
     else: 
         sim.mtrx([complex(np.cos(theta/2), 0), complex(-np.sin(theta/2), 0), 
-                  complex(np.sin(theta/2), 0), complex(np.cos(theta/2), 0)], q)
+                  complex(np.sin(theta/2), 0), complex(np.cos(theta/2), 0)], [q])
 
 def apply_rz(sim: Any, theta: float, q: int) -> None:
     if hasattr(sim, 'r'): 
         sim.r(PZ, float(theta), q)
     else: 
         sim.mtrx([complex(np.cos(-theta/2), np.sin(-theta/2)), 0j, 
-                  0j, complex(np.cos(theta/2), np.sin(theta/2))], q)
+                  0j, complex(np.cos(theta/2), np.sin(theta/2))], [q])
 
 def apply_cx(sim: Any, c: int, t: int) -> None:
     if hasattr(sim, 'cx'): 
@@ -111,12 +111,9 @@ def persistent_universe_worker(
         os.environ["QRACK_QUNITMULTI_DEVICES"] = str(device_id)
 
         from pyqrack import QrackSimulator
-        sim = QrackSimulator(
-            qubitCount=num_qubits,
-            isOpenCL=True,
-            isTensorNetwork=False,
-            isSchmidtDecompose=False
-        )
+        
+        # Updated for PyQrack 2.0 API (relies on env variables defined above)
+        sim = QrackSimulator(qubit_count=num_qubits)
         
         for q in range(num_qubits):
             apply_h(sim, q)
@@ -407,7 +404,7 @@ class TraversableWormholeEngine:
 # ==========================================
 if __name__ == "__main__":
     # Support environment-based parameterization for multi-GPU nodes
-    gpu_env = os.environ.get("WORMHOLE_GPUS", "0,0,0,0,0,0,0,0,0,0,0,0")
+    gpu_env = os.environ.get("WORMHOLE_GPUS", "0,1,0,1,0,1,0,1,0,1,0,1")
     base_gpus = [int(g.strip()) for g in gpu_env.split(',')]
     
     # Auto-pad or slice the GPU list to precisely match the 12 resulting patches
