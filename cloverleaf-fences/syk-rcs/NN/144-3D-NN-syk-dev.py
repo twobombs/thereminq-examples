@@ -11,36 +11,36 @@ from typing import List, Tuple, Dict, Any
 PX, PY, PZ = 1, 2, 3
 
 def apply_h(sim: Any, q: int) -> None:
-    if hasattr(sim, 'h'): 
+    if hasattr(sim, 'h'):
         sim.h(q)
-    else: 
+    else:
         sim.mtrx([complex(1/np.sqrt(2), 0)] * 3 + [complex(-1/np.sqrt(2), 0)], [q])
 
 def apply_rx(sim: Any, theta: float, q: int) -> None:
-    if hasattr(sim, 'r'): 
+    if hasattr(sim, 'r'):
         sim.r(PX, float(theta), q)
-    else: 
-        sim.mtrx([complex(np.cos(theta/2), 0), complex(0, -np.sin(theta/2)), 
+    else:
+        sim.mtrx([complex(np.cos(theta/2), 0), complex(0, -np.sin(theta/2)),
                   complex(0, -np.sin(theta/2)), complex(np.cos(theta/2), 0)], [q])
 
 def apply_ry(sim: Any, theta: float, q: int) -> None:
-    if hasattr(sim, 'r'): 
+    if hasattr(sim, 'r'):
         sim.r(PY, float(theta), q)
-    else: 
-        sim.mtrx([complex(np.cos(theta/2), 0), complex(-np.sin(theta/2), 0), 
+    else:
+        sim.mtrx([complex(np.cos(theta/2), 0), complex(-np.sin(theta/2), 0),
                   complex(np.sin(theta/2), 0), complex(np.cos(theta/2), 0)], [q])
 
 def apply_rz(sim: Any, theta: float, q: int) -> None:
-    if hasattr(sim, 'r'): 
+    if hasattr(sim, 'r'):
         sim.r(PZ, float(theta), q)
-    else: 
-        sim.mtrx([complex(np.cos(-theta/2), np.sin(-theta/2)), 0j, 
+    else:
+        sim.mtrx([complex(np.cos(-theta/2), np.sin(-theta/2)), 0j,
                   0j, complex(np.cos(theta/2), np.sin(theta/2))], [q])
 
 def apply_cx(sim: Any, c: int, t: int) -> None:
-    if hasattr(sim, 'cx'): 
+    if hasattr(sim, 'cx'):
         sim.cx(c, t)
-    else: 
+    else:
         sim.mcx([c], t)
 
 # ==========================================
@@ -66,14 +66,14 @@ def get_3d_topology() -> Tuple[List[List[Tuple[int, int]]], List[Tuple[Tuple[int
     global_to_local = {}
 
     # Pass 1: Populate global_to_local and patches to ensure all keys exist
-    for z in range(2): 
+    for z in range(2):
         for r in range(6):
             for c in range(12):
                 idx = z * 72 + r * 12 + c
                 patch_r = r // 3
                 patch_c = c // 6
                 # Patches 0-3 are Bottom Layer, Patches 4-7 are Top Layer
-                patch_idx = z * 4 + (patch_r * 2 + patch_c) 
+                patch_idx = z * 4 + (patch_r * 2 + patch_c)
                 local_idx = len(patches[patch_idx])
                 patches[patch_idx].append((idx, local_idx))
                 global_to_local[idx] = (patch_idx, local_idx)
@@ -83,7 +83,7 @@ def get_3d_topology() -> Tuple[List[List[Tuple[int, int]]], List[Tuple[Tuple[int
         for r in range(6):
             for c in range(12):
                 g1 = z * 72 + r * 12 + c
-                
+
                 # 2D Lateral Boundaries (East-West / North-South inside a layer)
                 if c == 5:
                     g2_east = z * 72 + r * 12 + (c + 1)
@@ -91,7 +91,7 @@ def get_3d_topology() -> Tuple[List[List[Tuple[int, int]]], List[Tuple[Tuple[int
                 if r == 2:
                     g2_south = z * 72 + (r + 1) * 12 + c
                     fence_edges.append((global_to_local[g1], global_to_local[g2_south]))
-                
+
                 # 3D Vertical Boundaries (Partial FC interconnect between Z-layers)
                 if z == 0 and (r % 2 == 0 and c % 3 == 0):
                     g2_up = (z + 1) * 72 + r * 12 + c
@@ -103,14 +103,14 @@ def get_3d_topology() -> Tuple[List[List[Tuple[int, int]]], List[Tuple[Tuple[int
 # 2. ISOLATED PERSISTENT UNIVERSE (GPU WORKER)
 # ==========================================
 def persistent_universe_worker(
-    device_id: int, 
-    patch_idx: int, 
-    num_qubits: int, 
-    intra_edges: List[Tuple[int, int]], 
+    device_id: int,
+    patch_idx: int,
+    num_qubits: int,
+    intra_edges: List[Tuple[int, int]],
     boundary_qubits: List[int],
     cmd_pipe: Connection
 ) -> None:
-    
+
     # Pre-flight bounds check on boundary qubits
     try:
         if boundary_qubits:
@@ -126,16 +126,13 @@ def persistent_universe_worker(
     # Delay READY signal until GPU context is fully allocated and initialized
     try:
         from pyqrack import QrackSimulator
-        sim = QrackSimulator(
-            qubitCount=num_qubits,
-            isOpenCL=True,
-            isTensorNetwork=False,
-            isSchmidtDecompose=False
-        )
         
+        # PyQrack 2.0 relies on the environment variables defined above for optimizations
+        sim = QrackSimulator(qubit_count=num_qubits)
+
         for q in range(num_qubits):
             apply_h(sim, q)
-            
+
         cmd_pipe.send({"status": "READY"})
     except Exception as e:
         cmd_pipe.send({"status": "ERROR", "msg": f"Worker {patch_idx} init failed: {e}"})
@@ -153,7 +150,7 @@ def persistent_universe_worker(
                     continue
             except (EOFError, OSError, BrokenPipeError):
                 break
-                
+
             action = cmd.get("action")
 
             if action == "SHUTDOWN":
@@ -169,10 +166,10 @@ def persistent_universe_worker(
                         gate_idx = rng.integers(0, 3)
                         theta = rng.uniform(-np.pi, np.pi)
                         rotation_gates[gate_idx](sim, theta, q)
-                    
+
                     for q1, q2 in intra_edges:
                         apply_cx(sim, q1, q2)
-                
+
                 cmd_pipe.send({"status": "CHUNK_COMPLETE"})
 
             elif action == "MEASURE_BOUNDARY_Z":
@@ -204,10 +201,10 @@ class TraversableWormholeEngine:
         self.device_ids = device_ids
         self.patches, self.fence_edges = get_3d_topology()
         self.intra_patch_edges = get_3x6_edges()
-        
+
         self.num_patches = len(self.patches)
         self.boundary_map = {i: {} for i in range(self.num_patches)}
-        
+
         # Accumulate neighbors to handle corner qubits overlapping multiple boundaries safely
         for (pA, qA), (pB, qB) in self.fence_edges:
             self.boundary_map[pA].setdefault(qA, []).append((pB, qB))
@@ -219,27 +216,27 @@ class TraversableWormholeEngine:
 
         print(f"Initializing {self.num_patches} isolated GPU Universes (3D Stack)...")
         for p_idx in range(self.num_patches):
-            
+
             assert len(self.patches[p_idx]) == 18, f"Patch {p_idx} invalid size. Intra-patch edges assume 3x6 topologies."
-            
+
             parent_conn, child_conn = self.ctx.Pipe()
             boundary_qubits = list(self.boundary_map[p_idx].keys())
-            
+
             p = self.ctx.Process(
                 target=persistent_universe_worker,
                 args=(
-                    self.device_ids[p_idx % len(self.device_ids)], 
-                    p_idx, 
-                    len(self.patches[p_idx]), 
-                    self.intra_patch_edges, 
-                    boundary_qubits, 
+                    self.device_ids[p_idx % len(self.device_ids)],
+                    p_idx,
+                    len(self.patches[p_idx]),
+                    self.intra_patch_edges,
+                    boundary_qubits,
                     child_conn
                 )
             )
             p.start()
             self.workers.append(p)
             self.pipes.append(parent_conn)
-            
+
         for i, pipe in enumerate(self.pipes):
             if pipe.poll(timeout=30.0): # Increased timeout slightly to account for parallel GPU cold starts
                 msg = pipe.recv()
@@ -254,7 +251,7 @@ class TraversableWormholeEngine:
     def sync_broadcast(self, action: str, kwargs_list: List[Dict] = None) -> List[Any]:
         if kwargs_list is None:
             kwargs_list = [{}] * self.num_patches
-            
+
         for i, pipe in enumerate(self.pipes):
             payload = {"action": action}
             payload.update(kwargs_list[i])
@@ -263,7 +260,7 @@ class TraversableWormholeEngine:
             except (BrokenPipeError, OSError) as e:
                 self.shutdown()
                 raise RuntimeError(f"Worker {i} pipe broken during send: {e}")
-            
+
         results = []
         for i, pipe in enumerate(self.pipes):
             if pipe.poll(timeout=120.0):
@@ -278,16 +275,16 @@ class TraversableWormholeEngine:
         print(f"Total Steps: {total_time_steps} | RCS Depth/Step: {depth_per_step} | g: {coupling_strength}\n")
 
         for t in range(total_time_steps):
-            
-            step_seed = int(np.random.randint(0, 1000000)) 
-            
+
+            step_seed = int(np.random.randint(0, 1000000))
+
             self.sync_broadcast("RCS_CHUNK", [{"seed": step_seed + i, "depth": depth_per_step} for i in range(self.num_patches)])
-            
+
             z_results = self.sync_broadcast("MEASURE_BOUNDARY_Z")
             patch_z_exp = {i: res["data"] for i, res in enumerate(z_results)}
 
             kick_payloads = [{"kicks": {}} for _ in range(self.num_patches)]
-            
+
             # Kicks are accumulated over all boundaries a qubit touches
             for pA in range(self.num_patches):
                 for qA, neighbors in self.boundary_map[pA].items():
@@ -300,11 +297,11 @@ class TraversableWormholeEngine:
             if t % 5 == 0 or t == total_time_steps - 1:
                 mag_res = self.sync_broadcast("MEASURE_MAGNETIZATION")
                 mag_sum = sum(res["data"] for res in mag_res)
-                
+
                 cross_corr = 0.0
                 edge_count = 0
                 seen = set()
-                
+
                 # Cross-correlation deduplicates the edges via lexicographical canonical pairing
                 for pA in range(self.num_patches):
                     for qA, neighbors in self.boundary_map[pA].items():
@@ -312,12 +309,12 @@ class TraversableWormholeEngine:
                             endpointA = (pA, qA)
                             endpointB = (pB, qB)
                             key = (min(endpointA, endpointB), max(endpointA, endpointB))
-                            
+
                             if key not in seen:
                                 seen.add(key)
                                 cross_corr += patch_z_exp[pA][qA] * patch_z_exp[pB][qB]
                                 edge_count += 1
-                            
+
                 avg_corr = cross_corr / edge_count if edge_count > 0 else 0.0
 
                 print(f"Step {t:03d} | Bulk Mag: {mag_sum:+.4f} | Boundary <Z_A Z_B>: {avg_corr:+.4f} | 2D/3D Kicks: {sum(len(k['kicks']) for k in kick_payloads)}")
@@ -328,33 +325,32 @@ class TraversableWormholeEngine:
             try:
                 if not pipe.closed:
                     pipe.send({"action": "SHUTDOWN"})
-                    
+
                     # Extended drain loop for straggling responses
                     while pipe.poll(timeout=0.5):
                         pipe.recv()
             except (EOFError, OSError, BrokenPipeError):
                 pass
-                
+
         for p in self.workers:
             p.join(timeout=5)
-            if p.is_alive(): 
+            if p.is_alive():
                 p.terminate()
 
 # ==========================================
 # 4. EXECUTION
 # ==========================================
 if __name__ == "__main__":
-    AVAILABLE_GPUS = [0, 0, 0, 0, 0, 0, 0, 0] 
-    
+    AVAILABLE_GPUS = [0, 1, 0, 1, 0, 1, 0, 1]
+
     wormhole_engine = TraversableWormholeEngine(device_ids=AVAILABLE_GPUS)
 
     try:
         wormhole_engine.evolve(
-            total_time_steps=50, 
-            depth_per_step=3, 
-            coupling_strength=0.15 
+            total_time_steps=50,
+            depth_per_step=3,
+            coupling_strength=0.15
         )
 
     finally:
         wormhole_engine.shutdown()
-      
