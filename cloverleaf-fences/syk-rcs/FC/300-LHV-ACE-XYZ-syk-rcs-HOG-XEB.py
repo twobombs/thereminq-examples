@@ -53,11 +53,21 @@ def apply_cx(sim: Any, c: int, t: int) -> None:
 # ==========================================
 # 1. HOLOGRAPHIC TOPOLOGY (BULK/BOUNDARY)
 # ==========================================
-def get_complete_intra_edges(num_qubits: int = 25) -> List[Tuple[int, int]]:
+def get_intra_edges(num_qubits: int = 25, topology: str = "FC") -> List[Tuple[int, int]]:
+    """Generates internal patch entanglement based on the chosen topology."""
     edges = []
-    for i in range(num_qubits):
-        for j in range(i + 1, num_qubits):
-            edges.append((i, j))
+    if topology == "FC":
+        for i in range(num_qubits):
+            for j in range(i + 1, num_qubits):
+                edges.append((i, j))
+    elif topology == "RING":
+        for i in range(num_qubits):
+            edges.append((i, (i + 1) % num_qubits))
+    elif topology == "STAR":
+        for i in range(1, num_qubits):
+            edges.append((0, i))
+    else:
+        raise ValueError(f"Unknown topology type: {topology}")
     return edges
 
 def get_holographic_topology(
@@ -136,11 +146,13 @@ def persistent_island_worker(
                     rng = np.random.default_rng(seed)
 
                     for _ in range(depth):
+                        # 1. Random single-qubit rotations
                         for q in range(num_qubits):
                             gate_idx = rng.integers(0, 3)
                             theta = rng.uniform(-np.pi, np.pi)
                             rotation_gates[gate_idx](sim, theta, q)
                         
+                        # 2. Apply chosen topology entanglement
                         for q1, q2 in intra_edges:
                             apply_cx(sim, q1, q2)
                     
@@ -149,15 +161,12 @@ def persistent_island_worker(
                 elif action == "MEASURE_BOUNDARY_BLOCH":
                     bloch_vectors = {}
                     for q in boundary_qubits:
-                        # Z Expectation
                         z_exp = 1.0 - 2.0 * sim.prob(q)
                         
-                        # X Expectation (H -> measure Z -> H)
                         apply_h(sim, q)
                         x_exp = 1.0 - 2.0 * sim.prob(q)
                         apply_h(sim, q)
                         
-                        # Y Expectation (Rx(-pi/2) -> measure Z -> Rx(pi/2))
                         apply_rx(sim, -np.pi/2, q)
                         y_exp = 1.0 - 2.0 * sim.prob(q)
                         apply_rx(sim, np.pi/2, q)
@@ -236,12 +245,14 @@ def persistent_island_worker(
 # 3. LHV WORMHOLE ORCHESTRATOR 
 # ==========================================
 class LHVWormholeEngine:
-    def __init__(self, device_ids: List[int]):
+    def __init__(self, device_ids: List[int], intra_topology: str = "FC"):
         self._is_shutdown = False
         self.device_ids = device_ids
         
         self.patches, self.fence_edges = get_holographic_topology(boundary_size=4)
-        self.intra_patch_edges = get_complete_intra_edges()
+        
+        # Generates edges based on the provided topology choice
+        self.intra_patch_edges = get_intra_edges(num_qubits=25, topology=intra_topology)
         
         self.num_patches = len(self.patches)
         self.boundary_map = {i: {} for i in range(self.num_patches)}
@@ -254,7 +265,7 @@ class LHVWormholeEngine:
         self.workers = []
         self.pipes = []
 
-        print(f"Initializing {self.num_patches} LHV Islands (25 Qubits/Patch)...")
+        print(f"Initializing {self.num_patches} LHV Islands (25 Qubits/Patch) with '{intra_topology}' Topology...")
         for p_idx in range(self.num_patches):
             parent_conn, child_conn = self.ctx.Pipe()
             boundary_qubits = list(self.boundary_map[p_idx].keys())
@@ -329,10 +340,10 @@ class LHVWormholeEngine:
         main_rng = np.random.default_rng()
 
         for t in range(total_time_steps):
+            # Applying robust NumPy randomization for exact reproducibility across benchmarks
             seeds = main_rng.integers(0, 2**32, size=self.num_patches)
             self.sync_broadcast("RCS_CHUNK", [{"seed": int(seeds[i]), "depth": depth_per_step} for i in range(self.num_patches)])
             
-            # Extract full (X, Y, Z) projections from all boundaries
             xyz_results = self.sync_broadcast("MEASURE_BOUNDARY_BLOCH")
             patch_bloch = {p_idx: res["data"] for p_idx, res in xyz_results.items()}
 
@@ -346,7 +357,6 @@ class LHVWormholeEngine:
                     for (pB, qB) in neighbors:
                         xB, yB, zB = patch_bloch[pB][qB]
                         
-                        # SDRP Style Tuned XYZ Communication 
                         kx += (coupling_strength * xB) / np.sqrt(n_neighbors)
                         ky += (coupling_strength * yB) / np.sqrt(n_neighbors)
                         kz += (coupling_strength * zB) / np.sqrt(n_neighbors)
@@ -355,7 +365,6 @@ class LHVWormholeEngine:
 
             self.sync_broadcast("APPLY_LHV_KICKS", kick_payloads)
 
-            # Analyze full inner product <V_A • V_B> cross-correlation
             cross_corr = 0.0
             edge_count = 0
             seen = set()
@@ -369,7 +378,6 @@ class LHVWormholeEngine:
                             vA = patch_bloch[pA][qA]
                             vB = patch_bloch[pB][qB]
                             
-                            # Dot product of the two Bloch vectors
                             dot_prod = vA[0]*vB[0] + vA[1]*vB[1] + vA[2]*vB[2]
                             cross_corr += dot_prod
                             edge_count += 1
@@ -413,7 +421,8 @@ if __name__ == "__main__":
     num_patches = 12
     AVAILABLE_GPUS = [base_gpus[i // 2 % len(base_gpus)] for i in range(num_patches)]
     
-    engine = LHVWormholeEngine(device_ids=AVAILABLE_GPUS)
+    # You can now specify "FC", "RING", or "STAR" for the intra-patch entanglement
+    engine = LHVWormholeEngine(device_ids=AVAILABLE_GPUS, intra_topology="RING")
 
     try:
         engine.evolve(
