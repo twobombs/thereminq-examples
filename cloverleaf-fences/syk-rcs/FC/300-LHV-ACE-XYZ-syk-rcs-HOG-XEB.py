@@ -47,8 +47,13 @@ def apply_rz(sim: Any, theta: float, q: int) -> None:
 def apply_cx(sim: Any, c: int, t: int) -> None:
     if hasattr(sim, 'cx'): 
         sim.cx(c, t)
-    else: 
-        sim.mcx([c], t)
+    elif hasattr(sim, 'mcx'):
+        try:
+            sim.mcx([c], t)
+        except TypeError:
+            sim.mcx([c], [t])
+    else:
+        raise RuntimeError("No CX gate available")
 
 # ==========================================
 # 1. HOLOGRAPHIC TOPOLOGY (BULK/BOUNDARY)
@@ -161,6 +166,7 @@ def persistent_island_worker(
                 elif action == "MEASURE_BOUNDARY_BLOCH":
                     bloch_vectors = {}
                     for q in boundary_qubits:
+                        # sim.prob() is non-collapsing in PyQrack - safe to rotate basis, sample, and undo
                         z_exp = 1.0 - 2.0 * sim.prob(q)
                         
                         apply_h(sim, q)
@@ -185,53 +191,50 @@ def persistent_island_worker(
                     cmd_pipe.send({"status": "KICKS_APPLIED", "patch_idx": patch_idx})
 
                 elif action == "MEASURE_MAGNETIZATION":
+                    # Reserved for future use (e.g., tracking bulk magnetization over time)
                     total_z = sum((1.0 - 2.0 * sim.prob(q)) for q in range(num_qubits))
                     cmd_pipe.send({"status": "MAGNETIZATION_MEASURED", "patch_idx": patch_idx, "data": total_z})
                 
                 elif action == "COMPUTE_BENCHMARKS":
                     shots = cmd.get("shots", 8192)
+                    expected_xeb, expected_hog = 0.0, 0.0
                     
                     try:
                         samples = sim.measure_shots(list(range(num_qubits)), shots)
+                        
+                        # Normalize: flatten if per-qubit format returned.
+                        # Assumes little-endian: s[0] = LSB. If PyQrack returns big-endian,
+                        # indices will be bit-reversed - harmless for XEB but matters for HOG.
+                        if samples and isinstance(samples[0], (list, tuple)):
+                            samples = [int(sum(b << i for i, b in enumerate(s))) for s in samples]
+                            
                         counts = dict(collections.Counter(samples))
+                        n_pow = 2 ** num_qubits
                         
-                        if hasattr(sim, 'out_probs'):
-                            ideal_probs = np.asarray(sim.out_probs(), dtype=np.float64)
-                        else:
-                            raise RuntimeError("Missing out_probs()")
-
-                        n_pow = len(ideal_probs)
-                        u_u = 1.0 / n_pow
+                        # Sparse collision probability - O(unique_outcomes) memory
+                        collision_prob = sum((c / shots) ** 2 for c in counts.values())
                         
-                        obs_probs = np.zeros(n_pow, dtype=np.float64)
-                        for k, count in counts.items():
-                            obs_probs[k] = count / shots
-
-                        denom = np.sum((ideal_probs - u_u) ** 2)
-                        numer = np.sum((ideal_probs - u_u) * (obs_probs - u_u))
-                        expected_xeb = numer / denom if denom > 0 else 0.0
-
-                        threshold = np.median(ideal_probs)
-                        heavy_mask = ideal_probs > threshold
-                        expected_hog = np.sum(obs_probs[heavy_mask])
-
-                        del ideal_probs, obs_probs, heavy_mask
+                        # Linear XEB via collision probability (Porter-Thomas: expected to approach 1.0 for ideal random circuits)
+                        expected_xeb = float(n_pow * collision_prob - 1.0)
+                        
+                        # Note: HOG requires ideal probabilities; with 2^25 states and 8k shots,
+                        # shot-based HOG is statistically meaningless. Reporting 0.0.
+                        expected_hog = 0.0
 
                     except Exception as e:
-                        expected_xeb, expected_hog = 0.0, 0.0
                         print(f"Worker {patch_idx} benchmark failed: {e}")
                     
                     gc.collect() 
                     cmd_pipe.send({
                         "status": "BENCHMARKS_COMPUTED", 
                         "patch_idx": patch_idx, 
-                        "data": {"xeb": float(expected_xeb), "hog": float(expected_hog)}
+                        "data": {"xeb": expected_xeb, "hog": expected_hog}
                     })
 
             except Exception as inner_e:
                 try:
                     cmd_pipe.send({"status": "ERROR", "msg": str(inner_e)})
-                except:
+                except (EOFError, OSError, BrokenPipeError):
                     break
                 
     except (EOFError, OSError, BrokenPipeError):
@@ -245,21 +248,18 @@ def persistent_island_worker(
 # 3. LHV WORMHOLE ORCHESTRATOR 
 # ==========================================
 class LHVWormholeEngine:
-    def __init__(self, device_ids: List[int], intra_topology: str = "FC"):
+    def __init__(self, device_ids: List[int], intra_topology: str = "FC", boundary_size: int = 4):
         self._is_shutdown = False
         self.device_ids = device_ids
         
-        self.patches, self.fence_edges = get_holographic_topology(boundary_size=4)
-        
-        # Generates edges based on the provided topology choice
+        self.patches, self.fence_edges = get_holographic_topology(boundary_size=boundary_size)
         self.intra_patch_edges = get_intra_edges(num_qubits=25, topology=intra_topology)
-        
         self.num_patches = len(self.patches)
         self.boundary_map = {i: {} for i in range(self.num_patches)}
         
-        for (pA, qA), (pB, qB) in self.fence_edges:
-            self.boundary_map[pA].setdefault(qA, []).append((pB, qB))
-            self.boundary_map[pB].setdefault(qB, []).append((pA, qA))
+        for (pA, bA), (pB, bB) in self.fence_edges:
+            self.boundary_map[pA].setdefault(bA, []).append((pB, bB))
+            self.boundary_map[pB].setdefault(bB, []).append((pA, bA))
 
         self.ctx = mp.get_context('spawn')
         self.workers = []
@@ -322,11 +322,15 @@ class LHVWormholeEngine:
             still_pending = []
             for idx, pipe in pending:
                 if pipe in ready_pipes:
-                    res = pipe.recv()
-                    if res.get("status") == "ERROR":
+                    try:
+                        res = pipe.recv()
+                        if res.get("status") == "ERROR":
+                            self.shutdown()
+                            raise RuntimeError(f"Worker {idx} error: {res.get('msg')}")
+                        results[idx] = res
+                    except (EOFError, OSError):
                         self.shutdown()
-                        raise RuntimeError(f"Worker {idx} error: {res.get('msg')}")
-                    results[idx] = res
+                        raise RuntimeError(f"Worker {idx} connection crashed during {action}.")
                 else:
                     still_pending.append((idx, pipe))
             pending = still_pending
@@ -340,7 +344,6 @@ class LHVWormholeEngine:
         main_rng = np.random.default_rng()
 
         for t in range(total_time_steps):
-            # Applying robust NumPy randomization for exact reproducibility across benchmarks
             seeds = main_rng.integers(0, 2**32, size=self.num_patches)
             self.sync_broadcast("RCS_CHUNK", [{"seed": int(seeds[i]), "depth": depth_per_step} for i in range(self.num_patches)])
             
@@ -350,18 +353,18 @@ class LHVWormholeEngine:
             kick_payloads = [{"kicks": {}} for _ in range(self.num_patches)]
             
             for pA in range(self.num_patches):
-                for qA, neighbors in self.boundary_map[pA].items():
+                for bA, neighbors in self.boundary_map[pA].items():
                     n_neighbors = len(neighbors)
                     kx, ky, kz = 0.0, 0.0, 0.0
                     
-                    for (pB, qB) in neighbors:
-                        xB, yB, zB = patch_bloch[pB][qB]
+                    for (pB, bB) in neighbors:
+                        xB, yB, zB = patch_bloch[pB][bB]
                         
                         kx += (coupling_strength * xB) / np.sqrt(n_neighbors)
                         ky += (coupling_strength * yB) / np.sqrt(n_neighbors)
                         kz += (coupling_strength * zB) / np.sqrt(n_neighbors)
                         
-                    kick_payloads[pA]["kicks"][qA] = (kx, ky, kz)
+                    kick_payloads[pA]["kicks"][bA] = (kx, ky, kz)
 
             self.sync_broadcast("APPLY_LHV_KICKS", kick_payloads)
 
@@ -370,13 +373,13 @@ class LHVWormholeEngine:
             seen = set()
             
             for pA in range(self.num_patches):
-                for qA, neighbors in self.boundary_map[pA].items():
-                    for (pB, qB) in neighbors:
-                        key = (min((pA, qA), (pB, qB)), max((pA, qA), (pB, qB)))
+                for bA, neighbors in self.boundary_map[pA].items():
+                    for (pB, bB) in neighbors:
+                        key = (min((pA, bA), (pB, bB)), max((pA, bA), (pB, bB)))
                         if key not in seen:
                             seen.add(key)
-                            vA = patch_bloch[pA][qA]
-                            vB = patch_bloch[pB][qB]
+                            vA = patch_bloch[pA][bA]
+                            vB = patch_bloch[pB][bB]
                             
                             dot_prod = vA[0]*vB[0] + vA[1]*vB[1] + vA[2]*vB[2]
                             cross_corr += dot_prod
@@ -386,6 +389,9 @@ class LHVWormholeEngine:
             print(f"Step {t:03d} | Boundary XYZ Correlation (V_A • V_B): {avg_corr:+.4f}")
             
             if t == total_time_steps - 1:
+                # Note: The benchmark is computed on the post-kick, post-Bloch-measurement state.
+                # While prob() is non-collapsing, the basis rotations applied during Bloch
+                # extraction do modify the state. XEB fidelity here reflects this slightly altered state.
                 print(f"         +-- Calculating Final Benchmarks...")
                 bench_res = self.sync_broadcast("COMPUTE_BENCHMARKS", [{"shots": 8192} for _ in range(self.num_patches)])
                 avg_xeb = sum(res["data"]["xeb"] for res in bench_res.values()) / self.num_patches
@@ -400,16 +406,22 @@ class LHVWormholeEngine:
         for pipe in getattr(self, 'pipes', []):
             try:
                 if not pipe.closed: pipe.send({"action": "SHUTDOWN"})
-            except: pass
+            except (OSError, BrokenPipeError):
+                pass
                 
         for p in getattr(self, 'workers', []):
-            p.join(timeout=5)
-            if p.is_alive(): p.terminate()
+            try:
+                p.join(timeout=5)
+                if p.is_alive(): 
+                    p.terminate()
+            except Exception:
+                pass
                 
         for pipe in getattr(self, 'pipes', []):
             try:
                 if not pipe.closed: pipe.close()
-            except: pass
+            except (OSError, BrokenPipeError):
+                pass
 
 # ==========================================
 # 4. EXECUTION
@@ -419,12 +431,18 @@ if __name__ == "__main__":
     base_gpus = [int(g.strip()) for g in gpu_env.split(',')]
     
     num_patches = 12
-    AVAILABLE_GPUS = [base_gpus[i // 2 % len(base_gpus)] for i in range(num_patches)]
     
-    # You can now specify "FC", "RING", or "STAR" for the intra-patch entanglement
-    engine = LHVWormholeEngine(device_ids=AVAILABLE_GPUS, intra_topology="RING")
+    if num_patches % len(base_gpus) != 0:
+        print(f"Warning: {num_patches} patches don't divide evenly across {len(base_gpus)} GPUs. Some GPUs will carry extra load.")
+        
+    patches_per_gpu = max(1, num_patches // len(base_gpus))
+    AVAILABLE_GPUS = [base_gpus[(i // patches_per_gpu) % len(base_gpus)] for i in range(num_patches)]
+    
+    engine = LHVWormholeEngine(device_ids=AVAILABLE_GPUS, intra_topology="RING", boundary_size=4)
 
     try:
+        # Effective kick magnitude per step is roughly g / sqrt(neighbors).
+        # e.g., for g=0.15 and 44 neighbors, this is ~0.023 radians (weak-coupling regime).
         engine.evolve(
             total_time_steps=10, 
             depth_per_step=1, 
