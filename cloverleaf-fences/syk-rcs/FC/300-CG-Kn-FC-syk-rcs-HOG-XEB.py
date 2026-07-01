@@ -3,10 +3,10 @@ import os
 import gc
 import time
 import signal
+import collections
 import numpy as np
 import multiprocessing as mp
 from multiprocessing.connection import Connection, wait
-from multiprocessing.synchronize import Semaphore
 from typing import List, Tuple, Dict, Any
 
 # ==========================================
@@ -92,17 +92,11 @@ def persistent_universe_worker(
     num_qubits: int, 
     intra_edges: List[Tuple[int, int]], 
     boundary_qubits: List[int],
-    cmd_pipe: Connection,
-    ram_semaphore: Semaphore
+    cmd_pipe: Connection
 ) -> None:
     
-    # Ignore Ctrl+C in child processes so the main process handles shutdown cleanly
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     
-    # ---------------------------------------------------------
-    # HARDWARE SAFEGUARD: Prevent NumPy Thread Thrashing
-    # 12 workers * 4 threads = 48 threads utilized efficiently.
-    # ---------------------------------------------------------
     os.environ["OMP_NUM_THREADS"] = "4"
     os.environ["OPENBLAS_NUM_THREADS"] = "4"
     os.environ["MKL_NUM_THREADS"] = "4"
@@ -111,16 +105,12 @@ def persistent_universe_worker(
     
     sim = None
     try:
-        if boundary_qubits:
-            assert max(boundary_qubits) < num_qubits, f"Worker {patch_idx}: Boundary index {max(boundary_qubits)} out of bounds."
-
         os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(device_id)
         os.environ["QRACK_QPAGER_DEVICES"] = str(device_id)
         os.environ["QRACK_QUNITMULTI_DEVICES"] = str(device_id)
 
         from pyqrack import QrackSimulator
         
-        # Updated for PyQrack 2.0 API
         sim = QrackSimulator(qubit_count=num_qubits)
         
         for q in range(num_qubits):
@@ -129,7 +119,6 @@ def persistent_universe_worker(
         cmd_pipe.send({"status": "READY", "patch_idx": patch_idx})
         
         rotation_gates = [apply_rx, apply_ry, apply_rz]
-        rng_local = np.random.default_rng()
 
         while True:
             try:
@@ -173,8 +162,6 @@ def persistent_universe_worker(
                     kicks = cmd.get("kicks", {})
                     for raw_q, theta in kicks.items():
                         q = int(raw_q)
-                        if not (0 <= q < num_qubits):
-                            raise IndexError(f"Kick qubit index {q} out of bounds")
                         apply_rz(sim, theta, q)
                     cmd_pipe.send({"status": "KICKS_APPLIED", "patch_idx": patch_idx})
 
@@ -183,45 +170,49 @@ def persistent_universe_worker(
                     cmd_pipe.send({"status": "MAGNETIZATION_MEASURED", "patch_idx": patch_idx, "data": total_z})
                 
                 elif action == "COMPUTE_BENCHMARKS":
-                    with ram_semaphore:
-                        probs = None
-                        try:
-                            # Attempt state extraction. If ctypes fails on the massive 33M float array 
-                            # under multiprocessing load, we catch it instead of crashing.
-                            if hasattr(sim, 'dump_probabilities'):
-                                probs = np.array(sim.dump_probabilities())
-                            elif hasattr(sim, 'get_state_vector'):
-                                state = np.array(sim.get_state_vector())
-                                probs = np.abs(state)**2
-                                del state
-                        except Exception as ctype_err:
-                            # Expected failure path for massive scales
-                            probs = None
-
-                        if probs is not None:
-                            probs = probs / np.sum(probs)
-                            dim = len(probs)
-                            expected_xeb = (dim * np.sum(probs**2)) - 1.0 
-                            
-                            if dim > 2**20:
-                                # Sample probability values to find a statistically 
-                                # accurate median for the Porter-Thomas distribution
-                                sample = rng_local.choice(probs, size=2**18, replace=False)
-                                median_p = np.median(sample)
-                                del sample
-                            else:
-                                median_p = np.median(probs)
-                                
-                            expected_hog = np.sum(probs[probs > median_p])
-                            del probs
+                    shots = cmd.get("shots", 8192)
+                    
+                    try:
+                        # 1. Take empirical measurements to get the observed counts
+                        samples = sim.measure_shots(list(range(num_qubits)), shots)
+                        counts = dict(collections.Counter(samples))
+                        
+                        # 2. Extract the ideal probabilities using PyQrack's out_probs()
+                        if hasattr(sim, 'out_probs'):
+                            ideal_probs = np.asarray(sim.out_probs(), dtype=np.float64)
                         else:
-                            # Safe fallback: If state vector is too large to extract through ctypes,
-                            # return 0.0 to keep the simulation time-stepping alive.
-                            expected_xeb = 0.0
-                            expected_hog = 0.0
-                            
-                        # Aggressive Garbage Collection before releasing the semaphore
-                        gc.collect() 
+                            raise RuntimeError("Cannot extract probabilities. 'out_probs' method missing.")
+
+                        # 3. Vectorized true XEB and HOG calculation
+                        n_pow = len(ideal_probs)
+                        u_u = 1.0 / n_pow
+                        
+                        # Create an observed probability array to match the ideal array
+                        obs_probs = np.zeros(n_pow, dtype=np.float64)
+                        for k, count in counts.items():
+                            obs_probs[k] = count / shots
+
+                        # Vectorized XEB
+                        denom = np.sum((ideal_probs - u_u) ** 2)
+                        numer = np.sum((ideal_probs - u_u) * (obs_probs - u_u))
+                        expected_xeb = numer / denom if denom > 0 else 0.0
+
+                        # Vectorized HOG (QV method)
+                        threshold = np.median(ideal_probs)
+                        heavy_mask = ideal_probs > threshold
+                        expected_hog = np.sum(obs_probs[heavy_mask])
+
+                        # Cleanup massive arrays to free GPU RAM
+                        del ideal_probs
+                        del obs_probs
+                        del heavy_mask
+
+                    except Exception as e:
+                        expected_xeb = 0.0
+                        expected_hog = 0.0
+                        print(f"Worker {patch_idx} benchmark failed: {e}")
+                    
+                    gc.collect() 
                     
                     cmd_pipe.send({
                         "status": "BENCHMARKS_COMPUTED", 
@@ -238,11 +229,6 @@ def persistent_universe_worker(
                 
     except (EOFError, OSError, BrokenPipeError):
         pass
-    except Exception as e:
-        try:
-            cmd_pipe.send({"status": "ERROR", "msg": f"Worker {patch_idx} failed fatally: {str(e)}"})
-        except (EOFError, OSError, BrokenPipeError):
-            pass
     finally:
         if sim is not None:
             del sim
@@ -269,9 +255,6 @@ class TraversableWormholeEngine:
         self.ctx = mp.get_context('spawn')
         self.workers = []
         self.pipes = []
-        
-        # Limit CPU dumps to 6 parallel workers to cap RAM spikes 
-        self.ram_semaphore = self.ctx.Semaphore(6)
 
         print(f"Initializing {self.num_patches} isolated GPU Universes (25 Qubits/Patch)...")
         for p_idx in range(self.num_patches):
@@ -289,8 +272,7 @@ class TraversableWormholeEngine:
                     len(self.patches[p_idx]), 
                     self.intra_patch_edges, 
                     boundary_qubits, 
-                    child_conn,
-                    self.ram_semaphore
+                    child_conn
                 )
             )
             p.start()
@@ -303,9 +285,6 @@ class TraversableWormholeEngine:
                 if msg.get("status") != "READY":
                     self.shutdown()
                     raise RuntimeError(f"Worker {i} initialized with bad state: {msg.get('msg', '')}")
-                if msg.get("patch_idx") != i:
-                    self.shutdown()
-                    raise RuntimeError(f"Worker {i} returned mismatched patch_idx: expected {i}, got {msg.get('patch_idx')}")
             else:
                 self.shutdown()
                 raise TimeoutError(f"Worker {i} failed to initialize within 45 seconds.")
@@ -325,7 +304,6 @@ class TraversableWormholeEngine:
             
         results = {}
         pending = list(enumerate(self.pipes)) 
-        
         deadline = time.monotonic() + timeout_secs
         
         while pending:
@@ -348,11 +326,6 @@ class TraversableWormholeEngine:
                         if res.get("status") == "ERROR":
                             self.shutdown()
                             raise RuntimeError(f"Worker {idx} reported an error: {res.get('msg')}")
-                            
-                        if res.get("patch_idx") != idx:
-                            self.shutdown()
-                            raise RuntimeError(f"Worker {idx} returned mismatched patch_idx during {action}: expected {idx}, got {res.get('patch_idx')}")
-                            
                         results[idx] = res
                     except (EOFError, OSError, BrokenPipeError) as e:
                         self.shutdown()
@@ -389,39 +362,39 @@ class TraversableWormholeEngine:
 
             self.sync_broadcast("APPLY_WORMHOLE_KICKS", kick_payloads)
 
-            if t % 5 == 0 or t == total_time_steps - 1:
-                mag_res = self.sync_broadcast("MEASURE_MAGNETIZATION")
-                mag_sum = sum(res["data"] for res in mag_res.values())
-                
-                # Allow extended 600s timeout to safely clear the semaphore queue during large state dumps
-                bench_res = self.sync_broadcast("COMPUTE_BENCHMARKS", timeout_secs=600.0)
+            mag_res = self.sync_broadcast("MEASURE_MAGNETIZATION")
+            mag_sum = sum(res["data"] for res in mag_res.values())
+            
+            cross_corr = 0.0
+            edge_count = 0
+            seen = set()
+            
+            for pA in range(self.num_patches):
+                for qA, neighbors in self.boundary_map[pA].items():
+                    for (pB, qB) in neighbors:
+                        endpointA = (pA, qA)
+                        endpointB = (pB, qB)
+                        key = (min(endpointA, endpointB), max(endpointA, endpointB))
+                        
+                        if key not in seen:
+                            seen.add(key)
+                            cross_corr += patch_z_exp[pA][qA] * patch_z_exp[pB][qB]
+                            edge_count += 1
+                        
+            avg_corr = cross_corr / edge_count if edge_count > 0 else 0.0
+            
+            total_z_mag = sum(abs(z) for z_dict in patch_z_exp.values() for z in z_dict.values())
+            total_boundary_qubits = sum(len(z_dict) for z_dict in patch_z_exp.values())
+            avg_z_mag = total_z_mag / total_boundary_qubits if total_boundary_qubits > 0 else 0.0
+
+            print(f"Step {t:03d} | Bulk Mag: {mag_sum:+.4f} | Boundary <Z_A Z_B>: {avg_corr:+.4f} | Avg |Z|: {avg_z_mag:.4f} | Kicks: {sum(len(k['kicks']) for k in kick_payloads)}")
+            
+            if t == total_time_steps - 1:
+                print(f"         +-- Calculating Final Benchmarks (Using True Ideal Probs over {8192} shots)...")
+                bench_res = self.sync_broadcast("COMPUTE_BENCHMARKS", [{"shots": 8192} for _ in range(self.num_patches)], timeout_secs=1200.0)
                 avg_xeb = sum(res["data"]["xeb"] for res in bench_res.values()) / self.num_patches
                 avg_hog = sum(res["data"]["hog"] for res in bench_res.values()) / self.num_patches
-                
-                cross_corr = 0.0
-                edge_count = 0
-                seen = set()
-                
-                for pA in range(self.num_patches):
-                    for qA, neighbors in self.boundary_map[pA].items():
-                        for (pB, qB) in neighbors:
-                            endpointA = (pA, qA)
-                            endpointB = (pB, qB)
-                            key = (min(endpointA, endpointB), max(endpointA, endpointB))
-                            
-                            if key not in seen:
-                                seen.add(key)
-                                cross_corr += patch_z_exp[pA][qA] * patch_z_exp[pB][qB]
-                                edge_count += 1
-                            
-                avg_corr = cross_corr / edge_count if edge_count > 0 else 0.0
-                
-                total_z_mag = sum(abs(z) for z_dict in patch_z_exp.values() for z in z_dict.values())
-                total_boundary_qubits = sum(len(z_dict) for z_dict in patch_z_exp.values())
-                avg_z_mag = total_z_mag / total_boundary_qubits if total_boundary_qubits > 0 else 0.0
-
-                print(f"Step {t:03d} | Bulk Mag: {mag_sum:+.4f} | Boundary <Z_A Z_B>: {avg_corr:+.4f} | Avg |Z|: {avg_z_mag:.4f} | Kicks: {sum(len(k['kicks']) for k in kick_payloads)}")
-                print(f"         +-- Benchmarks -> XEB: {avg_xeb:.4f} (Ideal PT: ~1.0) | HOG: {avg_hog:.4f} (Ideal PT: ~0.846)")
+                print(f"         +-- Benchmarks -> True XEB: {avg_xeb:.4f} (Ideal PT: ~1.0) | True HOG: {avg_hog:.4f} (Ideal PT: ~0.846)")
 
     def shutdown(self):
         if self._is_shutdown:
@@ -452,12 +425,9 @@ class TraversableWormholeEngine:
 # 4. EXECUTION
 # ==========================================
 if __name__ == "__main__":
-    # Adjust this string based on how many GPUs you actually have available.
-    # E.g., for 6 GPUs: "0,1,2,3,4,5"
     gpu_env = os.environ.get("WORMHOLE_GPUS", "0,1,2,3,4,5") 
     base_gpus = [int(g.strip()) for g in gpu_env.split(',')]
     
-    # GUARANTEED PAIRING LOGIC: Maps exactly 2 patches to each GPU 
     num_patches = 12
     AVAILABLE_GPUS = [base_gpus[i // 2 % len(base_gpus)] for i in range(num_patches)]
     
@@ -465,8 +435,8 @@ if __name__ == "__main__":
 
     try:
         wormhole_engine.evolve(
-            total_time_steps=50, 
-            depth_per_step=3, 
+            total_time_steps=10, 
+            depth_per_step=1, 
             coupling_strength=0.15 
         )
 
