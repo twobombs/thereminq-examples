@@ -1,4 +1,3 @@
-# -*- coding: us-ascii -*-
 import os
 import gc
 import time
@@ -97,18 +96,12 @@ def persistent_island_worker_3d(
         from pyqrack import QrackSimulator
         sim = QrackSimulator(qubit_count=num_qubits)
         
-        # Robust benchmark randomization logic
         np.random.seed(seed)
         
-        # Initial Ground State of -X field is |+>^N
-        # Applying robust symmetry breaking via deterministic micro-perturbations 
         for q in range(num_qubits):
             apply_h(sim, q)
-            # Prevents trapping in false symmetric vacua during adiabatic anneal
-            perturb_x = np.random.normal(0, 1e-5)
-            perturb_z = np.random.normal(0, 1e-5)
-            if perturb_x != 0: apply_rx(sim, perturb_x, q)
-            if perturb_z != 0: apply_rz(sim, perturb_z, q)
+            apply_rx(sim, np.random.normal(0, 1e-5), q)
+            apply_rz(sim, np.random.normal(0, 1e-5), q)
             
         cmd_pipe.send({"status": "READY", "patch_idx": patch_idx})
         all_boundary_qubits = list(set([q for face in boundaries.values() for q in face]))
@@ -139,34 +132,47 @@ def persistent_island_worker_3d(
                     J_val, hx_val, hz_val = cmd.get("J", 1.0), cmd.get("hx", 0.5), cmd.get("hz", 0.2)
                     local_energy = 0.0
                     
+                    # N2 LIMITATION: This per-qubit cloning strategy introduces O(E + 2N) memory 
+                    # overhead per step. It is viable up to ~22 qubits/patch on standard hardware.
+                    # Scaling further requires staged measurement or native backend Pauli expectation tracking.
                     for q in range(num_qubits):
-                        apply_h(sim, q)
-                        x_exp = 1.0 - 2.0 * sim.prob(q)
-                        apply_h(sim, q)
-                        local_energy += -hx_val * x_exp
+                        clone_x = sim.clone()
+                        apply_h(clone_x, q)
+                        local_energy += -hx_val * (1.0 - 2.0 * clone_x.prob(q))
+                        del clone_x
                         
-                    for q in range(num_qubits):
-                        z_exp = 1.0 - 2.0 * sim.prob(q)
-                        local_energy += -hz_val * z_exp
+                        clone_z = sim.clone()
+                        local_energy += -hz_val * (1.0 - 2.0 * clone_z.prob(q))
+                        del clone_z
                         
                     for q1, q2 in intra_edges:
-                        apply_cx(sim, q1, q2)
-                        zz_exp = 1.0 - 2.0 * sim.prob(q2)
-                        apply_cx(sim, q1, q2)
-                        local_energy += -J_val * zz_exp
+                        # N1 LIMITATION: The CNOT proxy method below is mathematically approximate 
+                        # for highly entangled states. It provides a heuristic <ZZ> expectation but 
+                        # lacks the precision of full state tomography or pauli_expectation_eigenvalues.
+                        clone_zz = sim.clone()
+                        apply_cx(clone_zz, q1, q2)
+                        local_energy += -J_val * (1.0 - 2.0 * clone_zz.prob(q2))
+                        del clone_zz
                         
                     cmd_pipe.send({"status": "ENERGY_MEASURED", "patch_idx": patch_idx, "data": local_energy})
 
                 elif action == "MEASURE_BOUNDARY_BLOCH":
                     bloch_vectors = {}
                     for q in all_boundary_qubits:
-                        z_exp = 1.0 - 2.0 * sim.prob(q)
-                        apply_h(sim, q)
-                        x_exp = 1.0 - 2.0 * sim.prob(q)
-                        apply_h(sim, q)
-                        apply_rx(sim, np.pi/2, q)
-                        y_exp = 1.0 - 2.0 * sim.prob(q)
-                        apply_rx(sim, -np.pi/2, q)
+                        clone_z = sim.clone()
+                        z_exp = 1.0 - 2.0 * clone_z.prob(q)
+                        del clone_z
+                        
+                        clone_x = sim.clone()
+                        apply_h(clone_x, q)
+                        x_exp = 1.0 - 2.0 * clone_x.prob(q)
+                        del clone_x
+                        
+                        clone_y = sim.clone()
+                        apply_rx(clone_y, -np.pi/2, q) 
+                        y_exp = 1.0 - 2.0 * clone_y.prob(q)
+                        del clone_y
+                        
                         bloch_vectors[q] = (float(x_exp), float(y_exp), float(z_exp))
                         
                     cmd_pipe.send({"status": "BLOCH_EXTRACTED", "patch_idx": patch_idx, "data": bloch_vectors})
@@ -196,7 +202,6 @@ class HierarchicalHadronEngine3D:
         self._is_shutdown = False
         self.device_ids = device_ids
         
-        # Grid dimensions parameterized for scaling node counts up to 4096
         self.grid_x, self.grid_y, self.grid_z = grid
         self.num_patches = self.grid_x * self.grid_y * self.grid_z
         
@@ -204,7 +209,6 @@ class HierarchicalHadronEngine3D:
         self.qubits_per_patch = self.lx * self.ly * self.lz
         self.intra_edges, self.boundaries = generate_3d_subvolume(self.lx, self.ly, self.lz)
         
-        # Dynamic coordinate mapping for arbitrary grid scaling
         self.patch_coords = {}
         idx = 0
         for x in range(self.grid_x):
@@ -213,14 +217,15 @@ class HierarchicalHadronEngine3D:
                     self.patch_coords[idx] = (x, y, z)
                     idx += 1
 
+        self.coord_to_patch = {v: k for k, v in self.patch_coords.items()}
+
         self.ctx = mp.get_context('spawn')
         self.workers: List[mp.Process] = []
         self.pipes: List[Connection] = []
 
         total_sites = self.num_patches * self.qubits_per_patch
-        print(f"Initializing 3D Minimum Energy Setup ({self.num_patches} patches, {total_sites} spatial sites)...")
+        print(f"Initializing 3D Minimum Energy Setup ({self.num_patches} patches, {self.qubits_per_patch} qubits/patch -> {total_sites} total qubits)...")
         
-        # Deterministic seed distribution for benchmark consistency
         np.random.seed(master_seed)
         patch_seeds = np.random.randint(0, 2**31 - 1, size=self.num_patches)
         
@@ -232,6 +237,8 @@ class HierarchicalHadronEngine3D:
                       self.qubits_per_patch, self.intra_edges, self.boundaries, child_conn, int(patch_seeds[p_idx]))
             )
             p.start()
+            child_conn.close() 
+            
             self.workers.append(p)
             self.pipes.append(parent_conn)
             
@@ -246,7 +253,14 @@ class HierarchicalHadronEngine3D:
             
         results = {}
         for idx, pipe in enumerate(self.pipes):
-            results[idx] = pipe.recv()
+            if not pipe.poll(timeout=30.0):
+                raise TimeoutError(f"Worker {idx} timed out on action '{action}'")
+            
+            msg = pipe.recv()
+            if msg.get("status") == "ERROR":
+                raise RuntimeError(f"Worker {idx} execution failed: {msg.get('msg')}")
+                
+            results[idx] = msg
         return results
 
     def anneal_to_ground_state(self, total_steps: int, dt: float, target_g_face: float, target_J: float, target_hx: float, target_hz: float):
@@ -274,11 +288,10 @@ class HierarchicalHadronEngine3D:
                 }
                 
                 for dir1, coord2 in neighbors.items():
-                    # Validate boundary conditions (non-periodic, open boundaries)
                     if not (0 <= coord2[0] < self.grid_x and 0 <= coord2[1] < self.grid_y and 0 <= coord2[2] < self.grid_z):
                         continue
                         
-                    p2 = next((k for k, v in self.patch_coords.items() if v == coord2), None)
+                    p2 = self.coord_to_patch.get(coord2)
                     if p2 is None: continue 
                     
                     dir2 = dir1.replace("+", "temp").replace("-", "+").replace("temp", "-")
@@ -295,6 +308,8 @@ class HierarchicalHadronEngine3D:
                     
                     interaction_E = 0.0
                     for q1 in face1_qubits:
+                        # N3 Note: Kicks are accumulated unconditionally. This correctly ensures
+                        # bilateral interaction, as both (p1->p2) and (p2->p1) apply fields to each other.
                         curr_k = kick_payloads[p1]["kicks"].get(q1, (0.0, 0.0, 0.0))
                         kick_payloads[p1]["kicks"][q1] = (
                             curr_k[0] + current_g_face * avg_x,
@@ -304,9 +319,11 @@ class HierarchicalHadronEngine3D:
                         v1 = patch_bloch[p1][q1]
                         interaction_E += -current_g_face * (v1[0]*avg_x + v1[1]*avg_y + v1[2]*avg_z)
                         
-                    macroscopic_boundary_energy += interaction_E / 2.0 
+                    if p1 < p2:
+                        macroscopic_boundary_energy += interaction_E
 
-            self.sync_broadcast("APPLY_LHV_KICKS", kick_payloads)
+            if current_g_face > 0.0:
+                self.sync_broadcast("APPLY_LHV_KICKS", kick_payloads)
             
             energy_res = self.sync_broadcast("MEASURE_ENERGY", [{"J": current_J, "hx": current_hx, "hz": current_hz}] * self.num_patches)
             bulk_energy = sum([r["data"] for r in energy_res.values()])
@@ -318,7 +335,9 @@ class HierarchicalHadronEngine3D:
         if self._is_shutdown: return
         self._is_shutdown = True
         for pipe in getattr(self, 'pipes', []):
-            try: pipe.send({"action": "SHUTDOWN"})
+            try: 
+                pipe.send({"action": "SHUTDOWN"})
+                while pipe.poll(timeout=0.05): pipe.recv()
             except: pass
         for p in getattr(self, 'workers', []):
             try:
@@ -335,8 +354,6 @@ if __name__ == "__main__":
     gpu_env = os.environ.get("WORMHOLE_GPUS", "0,1,2,3") 
     base_gpus = [int(g.strip()) for g in gpu_env.split(',')]
     
-    # Configure grid scaling. (2, 2, 2) defaults to 8 patches for local test. 
-    # Can scale up to (16, 16, 16) to reach the 4096 node count limit.
     target_grid = (2, 2, 2)
     total_requested_nodes = target_grid[0] * target_grid[1] * target_grid[2]
     
