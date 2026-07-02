@@ -83,7 +83,8 @@ def persistent_island_worker_3d(
     num_qubits: int, 
     intra_edges: List[Tuple[int, int]], 
     boundaries: Dict[str, List[int]],
-    cmd_pipe: Connection
+    cmd_pipe: Connection,
+    seed: int
 ) -> None:
     
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -96,9 +97,18 @@ def persistent_island_worker_3d(
         from pyqrack import QrackSimulator
         sim = QrackSimulator(qubit_count=num_qubits)
         
+        # Robust benchmark randomization logic
+        np.random.seed(seed)
+        
         # Initial Ground State of -X field is |+>^N
+        # Applying robust symmetry breaking via deterministic micro-perturbations 
         for q in range(num_qubits):
             apply_h(sim, q)
+            # Prevents trapping in false symmetric vacua during adiabatic anneal
+            perturb_x = np.random.normal(0, 1e-5)
+            perturb_z = np.random.normal(0, 1e-5)
+            if perturb_x != 0: apply_rx(sim, perturb_x, q)
+            if perturb_z != 0: apply_rz(sim, perturb_z, q)
             
         cmd_pipe.send({"status": "READY", "patch_idx": patch_idx})
         all_boundary_qubits = list(set([q for face in boundaries.values() for q in face]))
@@ -126,23 +136,19 @@ def persistent_island_worker_3d(
                     cmd_pipe.send({"status": "HADRONS_EVOLVED", "patch_idx": patch_idx})
 
                 elif action == "MEASURE_ENERGY":
-                    # Calculates <H_patch> expectation value
                     J_val, hx_val, hz_val = cmd.get("J", 1.0), cmd.get("hx", 0.5), cmd.get("hz", 0.2)
                     local_energy = 0.0
                     
-                    # 1. <X> Energy
                     for q in range(num_qubits):
                         apply_h(sim, q)
                         x_exp = 1.0 - 2.0 * sim.prob(q)
                         apply_h(sim, q)
                         local_energy += -hx_val * x_exp
                         
-                    # 2. <Z> Energy
                     for q in range(num_qubits):
                         z_exp = 1.0 - 2.0 * sim.prob(q)
                         local_energy += -hz_val * z_exp
                         
-                    # 3. Two-Body <Zi Zj> Energy via CX circuit trick
                     for q1, q2 in intra_edges:
                         apply_cx(sim, q1, q2)
                         zz_exp = 1.0 - 2.0 * sim.prob(q2)
@@ -186,32 +192,44 @@ def persistent_island_worker_3d(
 # 3. 3D HIERARCHICAL ORCHESTRATOR
 # ==========================================
 class HierarchicalHadronEngine3D:
-    def __init__(self, device_ids: List[int]):
+    def __init__(self, device_ids: List[int], grid: Tuple[int, int, int] = (2, 2, 2), master_seed: int = 42):
         self._is_shutdown = False
         self.device_ids = device_ids
+        
+        # Grid dimensions parameterized for scaling node counts up to 4096
+        self.grid_x, self.grid_y, self.grid_z = grid
+        self.num_patches = self.grid_x * self.grid_y * self.grid_z
         
         self.lx, self.ly, self.lz = 3, 3, 2
         self.qubits_per_patch = self.lx * self.ly * self.lz
         self.intra_edges, self.boundaries = generate_3d_subvolume(self.lx, self.ly, self.lz)
-        self.num_patches = 8 
         
-        self.patch_coords = {
-            0: (0,0,0), 1: (1,0,0), 2: (0,1,0), 3: (1,1,0),
-            4: (0,0,1), 5: (1,0,1), 6: (0,1,1), 7: (1,1,1)
-        }
+        # Dynamic coordinate mapping for arbitrary grid scaling
+        self.patch_coords = {}
+        idx = 0
+        for x in range(self.grid_x):
+            for y in range(self.grid_y):
+                for z in range(self.grid_z):
+                    self.patch_coords[idx] = (x, y, z)
+                    idx += 1
 
         self.ctx = mp.get_context('spawn')
         self.workers: List[mp.Process] = []
         self.pipes: List[Connection] = []
 
-        print(f"Initializing 3D Minimum Energy Setup (144 spatial sites)...")
+        total_sites = self.num_patches * self.qubits_per_patch
+        print(f"Initializing 3D Minimum Energy Setup ({self.num_patches} patches, {total_sites} spatial sites)...")
+        
+        # Deterministic seed distribution for benchmark consistency
+        np.random.seed(master_seed)
+        patch_seeds = np.random.randint(0, 2**31 - 1, size=self.num_patches)
         
         for p_idx in range(self.num_patches):
             parent_conn, child_conn = self.ctx.Pipe()
             p = self.ctx.Process(
                 target=persistent_island_worker_3d,
                 args=(self.device_ids[p_idx % len(self.device_ids)], p_idx, 
-                      self.qubits_per_patch, self.intra_edges, self.boundaries, child_conn)
+                      self.qubits_per_patch, self.intra_edges, self.boundaries, child_conn, int(patch_seeds[p_idx]))
             )
             p.start()
             self.workers.append(p)
@@ -235,25 +253,18 @@ class HierarchicalHadronEngine3D:
         print(f"Starting Adiabatic Anneal -> Target: J={target_J}, hx={target_hx}, hz={target_hz}\n")
         
         for t in range(total_steps):
-            # 1. Adiabatic Schedule: Linear ramp from s=0.0 to s=1.0
             s = t / max(1, (total_steps - 1))
-            
-            # Start with an overwhelming Transverse Field (hx = 3.0) to match initial |+> state
             current_hx = (1.0 - s) * 3.0 + s * target_hx
             current_J = s * target_J
             current_hz = s * target_hz
             current_g_face = s * target_g_face
             
-            # 2. Unitary Evolution Step
             self.sync_broadcast("EVOLVE_HADRONS", [{"J": current_J, "hx": current_hx, "hz": current_hz, "dt": dt, "steps": 2}] * self.num_patches)
             
-            # 3. Extract 2D Surface States
             patch_bloch = {p: res["data"] for p, res in self.sync_broadcast("MEASURE_BOUNDARY_BLOCH").items()}
             kick_payloads = [{"kicks": {}} for _ in range(self.num_patches)]
-            
             macroscopic_boundary_energy = 0.0
             
-            # 4. 3D Face-to-Face Stitching & Boundary Energy Calculation
             for p1, coord1 in self.patch_coords.items():
                 x1, y1, z1 = coord1
                 neighbors = {
@@ -263,6 +274,10 @@ class HierarchicalHadronEngine3D:
                 }
                 
                 for dir1, coord2 in neighbors.items():
+                    # Validate boundary conditions (non-periodic, open boundaries)
+                    if not (0 <= coord2[0] < self.grid_x and 0 <= coord2[1] < self.grid_y and 0 <= coord2[2] < self.grid_z):
+                        continue
+                        
                     p2 = next((k for k, v in self.patch_coords.items() if v == coord2), None)
                     if p2 is None: continue 
                     
@@ -286,15 +301,13 @@ class HierarchicalHadronEngine3D:
                             curr_k[1] + current_g_face * avg_y,
                             curr_k[2] + current_g_face * avg_z
                         )
-                        # Accumulate Hamiltonian interaction bridging the faces
                         v1 = patch_bloch[p1][q1]
                         interaction_E += -current_g_face * (v1[0]*avg_x + v1[1]*avg_y + v1[2]*avg_z)
                         
-                    macroscopic_boundary_energy += interaction_E / 2.0  # Prevent double-counting the pair
+                    macroscopic_boundary_energy += interaction_E / 2.0 
 
             self.sync_broadcast("APPLY_LHV_KICKS", kick_payloads)
             
-            # 5. Extract Total System Minimum Potential Energy
             energy_res = self.sync_broadcast("MEASURE_ENERGY", [{"J": current_J, "hx": current_hx, "hz": current_hz}] * self.num_patches)
             bulk_energy = sum([r["data"] for r in energy_res.values()])
             
@@ -321,12 +334,21 @@ if __name__ == "__main__":
     
     gpu_env = os.environ.get("WORMHOLE_GPUS", "0,1,2,3") 
     base_gpus = [int(g.strip()) for g in gpu_env.split(',')]
-    AVAILABLE_GPUS = [base_gpus[i % len(base_gpus)] for i in range(8)]
     
-    engine = HierarchicalHadronEngine3D(device_ids=AVAILABLE_GPUS)
+    # Configure grid scaling. (2, 2, 2) defaults to 8 patches for local test. 
+    # Can scale up to (16, 16, 16) to reach the 4096 node count limit.
+    target_grid = (2, 2, 2)
+    total_requested_nodes = target_grid[0] * target_grid[1] * target_grid[2]
+    
+    AVAILABLE_GPUS = [base_gpus[i % len(base_gpus)] for i in range(total_requested_nodes)]
+    
+    engine = HierarchicalHadronEngine3D(
+        device_ids=AVAILABLE_GPUS, 
+        grid=target_grid,
+        master_seed=1337
+    )
 
     try:
-        # Anneal the setup slowly into its ground state over 100 steps
         engine.anneal_to_ground_state(
             total_steps=100, 
             dt=0.02, 
