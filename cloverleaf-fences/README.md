@@ -9,6 +9,9 @@ numactl --interleave=all python3 <script>
 
 ## Implementations
 
+<img width="916" height="356" alt="1000009457" src="https://github.com/user-attachments/assets/8b9696d4-a857-4530-a327-d2dd7a4b839a" />
+
+
 ### Concept Demonstrations (`concept/`)
 
 *   **Scaled Holographic Multi-CPU Simulation (`concept/72-dev-multi-cpu.py`):** Models a 72-qubit system utilizing a dual-engine architecture featuring a heavily parallelized Monolithic CPU Oracle and a Holographic Distributed Engine. The CPU Oracle uses PyQrack's Binary Decision Tree (BDD) simulator across multiple processes to evaluate exact ground truth energy. The Holographic Distributed Engine calculates an Entanglement Embedding Loss by substituting cross-boundary true entanglement with a parameterized bath layer.
