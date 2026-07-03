@@ -2,59 +2,20 @@ import os
 import gc
 import time
 import signal
+import sys
+import json
 import numpy as np
 import multiprocessing as mp
 from multiprocessing.connection import Connection, wait
 from multiprocessing.synchronize import Semaphore
+from collections import Counter
 from typing import List, Tuple, Dict, Any
 
 # ==========================================
-# 0. PYQRACK API SAFEGUARDS & GATES
-# ==========================================
-PX, PY, PZ = 1, 2, 3
-
-def apply_h(sim: Any, q: int) -> None:
-    if hasattr(sim, 'h'): 
-        sim.h(q)
-    else: 
-        sim.mtrx([
-            complex(1/np.sqrt(2), 0), complex(1/np.sqrt(2), 0), 
-            complex(1/np.sqrt(2), 0), complex(-1/np.sqrt(2), 0)
-        ], q)
-
-def apply_rx(sim: Any, theta: float, q: int) -> None:
-    if hasattr(sim, 'r'): 
-        sim.r(PX, float(theta), q)
-    else: 
-        sim.mtrx([complex(np.cos(theta/2), 0), complex(0, -np.sin(theta/2)), 
-                  complex(0, -np.sin(theta/2)), complex(np.cos(theta/2), 0)], q)
-
-def apply_ry(sim: Any, theta: float, q: int) -> None:
-    if hasattr(sim, 'r'): 
-        sim.r(PY, float(theta), q)
-    else: 
-        sim.mtrx([complex(np.cos(theta/2), 0), complex(-np.sin(theta/2), 0), 
-                  complex(np.sin(theta/2), 0), complex(np.cos(theta/2), 0)], q)
-
-def apply_rz(sim: Any, theta: float, q: int) -> None:
-    if hasattr(sim, 'r'): 
-        sim.r(PZ, float(theta), q)
-    else: 
-        # Standard PyQrack phase convention for RZ
-        sim.mtrx([complex(np.cos(-theta/2), np.sin(-theta/2)), 0j, 
-                  0j, complex(np.cos(theta/2), np.sin(theta/2))], q)
-
-def apply_cx(sim: Any, c: int, t: int) -> None:
-    if hasattr(sim, 'cx'): 
-        sim.cx(c, t)
-    else: 
-        sim.mcx([c], t)
-
-# ==========================================
-# 1. HOLOGRAPHIC TOPOLOGY (BULK/BOUNDARY)
+# 0. HOLOGRAPHIC TOPOLOGY (BULK/BOUNDARY)
 # ==========================================
 def get_complete_intra_edges(num_qubits: int = 25) -> List[Tuple[int, int]]:
-    """Fully connected intra-patch entanglement"""
+    """Fully connected intra-patch entanglement for scaled architecture"""
     edges = []
     for i in range(num_qubits):
         for j in range(i + 1, num_qubits):
@@ -75,8 +36,6 @@ def get_holographic_topology(
         patch_idx = idx // qubits_per_patch
         patches[patch_idx].append(idx)
 
-    # fence_edges maps the boundary configuration used to populate boundary_map 
-    # in the orchestrator and track pairwise correlations during benchmarking.
     for p1 in range(num_patches):
         for p2 in range(p1 + 1, num_patches):
             for b1 in range(boundary_size):
@@ -86,7 +45,7 @@ def get_holographic_topology(
     return patches, fence_edges
 
 # ==========================================
-# 2. ISOLATED PERSISTENT UNIVERSE (GPU WORKER)
+# 1. ISOLATED PERSISTENT UNIVERSE (GPU WORKER)
 # ==========================================
 def persistent_universe_worker(
     device_id: int, 
@@ -98,12 +57,8 @@ def persistent_universe_worker(
     ram_semaphore: Semaphore
 ) -> None:
     
-    # Ignore Ctrl+C in child processes so the main process handles shutdown cleanly
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     
-    # ---------------------------------------------------------
-    # HARDWARE SAFEGUARD: Prevent NumPy Thread Thrashing
-    # ---------------------------------------------------------
     os.environ["OMP_NUM_THREADS"] = "4"
     os.environ["OPENBLAS_NUM_THREADS"] = "4"
     os.environ["MKL_NUM_THREADS"] = "4"
@@ -120,20 +75,42 @@ def persistent_universe_worker(
         os.environ["QRACK_QUNITMULTI_DEVICES"] = str(device_id)
 
         from pyqrack import QrackSimulator
-        sim = QrackSimulator(
-            qubitCount=num_qubits,
-            isOpenCL=True,
-            isTensorNetwork=False,
-            isSchmidtDecompose=False
-        )
         
+        sim = QrackSimulator(qubit_count=num_qubits)
+        
+        # PyQrack Pauli axis enum: X=1, Y=2, Z=3
+        PX, PY, PZ = 1, 2, 3
+        
+        if hasattr(sim, 'r'):
+            apply_rx = lambda theta, q: sim.r(PX, float(theta), q)
+            apply_ry = lambda theta, q: sim.r(PY, float(theta), q)
+            apply_rz = lambda theta, q: sim.r(PZ, float(theta), q)
+        else:
+            apply_rx = lambda theta, q: sim.mtrx([complex(np.cos(theta/2), 0), complex(0, -np.sin(theta/2)), 
+                                                  complex(0, -np.sin(theta/2)), complex(np.cos(theta/2), 0)], q)
+            apply_ry = lambda theta, q: sim.mtrx([complex(np.cos(theta/2), 0), complex(-np.sin(theta/2), 0), 
+                                                  complex(np.sin(theta/2), 0), complex(np.cos(theta/2), 0)], q)
+            apply_rz = lambda theta, q: sim.mtrx([complex(np.cos(-theta/2), np.sin(-theta/2)), 0j, 
+                                                  0j, complex(np.cos(theta/2), np.sin(theta/2))], q)
+            
+        if hasattr(sim, 'cx'):
+            apply_cx = lambda c, t: sim.cx(c, t)
+        else:
+            apply_cx = lambda c, t: sim.mcx([c], t)
+            
+        if hasattr(sim, 'h'):
+            apply_h = lambda q: sim.h(q)
+        else:
+            apply_h = lambda q: sim.mtrx([complex(1/np.sqrt(2), 0), complex(1/np.sqrt(2), 0), 
+                                          complex(1/np.sqrt(2), 0), complex(-1/np.sqrt(2), 0)], q)
+
         for q in range(num_qubits):
-            apply_h(sim, q)
+            apply_h(q)
             
         cmd_pipe.send({"status": "READY", "patch_idx": patch_idx})
         
-        rotation_gates = [apply_rx, apply_ry, apply_rz]
-        rng_local = np.random.default_rng()
+        rotation_gates = (apply_rx, apply_ry, apply_rz)
+        all_bits = list(range(num_qubits))
 
         while True:
             try:
@@ -159,18 +136,16 @@ def persistent_universe_worker(
                         for q in range(num_qubits):
                             gate_idx = rng.integers(0, 3)
                             theta = rng.uniform(-np.pi, np.pi)
-                            rotation_gates[gate_idx](sim, theta, q)
+                            rotation_gates[gate_idx](theta, q)
                         
                         for q1, q2 in intra_edges:
-                            apply_cx(sim, q1, q2)
+                            apply_cx(q1, q2)
                     
                     cmd_pipe.send({"status": "CHUNK_COMPLETE", "patch_idx": patch_idx})
 
                 elif action == "MEASURE_BOUNDARY_Z":
                     z_exp = {}
                     for q in boundary_qubits:
-                        # sim.prob(q) returns the marginal P(|1>) for qubit q, 
-                        # already tracing over all other qubits. No partial trace needed.
                         p_one = sim.prob(q)
                         z_exp[q] = 1.0 - 2.0 * p_one
                     cmd_pipe.send({"status": "Z_EXP_COMPUTED", "patch_idx": patch_idx, "data": z_exp})
@@ -181,69 +156,38 @@ def persistent_universe_worker(
                         q = int(raw_q)
                         if not (0 <= q < num_qubits):
                             raise IndexError(f"Kick qubit index {q} out of bounds")
-                        apply_rz(sim, theta, q)
+                        apply_rz(theta, q)
                     cmd_pipe.send({"status": "KICKS_APPLIED", "patch_idx": patch_idx})
 
                 elif action == "MEASURE_MAGNETIZATION":
                     total_z = sum((1.0 - 2.0 * sim.prob(q)) for q in range(num_qubits))
                     cmd_pipe.send({"status": "MAGNETIZATION_MEASURED", "patch_idx": patch_idx, "data": total_z})
                 
-                elif action == "COMPUTE_BENCHMARKS":
+                elif action == "SAMPLE_BITSTRINGS":
+                    shots = cmd.get("shots", 10000)
                     with ram_semaphore:
-                        if hasattr(sim, 'dump_probabilities'):
-                            probs = np.array(sim.dump_probabilities())
-                        elif hasattr(sim, 'dump'):
-                            raw_state = np.array(sim.dump())
-                            # Fallback check to prevent squaring already-squared values
-                            if np.iscomplexobj(raw_state):
-                                probs = np.abs(raw_state)**2
-                            else:
-                                probs = raw_state 
-                            del raw_state
-                        elif hasattr(sim, 'get_state_vector'):
-                            raw_state = np.array(sim.get_state_vector())
-                            if np.iscomplexobj(raw_state):
-                                probs = np.abs(raw_state)**2
-                            else:
-                                probs = raw_state
-                            del raw_state
-                        elif hasattr(sim, 'get_state'):
-                            raw_state = np.array(sim.get_state())
-                            if np.iscomplexobj(raw_state):
-                                probs = np.abs(raw_state)**2
-                            else:
-                                probs = raw_state
-                            del raw_state
-                        else:
-                            dim = 1 << num_qubits
-                            probs = np.ones(dim, dtype=np.float64) / dim
-                        
-                        probs = probs / np.sum(probs)
-                        dim = len(probs)
-                        
-                        expected_xeb = (dim * np.sum(probs**2)) - 1.0 
-                        
-                        if dim > 2**20:
-                            sample = rng_local.choice(probs, size=2**18, replace=False)
-                            median_p = np.median(sample)
-                            del sample 
-                        else:
-                            median_p = np.median(probs)
+                        try:
+                            raw_shots = sim.measure_shots(all_bits, shots)
+                            # Normalize keys to strings to prevent JSON serialization tuple crashes
+                            shot_counts = {str(k): v for k, v in Counter(raw_shots).items()}
+                            cmd_pipe.send({
+                                "status": "BENCHMARKS_SAMPLED", 
+                                "patch_idx": patch_idx, 
+                                "data": {"shots": shots, "counts": shot_counts}
+                            })
+                        except Exception as e:
+                            print(f"[WORKER {patch_idx} DEBUG] measure_shots() failed: {e}", file=sys.stderr)
+                            cmd_pipe.send({
+                                "status": "ERROR",
+                                "patch_idx": patch_idx,
+                                "msg": f"measure_shots() failed: {str(e)}"
+                            })
                             
-                        expected_hog = np.sum(probs[probs > median_p])
-                        
-                        del probs
                         gc.collect() 
-                    
-                    cmd_pipe.send({
-                        "status": "BENCHMARKS_COMPUTED", 
-                        "patch_idx": patch_idx, 
-                        "data": {"xeb": float(expected_xeb), "hog": float(expected_hog)}
-                    })
 
             except Exception as inner_e:
                 try:
-                    cmd_pipe.send({"status": "ERROR", "msg": f"Failed during {action}: {str(inner_e)}"})
+                    cmd_pipe.send({"status": "ERROR", "patch_idx": patch_idx, "msg": f"Failed during {action}: {str(inner_e)}"})
                 except (EOFError, OSError, BrokenPipeError):
                     break
                 continue
@@ -252,7 +196,7 @@ def persistent_universe_worker(
         pass
     except Exception as e:
         try:
-            cmd_pipe.send({"status": "ERROR", "msg": f"Worker {patch_idx} failed fatally: {str(e)}"})
+            cmd_pipe.send({"status": "ERROR", "patch_idx": patch_idx, "msg": f"Worker {patch_idx} failed fatally: {str(e)}"})
         except (EOFError, OSError, BrokenPipeError):
             pass
     finally:
@@ -261,16 +205,25 @@ def persistent_universe_worker(
         gc.collect()
 
 # ==========================================
-# 3. WORMHOLE ORCHESTRATOR (THE BULK SPACE)
+# 2. WORMHOLE ORCHESTRATOR (THE BULK SPACE)
 # ==========================================
 class TraversableWormholeEngine:
-    def __init__(self, device_ids: List[int]):
+    def __init__(self, device_ids: List[int], boundary_size: int = 4, qubits_per_patch: int = 25):
         self._is_shutdown = False
         self._mean_field_warned = False
-        self.device_ids = device_ids
+        self._warned_at_step = 0
         
-        self.patches, self.fence_edges = get_holographic_topology(boundary_size=4)
-        self.intra_patch_edges = get_complete_intra_edges()
+        self.device_ids = device_ids
+        self.boundary_size = boundary_size
+        self.qubits_per_patch = qubits_per_patch
+        
+        self.patches, self.fence_edges = get_holographic_topology(
+            num_patches=12, 
+            qubits_per_patch=self.qubits_per_patch, 
+            boundary_size=self.boundary_size
+        )
+        
+        self.intra_patch_edges = get_complete_intra_edges(num_qubits=self.qubits_per_patch)
         
         self.num_patches = len(self.patches)
         self.boundary_map = {i: {} for i in range(self.num_patches)}
@@ -285,11 +238,11 @@ class TraversableWormholeEngine:
         
         self.ram_semaphore = self.ctx.Semaphore(6)
 
-        print(f"Initializing {self.num_patches} isolated GPU Universes (25 Qubits/Patch)...")
+        print(f"Initializing {self.num_patches} isolated GPU Universes ({self.qubits_per_patch} Qubits/Patch, Boundary={self.boundary_size})...")
         for p_idx in range(self.num_patches):
             
-            assert len(self.patches[p_idx]) == 25, f"Patch {p_idx} invalid size."
-            assert len(self.boundary_map[p_idx]) > 0, f"Patch {p_idx} has no boundary qubits — wormhole kicks will be vacuous."
+            assert len(self.patches[p_idx]) == self.qubits_per_patch, f"Patch {p_idx} invalid size."
+            assert len(self.boundary_map[p_idx]) > 0, f"Patch {p_idx} has no boundary qubits -- wormhole kicks will be vacuous."
             assert all(q < len(self.patches[p_idx]) for q in self.boundary_map[p_idx].keys()), f"Patch {p_idx}: boundary qubit index exceeds patch size."
             
             parent_conn, child_conn = self.ctx.Pipe()
@@ -309,9 +262,7 @@ class TraversableWormholeEngine:
             )
             p.start()
             
-            # Close the child pipe in the parent process to prevent EOF leak/hanging
             child_conn.close() 
-            
             self.workers.append(p)
             self.pipes.append(parent_conn)
             
@@ -343,7 +294,6 @@ class TraversableWormholeEngine:
             
         results = {}
         pending = list(enumerate(self.pipes)) 
-        
         deadline = time.monotonic() + timeout_secs
         
         while pending:
@@ -367,6 +317,7 @@ class TraversableWormholeEngine:
                             self.shutdown()
                             raise RuntimeError(f"Worker {idx} reported an error: {res.get('msg')}")
                             
+                        # Restored boundary checking loop
                         if res.get("patch_idx") != idx:
                             self.shutdown()
                             raise RuntimeError(f"Worker {idx} returned mismatched patch_idx during {action}: expected {idx}, got {res.get('patch_idx')}")
@@ -386,9 +337,12 @@ class TraversableWormholeEngine:
             
         return results
 
-    def evolve(self, total_time_steps: int, depth_per_step: int, coupling_strength: float):
+    def evolve(self, total_time_steps: int, depth_per_step: int, coupling_strength: float, benchmark_interval: int = None):
+        if benchmark_interval is None:
+            benchmark_interval = total_time_steps
+
         print(f"\nStarting SYK Multi-Boundary Unimatrix Evolution...")
-        print(f"Total Steps: {total_time_steps} | RCS Depth/Step: {depth_per_step} | g: {coupling_strength}\n")
+        print(f"Total Steps: {total_time_steps} | RCS Depth/Step: {depth_per_step} | g: {coupling_strength} | Benchmark Interval: {benchmark_interval}\n")
         
         main_rng = np.random.default_rng()
 
@@ -399,67 +353,81 @@ class TraversableWormholeEngine:
             z_results = self.sync_broadcast("MEASURE_BOUNDARY_Z", expected_status="Z_EXP_COMPUTED")
             patch_z_exp = {p_idx: res["data"] for p_idx, res in z_results.items()}
 
-            # =================================================================
-            # UNIMATRIX ROUTING (THE BULK HUB)
-            # Pool all boundary measurements to calculate the central mean field
-            # =================================================================
             global_z_pool = sum(z for z_dict in patch_z_exp.values() for z in z_dict.values())
             total_boundary_qubits = sum(len(z_dict) for z_dict in patch_z_exp.values())
             bulk_mean_field = global_z_pool / total_boundary_qubits if total_boundary_qubits > 0 else 0.0
             
-            if abs(bulk_mean_field) < 1e-4 and not self._mean_field_warned:
-                # Diagnostic warning to track if the mean field completely collapses
-                print(f"         └─ [NOTE] Bulk Mean Field thermalized near zero at Step {t:03d}. Kicks suppressed.")
-                self._mean_field_warned = True
+            if abs(bulk_mean_field) < 1e-4:
+                if not self._mean_field_warned:
+                    print(f"         +-- [NOTE] Bulk Mean Field thermalized near zero at Step {t:03d}. Kicks suppressed.")
+                    self._mean_field_warned = True
+                    self._warned_at_step = t
+            elif abs(bulk_mean_field) > 1e-3 and self._mean_field_warned:
+                if t - self._warned_at_step > 10:
+                    self._mean_field_warned = False
 
             kick_payloads = [{"kicks": {}} for _ in range(self.num_patches)]
             
             for pA in range(self.num_patches):
                 for qA in self.boundary_map[pA].keys():
-                    # The patch receives a unified gravitational kick from the bulk, 
-                    # naturally filtering out chaotic RCS cross-talk noise.
                     unified_kick = 2.0 * coupling_strength * bulk_mean_field
                     kick_payloads[pA]["kicks"][qA] = unified_kick
 
             self.sync_broadcast("APPLY_WORMHOLE_KICKS", kick_payloads, expected_status="KICKS_APPLIED")
 
-            if t % 5 == 0 or t == total_time_steps - 1:
-                mag_res = self.sync_broadcast("MEASURE_MAGNETIZATION", expected_status="MAGNETIZATION_MEASURED")
-                mag_sum = sum(res["data"] for res in mag_res.values())
-                
-                # Allow extended 600s timeout to safely clear the semaphore queue during large state dumps
-                bench_res = self.sync_broadcast("COMPUTE_BENCHMARKS", timeout_secs=600.0, expected_status="BENCHMARKS_COMPUTED")
-                avg_xeb = sum(res["data"]["xeb"] for res in bench_res.values()) / self.num_patches
-                avg_hog = sum(res["data"]["hog"] for res in bench_res.values()) / self.num_patches
-                
-                cross_corr_connected = 0.0
-                edge_count = 0
-                seen = set()
-                
-                # We maintain the pairwise calculation here strictly to benchmark if the 
-                # boundaries are synchronizing via the bulk hub.
-                for pA in range(self.num_patches):
-                    for qA, neighbors in self.boundary_map[pA].items():
-                        for (pB, qB) in neighbors:
-                            endpointA = (pA, qA)
-                            endpointB = (pB, qB)
-                            key = (min(endpointA, endpointB), max(endpointA, endpointB))
-                            
-                            # boundary_map stores both directions per edge; the seen set 
-                            # deduplicates to ensure we count each physical pair exactly once.
-                            if key not in seen:
-                                seen.add(key)
-                                mean_zA = patch_z_exp[pA][qA]
-                                mean_zB = patch_z_exp[pB][qB]
-                                # Connected correlator under mean-field approximation: 
-                                # <Z_A Z_B>_c ≈ <Z_A><Z_B> - <Z_bulk>^2
-                                cross_corr_connected += (mean_zA * mean_zB) - (bulk_mean_field ** 2)
-                                edge_count += 1
-                            
-                avg_corr_c = cross_corr_connected / edge_count if edge_count > 0 else 0.0
+            mag_res = self.sync_broadcast("MEASURE_MAGNETIZATION", expected_status="MAGNETIZATION_MEASURED")
+            mag_sum = sum(res["data"] for res in mag_res.values())
+            
+            cross_corr_connected = 0.0
+            edge_count = 0
+            seen = set()
+            
+            for pA in range(self.num_patches):
+                for qA, neighbors in self.boundary_map[pA].items():
+                    for (pB, qB) in neighbors:
+                        endpointA = (pA, qA)
+                        endpointB = (pB, qB)
+                        key = (min(endpointA, endpointB), max(endpointA, endpointB))
+                        
+                        if key not in seen:
+                            seen.add(key)
+                            mean_zA = patch_z_exp[pA][qA]
+                            mean_zB = patch_z_exp[pB][qB]
+                            cross_corr_connected += (mean_zA * mean_zB) - (bulk_mean_field ** 2)
+                            edge_count += 1
+                        
+            avg_corr_c = cross_corr_connected / edge_count if edge_count > 0 else 0.0
 
-                print(f"Step {t:03d} | Bulk Mag: {mag_sum:+.4f} | Bulk Field <Z>: {bulk_mean_field:+.4f} | Connected Correlator <Z_A Z_B>_c: {avg_corr_c:+.4f} | Kicks: {sum(len(k['kicks']) for k in kick_payloads)}")
-                print(f"         └─ Benchmarks -> XEB: {avg_xeb:.4f} (Ideal PT: ~1.0) | HOG: {avg_hog:.4f} (Ideal PT: ~0.846)")
+            print(f"Step {t:03d} | Bulk Mag: {mag_sum:+.4f} | Bulk Field <Z>: {bulk_mean_field:+.4f} | Classical MF Variance: {avg_corr_c:+.4f} | Kicks: {sum(len(k['kicks']) for k in kick_payloads)}")
+            
+            run_benchmarks = (t > 0 and t % benchmark_interval == 0) or (t == total_time_steps - 1)
+            
+            if run_benchmarks:
+                shots = 10000
+                bench_res = self.sync_broadcast("SAMPLE_BITSTRINGS", [{"shots": shots} for _ in range(self.num_patches)], timeout_secs=600.0, expected_status="BENCHMARKS_SAMPLED")
+                
+                total_unique_states = 0
+                telemetry_payload = {
+                    "step": t,
+                    "depth_per_step": depth_per_step,
+                    "coupling_strength": coupling_strength,
+                    "shots_per_patch": shots,
+                    "patches": {}
+                }
+                
+                for p_idx, res in bench_res.items():
+                    counts = res["data"]["counts"]
+                    total_unique_states += len(counts)
+                    # Explicit string conversion for JSON compatibility
+                    telemetry_payload["patches"][str(p_idx)] = counts
+                
+                filename = f"wormhole_telemetry_step_{t}.json"
+                with open(filename, 'w') as f:
+                    json.dump(telemetry_payload, f, indent=2)
+                    
+                print(f"         +-- Sycamore Sampling -> {shots:,} shots per patch executed natively on GPU.")
+                print(f"         +-- Telemetry Export  -> Saved {total_unique_states:,} unique basis states to {filename}")
+                print(f"         +-- Next Step         -> Route JSON through Quantum Lemonade for ideal amplitude contraction to compute XEB/HOG.")
 
     def shutdown(self):
         if self._is_shutdown:
@@ -470,6 +438,11 @@ class TraversableWormholeEngine:
         for pipe in getattr(self, 'pipes', []):
             try:
                 if not pipe.closed:
+                    while pipe.poll(0.0):
+                        try:
+                            pipe.recv()
+                        except (EOFError, OSError):
+                            break
                     pipe.send({"action": "SHUTDOWN"})
             except (EOFError, OSError, BrokenPipeError):
                 pass
@@ -478,7 +451,7 @@ class TraversableWormholeEngine:
             p.join(timeout=5)
             if p.is_alive(): 
                 p.terminate()
-                p.join(timeout=2) # Explicitly reap the zombie process
+                p.join(timeout=2)
                 
         for pipe in getattr(self, 'pipes', []):
             try:
@@ -488,24 +461,34 @@ class TraversableWormholeEngine:
                 pass
 
 # ==========================================
-# 4. EXECUTION
+# 3. EXECUTION
 # ==========================================
 if __name__ == "__main__":
-    gpu_env = os.environ.get("WORMHOLE_GPUS", "0,1,2,3,4,5") 
+    gpu_env = os.environ.get("WORMHOLE_GPUS", "0,1") 
     base_gpus = [int(g.strip()) for g in gpu_env.split(',')]
     
-    # GUARANTEED PAIRING LOGIC: Maps exactly 2 patches to each GPU 
     num_patches = 12
-    AVAILABLE_GPUS = [base_gpus[i // 2 % len(base_gpus)] for i in range(num_patches)]
+    AVAILABLE_GPUS = [base_gpus[i % len(base_gpus)] for i in range(num_patches)]
     
-    wormhole_engine = TraversableWormholeEngine(device_ids=AVAILABLE_GPUS)
+    wormhole_engine = TraversableWormholeEngine(
+        device_ids=AVAILABLE_GPUS, 
+        boundary_size=4, 
+        qubits_per_patch=25
+    )
 
     try:
         wormhole_engine.evolve(
-            total_time_steps=50, 
-            depth_per_step=3, 
-            coupling_strength=0.15 
+            total_time_steps=10, 
+            depth_per_step=1, 
+            coupling_strength=1.5,
+            benchmark_interval=None # Defaults to final step only
         )
-
+    except KeyboardInterrupt:
+        print("\n[SIGINT] Manual interrupt received.")
+    except Exception as e:
+        print(f"\n[FATAL ERROR] The orchestrator caught an exception:")
+        print(str(e))
+        raise
     finally:
         wormhole_engine.shutdown()
+        sys.exit(0)
