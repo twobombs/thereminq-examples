@@ -391,7 +391,7 @@ class TraversableWormholeEngine:
             
             if t == total_time_steps - 1:
                 print(f"         +-- Calculating Final Benchmarks (Using True Ideal Probs over {8192} shots)...")
-                bench_res = self.sync_broadcast("COMPUTE_BENCHMARKS", [{"shots": 8192} for _ in range(self.num_patches)], timeout_secs=1200.0)
+                bench_res = self.sync_broadcast("COMPUTE_BENCHMARKS", [{"shots": 8192} for _ in range(self.num_patches)], timeout_secs=3600.0)
                 avg_xeb = sum(res["data"]["xeb"] for res in bench_res.values()) / self.num_patches
                 avg_hog = sum(res["data"]["hog"] for res in bench_res.values()) / self.num_patches
                 print(f"         +-- Benchmarks -> True XEB: {avg_xeb:.4f} (Ideal PT: ~1.0) | True HOG: {avg_hog:.4f} (Ideal PT: ~0.846)")
