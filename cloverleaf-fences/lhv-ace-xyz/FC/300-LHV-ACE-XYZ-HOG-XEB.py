@@ -493,7 +493,7 @@ class LHVWormholeEngine:
 # 4. EXECUTION
 # ==========================================
 if __name__ == "__main__":
-    gpu_env = os.environ.get("WORMHOLE_GPUS", "0,1,2,3,4,5") 
+    gpu_env = os.environ.get("WORMHOLE_GPUS", "0,1") 
     base_gpus = [int(g.strip()) for g in gpu_env.split(',')]
     
     num_patches = 12
