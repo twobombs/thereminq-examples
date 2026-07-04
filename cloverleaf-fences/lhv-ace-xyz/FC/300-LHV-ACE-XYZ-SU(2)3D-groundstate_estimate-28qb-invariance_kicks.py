@@ -8,6 +8,7 @@ import time
 import signal
 import numpy as np
 import multiprocessing as mp
+import threading
 from multiprocessing.connection import Connection, wait
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -118,16 +119,14 @@ def persistent_island_worker_28q(
             
         cmd_pipe.send({"status": "READY", "patch_idx": patch_idx})
         
-        # Sort to guarantee stable covariance matrix indexing
         all_boundary_qubits = sorted(list(set([q for face in boundaries.values() for q in face])))
         num_bound = len(all_boundary_qubits)
 
         def extract_bits(samples: List[int], n_q: int) -> np.ndarray:
-            """Convert integer shots to an array of +1/-1 eigenvalues."""
             arr = np.array(samples, dtype=np.uint32)[:, None]
             mask = 1 << np.arange(n_q, dtype=np.uint32)
             bits = (arr & mask) > 0
-            return 1.0 - 2.0 * bits 
+            return 1.0 - 2.0 * bits.astype(float)
 
         while True:
             if not cmd_pipe.poll(timeout=0.1): continue
@@ -143,7 +142,6 @@ def persistent_island_worker_28q(
                     corr_shots = cmd.get("corr_shots", 1024)
                     
                     with gpu_semaphore:
-                        # 1. Strang Splitting (Heavy Entanglement Phase)
                         for _ in range(steps):
                             for q in range(num_qubits): apply_rx(sim, -hx * dt, q)
                             for q in range(num_qubits): apply_rz(sim, -hz * dt, q)
@@ -154,30 +152,44 @@ def persistent_island_worker_28q(
                             for q in range(num_qubits): apply_rz(sim, -hz * dt, q)
                             for q in range(num_qubits): apply_rx(sim, -hx * dt, q)
                             
-                        # 2. Statistical Correlation Profiling (Z-Basis)
-                        z_samples = sim.measure_shots(all_boundary_qubits, corr_shots)
-                        Z_mat = extract_bits(z_samples, num_bound)
-                        Z_mean = np.mean(Z_mat, axis=0)
-                        Z_cov = np.cov(Z_mat, rowvar=False) + np.eye(num_bound) * 1e-6
-                        
-                        # X-Basis Profile
-                        for q in all_boundary_qubits: apply_h(sim, q)
-                        x_samples = sim.measure_shots(all_boundary_qubits, corr_shots)
-                        X_mat = extract_bits(x_samples, num_bound)
-                        X_mean = np.mean(X_mat, axis=0)
-                        X_cov = np.cov(X_mat, rowvar=False) + np.eye(num_bound) * 1e-6
-                        for q in all_boundary_qubits: apply_h(sim, q) # Reverse
+                    with gpu_semaphore:
+                        sim_z = QrackSimulator(clone_sid=sim.sid)
+                        try:
+                            z_samples = sim_z.measure_shots(all_boundary_qubits, corr_shots)
+                        finally:
+                            del sim_z
+                    gc.collect()
+                    Z_mat = extract_bits(z_samples, num_bound)
+                    Z_mean = np.mean(Z_mat, axis=0)
+                    Z_cov = np.cov(Z_mat, rowvar=False) + np.eye(num_bound) * 1e-6
+                    
+                    with gpu_semaphore:
+                        sim_x = QrackSimulator(clone_sid=sim.sid)
+                        try:
+                            for q in all_boundary_qubits: apply_h(sim_x, q)
+                            x_samples = sim_x.measure_shots(all_boundary_qubits, corr_shots)
+                        finally:
+                            del sim_x
+                    gc.collect()
+                    X_mat = extract_bits(x_samples, num_bound)
+                    X_mean = np.mean(X_mat, axis=0)
+                    X_cov = np.cov(X_mat, rowvar=False) + np.eye(num_bound) * 1e-6
 
-                        # Y-Basis Profile
-                        for q in all_boundary_qubits: apply_rx(sim, np.pi/2, q)
-                        y_samples = sim.measure_shots(all_boundary_qubits, corr_shots)
-                        Y_mat = extract_bits(y_samples, num_bound)
-                        Y_mean = np.mean(Y_mat, axis=0)
-                        Y_cov = np.cov(Y_mat, rowvar=False) + np.eye(num_bound) * 1e-6
-                        for q in all_boundary_qubits: apply_rx(sim, -np.pi/2, q) # Reverse
+                    with gpu_semaphore:
+                        sim_y = QrackSimulator(clone_sid=sim.sid)
+                        try:
+                            for q in all_boundary_qubits: apply_rx(sim_y, -np.pi/2, q)
+                            y_samples = sim_y.measure_shots(all_boundary_qubits, corr_shots)
+                        finally:
+                            del sim_y
+                    gc.collect()
+                    Y_mat = extract_bits(y_samples, num_bound)
+                    Y_mean = np.mean(Y_mat, axis=0)
+                    Y_cov = np.cov(Y_mat, rowvar=False) + np.eye(num_bound) * 1e-6
                             
                     payload = {
                         "qubits": all_boundary_qubits,
+                        "corr_shots": corr_shots,
                         "means": {"X": X_mean, "Y": Y_mean, "Z": Z_mean},
                         "covs": {"X": X_cov, "Y": Y_cov, "Z": Z_cov}
                     }
@@ -189,14 +201,12 @@ def persistent_island_worker_28q(
                     local_energy = 0.0
                     
                     with gpu_semaphore:
-                        # 1. Apply Stochastic Macroscopic Kicks
                         for raw_q, (kx, ky, kz) in kicks.items():
                             q = int(raw_q)
                             if kx != 0.0: apply_rx(sim, kx, q)
                             if ky != 0.0: apply_ry(sim, ky, q)
                             if kz != 0.0: apply_rz(sim, kz, q)
                             
-                        # 2. Measure Bulk Energy (in-place)
                         for q in range(num_qubits):
                             local_energy += -hz_val * (1.0 - 2.0 * sim.prob(q))
                             apply_h(sim, q)
@@ -210,56 +220,28 @@ def persistent_island_worker_28q(
                             
                     cmd_pipe.send({"status": "STEP_2_COMPLETE", "patch_idx": patch_idx, "data": local_energy})
 
-                # COMPUTE_BENCHMARKS remains functionally identical to the previous version
                 elif action == "COMPUTE_BENCHMARKS":
-                    shots = cmd.get("shots", 2048) 
-                    avg_purity, expected_xeb, expected_hog = 0.0, 0.0, 0.0
-                    
                     try:
                         purity_sum = 0.0
                         with gpu_semaphore:
-                            for q in range(27):
+                            for q in range(num_qubits):
                                 z_exp = 1.0 - 2.0 * sim.prob(q)
                                 apply_h(sim, q)
                                 x_exp = 1.0 - 2.0 * sim.prob(q)
                                 apply_h(sim, q)
-                                apply_rx(sim, np.pi/2, q)
-                                y_exp = 1.0 - 2.0 * sim.prob(q)
                                 apply_rx(sim, -np.pi/2, q)
+                                y_exp = 1.0 - 2.0 * sim.prob(q)
+                                apply_rx(sim, np.pi/2, q)
                                 purity_sum += (x_exp**2 + y_exp**2 + z_exp**2)
                                 
-                            ideal_probs_list = sim.out_probs()
-                            raw_samples = sim.measure_shots(list(range(num_qubits)), shots)
-                            
-                        avg_purity = purity_sum / 27.0
-                        
-                        if raw_samples and isinstance(raw_samples[0], (list, tuple)):
-                            samples_arr = np.array(raw_samples, dtype=np.uint32)
-                            powers = 1 << np.arange(num_qubits, dtype=np.uint32)
-                            samples = samples_arr.dot(powers)
-                        else:
-                            samples = np.array(raw_samples, dtype=np.uint32)
-                        
-                        ideal_probs = np.array(ideal_probs_list, dtype=np.float64)
-                        n_pow = len(ideal_probs)
-                        u_u = 1.0 / n_pow
-                        
-                        counts_arr = np.bincount(samples, minlength=n_pow)
-                        denom = np.sum((ideal_probs - u_u) ** 2)
-                        numer = np.sum((ideal_probs - u_u) * ((counts_arr / shots) - u_u))
-                        expected_xeb = float(numer / denom) if denom > 0 else 0.0
-                        
-                        threshold = np.median(ideal_probs)
-                        is_heavy = ideal_probs > threshold
-                        sum_hog_counts = np.sum(counts_arr[is_heavy])
-                        expected_hog = float(sum_hog_counts / shots)
-                        
+                        avg_purity = purity_sum / float(num_qubits)
                     except Exception as e:
                         print(f"Worker {patch_idx} benchmark failed: {e}")
+                        avg_purity = 0.0
                     
                     gc.collect() 
                     cmd_pipe.send({"status": "BENCHMARKS_COMPUTED", "patch_idx": patch_idx, "data": {
-                        "grid_purity": float(avg_purity), "xeb": expected_xeb, "hog": expected_hog
+                        "grid_purity": float(avg_purity)
                     }})
 
             except Exception as e:
@@ -309,6 +291,7 @@ class VolumetricHadronEngine28Q:
 
         total_sites = self.num_patches * self.qubits_per_patch
         print(f"Initializing High-Throughput 28-Qubit Engine with Statistical Covariance Profiles...")
+        print(f"Total logical capacity configured: {total_sites} total qubits")
         
         master_rng = np.random.default_rng(master_seed)
         patch_seeds = master_rng.integers(0, 2**31 - 1, size=self.num_patches)
@@ -353,10 +336,30 @@ class VolumetricHadronEngine28Q:
                 os.fsync(f.fileno())
         except Exception: pass
 
-    def sync_broadcast(self, action: str, kwargs_list: Optional[List[Dict]] = None) -> Dict[int, Any]:
-        if kwargs_list is None: kwargs_list = [{}] * self.num_patches
+    def sync_broadcast(self, action: str, kwargs_list: Optional[List[Dict]] = None, expected_status: Optional[str] = None) -> Dict[int, Any]:
+        if kwargs_list is None: kwargs_list = [{} for _ in range(self.num_patches)]
+        
+        send_errors = {}
+        error_lock = threading.Lock()
+        
+        def _send_one(pipe: Connection, msg: Dict[str, Any], idx: int):
+            try:
+                pipe.send(msg)
+            except Exception as e:
+                with error_lock:
+                    send_errors[idx] = e
+
+        threads = []
         for i, pipe in enumerate(self.pipes): 
-            pipe.send({"action": action, **kwargs_list[i]})
+            t = threading.Thread(target=_send_one, args=(pipe, {"action": action, **kwargs_list[i]}, i))
+            t.start()
+            threads.append(t)
+            
+        for t in threads: t.join()
+            
+        if send_errors:
+            self.shutdown()
+            raise RuntimeError(f"Send failed for workers: {send_errors}")
             
         results = {}
         pending = list(enumerate(self.pipes)) 
@@ -376,6 +379,8 @@ class VolumetricHadronEngine28Q:
                         res = pipe.recv()
                         if res.get("status") == "ERROR": 
                             raise RuntimeError(f"Worker {idx} error: {res.get('msg')}")
+                        if expected_status and res.get("status") != expected_status:
+                            raise RuntimeError(f"Worker {idx} protocol sync error: Expected {expected_status}, got {res.get('status')}")
                         results[idx] = res
                     except (EOFError, OSError, BrokenPipeError): 
                         raise RuntimeError(f"Worker {idx} connection crashed.")
@@ -395,30 +400,26 @@ class VolumetricHadronEngine28Q:
             current_hz = s * target_hz
             current_g_face = s * target_g_face
             
-            # Step 1: Statistical Sampling
-            step1_res = self.sync_broadcast("EVOLVE_AND_MEASURE_STATISTICAL", [
-                {"J": current_J, "hx": current_hx, "hz": current_hz, "dt": dt, "steps": 2, "corr_shots": 1024}
-            ] * self.num_patches)
+            step_payload = [{"J": current_J, "hx": current_hx, "hz": current_hz, "dt": dt, "steps": 2, "corr_shots": 1024} for _ in range(self.num_patches)]
+            step1_res = self.sync_broadcast("EVOLVE_AND_MEASURE_STATISTICAL", step_payload, expected_status="STEP_1_COMPLETE")
             
             patch_profiles = {p: res["data"] for p, res in step1_res.items()}
             kick_payloads = [{"kicks": {}, "J": current_J, "hx": current_hx, "hz": current_hz} for _ in range(self.num_patches)]
             macroscopic_boundary_energy = 0.0
             
-            # Generate multivariate stochastic fluctuations based on measured exact covariances
             stochastic_noise = {}
             for p, prof in patch_profiles.items():
                 n_bounds = len(prof["qubits"])
-                # Langevin dynamics: Sample correlated noise from the covariance matrices
-                X_noise = np.random.multivariate_normal(np.zeros(n_bounds), prof["covs"]["X"])
-                Y_noise = np.random.multivariate_normal(np.zeros(n_bounds), prof["covs"]["Y"])
-                Z_noise = np.random.multivariate_normal(np.zeros(n_bounds), prof["covs"]["Z"])
+                scale = np.sqrt(dt / prof["corr_shots"])
+                X_noise = np.random.multivariate_normal(np.zeros(n_bounds), prof["covs"]["X"]) * scale
+                Y_noise = np.random.multivariate_normal(np.zeros(n_bounds), prof["covs"]["Y"]) * scale
+                Z_noise = np.random.multivariate_normal(np.zeros(n_bounds), prof["covs"]["Z"]) * scale
                 
                 stochastic_noise[p] = {
                     q: (X_noise[i], Y_noise[i], Z_noise[i]) 
                     for i, q in enumerate(prof["qubits"])
                 }
 
-            # Map the kicks topographically
             for p1, coord1 in self.patch_coords.items():
                 x1, y1, z1 = coord1
                 neighbors = {
@@ -432,49 +433,70 @@ class VolumetricHadronEngine28Q:
                         continue
                         
                     p2 = self.coord_to_patch.get(coord2)
-                    if p2 is None: continue 
+                    if p2 is None or p1 >= p2: continue 
                     
                     dir2 = dir1.replace("+", "temp").replace("-", "+").replace("temp", "-")
                     face1_qubits = self.boundaries[dir1]
                     face2_qubits = self.boundaries[dir2]
                     
-                    prof2 = patch_profiles[p2]
-                    noise2 = stochastic_noise[p2]
+                    prof1, noise1 = patch_profiles[p1], stochastic_noise[p1]
+                    prof2, noise2 = patch_profiles[p2], stochastic_noise[p2]
                     
-                    # Compute mean field + statistical dispersion per face
-                    avg_x, avg_y, avg_z = 0.0, 0.0, 0.0
+                    q_to_idx1 = {q: i for i, q in enumerate(prof1["qubits"])}
+                    q_to_idx2 = {q: i for i, q in enumerate(prof2["qubits"])}
+                    
+                    avg_x2, avg_y2, avg_z2 = 0.0, 0.0, 0.0
                     for q2 in face2_qubits:
-                        idx2 = prof2["qubits"].index(q2)
-                        # Mean Field
-                        avg_x += prof2["means"]["X"][idx2]
-                        avg_y += prof2["means"]["Y"][idx2]
-                        avg_z += prof2["means"]["Z"][idx2]
-                        
-                        # Add Correlated Fluctuation Component
-                        avg_x += noise2[q2][0]
-                        avg_y += noise2[q2][1]
-                        avg_z += noise2[q2][2]
+                        idx2 = q_to_idx2[q2]
+                        avg_x2 += prof2["means"]["X"][idx2] + noise2[q2][0]
+                        avg_y2 += prof2["means"]["Y"][idx2] + noise2[q2][1]
+                        avg_z2 += prof2["means"]["Z"][idx2] + noise2[q2][2]
                         
                     n2 = max(1, len(face2_qubits))
-                    avg_x /= n2; avg_y /= n2; avg_z /= n2
+                    avg_x2 /= n2; avg_y2 /= n2; avg_z2 /= n2
+                    
+                    avg_x1, avg_y1, avg_z1 = 0.0, 0.0, 0.0
+                    for q1 in face1_qubits:
+                        idx1 = q_to_idx1[q1]
+                        avg_x1 += prof1["means"]["X"][idx1] + noise1[q1][0]
+                        avg_y1 += prof1["means"]["Y"][idx1] + noise1[q1][1]
+                        avg_z1 += prof1["means"]["Z"][idx1] + noise1[q1][2]
+                        
+                    n1 = max(1, len(face1_qubits))
+                    avg_x1 /= n1; avg_y1 /= n1; avg_z1 /= n1
                     
                     interaction_E = 0.0
-                    prof1 = patch_profiles[p1]
+                    
+                    # Note on Physics: We compute the cross-product of (Noisy Field) x (Clean Expectation).
+                    # This intentionally models a stochastic external field acting on a mean-field source,
+                    # ensuring the energy accurately reflects the exact variance injection.
                     for q1 in face1_qubits:
-                        curr_k = kick_payloads[p1]["kicks"].get(q1, (0.0, 0.0, 0.0))
+                        curr_k1 = kick_payloads[p1]["kicks"].get(q1, (0.0, 0.0, 0.0))
                         kick_payloads[p1]["kicks"][q1] = (
-                            curr_k[0] + current_g_face * avg_x,
-                            curr_k[1] + current_g_face * avg_y,
-                            curr_k[2] + current_g_face * avg_z
+                            curr_k1[0] + current_g_face * avg_x2,
+                            curr_k1[1] + current_g_face * avg_y2,
+                            curr_k1[2] + current_g_face * avg_z2
                         )
-                        idx1 = prof1["qubits"].index(q1)
-                        interaction_E += -current_g_face * (prof1["means"]["X"][idx1]*avg_x + 
-                                                            prof1["means"]["Y"][idx1]*avg_y + 
-                                                            prof1["means"]["Z"][idx1]*avg_z)
+                        idx1 = q_to_idx1[q1]
+                        interaction_E += -current_g_face * (prof1["means"]["X"][idx1]*avg_x2 + 
+                                                            prof1["means"]["Y"][idx1]*avg_y2 + 
+                                                            prof1["means"]["Z"][idx1]*avg_z2)
                         
-                    if p1 < p2: macroscopic_boundary_energy += interaction_E
+                    for q2 in face2_qubits:
+                        curr_k2 = kick_payloads[p2]["kicks"].get(q2, (0.0, 0.0, 0.0))
+                        kick_payloads[p2]["kicks"][q2] = (
+                            curr_k2[0] + current_g_face * avg_x1,
+                            curr_k2[1] + current_g_face * avg_y1,
+                            curr_k2[2] + current_g_face * avg_z1
+                        )
+                        idx2 = q_to_idx2[q2]
+                        interaction_E += -current_g_face * (prof2["means"]["X"][idx2]*avg_x1 + 
+                                                            prof2["means"]["Y"][idx2]*avg_y1 + 
+                                                            prof2["means"]["Z"][idx2]*avg_z1)
+                        
+                    macroscopic_boundary_energy += interaction_E / 2.0
 
-            step2_res = self.sync_broadcast("APPLY_KICKS_AND_MEASURE_ENERGY", kick_payloads)
+            step2_res = self.sync_broadcast("APPLY_KICKS_AND_MEASURE_ENERGY", kick_payloads, expected_status="STEP_2_COMPLETE")
             bulk_energy = sum([r["data"] for r in step2_res.values()])
             
             total_energy = bulk_energy + macroscopic_boundary_energy
@@ -488,24 +510,9 @@ class VolumetricHadronEngine28Q:
             
             if t == total_steps - 1:
                 print(f"         +-- Calculating Final Benchmarks...")
-                bench_res = {}
-                for p_idx, pipe in enumerate(self.pipes):
-                    pipe.send({"action": "COMPUTE_BENCHMARKS", "shots": 2048})
-                    if not wait([pipe], timeout=300.0):
-                        self.shutdown(); raise TimeoutError(f"Worker {p_idx} benchmark timeout.")
-                    try:
-                        res = pipe.recv()
-                        if res.get("status") == "ERROR": self.shutdown(); raise RuntimeError(res.get('msg'))
-                        bench_res[p_idx] = res
-                    except (EOFError, OSError, BrokenPipeError):
-                        self.shutdown(); raise RuntimeError(f"Worker {p_idx} crashed.")
-
+                bench_res = self.sync_broadcast("COMPUTE_BENCHMARKS", expected_status="BENCHMARKS_COMPUTED")
                 avg_purity = sum(res["data"]["grid_purity"] for res in bench_res.values()) / self.num_patches
-                avg_xeb = sum(res["data"]["xeb"] for res in bench_res.values()) / self.num_patches
-                avg_hog = sum(res["data"]["hog"] for res in bench_res.values()) / self.num_patches
-                
-                print(f"         +-- Avg XEB: {avg_xeb:.4f} | Avg HOG: {avg_hog:.4f}")
-                print(f"         +-- Avg Grid Purity (1.0 = Pure, 0.0 = Mixed): {avg_purity:.4f}")
+                print(f"         +-- Avg Total Sub-Volume Purity (1.0 = Pure, 0.0 = Mixed): {avg_purity:.4f}")
 
     def shutdown(self) -> None:
         if self._is_shutdown: return
@@ -519,7 +526,7 @@ class VolumetricHadronEngine28Q:
             except (OSError, BrokenPipeError, EOFError): pass
         for p in getattr(self, 'workers', []):
             try:
-                p.join(timeout=2)
+                p.join(timeout=5)
                 if p.is_alive(): p.terminate()
             except Exception: pass
         for pipe in getattr(self, 'pipes', []):
