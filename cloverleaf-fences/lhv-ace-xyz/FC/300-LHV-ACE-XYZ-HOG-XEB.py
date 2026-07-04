@@ -59,7 +59,6 @@ def apply_cx(sim: Any, c: int, t: int) -> None:
 # 1. HOLOGRAPHIC TOPOLOGY (BULK/BOUNDARY)
 # ==========================================
 def get_intra_edges(num_qubits: int = 25, topology: str = "FC") -> List[Tuple[int, int]]:
-    """Generates internal patch entanglement based on the chosen topology."""
     edges = []
     if topology == "FC":
         for i in range(num_qubits):
@@ -106,7 +105,8 @@ def persistent_island_worker(
     num_qubits: int, 
     intra_edges: List[Tuple[int, int]], 
     boundary_qubits: List[int],
-    cmd_pipe: Connection
+    cmd_pipe: Connection,
+    gpu_lock: Any
 ) -> None:
     
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -124,8 +124,9 @@ def persistent_island_worker(
         
         sim = QrackSimulator(qubit_count=num_qubits)
         
-        for q in range(num_qubits):
-            apply_h(sim, q)
+        with gpu_lock:
+            for q in range(num_qubits):
+                apply_h(sim, q)
             
         cmd_pipe.send({"status": "READY", "patch_idx": patch_idx})
         rotation_gates = [apply_rx, apply_ry, apply_rz]
@@ -148,87 +149,121 @@ def persistent_island_worker(
                 if action == "RCS_CHUNK":
                     seed = cmd.get("seed")
                     depth = cmd.get("depth", 1)
+                    drop_rate = cmd.get("drop_rate", 0.0) 
                     rng = np.random.default_rng(seed)
 
-                    for _ in range(depth):
-                        # 1. Random single-qubit rotations
-                        for q in range(num_qubits):
-                            gate_idx = rng.integers(0, 3)
-                            theta = rng.uniform(-np.pi, np.pi)
-                            rotation_gates[gate_idx](sim, theta, q)
-                        
-                        # 2. Apply chosen topology entanglement
-                        for q1, q2 in intra_edges:
-                            apply_cx(sim, q1, q2)
+                    with gpu_lock:
+                        for _ in range(depth):
+                            for q in range(num_qubits):
+                                gate_idx = rng.integers(0, 3)
+                                theta = rng.uniform(-np.pi, np.pi)
+                                rotation_gates[gate_idx](sim, theta, q)
+                            
+                            for q1, q2 in intra_edges:
+                                if rng.random() > drop_rate:
+                                    apply_cx(sim, q1, q2)
                     
                     cmd_pipe.send({"status": "CHUNK_COMPLETE", "patch_idx": patch_idx})
 
                 elif action == "MEASURE_BOUNDARY_BLOCH":
                     bloch_vectors = {}
-                    for q in boundary_qubits:
-                        # sim.prob() is non-collapsing in PyQrack - safe to rotate basis, sample, and undo
-                        z_exp = 1.0 - 2.0 * sim.prob(q)
-                        
-                        apply_h(sim, q)
-                        x_exp = 1.0 - 2.0 * sim.prob(q)
-                        apply_h(sim, q)
-                        
-                        apply_rx(sim, -np.pi/2, q)
-                        y_exp = 1.0 - 2.0 * sim.prob(q)
-                        apply_rx(sim, np.pi/2, q)
+                    with gpu_lock:
+                        for q in boundary_qubits:
+                            z_exp = 1.0 - 2.0 * sim.prob(q)
+                            
+                            apply_h(sim, q)
+                            x_exp = 1.0 - 2.0 * sim.prob(q)
+                            apply_h(sim, q)
+                            
+                            apply_rx(sim, np.pi/2, q)
+                            y_exp = 1.0 - 2.0 * sim.prob(q)
+                            apply_rx(sim, -np.pi/2, q)
 
-                        bloch_vectors[q] = (float(x_exp), float(y_exp), float(z_exp))
+                            bloch_vectors[q] = (float(x_exp), float(y_exp), float(z_exp))
                         
                     cmd_pipe.send({"status": "BLOCH_EXTRACTED", "patch_idx": patch_idx, "data": bloch_vectors})
 
                 elif action == "APPLY_LHV_KICKS":
                     kicks = cmd.get("kicks", {})
-                    for raw_q, (kx, ky, kz) in kicks.items():
-                        q = int(raw_q)
-                        if kx != 0.0: apply_rx(sim, kx, q)
-                        if ky != 0.0: apply_ry(sim, ky, q)
-                        if kz != 0.0: apply_rz(sim, kz, q)
+                    with gpu_lock:
+                        for raw_q, (kx, ky, kz) in kicks.items():
+                            q = int(raw_q)
+                            if kx != 0.0: apply_rx(sim, kx, q)
+                            if ky != 0.0: apply_ry(sim, ky, q)
+                            if kz != 0.0: apply_rz(sim, kz, q)
                     cmd_pipe.send({"status": "KICKS_APPLIED", "patch_idx": patch_idx})
 
                 elif action == "MEASURE_MAGNETIZATION":
-                    # Reserved for future use (e.g., tracking bulk magnetization over time)
-                    total_z = sum((1.0 - 2.0 * sim.prob(q)) for q in range(num_qubits))
+                    with gpu_lock:
+                        total_z = sum((1.0 - 2.0 * sim.prob(q)) for q in range(num_qubits))
                     cmd_pipe.send({"status": "MAGNETIZATION_MEASURED", "patch_idx": patch_idx, "data": total_z})
                 
                 elif action == "COMPUTE_BENCHMARKS":
-                    shots = cmd.get("shots", 8192)
+                    shots = cmd.get("shots", 2048) 
+                    purity_sum = 0.0
                     expected_xeb, expected_hog = 0.0, 0.0
                     
                     try:
-                        samples = sim.measure_shots(list(range(num_qubits)), shots)
-                        
-                        # Normalize: flatten if per-qubit format returned.
-                        # Assumes little-endian: s[0] = LSB. If PyQrack returns big-endian,
-                        # indices will be bit-reversed - harmless for XEB but matters for HOG.
-                        if samples and isinstance(samples[0], (list, tuple)):
-                            samples = [int(sum(b << i for i, b in enumerate(s))) for s in samples]
+                        # 1. GPU Tasks: Measure Purity, Extract Probabilities, and Draw Shots
+                        with gpu_lock:
+                            for q in boundary_qubits:
+                                z_exp = 1.0 - 2.0 * sim.prob(q)
+                                apply_h(sim, q)
+                                x_exp = 1.0 - 2.0 * sim.prob(q)
+                                apply_h(sim, q)
+                                apply_rx(sim, np.pi/2, q)
+                                y_exp = 1.0 - 2.0 * sim.prob(q)
+                                apply_rx(sim, -np.pi/2, q)
+                                
+                                purity_sum += (x_exp**2 + y_exp**2 + z_exp**2)
+                                
+                            # Extract true ground-truth statevector probabilities for XEB/HOG
+                            ideal_probs_list = sim.out_probs()
+                            raw_samples = sim.measure_shots(list(range(num_qubits)), shots)
                             
-                        counts = dict(collections.Counter(samples))
-                        n_pow = 2 ** num_qubits
+                        # Lock released. Perform heavy mathematics on CPU.
+                        avg_purity = purity_sum / len(boundary_qubits) if boundary_qubits else 0.0
                         
-                        # Sparse collision probability - O(unique_outcomes) memory
-                        collision_prob = sum((c / shots) ** 2 for c in counts.values())
+                        # Process raw samples into integers
+                        if raw_samples and isinstance(raw_samples[0], (list, tuple)):
+                            samples_arr = np.array(raw_samples, dtype=np.uint32)
+                            powers = 1 << np.arange(num_qubits, dtype=np.uint32)
+                            samples = samples_arr.dot(powers)
+                        else:
+                            samples = np.array(raw_samples, dtype=np.uint32)
                         
-                        # Linear XEB via collision probability (Porter-Thomas: expected to approach 1.0 for ideal random circuits)
-                        expected_xeb = float(n_pow * collision_prob - 1.0)
+                        # Convert PyQrack output to NumPy float64 array
+                        ideal_probs = np.array(ideal_probs_list, dtype=np.float64)
+                        n_pow = len(ideal_probs)
+                        u_u = 1.0 / n_pow
                         
-                        # Note: HOG requires ideal probabilities; with 2^25 states and 8k shots,
-                        # shot-based HOG is statistically meaningless. Reporting 0.0.
-                        expected_hog = 0.0
-
+                        # Vectorized equivalent of the reference counts loop
+                        counts_arr = np.bincount(samples, minlength=n_pow)
+                        
+                        # True XEB Calculation (Vectorized)
+                        denom = np.sum((ideal_probs - u_u) ** 2)
+                        numer = np.sum((ideal_probs - u_u) * ((counts_arr / shots) - u_u))
+                        expected_xeb = float(numer / denom) if denom > 0 else 0.0
+                        
+                        # True HOG Calculation (Vectorized)
+                        threshold = np.median(ideal_probs)
+                        is_heavy = ideal_probs > threshold
+                        sum_hog_counts = np.sum(counts_arr[is_heavy])
+                        expected_hog = float(sum_hog_counts / shots)
+                        
                     except Exception as e:
                         print(f"Worker {patch_idx} benchmark failed: {e}")
                     
+                    # Force memory cleanup due to large probability arrays
                     gc.collect() 
                     cmd_pipe.send({
                         "status": "BENCHMARKS_COMPUTED", 
                         "patch_idx": patch_idx, 
-                        "data": {"xeb": expected_xeb, "hog": expected_hog}
+                        "data": {
+                            "boundary_purity": float(avg_purity),
+                            "xeb": expected_xeb,
+                            "hog": expected_hog
+                        }
                     })
 
             except Exception as inner_e:
@@ -262,6 +297,9 @@ class LHVWormholeEngine:
             self.boundary_map[pB].setdefault(bB, []).append((pA, bA))
 
         self.ctx = mp.get_context('spawn')
+        
+        self.gpu_locks = {gpu_id: self.ctx.Lock() for gpu_id in set(self.device_ids)}
+        
         self.workers = []
         self.pipes = []
 
@@ -269,16 +307,18 @@ class LHVWormholeEngine:
         for p_idx in range(self.num_patches):
             parent_conn, child_conn = self.ctx.Pipe()
             boundary_qubits = list(self.boundary_map[p_idx].keys())
+            assigned_gpu = self.device_ids[p_idx % len(self.device_ids)]
             
             p = self.ctx.Process(
                 target=persistent_island_worker,
                 args=(
-                    self.device_ids[p_idx % len(self.device_ids)], 
+                    assigned_gpu, 
                     p_idx, 
                     len(self.patches[p_idx]), 
                     self.intra_patch_edges, 
                     boundary_qubits, 
-                    child_conn
+                    child_conn,
+                    self.gpu_locks[assigned_gpu]
                 )
             )
             p.start()
@@ -337,15 +377,19 @@ class LHVWormholeEngine:
             
         return results
 
-    def evolve(self, total_time_steps: int, depth_per_step: int, coupling_strength: float):
+    def evolve(self, total_time_steps: int, depth_per_step: int, coupling_strength: float, drop_rate: float = 0.0):
         print(f"\nStarting Tuned XYZ LHV Evolution...")
-        print(f"Steps: {total_time_steps} | RCS Depth: {depth_per_step} | g: {coupling_strength}\n")
+        print(f"Steps: {total_time_steps} | RCS Depth: {depth_per_step} | g: {coupling_strength}")
+        print(f"Scrambling Drop Rate: {drop_rate*100}% of internal CX gates skipped.\n")
         
         main_rng = np.random.default_rng()
 
         for t in range(total_time_steps):
             seeds = main_rng.integers(0, 2**32, size=self.num_patches)
-            self.sync_broadcast("RCS_CHUNK", [{"seed": int(seeds[i]), "depth": depth_per_step} for i in range(self.num_patches)])
+            self.sync_broadcast("RCS_CHUNK", [
+                {"seed": int(seeds[i]), "depth": depth_per_step, "drop_rate": drop_rate} 
+                for i in range(self.num_patches)
+            ])
             
             xyz_results = self.sync_broadcast("MEASURE_BOUNDARY_BLOCH")
             patch_bloch = {p_idx: res["data"] for p_idx, res in xyz_results.items()}
@@ -386,17 +430,17 @@ class LHVWormholeEngine:
                             edge_count += 1
                         
             avg_corr = cross_corr / edge_count if edge_count > 0 else 0.0
-            print(f"Step {t:03d} | Boundary XYZ Correlation (V_A • V_B): {avg_corr:+.4f}")
+            print(f"Step {t:03d} | Boundary XYZ Correlation (V_A * V_B): {avg_corr:+.4f}")
             
             if t == total_time_steps - 1:
-                # Note: The benchmark is computed on the post-kick, post-Bloch-measurement state.
-                # While prob() is non-collapsing, the basis rotations applied during Bloch
-                # extraction do modify the state. XEB fidelity here reflects this slightly altered state.
                 print(f"         +-- Calculating Final Benchmarks...")
-                bench_res = self.sync_broadcast("COMPUTE_BENCHMARKS", [{"shots": 8192} for _ in range(self.num_patches)])
+                bench_res = self.sync_broadcast("COMPUTE_BENCHMARKS")
+                avg_purity = sum(res["data"]["boundary_purity"] for res in bench_res.values()) / self.num_patches
                 avg_xeb = sum(res["data"]["xeb"] for res in bench_res.values()) / self.num_patches
                 avg_hog = sum(res["data"]["hog"] for res in bench_res.values()) / self.num_patches
+                
                 print(f"         +-- Avg XEB: {avg_xeb:.4f} | Avg HOG: {avg_hog:.4f}")
+                print(f"         +-- Avg Boundary Purity (1.0 = Pure, 0.0 = Mixed): {avg_purity:.4f}")
 
     def shutdown(self):
         if self._is_shutdown: return
@@ -438,15 +482,14 @@ if __name__ == "__main__":
     patches_per_gpu = max(1, num_patches // len(base_gpus))
     AVAILABLE_GPUS = [base_gpus[(i // patches_per_gpu) % len(base_gpus)] for i in range(num_patches)]
     
-    engine = LHVWormholeEngine(device_ids=AVAILABLE_GPUS, intra_topology="RING", boundary_size=4)
+    engine = LHVWormholeEngine(device_ids=AVAILABLE_GPUS, intra_topology="FC", boundary_size=4)
 
     try:
-        # Effective kick magnitude per step is roughly g / sqrt(neighbors).
-        # e.g., for g=0.15 and 44 neighbors, this is ~0.023 radians (weak-coupling regime).
         engine.evolve(
             total_time_steps=10, 
             depth_per_step=1, 
-            coupling_strength=0.15 
+            coupling_strength=0.5,
+            drop_rate=0.8 
         )
     finally:
         engine.shutdown()
