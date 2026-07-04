@@ -1,5 +1,9 @@
+# -*- coding: us-ascii -*-
+# 3D Sub-Volume Lattice & Macroscopic Grid Annealing
+# High-Throughput Volumetric Engine with Partial-Run CSV Logging
 import os
 import gc
+import csv
 import time
 import signal
 import numpy as np
@@ -83,6 +87,7 @@ def persistent_island_worker_3d(
     intra_edges: List[Tuple[int, int]], 
     boundaries: Dict[str, List[int]],
     cmd_pipe: Connection,
+    gpu_semaphore: Any,
     seed: int
 ) -> None:
     
@@ -96,12 +101,14 @@ def persistent_island_worker_3d(
         from pyqrack import QrackSimulator
         sim = QrackSimulator(qubit_count=num_qubits)
         
-        np.random.seed(seed)
+        # Upgraded to modern, thread-safe RNG API
+        rng = np.random.default_rng(seed)
         
-        for q in range(num_qubits):
-            apply_h(sim, q)
-            apply_rx(sim, np.random.normal(0, 1e-5), q)
-            apply_rz(sim, np.random.normal(0, 1e-5), q)
+        with gpu_semaphore:
+            for q in range(num_qubits):
+                apply_h(sim, q)
+                apply_rx(sim, rng.normal(0, 1e-5), q)
+                apply_rz(sim, rng.normal(0, 1e-5), q)
             
         cmd_pipe.send({"status": "READY", "patch_idx": patch_idx})
         all_boundary_qubits = list(set([q for face in boundaries.values() for q in face]))
@@ -114,91 +121,137 @@ def persistent_island_worker_3d(
             if action == "SHUTDOWN": break
 
             try:
-                if action == "EVOLVE_HADRONS":
+                if action == "EVOLVE_AND_MEASURE_BLOCH":
                     J, hx, hz = cmd.get("J", 1.0), cmd.get("hx", 0.5), cmd.get("hz", 0.2)
                     dt, steps = cmd.get("dt", 0.05), cmd.get("steps", 2)
                     
-                    for _ in range(steps):
-                        for q in range(num_qubits): apply_rx(sim, -2.0 * hx * dt, q)
-                        for q in range(num_qubits): apply_rz(sim, -2.0 * hz * dt, q)
-                        for q1, q2 in intra_edges:
-                            apply_cx(sim, q1, q2)
-                            apply_rz(sim, -2.0 * J * dt, q2)
-                            apply_cx(sim, q1, q2)
+                    bloch_vectors = {}
+                    
+                    with gpu_semaphore:
+                        # 1. Strang Splitting (1D LSH Hadron Proxy)
+                        for _ in range(steps):
+                            for q in range(num_qubits): apply_rx(sim, -hx * dt, q)
+                            for q in range(num_qubits): apply_rz(sim, -hz * dt, q)
+                            for q1, q2 in intra_edges:
+                                apply_cx(sim, q1, q2)
+                                apply_rz(sim, -2.0 * J * dt, q2)
+                                apply_cx(sim, q1, q2)
+                            for q in range(num_qubits): apply_rz(sim, -hz * dt, q)
+                            for q in range(num_qubits): apply_rx(sim, -hx * dt, q)
                             
-                    cmd_pipe.send({"status": "HADRONS_EVOLVED", "patch_idx": patch_idx})
+                        # 2. Extract Bloch Vectors (In-Place, NO CLONING)
+                        for q in all_boundary_qubits:
+                            z_exp = 1.0 - 2.0 * sim.prob(q)
+                            
+                            apply_h(sim, q)
+                            x_exp = 1.0 - 2.0 * sim.prob(q)
+                            apply_h(sim, q)
+                            
+                            # CORRECTED: Rotate Y to Z basis uses R_x(+pi/2), then reverse with R_x(-pi/2)
+                            apply_rx(sim, np.pi/2, q) 
+                            y_exp = 1.0 - 2.0 * sim.prob(q)
+                            apply_rx(sim, -np.pi/2, q)
+                            
+                            bloch_vectors[q] = (float(x_exp), float(y_exp), float(z_exp))
+                            
+                    cmd_pipe.send({"status": "STEP_1_COMPLETE", "patch_idx": patch_idx, "data": bloch_vectors})
 
-                elif action == "MEASURE_ENERGY":
+                elif action == "APPLY_KICKS_AND_MEASURE_ENERGY":
+                    kicks = cmd.get("kicks", {})
                     J_val, hx_val, hz_val = cmd.get("J", 1.0), cmd.get("hx", 0.5), cmd.get("hz", 0.2)
                     local_energy = 0.0
                     
-                    # N2 LIMITATION: This per-qubit cloning strategy introduces O(E + 2N) memory 
-                    # overhead per step. It is viable up to ~22 qubits/patch on standard hardware.
-                    # Scaling further requires staged measurement or native backend Pauli expectation tracking.
-                    for q in range(num_qubits):
-                        clone_x = sim.clone()
-                        apply_h(clone_x, q)
-                        local_energy += -hx_val * (1.0 - 2.0 * clone_x.prob(q))
-                        del clone_x
-                        
-                        clone_z = sim.clone()
-                        local_energy += -hz_val * (1.0 - 2.0 * clone_z.prob(q))
-                        del clone_z
-                        
-                    for q1, q2 in intra_edges:
-                        # N1 LIMITATION: The CNOT proxy method below is mathematically approximate 
-                        # for highly entangled states. It provides a heuristic <ZZ> expectation but 
-                        # lacks the precision of full state tomography or pauli_expectation_eigenvalues.
-                        clone_zz = sim.clone()
-                        apply_cx(clone_zz, q1, q2)
-                        local_energy += -J_val * (1.0 - 2.0 * clone_zz.prob(q2))
-                        del clone_zz
-                        
-                    cmd_pipe.send({"status": "ENERGY_MEASURED", "patch_idx": patch_idx, "data": local_energy})
+                    with gpu_semaphore:
+                        # 1. Apply Macroscopic Boundary Kicks
+                        for raw_q, (kx, ky, kz) in kicks.items():
+                            q = int(raw_q)
+                            if kx != 0.0: apply_rx(sim, kx, q)
+                            if ky != 0.0: apply_ry(sim, ky, q)
+                            if kz != 0.0: apply_rz(sim, kz, q)
+                            
+                        # 2. Measure Bulk Energy (In-Place, NO CLONING)
+                        for q in range(num_qubits):
+                            local_energy += -hz_val * (1.0 - 2.0 * sim.prob(q))
+                            
+                            apply_h(sim, q)
+                            local_energy += -hx_val * (1.0 - 2.0 * sim.prob(q))
+                            apply_h(sim, q)
+                            
+                        for q1, q2 in intra_edges:
+                            # Measures <ZZ> by conjugating Z_2 with CNOT
+                            apply_cx(sim, q1, q2)
+                            local_energy += -J_val * (1.0 - 2.0 * sim.prob(q2))
+                            apply_cx(sim, q1, q2)
+                            
+                    cmd_pipe.send({"status": "STEP_2_COMPLETE", "patch_idx": patch_idx, "data": local_energy})
 
-                elif action == "MEASURE_BOUNDARY_BLOCH":
-                    bloch_vectors = {}
-                    for q in all_boundary_qubits:
-                        clone_z = sim.clone()
-                        z_exp = 1.0 - 2.0 * clone_z.prob(q)
-                        del clone_z
+                elif action == "COMPUTE_BENCHMARKS":
+                    shots = cmd.get("shots", 2048) 
+                    avg_purity, expected_xeb, expected_hog = 0.0, 0.0, 0.0
+                    
+                    try:
+                        purity_sum = 0.0
+                        with gpu_semaphore:
+                            for q in all_boundary_qubits:
+                                z_exp = 1.0 - 2.0 * sim.prob(q)
+                                apply_h(sim, q)
+                                x_exp = 1.0 - 2.0 * sim.prob(q)
+                                apply_h(sim, q)
+                                apply_rx(sim, np.pi/2, q)
+                                y_exp = 1.0 - 2.0 * sim.prob(q)
+                                apply_rx(sim, -np.pi/2, q)
+                                purity_sum += (x_exp**2 + y_exp**2 + z_exp**2)
+                                
+                            ideal_probs_list = sim.out_probs()
+                            raw_samples = sim.measure_shots(list(range(num_qubits)), shots)
+                            
+                        avg_purity = purity_sum / len(all_boundary_qubits) if all_boundary_qubits else 0.0
                         
-                        clone_x = sim.clone()
-                        apply_h(clone_x, q)
-                        x_exp = 1.0 - 2.0 * clone_x.prob(q)
-                        del clone_x
+                        if raw_samples and isinstance(raw_samples[0], (list, tuple)):
+                            samples_arr = np.array(raw_samples, dtype=np.uint32)
+                            powers = 1 << np.arange(num_qubits, dtype=np.uint32)
+                            samples = samples_arr.dot(powers)
+                        else:
+                            samples = np.array(raw_samples, dtype=np.uint32)
                         
-                        clone_y = sim.clone()
-                        apply_rx(clone_y, -np.pi/2, q) 
-                        y_exp = 1.0 - 2.0 * clone_y.prob(q)
-                        del clone_y
+                        ideal_probs = np.array(ideal_probs_list, dtype=np.float64)
+                        n_pow = len(ideal_probs)
+                        u_u = 1.0 / n_pow
                         
-                        bloch_vectors[q] = (float(x_exp), float(y_exp), float(z_exp))
+                        counts_arr = np.bincount(samples, minlength=n_pow)
+                        denom = np.sum((ideal_probs - u_u) ** 2)
+                        numer = np.sum((ideal_probs - u_u) * ((counts_arr / shots) - u_u))
+                        expected_xeb = float(numer / denom) if denom > 0 else 0.0
                         
-                    cmd_pipe.send({"status": "BLOCH_EXTRACTED", "patch_idx": patch_idx, "data": bloch_vectors})
-
-                elif action == "APPLY_LHV_KICKS":
-                    kicks = cmd.get("kicks", {})
-                    for raw_q, (kx, ky, kz) in kicks.items():
-                        q = int(raw_q)
-                        if kx != 0.0: apply_rx(sim, kx, q)
-                        if ky != 0.0: apply_ry(sim, ky, q)
-                        if kz != 0.0: apply_rz(sim, kz, q)
-                    cmd_pipe.send({"status": "KICKS_APPLIED", "patch_idx": patch_idx})
+                        threshold = np.median(ideal_probs)
+                        is_heavy = ideal_probs > threshold
+                        sum_hog_counts = np.sum(counts_arr[is_heavy])
+                        expected_hog = float(sum_hog_counts / shots)
+                        
+                    except Exception as e:
+                        print(f"Worker {patch_idx} benchmark failed: {e}")
+                    
+                    gc.collect() 
+                    cmd_pipe.send({"status": "BENCHMARKS_COMPUTED", "patch_idx": patch_idx, "data": {
+                        "boundary_purity": float(avg_purity), "xeb": expected_xeb, "hog": expected_hog
+                    }})
 
             except Exception as e:
-                cmd_pipe.send({"status": "ERROR", "msg": str(e)})
+                try:
+                    cmd_pipe.send({"status": "ERROR", "msg": str(e)})
+                except (EOFError, OSError, BrokenPipeError):
+                    break
                 
-    except (EOFError, OSError): pass
+    except (EOFError, OSError, BrokenPipeError): pass
     finally:
         if sim is not None: del sim
         gc.collect()
 
 # ==========================================
-# 3. 3D HIERARCHICAL ORCHESTRATOR
+# 3. 3D MACROSCOPIC ORCHESTRATOR
 # ==========================================
-class HierarchicalHadronEngine3D:
-    def __init__(self, device_ids: List[int], grid: Tuple[int, int, int] = (2, 2, 2), master_seed: int = 42):
+class VolumetricHadronEngine3D:
+    def __init__(self, device_ids: List[int], grid: Tuple[int, int, int] = (2, 2, 4), master_seed: int = 42):
         self._is_shutdown = False
         self.device_ids = device_ids
         
@@ -220,51 +273,82 @@ class HierarchicalHadronEngine3D:
         self.coord_to_patch = {v: k for k, v in self.patch_coords.items()}
 
         self.ctx = mp.get_context('spawn')
+        
+        # SEMAPHORE OPTIMIZATION: Limits concurrent kernel streams per GPU to prevent driver crashes.
+        # Set to 4 here to allow aggressive pipelining on 18-qubit patches without overwhelming VRAM.
+        # If scaling to larger patches (>22 qubits), reduce this capacity to 2 or 1.
+        self.gpu_semaphores = {gpu_id: self.ctx.Semaphore(4) for gpu_id in set(self.device_ids)}
+        
         self.workers: List[mp.Process] = []
         self.pipes: List[Connection] = []
+        
+        self.energy_history = []
 
         total_sites = self.num_patches * self.qubits_per_patch
-        print(f"Initializing 3D Minimum Energy Setup ({self.num_patches} patches, {self.qubits_per_patch} qubits/patch -> {total_sites} total qubits)...")
+        print(f"Initializing High-Throughput 3D LSH Setup ({self.num_patches} patches, {total_sites} total qubits)...")
         
-        np.random.seed(master_seed)
-        patch_seeds = np.random.randint(0, 2**31 - 1, size=self.num_patches)
+        # Upgraded to modern, thread-safe RNG API for deterministic patch seeding
+        master_rng = np.random.default_rng(master_seed)
+        patch_seeds = master_rng.integers(0, 2**31 - 1, size=self.num_patches)
         
         for p_idx in range(self.num_patches):
             parent_conn, child_conn = self.ctx.Pipe()
+            assigned_gpu = self.device_ids[p_idx % len(self.device_ids)]
+            
             p = self.ctx.Process(
                 target=persistent_island_worker_3d,
-                args=(self.device_ids[p_idx % len(self.device_ids)], p_idx, 
-                      self.qubits_per_patch, self.intra_edges, self.boundaries, child_conn, int(patch_seeds[p_idx]))
+                args=(
+                    assigned_gpu, p_idx, self.qubits_per_patch, 
+                    self.intra_edges, self.boundaries, child_conn,
+                    self.gpu_semaphores[assigned_gpu], int(patch_seeds[p_idx])
+                )
             )
             p.start()
             child_conn.close() 
-            
             self.workers.append(p)
             self.pipes.append(parent_conn)
             
         for i, pipe in enumerate(self.pipes):
             if pipe.poll(timeout=45.0):
-                if pipe.recv().get("status") != "READY": raise RuntimeError("Worker error.")
-            else: raise TimeoutError("Worker timeout.")
+                if pipe.recv().get("status") != "READY": 
+                    self.shutdown(); raise RuntimeError("Worker error.")
+            else: 
+                self.shutdown(); raise TimeoutError("Worker timeout.")
 
     def sync_broadcast(self, action: str, kwargs_list: Optional[List[Dict]] = None) -> Dict[int, Any]:
         if kwargs_list is None: kwargs_list = [{}] * self.num_patches
-        for i, pipe in enumerate(self.pipes): pipe.send({"action": action, **kwargs_list[i]})
+        for i, pipe in enumerate(self.pipes): 
+            pipe.send({"action": action, **kwargs_list[i]})
             
         results = {}
-        for idx, pipe in enumerate(self.pipes):
-            if not pipe.poll(timeout=30.0):
-                raise TimeoutError(f"Worker {idx} timed out on action '{action}'")
-            
-            msg = pipe.recv()
-            if msg.get("status") == "ERROR":
-                raise RuntimeError(f"Worker {idx} execution failed: {msg.get('msg')}")
+        pending = list(enumerate(self.pipes)) 
+        deadline = time.monotonic() + 300.0
+        
+        while pending:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0: raise TimeoutError(f"Workers timed out on action '{action}'")
                 
-            results[idx] = msg
+            ready_pipes = wait([p for _, p in pending], timeout=timeout)
+            if not ready_pipes: continue
+                
+            still_pending = []
+            for idx, pipe in pending:
+                if pipe in ready_pipes:
+                    try:
+                        res = pipe.recv()
+                        if res.get("status") == "ERROR": 
+                            raise RuntimeError(f"Worker {idx} error: {res.get('msg')}")
+                        results[idx] = res
+                    except (EOFError, OSError, BrokenPipeError): 
+                        raise RuntimeError(f"Worker {idx} connection crashed.")
+                else: 
+                    still_pending.append((idx, pipe))
+            pending = still_pending
         return results
 
     def anneal_to_ground_state(self, total_steps: int, dt: float, target_g_face: float, target_J: float, target_hx: float, target_hz: float):
         print(f"Starting Adiabatic Anneal -> Target: J={target_J}, hx={target_hx}, hz={target_hz}\n")
+        self.energy_history.clear()
         
         for t in range(total_steps):
             s = t / max(1, (total_steps - 1))
@@ -273,10 +357,12 @@ class HierarchicalHadronEngine3D:
             current_hz = s * target_hz
             current_g_face = s * target_g_face
             
-            self.sync_broadcast("EVOLVE_HADRONS", [{"J": current_J, "hx": current_hx, "hz": current_hz, "dt": dt, "steps": 2}] * self.num_patches)
+            step1_res = self.sync_broadcast("EVOLVE_AND_MEASURE_BLOCH", [
+                {"J": current_J, "hx": current_hx, "hz": current_hz, "dt": dt, "steps": 2}
+            ] * self.num_patches)
+            patch_bloch = {p: res["data"] for p, res in step1_res.items()}
             
-            patch_bloch = {p: res["data"] for p, res in self.sync_broadcast("MEASURE_BOUNDARY_BLOCH").items()}
-            kick_payloads = [{"kicks": {}} for _ in range(self.num_patches)]
+            kick_payloads = [{"kicks": {}, "J": current_J, "hx": current_hx, "hz": current_hz} for _ in range(self.num_patches)]
             macroscopic_boundary_energy = 0.0
             
             for p1, coord1 in self.patch_coords.items():
@@ -308,8 +394,6 @@ class HierarchicalHadronEngine3D:
                     
                     interaction_E = 0.0
                     for q1 in face1_qubits:
-                        # N3 Note: Kicks are accumulated unconditionally. This correctly ensures
-                        # bilateral interaction, as both (p1->p2) and (p2->p1) apply fields to each other.
                         curr_k = kick_payloads[p1]["kicks"].get(q1, (0.0, 0.0, 0.0))
                         kick_payloads[p1]["kicks"][q1] = (
                             curr_k[0] + current_g_face * avg_x,
@@ -319,31 +403,75 @@ class HierarchicalHadronEngine3D:
                         v1 = patch_bloch[p1][q1]
                         interaction_E += -current_g_face * (v1[0]*avg_x + v1[1]*avg_y + v1[2]*avg_z)
                         
-                    if p1 < p2:
-                        macroscopic_boundary_energy += interaction_E
+                    if p1 < p2: macroscopic_boundary_energy += interaction_E
 
-            if current_g_face > 0.0:
-                self.sync_broadcast("APPLY_LHV_KICKS", kick_payloads)
-            
-            energy_res = self.sync_broadcast("MEASURE_ENERGY", [{"J": current_J, "hx": current_hx, "hz": current_hz}] * self.num_patches)
-            bulk_energy = sum([r["data"] for r in energy_res.values()])
+            step2_res = self.sync_broadcast("APPLY_KICKS_AND_MEASURE_ENERGY", kick_payloads)
+            bulk_energy = sum([r["data"] for r in step2_res.values()])
             
             total_energy = bulk_energy + macroscopic_boundary_energy
             print(f"Step {t:03d} | Anneal: {s*100:05.1f}% | Total Setup Potential Energy: {total_energy:+.4f}")
+            
+            self.energy_history.append({"Step": t, "Anneal_Percent": s*100, "Energy": total_energy})
+            
+            if t == total_steps - 1:
+                print(f"         +-- Calculating Final Benchmarks...")
+                bench_res = {}
+                for p_idx, pipe in enumerate(self.pipes):
+                    pipe.send({"action": "COMPUTE_BENCHMARKS", "shots": 2048})
+                    if not wait([pipe], timeout=300.0):
+                        self.shutdown(); raise TimeoutError(f"Worker {p_idx} benchmark timeout.")
+                    try:
+                        res = pipe.recv()
+                        if res.get("status") == "ERROR": self.shutdown(); raise RuntimeError(res.get('msg'))
+                        bench_res[p_idx] = res
+                    except (EOFError, OSError, BrokenPipeError):
+                        self.shutdown(); raise RuntimeError(f"Worker {p_idx} crashed.")
+
+                avg_purity = sum(res["data"]["boundary_purity"] for res in bench_res.values()) / self.num_patches
+                avg_xeb = sum(res["data"]["xeb"] for res in bench_res.values()) / self.num_patches
+                avg_hog = sum(res["data"]["hog"] for res in bench_res.values()) / self.num_patches
+                
+                print(f"         +-- Avg XEB: {avg_xeb:.4f} | Avg HOG: {avg_hog:.4f}")
+                print(f"         +-- Avg Boundary Purity (1.0 = Pure, 0.0 = Mixed): {avg_purity:.4f}")
+
+    def _export_csv(self):
+        filename = "ground_state_energy_curve.csv"
+        try:
+            with open(filename, mode='w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=["Step", "Anneal_Percent", "Energy"])
+                writer.writeheader()
+                writer.writerows(self.energy_history)
+            print(f"         +-- Success: Annealing curve saved to {filename}")
+        except Exception as e:
+            print(f"         +-- Warning: Could not save CSV file. {e}")
 
     def shutdown(self) -> None:
         if self._is_shutdown: return
         self._is_shutdown = True
+        print("\nShutting down High-Throughput Volumetric Engine...")
+        
+        # Safely flush partial or completed data to disk on shutdown
+        if hasattr(self, 'energy_history') and len(self.energy_history) > 0:
+            self._export_csv()
+            self.energy_history.clear()
+        
         for pipe in getattr(self, 'pipes', []):
-            try: 
-                pipe.send({"action": "SHUTDOWN"})
-                while pipe.poll(timeout=0.05): pipe.recv()
-            except: pass
+            try:
+                if not pipe.closed: 
+                    while pipe.poll(): pipe.recv()
+                    pipe.send({"action": "SHUTDOWN"})
+            except (OSError, BrokenPipeError, EOFError): pass
+                
         for p in getattr(self, 'workers', []):
             try:
                 p.join(timeout=2)
                 if p.is_alive(): p.terminate()
-            except: pass
+            except Exception: pass
+                
+        for pipe in getattr(self, 'pipes', []):
+            try:
+                if not pipe.closed: pipe.close()
+            except (OSError, BrokenPipeError, EOFError): pass
 
 # ==========================================
 # 4. EXECUTION
@@ -354,12 +482,12 @@ if __name__ == "__main__":
     gpu_env = os.environ.get("WORMHOLE_GPUS", "0,1,2,3") 
     base_gpus = [int(g.strip()) for g in gpu_env.split(',')]
     
-    target_grid = (2, 2, 2)
+    target_grid = (2, 2, 4)
     total_requested_nodes = target_grid[0] * target_grid[1] * target_grid[2]
     
     AVAILABLE_GPUS = [base_gpus[i % len(base_gpus)] for i in range(total_requested_nodes)]
     
-    engine = HierarchicalHadronEngine3D(
+    engine = VolumetricHadronEngine3D(
         device_ids=AVAILABLE_GPUS, 
         grid=target_grid,
         master_seed=1337
@@ -375,6 +503,6 @@ if __name__ == "__main__":
             target_hz=0.2
         )
     except KeyboardInterrupt:
-        pass
+        print("\nExecution interrupted by user.")
     finally:
         engine.shutdown()
