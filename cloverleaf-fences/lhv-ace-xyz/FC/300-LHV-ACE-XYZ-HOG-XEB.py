@@ -193,18 +193,16 @@ def persistent_island_worker(
                             if kz != 0.0: apply_rz(sim, kz, q)
                     cmd_pipe.send({"status": "KICKS_APPLIED", "patch_idx": patch_idx})
 
-                elif action == "MEASURE_MAGNETIZATION":
-                    with gpu_lock:
-                        total_z = sum((1.0 - 2.0 * sim.prob(q)) for q in range(num_qubits))
-                    cmd_pipe.send({"status": "MAGNETIZATION_MEASURED", "patch_idx": patch_idx, "data": total_z})
-                
                 elif action == "COMPUTE_BENCHMARKS":
                     shots = cmd.get("shots", 2048) 
+                    
+                    # FIX: Initialize all variables before the try block to prevent UnboundLocalError
+                    avg_purity = 0.0
+                    expected_xeb = 0.0
+                    expected_hog = 0.0
                     purity_sum = 0.0
-                    expected_xeb, expected_hog = 0.0, 0.0
                     
                     try:
-                        # 1. GPU Tasks: Measure Purity, Extract Probabilities, and Draw Shots
                         with gpu_lock:
                             for q in boundary_qubits:
                                 z_exp = 1.0 - 2.0 * sim.prob(q)
@@ -217,14 +215,13 @@ def persistent_island_worker(
                                 
                                 purity_sum += (x_exp**2 + y_exp**2 + z_exp**2)
                                 
-                            # Extract true ground-truth statevector probabilities for XEB/HOG
                             ideal_probs_list = sim.out_probs()
                             raw_samples = sim.measure_shots(list(range(num_qubits)), shots)
                             
-                        # Lock released. Perform heavy mathematics on CPU.
                         avg_purity = purity_sum / len(boundary_qubits) if boundary_qubits else 0.0
                         
-                        # Process raw samples into integers
+                        # Note: This matrix dot product assumes PyQrack outputs little-endian bitstrings
+                        # where qubit 0 is the least significant bit (LSB).
                         if raw_samples and isinstance(raw_samples[0], (list, tuple)):
                             samples_arr = np.array(raw_samples, dtype=np.uint32)
                             powers = 1 << np.arange(num_qubits, dtype=np.uint32)
@@ -232,20 +229,16 @@ def persistent_island_worker(
                         else:
                             samples = np.array(raw_samples, dtype=np.uint32)
                         
-                        # Convert PyQrack output to NumPy float64 array
                         ideal_probs = np.array(ideal_probs_list, dtype=np.float64)
                         n_pow = len(ideal_probs)
                         u_u = 1.0 / n_pow
                         
-                        # Vectorized equivalent of the reference counts loop
                         counts_arr = np.bincount(samples, minlength=n_pow)
                         
-                        # True XEB Calculation (Vectorized)
                         denom = np.sum((ideal_probs - u_u) ** 2)
                         numer = np.sum((ideal_probs - u_u) * ((counts_arr / shots) - u_u))
                         expected_xeb = float(numer / denom) if denom > 0 else 0.0
                         
-                        # True HOG Calculation (Vectorized)
                         threshold = np.median(ideal_probs)
                         is_heavy = ideal_probs > threshold
                         sum_hog_counts = np.sum(counts_arr[is_heavy])
@@ -254,7 +247,6 @@ def persistent_island_worker(
                     except Exception as e:
                         print(f"Worker {patch_idx} benchmark failed: {e}")
                     
-                    # Force memory cleanup due to large probability arrays
                     gc.collect() 
                     cmd_pipe.send({
                         "status": "BENCHMARKS_COMPUTED", 
@@ -322,6 +314,10 @@ class LHVWormholeEngine:
                 )
             )
             p.start()
+            
+            # FIX: Explicitly close the child connection in the parent to prevent FD leaks
+            child_conn.close()
+            
             self.workers.append(p)
             self.pipes.append(parent_conn)
             
@@ -434,7 +430,29 @@ class LHVWormholeEngine:
             
             if t == total_time_steps - 1:
                 print(f"         +-- Calculating Final Benchmarks...")
-                bench_res = self.sync_broadcast("COMPUTE_BENCHMARKS")
+                
+                # FIX: Stagger benchmarks sequentially to prevent a 3GB RAM spike.
+                # Instead of a single sync_broadcast, we iterate one by one.
+                bench_res = {}
+                for p_idx, pipe in enumerate(self.pipes):
+                    pipe.send({"action": "COMPUTE_BENCHMARKS", "shots": 2048})
+                    
+                    # Wait for just this worker to finish and garbage collect
+                    ready = wait([pipe], timeout=300.0)
+                    if not ready:
+                        self.shutdown()
+                        raise TimeoutError(f"Worker {p_idx} timed out during benchmarks.")
+                        
+                    try:
+                        res = pipe.recv()
+                        if res.get("status") == "ERROR":
+                            self.shutdown()
+                            raise RuntimeError(f"Worker {p_idx} error: {res.get('msg')}")
+                        bench_res[p_idx] = res
+                    except (EOFError, OSError):
+                        self.shutdown()
+                        raise RuntimeError(f"Worker {p_idx} crashed during COMPUTE_BENCHMARKS.")
+
                 avg_purity = sum(res["data"]["boundary_purity"] for res in bench_res.values()) / self.num_patches
                 avg_xeb = sum(res["data"]["xeb"] for res in bench_res.values()) / self.num_patches
                 avg_hog = sum(res["data"]["hog"] for res in bench_res.values()) / self.num_patches
@@ -449,8 +467,12 @@ class LHVWormholeEngine:
         print("\nShutting down LHV Islands...")
         for pipe in getattr(self, 'pipes', []):
             try:
-                if not pipe.closed: pipe.send({"action": "SHUTDOWN"})
-            except (OSError, BrokenPipeError):
+                if not pipe.closed:
+                    # FIX: Drain the pipe before sending SHUTDOWN to avoid blocking
+                    while pipe.poll():
+                        pipe.recv()
+                    pipe.send({"action": "SHUTDOWN"})
+            except (OSError, BrokenPipeError, EOFError):
                 pass
                 
         for p in getattr(self, 'workers', []):
@@ -476,11 +498,8 @@ if __name__ == "__main__":
     
     num_patches = 12
     
-    if num_patches % len(base_gpus) != 0:
-        print(f"Warning: {num_patches} patches don't divide evenly across {len(base_gpus)} GPUs. Some GPUs will carry extra load.")
-        
-    patches_per_gpu = max(1, num_patches // len(base_gpus))
-    AVAILABLE_GPUS = [base_gpus[(i // patches_per_gpu) % len(base_gpus)] for i in range(num_patches)]
+    # FIX: Clean round-robin GPU assignment prevents uneven loading on arbitrary patch counts
+    AVAILABLE_GPUS = [base_gpus[i % len(base_gpus)] for i in range(num_patches)]
     
     engine = LHVWormholeEngine(device_ids=AVAILABLE_GPUS, intra_topology="FC", boundary_size=4)
 
