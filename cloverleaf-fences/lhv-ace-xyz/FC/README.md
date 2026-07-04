@@ -1,4 +1,4 @@
-#### ACE LHV introduction into the workflow
+#### ACE XYZ LHV introduction into the workflow - work in progress !
 
 the papers in this folder (tex/pdf) are generated and are only there to reflect a formal chain of thought of the code residing in this folder - they are *not* claiming anything, and are of all things emphimeral and are not to be regarded as any final statement nor claim to be authoritative in any way.
 
@@ -16,3 +16,6 @@ the papers in this folder (tex/pdf) are generated and are only there to reflect 
 
 #### Small adiabatic run quickly scales into hundreds of qubits even in a small example model
 <img width="1197" height="33" alt="Screenshot_2026-07-04_10-55-04" src="https://github.com/user-attachments/assets/77bfa124-6f57-45dc-945f-2601c21f3fec" />
+
+
+***** CONCEPT!! ******
