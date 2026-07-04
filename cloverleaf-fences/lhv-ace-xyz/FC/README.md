@@ -10,3 +10,4 @@
 #### Ground state iterations by Adiabatic Annealing
 <img width="827" height="647" alt="Screenshot_2026-07-04_10-14-06" src="https://github.com/user-attachments/assets/9a107ed4-2722-4356-ab62-f58bddcccf30" />
 <img width="1010" height="717" alt="Screenshot_2026-07-04_10-14-39" src="https://github.com/user-attachments/assets/f21cb3f4-9f11-4323-9725-7a2281a85379" />
+<img width="1203" height="158" alt="Screenshot_2026-07-04_10-35-10" src="https://github.com/user-attachments/assets/8f3856e7-bed2-4903-8bdb-e12609888f05" />
