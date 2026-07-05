@@ -102,8 +102,8 @@ def persistent_island_worker_27q(
 ) -> None:
 
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    os.environ["OMP_NUM_THREADS"] = "4"
-    os.environ["OPENBLAS_NUM_THREADS"] = "4"
+    os.environ["OMP_NUM_THREADS"] = "6"
+    os.environ["OPENBLAS_NUM_THREADS"] = "6"
     os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
 
     sim = None
@@ -682,19 +682,18 @@ if __name__ == "__main__":
     gpu_16gb = base_gpus[0]
     gpu_10gb = base_gpus[1]
 
-    target_grid = (2, 2, 2)  # 8 patches total
+    target_grid = (2, 2, 4)  # 16 patches total
 
-    # 5 workers on the 16GB GPU, 3 on the 10GB GPU.
+    # 4 workers on the 16GB GPU, 4 on the 10GB GPU.
     # 27-qubit state vector: 2^27 amplitudes = ~2.1 GB per worker.
-    # Semaphore limits allow up to 2 concurrent workers per GPU
-    # (staying safely within VRAM: 2 x 2.1 GB = 4.2 GB on the 10GB card,
-    #  2 x 2.1 GB = 4.2 GB of the 16GB card's budget, leaving headroom for clones).
-    # Raise to 3 on gpu_16gb if step time is acceptable and VRAM permits.
-    explicit_gpu_allocation = [gpu_16gb] * 5 + [gpu_10gb] * 3
+    # Semaphore limits allow up to 5 concurrent workers per GPU
+    # (staying safely within VRAM of the 10GB card,
+    # 
+    explicit_gpu_allocation = [gpu_16gb] * 8 + [gpu_10gb] * 8
 
     semaphore_caps = {
-        gpu_16gb: 2,
-        gpu_10gb: 2,
+        gpu_16gb: 7,
+        gpu_10gb: 6,
     }
 
     engine = VolumetricHadronEngine27Q(
