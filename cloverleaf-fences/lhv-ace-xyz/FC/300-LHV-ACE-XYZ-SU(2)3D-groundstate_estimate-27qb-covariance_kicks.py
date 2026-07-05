@@ -1,7 +1,25 @@
 # -*- coding: us-ascii -*-
 # 27-Qubit 3x3x3 Lattice & Macroscopic Grid Annealing
-# High-Throughput Volumetric Engine with Statistical Covariance Injection
+# High-Throughput Volumetric Engine with Statistical Variance Injection
 # Nucleus qubit removed: pure nearest-neighbour 3D Ising topology (54 bonds)
+#
+# PERFORMANCE REVISION 3 (VRAM-safe):
+#   Fix 1: Forced plain dense engine (no QUnit Schmidt thrash)          [kept]
+#   Fix 2: Merged redundant Rz layers (exact)                           [kept]
+#   Fix 3: ZZ term as Rz+Rz+controlled-phase                            [kept]
+#   Fix 5: Clone-free, shot-free prob()-based measurement               [kept]
+#   Fix 6: VRAM RESIDENCY BUDGET. The dense engine allocates the full
+#          2^27 buffer (~2.1GB) per worker at construction. Resident
+#          workers x 2.1GB MUST stay below physical VRAM per card, or
+#          Mesa pages buffers to GTT, kernels stall past the amdgpu
+#          watchdog, and the driver resets the GPU ("context is lost"),
+#          killing every worker on the card. Allocation is therefore
+#          5 workers on the 16GB card (10.5GB) + 3 on the 10GB card
+#          (6.3GB), grid (2,2,2) = 8 patches.
+#   Fix 7: QRACK_MAX_ALLOC_MB tripwire per worker: oversubscription now
+#          raises an allocation error in ONE worker instead of silently
+#          paging and taking down the whole card.
+#   Energy is computed and printed at EVERY step (measure_every=1).
 import os
 import gc
 import csv
@@ -17,6 +35,28 @@ from typing import List, Tuple, Dict, Any, Optional
 # 0. PYQRACK API SAFEGUARDS & GATES
 # ==========================================
 PX, PY, PZ = 1, 2, 3
+
+def make_sim(QrackSimulator: Any, n: int) -> Any:
+    """
+    Force a plain dense QEngine. QUnit's Schmidt-decomposition attempts
+    on an irreducibly entangled 27-qubit register cost O(2^27) per failed
+    re-factoring attempt. Kwarg names vary across PyQrack versions, so
+    unsupported ones are stripped on TypeError and the constructor retried.
+    """
+    kwargs = dict(isTensorNetwork=False, isSchmidtDecompose=False,
+                  isStabilizerHybrid=False, isBinaryDecisionTree=False)
+    while True:
+        try:
+            return QrackSimulator(qubit_count=n, **kwargs)
+        except TypeError as e:
+            removed = False
+            for k in list(kwargs):
+                if k in str(e):
+                    kwargs.pop(k)
+                    removed = True
+                    break
+            if not removed:
+                return QrackSimulator(qubit_count=n)
 
 def apply_h(sim: Any, q: int) -> None:
     if hasattr(sim, 'h'):
@@ -55,13 +95,95 @@ def apply_cx(sim: Any, c: int, t: int) -> None:
     else:
         raise RuntimeError("No CX gate available.")
 
+def apply_zz(sim: Any, theta: float, q1: int, q2: int) -> None:
+    """
+    exp(-i*theta/2 * Z(q1)Z(q2)) up to global phase.
+    Rz(theta) x Rz(theta) . CP(-2*theta) with CP(phi)=diag(1,1,1,e^{i*phi}).
+    One diagonal controlled-phase replaces two CX gates. Falls back to
+    CX.Rz.CX if no controlled-mtrx API is available.
+    """
+    if hasattr(sim, 'mcmtrx'):
+        apply_rz(sim, theta, q1)
+        apply_rz(sim, theta, q2)
+        ph = complex(np.cos(2.0 * theta), -np.sin(2.0 * theta))
+        try:
+            sim.mcmtrx([q1], [complex(1, 0), 0j, 0j, ph], q2)
+        except TypeError:
+            sim.mcmtrx([q1], [complex(1, 0), 0j, 0j, ph], [q2])
+    else:
+        apply_cx(sim, q1, q2)
+        apply_rz(sim, theta, q2)
+        apply_cx(sim, q1, q2)
+
+def trotter_step_body(sim: Any, num_qubits: int,
+                      intra_edges: List[Tuple[int, int]],
+                      J: float, hx: float, hz: float, dt: float,
+                      steps: int) -> None:
+    """
+    Symmetric Trotter step with the two Rz layers merged (Rz commutes
+    exactly with the diagonal ZZ layer). Same unitary as the original
+    Rx.Rz.ZZ.Rz.Rx sequence, 27 fewer gates per step.
+    """
+    for _ in range(steps):
+        for q in range(num_qubits):
+            apply_rx(sim, -2.0 * hx * dt, q)
+        for q in range(num_qubits):
+            apply_rz(sim, -4.0 * hz * dt, q)
+        for q1, q2 in intra_edges:
+            apply_zz(sim, -2.0 * J * dt, q1, q2)
+        for q in range(num_qubits):
+            apply_rx(sim, -2.0 * hx * dt, q)
+
+# ------------------------------------------
+# Clone-free expectation helpers.
+# prob(q) is a NON-DESTRUCTIVE marginal query (no collapse), and every
+# basis rotation below is exactly self-inverting (H.H = I,
+# Rx(-a).Rx(a) = I, CX.CX = I), so the persistent state is restored to
+# fp roundoff after each helper returns. This is what lets the anneal
+# hot path run with zero clone_sid copies and zero measure_shots calls.
+# ------------------------------------------
+
+def z_means(sim: Any, qubits: List[int]) -> np.ndarray:
+    """<Z_q> for each q. Pure reads; state untouched."""
+    return np.array([1.0 - 2.0 * sim.prob(q) for q in qubits])
+
+def x_means(sim: Any, qubits: List[int]) -> np.ndarray:
+    """<X_q> for each q. H / read / H-undo, exact."""
+    out = np.empty(len(qubits))
+    for i, q in enumerate(qubits):
+        apply_h(sim, q)
+        out[i] = 1.0 - 2.0 * sim.prob(q)
+        apply_h(sim, q)
+    return out
+
+def y_means(sim: Any, qubits: List[int]) -> np.ndarray:
+    """<Y_q> for each q. Rx(-pi/2) / read / Rx(+pi/2)-undo, exact."""
+    out = np.empty(len(qubits))
+    for i, q in enumerate(qubits):
+        apply_rx(sim, -np.pi / 2, q)
+        out[i] = 1.0 - 2.0 * sim.prob(q)
+        apply_rx(sim, np.pi / 2, q)
+    return out
+
+def zz_means(sim: Any, edges: List[Tuple[int, int]]) -> np.ndarray:
+    """
+    <Z_q1 Z_q2> per edge via the CX trick: CX(q1,q2) maps Z(q1)Z(q2) to
+    I x Z(q2), so prob(q2) in the rotated frame gives the ZZ parity.
+    CX.CX = I restores the state exactly; prob() never collapses.
+    """
+    out = np.empty(len(edges))
+    for i, (q1, q2) in enumerate(edges):
+        apply_cx(sim, q1, q2)
+        out[i] = 1.0 - 2.0 * sim.prob(q2)
+        apply_cx(sim, q1, q2)
+    return out
+
 # ==========================================
 # 1. 27-QUBIT TOPOLOGY (3x3x3 LATTICE ONLY)
 # ==========================================
 def generate_27q_lattice_subvolume() -> Tuple[List[Tuple[int, int]], Dict[str, List[int]]]:
     """
     Pure 3x3x3 nearest-neighbour lattice. 27 qubits, 54 bonds.
-    No nucleus qubit. Boundary faces are the outer planes of the cube.
     Qubit index: idx = x*(ly*lz) + y*lz + z, with lx=ly=lz=3.
     """
     lx, ly, lz = 3, 3, 3
@@ -97,21 +219,28 @@ def persistent_island_worker_27q(
     boundaries: Dict[str, List[int]],
     cmd_pipe: Connection,
     gpu_semaphore: Any,
-    seed: int
+    seed: int,
+    max_alloc_mb: int
 ) -> None:
 
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    # NUMA Fix: Force single-threaded dispatch to prevent HyperTransport thrashing
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
+
+    # Fix 7: allocation tripwire. If the workers on this device would
+    # collectively exceed physical VRAM, Qrack raises an allocation
+    # error in THIS worker (reported cleanly over the pipe) instead of
+    # Mesa silently paging to GTT, stalling kernels past the amdgpu
+    # watchdog, and resetting the whole GPU.
+    os.environ["QRACK_MAX_ALLOC_MB"] = str(int(max_alloc_mb))
 
     sim = None
     try:
         os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(device_id)
         from pyqrack import QrackSimulator
 
-        sim = QrackSimulator(qubit_count=num_qubits)
+        sim = make_sim(QrackSimulator, num_qubits)
         rng = np.random.default_rng(seed)
 
         with gpu_semaphore:
@@ -125,13 +254,6 @@ def persistent_island_worker_27q(
         all_boundary_qubits = sorted(list(set(
             q for face in boundaries.values() for q in face
         )))
-        num_bound = len(all_boundary_qubits)
-
-        def extract_bits(samples: List[int], n_q: int) -> np.ndarray:
-            arr = np.array(samples, dtype=np.uint64)[:, None]
-            mask = np.uint64(1) << np.arange(n_q, dtype=np.uint64)
-            bits = (arr & mask) > 0
-            return 1.0 - 2.0 * bits.astype(float)
 
         while True:
             if not cmd_pipe.poll(timeout=0.1): continue
@@ -142,197 +264,168 @@ def persistent_island_worker_27q(
 
             try:
                 # --------------------------------------------------
-                if action == "COMPUTE_SUPREMACY_BENCHMARK":
-                    depth = cmd.get("depth", 10)
-                    M_shots = cmd.get("shots", 10000)
-                    try:
-                        with gpu_semaphore:
-                            sim_xeb = QrackSimulator(clone_sid=sim.sid)
-                            try:
-                                for _ in range(depth):
-                                    for q in range(num_qubits):
-                                        apply_rx(sim_xeb, rng.uniform(0, 2*np.pi), q)
-                                        apply_rz(sim_xeb, rng.uniform(0, 2*np.pi), q)
-                                    for q1, q2 in intra_edges:
-                                        apply_cx(sim_xeb, q1, q2)
-                                
-                                all_q_list = list(range(num_qubits))
-                                samples = sim_xeb.measure_shots(all_q_list, M_shots)
-                                
-                                state_vector = np.array(sim_xeb.amplitudes())
-                            finally:
-                                del sim_xeb
-                        gc.collect()
+                # Fast path: Trotter evolution only (optional cadence).
+                if action == "EVOLVE_ONLY":
+                    J   = cmd.get("J",   1.0)
+                    hx  = cmd.get("hx",  0.5)
+                    hz  = cmd.get("hz",  0.2)
+                    dt  = cmd.get("dt",  0.05)
+                    steps = cmd.get("steps", 1)
 
-                        probs = np.abs(state_vector)**2
-                        sample_probs = probs[samples]
-                        
-                        median_prob = np.median(probs)
-                        heavy_count = np.sum(sample_probs > median_prob)
-                        hog_score = heavy_count / float(M_shots)
-                        
-                        hilbert_space_size = 2.0 ** num_qubits
-                        xeb_score = hilbert_space_size * np.mean(sample_probs) - 1.0
+                    with gpu_semaphore:
+                        trotter_step_body(sim, num_qubits, intra_edges,
+                                          J, hx, hz, dt, steps)
 
-                        cmd_pipe.send({"status": "BENCHMARKS_COMPUTED", "patch_idx": patch_idx, "data": {
-                            "HOG": float(hog_score),
-                            "XEB": float(xeb_score)
-                        }})
-
-                    except Exception as e:
-                        cmd_pipe.send({"status": "ERROR", "msg": f"XEB Failed: {str(e)}"})
+                    cmd_pipe.send({"status": "EVOLVE_COMPLETE",
+                                   "patch_idx": patch_idx})
 
                 # --------------------------------------------------
+                elif action == "COMPUTE_SUPREMACY_BENCHMARK":
+                    depth = cmd.get("depth", 10)
+                    M_shots = cmd.get("shots", 10000)
+
+                    with gpu_semaphore:
+                        # Fresh simulator at |0...0> for proper RQC benchmarking.
+                        # NOTE: this is the one remaining allocation-heavy path
+                        # (fresh sim + clone = 2 x 2.1GB transient on top of the
+                        # persistent state). The 5+3 residency budget leaves
+                        # headroom for exactly this; the semaphore serialises it.
+                        sim_xeb = make_sim(QrackSimulator, num_qubits)
+                        try:
+                            for _ in range(depth):
+                                for q in range(num_qubits):
+                                    apply_rx(sim_xeb, rng.uniform(0, 2*np.pi), q)
+                                    apply_rz(sim_xeb, rng.uniform(0, 2*np.pi), q)
+                                for q1, q2 in intra_edges:
+                                    apply_cx(sim_xeb, q1, q2)
+                                    apply_rz(sim_xeb, rng.uniform(0, 2*np.pi), q2)
+                                    apply_cx(sim_xeb, q1, q2)
+
+                            # State vector BEFORE measurement, via clone to
+                            # protect against graph-resolution artifacts
+                            sim_sv = QrackSimulator(clone_sid=sim_xeb.sid)
+                            try:
+                                if hasattr(sim_sv, 'out_ket'):
+                                    state_vector = np.array(sim_sv.out_ket())
+                                elif hasattr(sim_sv, 'amplitudes'):
+                                    state_vector = np.array(sim_sv.amplitudes())
+                                else:
+                                    raise RuntimeError(
+                                        "No compatible state vector extraction method found.")
+                            finally:
+                                del sim_sv
+
+                            all_q_list = list(range(num_qubits))
+                            samples = sim_xeb.measure_shots(all_q_list, M_shots)
+
+                        finally:
+                            del sim_xeb
+                    gc.collect()
+
+                    probs = np.abs(state_vector)**2
+                    sample_probs = probs[samples]
+
+                    median_prob = np.median(probs)
+                    heavy_count = np.sum(sample_probs > median_prob)
+                    hog_score = heavy_count / float(M_shots)
+
+                    hilbert_space_size = 2.0 ** num_qubits
+                    xeb_score = hilbert_space_size * np.mean(sample_probs) - 1.0
+
+                    cmd_pipe.send({"status": "BENCHMARKS_COMPUTED",
+                                   "patch_idx": patch_idx, "data": {
+                        "HOG": float(hog_score),
+                        "XEB": float(xeb_score)
+                    }})
+
+                # --------------------------------------------------
+                # Clone-free, shot-free statistical measurement.
                 elif action == "EVOLVE_AND_MEASURE_STATISTICAL":
                     J   = cmd.get("J",   1.0)
                     hx  = cmd.get("hx",  0.5)
                     hz  = cmd.get("hz",  0.2)
                     dt  = cmd.get("dt",  0.05)
-                    steps      = cmd.get("steps",      1)     # Minimised for speed
-                    corr_shots = cmd.get("corr_shots", 512)   # Minimised for bandwidth
+                    steps = cmd.get("steps", 1)
 
                     with gpu_semaphore:
-                        for _ in range(steps):
-                            for q in range(num_qubits): apply_rx(sim, -2.0 * hx * dt, q)
-                            for q in range(num_qubits): apply_rz(sim, -2.0 * hz * dt, q)
-                            for q1, q2 in intra_edges:
-                                apply_cx(sim, q1, q2)
-                                apply_rz(sim, -2.0 * J * dt, q2)
-                                apply_cx(sim, q1, q2)
-                            for q in range(num_qubits): apply_rz(sim, -2.0 * hz * dt, q)
-                            for q in range(num_qubits): apply_rx(sim, -2.0 * hx * dt, q)
+                        trotter_step_body(sim, num_qubits, intra_edges,
+                                          J, hx, hz, dt, steps)
 
-                        sim_z = QrackSimulator(clone_sid=sim.sid)
-                        try:
-                            z_samples = sim_z.measure_shots(all_boundary_qubits, corr_shots)
-                        finally:
-                            del sim_z
+                        Z_mean = z_means(sim, all_boundary_qubits)
+                        X_mean = x_means(sim, all_boundary_qubits)
+                        Y_mean = y_means(sim, all_boundary_qubits)
 
-                        sim_x = QrackSimulator(clone_sid=sim.sid)
-                        try:
-                            for q in all_boundary_qubits: apply_h(sim_x, q)
-                            x_samples = sim_x.measure_shots(all_boundary_qubits, corr_shots)
-                        finally:
-                            del sim_x
-
-                        sim_y = QrackSimulator(clone_sid=sim.sid)
-                        try:
-                            for q in all_boundary_qubits: apply_rx(sim_y, -np.pi/2, q)
-                            y_samples = sim_y.measure_shots(all_boundary_qubits, corr_shots)
-                        finally:
-                            del sim_y
-
-                    gc.collect()
-
-                    Z_mat  = extract_bits(z_samples, num_bound)
-                    Z_mean = np.mean(Z_mat, axis=0)
-                    Z_cov  = np.cov(Z_mat, rowvar=False) + np.eye(num_bound) * 1e-6
-
-                    X_mat  = extract_bits(x_samples, num_bound)
-                    X_mean = np.mean(X_mat, axis=0)
-                    X_cov  = np.cov(X_mat, rowvar=False) + np.eye(num_bound) * 1e-6
-
-                    Y_mat  = extract_bits(y_samples, num_bound)
-                    Y_mean = np.mean(Y_mat, axis=0)
-                    Y_cov  = np.cov(Y_mat, rowvar=False) + np.eye(num_bound) * 1e-6
+                    # Var = 1 - <s>^2, exact for +/-1-valued Pauli observables.
+                    Z_var = np.clip(1.0 - Z_mean**2, 0.0, 1.0)
+                    X_var = np.clip(1.0 - X_mean**2, 0.0, 1.0)
+                    Y_var = np.clip(1.0 - Y_mean**2, 0.0, 1.0)
 
                     payload = {
-                        "qubits":     all_boundary_qubits,
-                        "corr_shots": corr_shots,
+                        "qubits": all_boundary_qubits,
                         "means": {"X": X_mean, "Y": Y_mean, "Z": Z_mean},
-                        "covs":  {"X": X_cov,  "Y": Y_cov,  "Z": Z_cov}
+                        "vars":  {"X": X_var,  "Y": Y_var,  "Z": Z_var}
                     }
                     cmd_pipe.send({"status": "STEP_1_COMPLETE",
                                    "patch_idx": patch_idx, "data": payload})
 
                 # --------------------------------------------------
+                # Clone-free, shot-free energy measurement.
                 elif action == "APPLY_KICKS_AND_MEASURE_ENERGY":
                     kicks  = cmd.get("kicks", {})
                     J_val  = cmd.get("J",   1.0)
                     hx_val = cmd.get("hx",  0.5)
                     hz_val = cmd.get("hz",  0.2)
-                    local_energy = 0.0
-                    
-                    # Ensure energy measurements match the reduced statistical bandwidth
-                    energy_shots = 512 
+
+                    all_q = list(range(num_qubits))
 
                     with gpu_semaphore:
+                        # Macroscopic mean-field kicks: single exact SU(2)
+                        # unitary per qubit (Rodriguez formula).
                         for raw_q, (kx, ky, kz) in kicks.items():
                             q = int(raw_q)
-                            # Consolidate 3-axis kick into a single exact SU(2) unitary
                             K = np.sqrt(kx**2 + ky**2 + kz**2)
                             if K > 0.0:
                                 c = np.cos(K / 2.0)
                                 s = np.sin(K / 2.0)
                                 nx, ny, nz = kx/K, ky/K, kz/K
-                                
+
                                 m00 = complex(c, -nz * s)
                                 m01 = complex(-ny * s, -nx * s)
                                 m10 = complex(ny * s, -nx * s)
                                 m11 = complex(c, nz * s)
-                                
+
                                 sim.mtrx([m00, m01, m10, m11], [q])
 
-                        sim_z_zz = QrackSimulator(clone_sid=sim.sid)
-                        try:
-                            zz_samples = sim_z_zz.measure_shots(
-                                list(range(num_qubits)), energy_shots)
-                        finally:
-                            del sim_z_zz
+                        z_exp  = z_means(sim, all_q)
+                        zz_exp = zz_means(sim, intra_edges)
+                        x_exp  = x_means(sim, all_q)
 
-                        sim_x = QrackSimulator(clone_sid=sim.sid)
-                        try:
-                            for q in range(num_qubits): apply_h(sim_x, q)
-                            x_samples = sim_x.measure_shots(
-                                list(range(num_qubits)), energy_shots)
-                        finally:
-                            del sim_x
-
-                    mask = np.uint64(1) << np.arange(num_qubits, dtype=np.uint64)
-
-                    arr_z   = np.array(zz_samples, dtype=np.uint64)[:, None]
-                    spins_z = 1.0 - 2.0 * ((arr_z & mask) > 0).astype(float)
-
-                    for q in range(num_qubits):
-                        local_energy += -hz_val * np.mean(spins_z[:, q])
-                    for q1, q2 in intra_edges:
-                        local_energy += -J_val * np.mean(spins_z[:, q1] * spins_z[:, q2])
-
-                    arr_x   = np.array(x_samples, dtype=np.uint64)[:, None]
-                    spins_x = 1.0 - 2.0 * ((arr_x & mask) > 0).astype(float)
-
-                    for q in range(num_qubits):
-                        local_energy += -hx_val * np.mean(spins_x[:, q])
+                    local_energy = (
+                        -hz_val * float(np.sum(z_exp))
+                        - J_val * float(np.sum(zz_exp))
+                        - hx_val * float(np.sum(x_exp))
+                    )
 
                     cmd_pipe.send({"status": "STEP_2_COMPLETE",
                                    "patch_idx": patch_idx, "data": local_energy})
 
                 # --------------------------------------------------
+                # Clone-free purity benchmark.
                 elif action == "COMPUTE_BENCHMARKS":
                     try:
-                        purity_sum = 0.0
+                        all_q = list(range(num_qubits))
                         with gpu_semaphore:
-                            for q in range(num_qubits):
-                                sim_q = QrackSimulator(clone_sid=sim.sid)
-                                try:
-                                    z_exp = 1.0 - 2.0 * sim_q.prob(q)
-                                    apply_h(sim_q, q)
-                                    x_exp = 1.0 - 2.0 * sim_q.prob(q)
-                                    apply_h(sim_q, q)
-                                    apply_rx(sim_q, -np.pi/2, q)
-                                    y_exp = 1.0 - 2.0 * sim_q.prob(q)
-                                    purity_sum += x_exp**2 + y_exp**2 + z_exp**2
-                                finally:
-                                    del sim_q
-                        avg_purity = purity_sum / float(num_qubits)
+                            z_e = z_means(sim, all_q)
+                            x_e = x_means(sim, all_q)
+                            y_e = y_means(sim, all_q)
+                        avg_purity = float(np.mean(x_e**2 + y_e**2 + z_e**2))
                     except Exception as e:
                         print(f"Worker {patch_idx} benchmark failed: {e}")
                         avg_purity = 0.0
 
-                    gc.collect()
                     cmd_pipe.send({"status": "BENCHMARKS_COMPUTED",
                                    "patch_idx": patch_idx,
-                                   "data": {"grid_purity": float(avg_purity)}})
+                                   "data": {"grid_purity": avg_purity}})
 
             except Exception as e:
                 try:
@@ -357,6 +450,7 @@ class VolumetricHadronEngine27Q:
         self,
         gpu_allocation: List[int],
         semaphore_limits: Dict[int, int],
+        gpu_alloc_caps_mb: Dict[int, int],
         grid: Tuple[int, int, int] = (2, 2, 2),
         master_seed: int = 42
     ):
@@ -374,6 +468,28 @@ class VolumetricHadronEngine27Q:
 
         self.qubits_per_patch = 27
         self.intra_edges, self.boundaries = generate_27q_lattice_subvolume()
+
+        # Fix 6: hard VRAM residency check. Dense engine = ~2.1GB per
+        # resident worker; refuse to start a configuration that
+        # oversubscribes any card (the failure mode is a driver-level
+        # GPU reset that kills every worker on the device).
+        STATE_MB = 2200  # 2^27 complex128 amplitudes + runtime overhead
+        residency: Dict[int, int] = {}
+        for g in self.gpu_allocation:
+            residency[g] = residency.get(g, 0) + 1
+        for g, count in residency.items():
+            cap = gpu_alloc_caps_mb.get(g)
+            if cap is None:
+                raise ValueError(f"No VRAM cap provided for GPU {g}.")
+            need = count * STATE_MB
+            if need > cap:
+                raise ValueError(
+                    f"GPU {g}: {count} resident workers x {STATE_MB}MB = "
+                    f"{need}MB exceeds the {cap}MB cap. Reduce workers on "
+                    f"this device (grid/allocation), do not raise the cap."
+                )
+
+        self.gpu_alloc_caps_mb = gpu_alloc_caps_mb
 
         self.patch_coords: Dict[int, Tuple[int, int, int]] = {}
         idx = 0
@@ -403,6 +519,9 @@ class VolumetricHadronEngine27Q:
         print(f"Topology: {self.num_patches} patches x {self.qubits_per_patch} qubits "
               f"= {total_sites} total logical qubits")
         print(f"Intra-patch bonds: {len(self.intra_edges)} (54 nearest-neighbour per patch)")
+        for g, count in residency.items():
+            print(f"GPU {g}: {count} resident workers, "
+                  f"{count * STATE_MB}MB / {gpu_alloc_caps_mb[g]}MB budget")
 
         master_rng  = np.random.default_rng(master_seed)
         patch_seeds = master_rng.integers(0, 2**31 - 1, size=self.num_patches)
@@ -417,7 +536,9 @@ class VolumetricHadronEngine27Q:
                     args=(
                         assigned_gpu, p_idx, self.qubits_per_patch,
                         self.intra_edges, self.boundaries, child_conn,
-                        self.gpu_semaphores[assigned_gpu], int(patch_seeds[p_idx])
+                        self.gpu_semaphores[assigned_gpu],
+                        int(patch_seeds[p_idx]),
+                        self.gpu_alloc_caps_mb[assigned_gpu]
                     )
                 )
                 p.start()
@@ -530,21 +651,20 @@ class VolumetricHadronEngine27Q:
         payload = [{"depth": depth, "shots": shots} for _ in range(self.num_patches)]
         try:
             res = self.sync_broadcast(
-                "COMPUTE_SUPREMACY_BENCHMARK", 
-                payload, 
-                expected_status="BENCHMARKS_COMPUTED", 
+                "COMPUTE_SUPREMACY_BENCHMARK",
+                payload,
+                expected_status="BENCHMARKS_COMPUTED",
                 timeout_s=3600.0
             )
-            
+
             avg_hog = sum(r["data"]["HOG"] for r in res.values()) / self.num_patches
             avg_xeb = sum(r["data"]["XEB"] for r in res.values()) / self.num_patches
-            
-            print(f"         +-- Average HOG Score: {avg_hog:.4f} (Ideal noiseless: ~0.846)")
+
+            print(f"         +-- Average HOG Score: {avg_hog:.4f} (Ideal noiseless: ~0.693)")
             print(f"         +-- Average XEB Score: {avg_xeb:.4f} (Ideal noiseless: 1.000)")
-            
+
         except Exception as e:
             print(f"Supremacy Benchmark Failed: {e}")
-
 
     def anneal_to_ground_state(
         self,
@@ -553,11 +673,21 @@ class VolumetricHadronEngine27Q:
         target_g_face: float,
         target_J: float,
         target_hx: float,
-        target_hz: float
+        target_hz: float,
+        measure_every: int = 1
     ):
+        """
+        Clone-free expectation measurement makes the full
+        measure -> kick -> energy cycle cheap enough to run at every
+        step (measure_every=1, the default). Raise measure_every to
+        skip the cycle on intermediate steps via EVOLVE_ONLY.
+        """
         print(f"\nStarting Adiabatic Anneal with Stochastic Injection...")
+        if measure_every > 1:
+            print(f"Mean-field measurement cadence: every {measure_every} steps")
         self.energy_history.clear()
         noise_rng = np.random.default_rng()
+        effective_shots = 512.0  # keeps noise amplitude consistent with prior runs
 
         for t in range(total_steps):
             s = t / max(1, (total_steps - 1))
@@ -566,11 +696,22 @@ class VolumetricHadronEngine27Q:
             current_hz     = s * target_hz
             current_g_face = s * target_g_face
 
+            is_measure_step = (t % measure_every == 0) or (t == total_steps - 1)
+
             step_payload = [
                 {"J": current_J, "hx": current_hx, "hz": current_hz,
-                 "dt": dt, "steps": 1, "corr_shots": 512}  # Optimised steps & shots
+                 "dt": dt, "steps": 1}
                 for _ in range(self.num_patches)
             ]
+
+            if not is_measure_step:
+                self.sync_broadcast(
+                    "EVOLVE_ONLY", step_payload,
+                    expected_status="EVOLVE_COMPLETE"
+                )
+                print(f"Step {t:03d} | Anneal: {s*100:05.1f}% | (evolve-only)")
+                continue
+
             step1_res = self.sync_broadcast(
                 "EVOLVE_AND_MEASURE_STATISTICAL", step_payload,
                 expected_status="STEP_1_COMPLETE"
@@ -583,18 +724,15 @@ class VolumetricHadronEngine27Q:
             ]
             macroscopic_boundary_energy = 0.0
 
+            # Independent per-qubit Gaussian noise from exact variances.
+            scale = np.sqrt(dt / effective_shots)
             stochastic_noise: Dict[int, Dict[int, Tuple[float, float, float]]] = {}
             for p, prof in patch_profiles.items():
                 n_bounds = len(prof["qubits"])
-                scale = np.sqrt(dt / prof["corr_shots"])
 
-                # CPU FPU Fix: Swap method='svd' to method='cholesky' for strict O(N^3) speedup
-                X_noise = noise_rng.multivariate_normal(
-                    np.zeros(n_bounds), prof["covs"]["X"], method='cholesky') * scale
-                Y_noise = noise_rng.multivariate_normal(
-                    np.zeros(n_bounds), prof["covs"]["Y"], method='cholesky') * scale
-                Z_noise = noise_rng.multivariate_normal(
-                    np.zeros(n_bounds), prof["covs"]["Z"], method='cholesky') * scale
+                X_noise = noise_rng.normal(0.0, 1.0, n_bounds) * np.sqrt(prof["vars"]["X"]) * scale
+                Y_noise = noise_rng.normal(0.0, 1.0, n_bounds) * np.sqrt(prof["vars"]["Y"]) * scale
+                Z_noise = noise_rng.normal(0.0, 1.0, n_bounds) * np.sqrt(prof["vars"]["Z"]) * scale
 
                 for noise_arr in (X_noise, Y_noise, Z_noise):
                     if not np.all(np.isfinite(noise_arr)):
@@ -688,9 +826,7 @@ class VolumetricHadronEngine27Q:
 
             step_data = {"Step": t, "Anneal_Percent": s * 100, "Energy": total_energy}
             self.energy_history.append(step_data)
-
-            if t % 5 == 0 or t == total_steps - 1:
-                self._append_to_csv(step_data)
+            self._append_to_csv(step_data)
 
             if t == total_steps - 1:
                 print(f"         +-- Calculating Final Benchmarks...")
@@ -747,22 +883,36 @@ if __name__ == "__main__":
     gpu_16gb = base_gpus[0]
     gpu_10gb = base_gpus[1]
 
-    target_grid = (2, 2, 4)  # 16 patches total
+    # Fix 6: VRAM-safe residency. Dense engine allocates the full 2.1GB
+    # state per worker AT ALL TIMES (unlike QUnit, which kept idle
+    # workers tiny). Oversubscription causes Mesa GTT paging -> kernel
+    # stalls -> amdgpu watchdog GPU reset ("context is lost") killing
+    # every worker on the card. The residency budget is therefore a
+    # hard constraint:
+    #   16GB card: 5 workers x 2.1GB = 10.5GB (headroom for XEB transients)
+    #   10GB card: 3 workers x 2.1GB =  6.3GB
+    target_grid = (2, 2, 2)  # 8 patches total
 
-    # Symmetric Load Balancing for quad-socket NUMA architecture.
-    # Eliminates the global barrier wait by equalising the worker count.
-    explicit_gpu_allocation = [gpu_16gb] * 8 + [gpu_10gb] * 8
+    explicit_gpu_allocation = [gpu_16gb] * 5 + [gpu_10gb] * 3
 
-    # Generous semaphores to ensure GPUs are never starved.
-    # VRAM footprint validated at ~1.1GB continuous per worker.
     semaphore_caps = {
-        gpu_16gb: 7,
-        gpu_10gb: 6,
+        gpu_16gb: 2,
+        gpu_10gb: 2,
+    }
+
+    # Fix 7: per-device allocation caps (MB), passed to workers as
+    # QRACK_MAX_ALLOC_MB. Set below physical VRAM so an accidental
+    # oversubscribe fails loudly in one worker instead of resetting
+    # the GPU. Also used by the orchestrator's residency pre-check.
+    gpu_alloc_caps_mb = {
+        gpu_16gb: 15000,
+        gpu_10gb: 9000,
     }
 
     engine = VolumetricHadronEngine27Q(
         gpu_allocation=explicit_gpu_allocation,
         semaphore_limits=semaphore_caps,
+        gpu_alloc_caps_mb=gpu_alloc_caps_mb,
         grid=target_grid,
         master_seed=1337
     )
@@ -770,16 +920,17 @@ if __name__ == "__main__":
     try:
         engine.anneal_to_ground_state(
             total_steps=100,
-            dt=0.04,  # Doubled to compensate for fewer inner steps
+            dt=0.04,
             target_g_face=0.15,
             target_J=1.0,
             target_hx=0.5,
-            target_hz=0.2
+            target_hz=0.2,
+            measure_every=1   # energy computed and printed at EVERY step
         )
-        
+
         # Diagnostic executed precisely ONCE on the post-annealed state
         engine.run_supremacy_benchmark(depth=10, shots=10000)
-        
+
     except KeyboardInterrupt:
         print("\nExecution interrupted by user.")
     finally:
