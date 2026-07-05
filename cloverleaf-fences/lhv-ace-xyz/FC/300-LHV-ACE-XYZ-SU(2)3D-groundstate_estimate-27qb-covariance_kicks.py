@@ -2,12 +2,14 @@
 # 27-Qubit 3x3x3 Lattice & Macroscopic Grid Annealing
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 # Nucleus qubit removed: pure nearest-neighbour 3D Ising topology (54 bonds)
+# Fable5 Senior for measurement breakthrough
+# Sonnet 4.6 lead & management, Gemini 3.x pro as workers
 #
-# PERFORMANCE REVISION 3 (VRAM-safe):
-#   Fix 1: Forced plain dense engine (no QUnit Schmidt thrash)          [kept]
-#   Fix 2: Merged redundant Rz layers (exact)                           [kept]
-#   Fix 3: ZZ term as Rz+Rz+controlled-phase                            [kept]
-#   Fix 5: Clone-free, shot-free prob()-based measurement               [kept]
+# Fable5 PERFORMANCE REVISION 3 (VRAM-safe):
+#   Fix 1: Forced plain dense engine (no QUnit Schmidt thrash)         [kept]
+#   Fix 2: Merged redundant Rz layers (exact)                          [kept]
+#   Fix 3: ZZ term as Rz+Rz+controlled-phase                           [kept]
+#   Fix 5: Clone-free, shot-free prob()-based measurement              [kept]
 #   Fix 6: VRAM RESIDENCY BUDGET. The dense engine allocates the full
 #          2^27 buffer (~2.1GB) per worker at construction. Resident
 #          workers x 2.1GB MUST stay below physical VRAM per card, or
@@ -20,6 +22,7 @@
 #          raises an allocation error in ONE worker instead of silently
 #          paging and taking down the whole card.
 #   Energy is computed and printed at EVERY step (measure_every=1).
+#
 import os
 import gc
 import csv
@@ -63,28 +66,28 @@ def apply_h(sim: Any, q: int) -> None:
         sim.h(q)
     else:
         sim.mtrx([complex(1/np.sqrt(2), 0), complex(1/np.sqrt(2), 0),
-                  complex(1/np.sqrt(2), 0), complex(-1/np.sqrt(2), 0)], [q])
+                  complex(1/np.sqrt(2), 0), complex(-1/np.sqrt(2), 0)], q)
 
 def apply_rx(sim: Any, theta: float, q: int) -> None:
     if hasattr(sim, 'r'):
         sim.r(PX, float(theta), q)
     else:
         sim.mtrx([complex(np.cos(theta/2), 0), complex(0, -np.sin(theta/2)),
-                  complex(0, -np.sin(theta/2)), complex(np.cos(theta/2), 0)], [q])
+                  complex(0, -np.sin(theta/2)), complex(np.cos(theta/2), 0)], q)
 
 def apply_ry(sim: Any, theta: float, q: int) -> None:
     if hasattr(sim, 'r'):
         sim.r(PY, float(theta), q)
     else:
         sim.mtrx([complex(np.cos(theta/2), 0), complex(-np.sin(theta/2), 0),
-                  complex(np.sin(theta/2), 0), complex(np.cos(theta/2), 0)], [q])
+                  complex(np.sin(theta/2), 0), complex(np.cos(theta/2), 0)], q)
 
 def apply_rz(sim: Any, theta: float, q: int) -> None:
     if hasattr(sim, 'r'):
         sim.r(PZ, float(theta), q)
     else:
         sim.mtrx([complex(np.cos(theta/2), -np.sin(theta/2)), 0j,
-                  0j, complex(np.cos(theta/2), np.sin(theta/2))], [q])
+                  0j, complex(np.cos(theta/2), np.sin(theta/2))], q)
 
 def apply_cx(sim: Any, c: int, t: int) -> None:
     if hasattr(sim, 'cx'):
@@ -394,7 +397,7 @@ def persistent_island_worker_27q(
                                 m10 = complex(ny * s, -nx * s)
                                 m11 = complex(c, nz * s)
 
-                                sim.mtrx([m00, m01, m10, m11], [q])
+                                sim.mtrx([m00, m01, m10, m11], q)
 
                         z_exp  = z_means(sim, all_q)
                         zz_exp = zz_means(sim, intra_edges)
