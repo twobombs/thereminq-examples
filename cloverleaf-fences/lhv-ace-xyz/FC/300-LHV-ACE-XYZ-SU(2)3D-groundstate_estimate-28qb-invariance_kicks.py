@@ -42,7 +42,7 @@ def apply_rz(sim: Any, theta: float, q: int) -> None:
     if hasattr(sim, 'r'): 
         sim.r(PZ, float(theta), q)
     else: 
-        sim.mtrx([complex(np.cos(-theta/2), np.sin(-theta/2)), 0j, 
+        sim.mtrx([complex(np.cos(theta/2), -np.sin(theta/2)), 0j, 
                   0j, complex(np.cos(theta/2), np.sin(theta/2))], [q])
 
 def apply_cx(sim: Any, c: int, t: int) -> None:
@@ -78,6 +78,8 @@ def generate_28q_nucleus_subvolume() -> Tuple[List[Tuple[int, int]], Dict[str, L
                 if z == 0: boundaries["-Z"].append(idx)
                 if z == lz - 1: boundaries["+Z"].append(idx)
                 
+    # Note: The nucleus qubit (index 27) acts as a bulk central node 
+    # and is deliberately excluded from the macroscopic boundary sets.
     nucleus_idx = 27
     for grid_idx in range(27):
         edges.append((nucleus_idx, grid_idx))
@@ -143,14 +145,14 @@ def persistent_island_worker_28q(
                     
                     with gpu_semaphore:
                         for _ in range(steps):
-                            for q in range(num_qubits): apply_rx(sim, -hx * dt, q)
-                            for q in range(num_qubits): apply_rz(sim, -hz * dt, q)
+                            for q in range(num_qubits): apply_rx(sim, -2.0 * hx * dt, q)
+                            for q in range(num_qubits): apply_rz(sim, -2.0 * hz * dt, q)
                             for q1, q2 in intra_edges:
                                 apply_cx(sim, q1, q2)
                                 apply_rz(sim, -2.0 * J * dt, q2)
                                 apply_cx(sim, q1, q2)
-                            for q in range(num_qubits): apply_rz(sim, -hz * dt, q)
-                            for q in range(num_qubits): apply_rx(sim, -hx * dt, q)
+                            for q in range(num_qubits): apply_rz(sim, -2.0 * hz * dt, q)
+                            for q in range(num_qubits): apply_rx(sim, -2.0 * hx * dt, q)
                             
                     with gpu_semaphore:
                         sim_z = QrackSimulator(clone_sid=sim.sid)
@@ -208,43 +210,64 @@ def persistent_island_worker_28q(
                             if ky != 0.0: apply_ry(sim, ky, q)
                             if kz != 0.0: apply_rz(sim, kz, q)
                             
-                        # 2. Instantiate ephemeral clone strictly for destructive energy measurement
-                        sim_e = QrackSimulator(clone_sid=sim.sid)
+                        # 2. Shot-based extraction of Z and ZZ correlators to avoid state mutation
+                        sim_z_zz = QrackSimulator(clone_sid=sim.sid)
                         try:
-                            # Z terms - Native Z Basis
-                            for q in range(num_qubits):
-                                local_energy += -hz_val * (1.0 - 2.0 * sim_e.prob(q))
-                                
-                            # ZZ terms - Native Z Basis (CX pairs restore entanglement cleanly)
-                            for q1, q2 in intra_edges:
-                                apply_cx(sim_e, q1, q2)
-                                local_energy += -J_val * (1.0 - 2.0 * sim_e.prob(q2))
-                                apply_cx(sim_e, q1, q2)
-                                
-                            # X terms - Destructively rotate to X Basis last
-                            for q in range(num_qubits):
-                                apply_h(sim_e, q)
-                                local_energy += -hx_val * (1.0 - 2.0 * sim_e.prob(q))
-                                
+                            # 1024 shots is generally sufficient for energy expectation estimation
+                            zz_samples = sim_z_zz.measure_shots(list(range(num_qubits)), 1024)
                         finally:
-                            del sim_e
+                            del sim_z_zz
+
+                        # 3. Independent shot-based extraction for X terms
+                        sim_x = QrackSimulator(clone_sid=sim.sid)
+                        try:
+                            for q in range(num_qubits):
+                                apply_h(sim_x, q)
+                            x_samples = sim_x.measure_shots(list(range(num_qubits)), 1024)
+                        finally:
+                            del sim_x
+                            
+                    # Column q in spins corresponds to qubit q: measure_shots preserves 
+                    # the ordering of the input qubit list as bit positions.
+                    mask = np.uint64(1) << np.arange(num_qubits, dtype=np.uint64)
+                    
+                    arr_z = np.array(zz_samples, dtype=np.uint64)[:, None]
+                    bits_z = (arr_z & mask) > 0
+                    spins_z = 1.0 - 2.0 * bits_z.astype(float)
+
+                    for q in range(num_qubits):
+                        local_energy += -hz_val * np.mean(spins_z[:, q])
+                        
+                    for q1, q2 in intra_edges:
+                        local_energy += -J_val * np.mean(spins_z[:, q1] * spins_z[:, q2])
+                        
+                    arr_x = np.array(x_samples, dtype=np.uint64)[:, None]
+                    bits_x = (arr_x & mask) > 0
+                    spins_x = 1.0 - 2.0 * bits_x.astype(float)
+                    
+                    for q in range(num_qubits):
+                        local_energy += -hx_val * np.mean(spins_x[:, q])
                             
                     cmd_pipe.send({"status": "STEP_2_COMPLETE", "patch_idx": patch_idx, "data": local_energy})
 
                 elif action == "COMPUTE_BENCHMARKS":
                     try:
                         purity_sum = 0.0
+                        # Batched semaphore lock to prevent OS cycle overhead
                         with gpu_semaphore:
                             for q in range(num_qubits):
-                                z_exp = 1.0 - 2.0 * sim.prob(q)
-                                apply_h(sim, q)
-                                x_exp = 1.0 - 2.0 * sim.prob(q)
-                                apply_h(sim, q)
-                                apply_rx(sim, -np.pi/2, q)
-                                y_exp = 1.0 - 2.0 * sim.prob(q)
-                                apply_rx(sim, np.pi/2, q) # Y-basis restoration guaranteed
-                                purity_sum += (x_exp**2 + y_exp**2 + z_exp**2)
-                                
+                                sim_q = QrackSimulator(clone_sid=sim.sid)
+                                try:
+                                    z_exp = 1.0 - 2.0 * sim_q.prob(q)
+                                    apply_h(sim_q, q)
+                                    x_exp = 1.0 - 2.0 * sim_q.prob(q)
+                                    apply_h(sim_q, q)
+                                    apply_rx(sim_q, -np.pi/2, q)
+                                    y_exp = 1.0 - 2.0 * sim_q.prob(q)
+                                    purity_sum += x_exp**2 + y_exp**2 + z_exp**2
+                                finally:
+                                    del sim_q
+                        
                         avg_purity = purity_sum / float(num_qubits)
                     except Exception as e:
                         print(f"Worker {patch_idx} benchmark failed: {e}")
@@ -266,7 +289,7 @@ def persistent_island_worker_28q(
         if sim is not None: del sim
         gc.collect()
         try:
-            cmd_pipe.close() # Plugs the worker process resource leak
+            cmd_pipe.close()
         except Exception:
             pass
 
@@ -392,7 +415,6 @@ class VolumetricHadronEngine28Q:
             timeout = deadline - time.monotonic()
             if timeout <= 0: raise TimeoutError(f"Workers timed out on action '{action}'")
                 
-            # Restrict wait timeout to 60s for periodic progress logging
             ready_pipes = wait([p for _, p in pending], timeout=min(timeout, 60.0))
             if not ready_pipes: 
                 elapsed = 300.0 - (deadline - time.monotonic())
@@ -445,6 +467,10 @@ class VolumetricHadronEngine28Q:
                 Y_noise = noise_rng.multivariate_normal(np.zeros(n_bounds), prof["covs"]["Y"], method='svd') * scale
                 Z_noise = noise_rng.multivariate_normal(np.zeros(n_bounds), prof["covs"]["Z"], method='svd') * scale
                 
+                for noise_arr in (X_noise, Y_noise, Z_noise):
+                    if not np.all(np.isfinite(noise_arr)):
+                        noise_arr[:] = 0.0
+                
                 stochastic_noise[p] = {
                     q: (X_noise[i], Y_noise[i], Z_noise[i]) 
                     for i, q in enumerate(prof["qubits"])
@@ -495,7 +521,6 @@ class VolumetricHadronEngine28Q:
                     n1 = max(1, len(face1_qubits))
                     avg_x1 /= n1; avg_y1 /= n1; avg_z1 /= n1
                     
-                    # Physically robust mean-field bond energy calculation (Symmetric)
                     interaction_E = -current_g_face * (avg_x1*avg_x2 + avg_y1*avg_y2 + avg_z1*avg_z2) * ((len(face1_qubits) + len(face2_qubits)) / 2.0)
                     macroscopic_boundary_energy += interaction_E
                     
@@ -538,7 +563,6 @@ class VolumetricHadronEngine28Q:
         self._is_shutdown = True
         print("\nShutting down Asymmetric 28-Qubit Volumetric Engine...")
         
-        # Hardened double-drain pipe sequence to prevent race conditions during shutdown
         for pipe in getattr(self, 'pipes', []):
             try:
                 if not pipe.closed: 
@@ -552,7 +576,7 @@ class VolumetricHadronEngine28Q:
         for p in getattr(self, 'workers', []):
             try:
                 p.join(timeout=3)
-                if p.is_alive(): 
+                if p.is_alive() and p.pid is not None: 
                     os.kill(p.pid, signal.SIGKILL) 
             except Exception: pass
             
