@@ -123,8 +123,8 @@ def persistent_island_worker_28q(
         num_bound = len(all_boundary_qubits)
 
         def extract_bits(samples: List[int], n_q: int) -> np.ndarray:
-            arr = np.array(samples, dtype=np.uint32)[:, None]
-            mask = 1 << np.arange(n_q, dtype=np.uint32)
+            arr = np.array(samples, dtype=np.uint64)[:, None]
+            mask = np.uint64(1) << np.arange(n_q, dtype=np.uint64)
             bits = (arr & mask) > 0
             return 1.0 - 2.0 * bits.astype(float)
 
@@ -201,22 +201,33 @@ def persistent_island_worker_28q(
                     local_energy = 0.0
                     
                     with gpu_semaphore:
+                        # 1. Apply macroscopic kicks to the primary persistent state
                         for raw_q, (kx, ky, kz) in kicks.items():
                             q = int(raw_q)
                             if kx != 0.0: apply_rx(sim, kx, q)
                             if ky != 0.0: apply_ry(sim, ky, q)
                             if kz != 0.0: apply_rz(sim, kz, q)
                             
-                        for q in range(num_qubits):
-                            local_energy += -hz_val * (1.0 - 2.0 * sim.prob(q))
-                            apply_h(sim, q)
-                            local_energy += -hx_val * (1.0 - 2.0 * sim.prob(q))
-                            apply_h(sim, q)
-                            
-                        for q1, q2 in intra_edges:
-                            apply_cx(sim, q1, q2)
-                            local_energy += -J_val * (1.0 - 2.0 * sim.prob(q2))
-                            apply_cx(sim, q1, q2)
+                        # 2. Instantiate ephemeral clone strictly for destructive energy measurement
+                        sim_e = QrackSimulator(clone_sid=sim.sid)
+                        try:
+                            # Z terms - Native Z Basis
+                            for q in range(num_qubits):
+                                local_energy += -hz_val * (1.0 - 2.0 * sim_e.prob(q))
+                                
+                            # ZZ terms - Native Z Basis (CX pairs restore entanglement cleanly)
+                            for q1, q2 in intra_edges:
+                                apply_cx(sim_e, q1, q2)
+                                local_energy += -J_val * (1.0 - 2.0 * sim_e.prob(q2))
+                                apply_cx(sim_e, q1, q2)
+                                
+                            # X terms - Destructively rotate to X Basis last
+                            for q in range(num_qubits):
+                                apply_h(sim_e, q)
+                                local_energy += -hx_val * (1.0 - 2.0 * sim_e.prob(q))
+                                
+                        finally:
+                            del sim_e
                             
                     cmd_pipe.send({"status": "STEP_2_COMPLETE", "patch_idx": patch_idx, "data": local_energy})
 
@@ -231,7 +242,7 @@ def persistent_island_worker_28q(
                                 apply_h(sim, q)
                                 apply_rx(sim, -np.pi/2, q)
                                 y_exp = 1.0 - 2.0 * sim.prob(q)
-                                apply_rx(sim, np.pi/2, q)
+                                apply_rx(sim, np.pi/2, q) # Y-basis restoration guaranteed
                                 purity_sum += (x_exp**2 + y_exp**2 + z_exp**2)
                                 
                         avg_purity = purity_sum / float(num_qubits)
@@ -254,18 +265,25 @@ def persistent_island_worker_28q(
     finally:
         if sim is not None: del sim
         gc.collect()
+        try:
+            cmd_pipe.close() # Plugs the worker process resource leak
+        except Exception:
+            pass
 
 # ==========================================
 # 3. 28-QUBIT MACROSCOPIC ORCHESTRATOR
 # ==========================================
 class VolumetricHadronEngine28Q:
-    def __init__(self, device_ids: List[int], grid: Tuple[int, int, int] = (2, 2, 4), master_seed: int = 42):
+    def __init__(self, gpu_allocation: List[int], semaphore_limits: Dict[int, int], grid: Tuple[int, int, int] = (2, 2, 2), master_seed: int = 42):
         self._is_shutdown = False
-        self.device_ids = device_ids
+        self.gpu_allocation = gpu_allocation
         
         self.grid_x, self.grid_y, self.grid_z = grid
         self.num_patches = self.grid_x * self.grid_y * self.grid_z
         
+        if len(self.gpu_allocation) != self.num_patches:
+            raise ValueError(f"GPU allocation list ({len(self.gpu_allocation)}) must match total grid patches ({self.num_patches}).")
+            
         self.qubits_per_patch = 28
         self.intra_edges, self.boundaries = generate_28q_nucleus_subvolume()
         
@@ -280,7 +298,7 @@ class VolumetricHadronEngine28Q:
         self.coord_to_patch = {v: k for k, v in self.patch_coords.items()}
 
         self.ctx = mp.get_context('spawn')
-        self.gpu_semaphores = {gpu_id: self.ctx.Semaphore(2) for gpu_id in set(self.device_ids)}
+        self.gpu_semaphores = {gpu_id: self.ctx.Semaphore(limit) for gpu_id, limit in semaphore_limits.items()}
         
         self.workers: List[mp.Process] = []
         self.pipes: List[Connection] = []
@@ -290,35 +308,40 @@ class VolumetricHadronEngine28Q:
         self._init_csv()
 
         total_sites = self.num_patches * self.qubits_per_patch
-        print(f"Initializing High-Throughput 28-Qubit Engine with Statistical Covariance Profiles...")
+        print(f"Initializing Asymmetric High-Throughput 28-Qubit Engine...")
         print(f"Total logical capacity configured: {total_sites} total qubits")
         
         master_rng = np.random.default_rng(master_seed)
         patch_seeds = master_rng.integers(0, 2**31 - 1, size=self.num_patches)
         
-        for p_idx in range(self.num_patches):
-            parent_conn, child_conn = self.ctx.Pipe()
-            assigned_gpu = self.device_ids[p_idx % len(self.device_ids)]
-            
-            p = self.ctx.Process(
-                target=persistent_island_worker_28q,
-                args=(
-                    assigned_gpu, p_idx, self.qubits_per_patch, 
-                    self.intra_edges, self.boundaries, child_conn,
-                    self.gpu_semaphores[assigned_gpu], int(patch_seeds[p_idx])
+        try:
+            for p_idx in range(self.num_patches):
+                parent_conn, child_conn = self.ctx.Pipe()
+                assigned_gpu = self.gpu_allocation[p_idx]
+                
+                p = self.ctx.Process(
+                    target=persistent_island_worker_28q,
+                    args=(
+                        assigned_gpu, p_idx, self.qubits_per_patch, 
+                        self.intra_edges, self.boundaries, child_conn,
+                        self.gpu_semaphores[assigned_gpu], int(patch_seeds[p_idx])
+                    )
                 )
-            )
-            p.start()
-            child_conn.close() 
-            self.workers.append(p)
-            self.pipes.append(parent_conn)
-            
-        for i, pipe in enumerate(self.pipes):
-            if pipe.poll(timeout=45.0):
-                if pipe.recv().get("status") != "READY": 
-                    self.shutdown(); raise RuntimeError("Worker error.")
-            else: 
-                self.shutdown(); raise TimeoutError("Worker timeout.")
+                p.start()
+                child_conn.close() 
+                self.workers.append(p)
+                self.pipes.append(parent_conn)
+                
+            for i, pipe in enumerate(self.pipes):
+                if pipe.poll(timeout=45.0):
+                    if pipe.recv().get("status") != "READY": 
+                        raise RuntimeError(f"Worker {i} protocol failure.")
+                else: 
+                    raise TimeoutError(f"Worker {i} timeout during initialization.")
+                    
+        except Exception as e:
+            self.shutdown()
+            raise RuntimeError(f"Engine initialization aborted: {e}") from e
 
     def _init_csv(self):
         try:
@@ -369,8 +392,12 @@ class VolumetricHadronEngine28Q:
             timeout = deadline - time.monotonic()
             if timeout <= 0: raise TimeoutError(f"Workers timed out on action '{action}'")
                 
-            ready_pipes = wait([p for _, p in pending], timeout=timeout)
-            if not ready_pipes: continue
+            # Restrict wait timeout to 60s for periodic progress logging
+            ready_pipes = wait([p for _, p in pending], timeout=min(timeout, 60.0))
+            if not ready_pipes: 
+                elapsed = 300.0 - (deadline - time.monotonic())
+                print(f"[WARN] Still waiting on {len(pending)} workers ({elapsed:.0f}s elapsed) for action '{action}'...")
+                continue
                 
             still_pending = []
             for idx, pipe in pending:
@@ -393,6 +420,8 @@ class VolumetricHadronEngine28Q:
         print(f"Starting Adiabatic Anneal with Stochastic Injection...")
         self.energy_history.clear()
         
+        noise_rng = np.random.default_rng()
+        
         for t in range(total_steps):
             s = t / max(1, (total_steps - 1))
             current_hx = (1.0 - s) * 3.0 + s * target_hx
@@ -411,9 +440,10 @@ class VolumetricHadronEngine28Q:
             for p, prof in patch_profiles.items():
                 n_bounds = len(prof["qubits"])
                 scale = np.sqrt(dt / prof["corr_shots"])
-                X_noise = np.random.multivariate_normal(np.zeros(n_bounds), prof["covs"]["X"]) * scale
-                Y_noise = np.random.multivariate_normal(np.zeros(n_bounds), prof["covs"]["Y"]) * scale
-                Z_noise = np.random.multivariate_normal(np.zeros(n_bounds), prof["covs"]["Z"]) * scale
+                
+                X_noise = noise_rng.multivariate_normal(np.zeros(n_bounds), prof["covs"]["X"], method='svd') * scale
+                Y_noise = noise_rng.multivariate_normal(np.zeros(n_bounds), prof["covs"]["Y"], method='svd') * scale
+                Z_noise = noise_rng.multivariate_normal(np.zeros(n_bounds), prof["covs"]["Z"], method='svd') * scale
                 
                 stochastic_noise[p] = {
                     q: (X_noise[i], Y_noise[i], Z_noise[i]) 
@@ -465,11 +495,10 @@ class VolumetricHadronEngine28Q:
                     n1 = max(1, len(face1_qubits))
                     avg_x1 /= n1; avg_y1 /= n1; avg_z1 /= n1
                     
-                    interaction_E = 0.0
+                    # Physically robust mean-field bond energy calculation (Symmetric)
+                    interaction_E = -current_g_face * (avg_x1*avg_x2 + avg_y1*avg_y2 + avg_z1*avg_z2) * ((len(face1_qubits) + len(face2_qubits)) / 2.0)
+                    macroscopic_boundary_energy += interaction_E
                     
-                    # Note on Physics: We compute the cross-product of (Noisy Field) x (Clean Expectation).
-                    # This intentionally models a stochastic external field acting on a mean-field source,
-                    # ensuring the energy accurately reflects the exact variance injection.
                     for q1 in face1_qubits:
                         curr_k1 = kick_payloads[p1]["kicks"].get(q1, (0.0, 0.0, 0.0))
                         kick_payloads[p1]["kicks"][q1] = (
@@ -477,10 +506,6 @@ class VolumetricHadronEngine28Q:
                             curr_k1[1] + current_g_face * avg_y2,
                             curr_k1[2] + current_g_face * avg_z2
                         )
-                        idx1 = q_to_idx1[q1]
-                        interaction_E += -current_g_face * (prof1["means"]["X"][idx1]*avg_x2 + 
-                                                            prof1["means"]["Y"][idx1]*avg_y2 + 
-                                                            prof1["means"]["Z"][idx1]*avg_z2)
                         
                     for q2 in face2_qubits:
                         curr_k2 = kick_payloads[p2]["kicks"].get(q2, (0.0, 0.0, 0.0))
@@ -489,12 +514,6 @@ class VolumetricHadronEngine28Q:
                             curr_k2[1] + current_g_face * avg_y1,
                             curr_k2[2] + current_g_face * avg_z1
                         )
-                        idx2 = q_to_idx2[q2]
-                        interaction_E += -current_g_face * (prof2["means"]["X"][idx2]*avg_x1 + 
-                                                            prof2["means"]["Y"][idx2]*avg_y1 + 
-                                                            prof2["means"]["Z"][idx2]*avg_z1)
-                        
-                    macroscopic_boundary_energy += interaction_E / 2.0
 
             step2_res = self.sync_broadcast("APPLY_KICKS_AND_MEASURE_ENERGY", kick_payloads, expected_status="STEP_2_COMPLETE")
             bulk_energy = sum([r["data"] for r in step2_res.values()])
@@ -517,18 +536,26 @@ class VolumetricHadronEngine28Q:
     def shutdown(self) -> None:
         if self._is_shutdown: return
         self._is_shutdown = True
-        print("\nShutting down 28-Qubit Volumetric Engine...")
+        print("\nShutting down Asymmetric 28-Qubit Volumetric Engine...")
+        
+        # Hardened double-drain pipe sequence to prevent race conditions during shutdown
         for pipe in getattr(self, 'pipes', []):
             try:
                 if not pipe.closed: 
-                    while pipe.poll(): pipe.recv()
+                    while pipe.poll(timeout=0.05): pipe.recv()
                     pipe.send({"action": "SHUTDOWN"})
+                    while pipe.poll(timeout=0.1): pipe.recv()
             except (OSError, BrokenPipeError, EOFError): pass
+            
+        time.sleep(0.5) 
+        
         for p in getattr(self, 'workers', []):
             try:
-                p.join(timeout=5)
-                if p.is_alive(): p.terminate()
+                p.join(timeout=3)
+                if p.is_alive(): 
+                    os.kill(p.pid, signal.SIGKILL) 
             except Exception: pass
+            
         for pipe in getattr(self, 'pipes', []):
             try:
                 if not pipe.closed: pipe.close()
@@ -540,15 +567,28 @@ class VolumetricHadronEngine28Q:
 if __name__ == "__main__":
     mp.freeze_support()
     
-    gpu_env = os.environ.get("WORMHOLE_GPUS", "0,1,2,3") 
+    gpu_env = os.environ.get("WORMHOLE_GPUS", "0,1") 
     base_gpus = [int(g.strip()) for g in gpu_env.split(',')]
     
-    target_grid = (2, 2, 4)
-    total_requested_nodes = target_grid[0] * target_grid[1] * target_grid[2]
-    AVAILABLE_GPUS = [base_gpus[i % len(base_gpus)] for i in range(total_requested_nodes)]
+    if len(base_gpus) < 2:
+        print("WARNING: Asymmetric execution requires at least 2 GPUs. Falling back to default [0, 1].")
+        base_gpus = [0, 1]
+        
+    gpu_16gb = base_gpus[0]
+    gpu_10gb = base_gpus[1]
+    
+    target_grid = (2, 2, 2)
+    
+    explicit_gpu_allocation = [gpu_16gb] * 5 + [gpu_10gb] * 3
+    
+    semaphore_caps = {
+        gpu_16gb: 1, 
+        gpu_10gb: 1   
+    }
     
     engine = VolumetricHadronEngine28Q(
-        device_ids=AVAILABLE_GPUS, 
+        gpu_allocation=explicit_gpu_allocation,
+        semaphore_limits=semaphore_caps,
         grid=target_grid,
         master_seed=1337
     )
