@@ -3,39 +3,40 @@
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 # Nucleus qubit removed: pure nearest-neighbour 3D Ising topology (54 bonds)
 #
-# REVISION 23 -- THE FINAL DMA SYNC (INKET RACE FIX) & 16-PATCH MEMORY CLAMP
+# REVISION 27 -- DRI_PRIME DEVICE ISOLATION (LIBDRM BAREMETAL FIX)
 #
 # This machine exposes TWO OpenCL devices under Mesa rusticl:
 #   Device 0: AMD Radeon Pro VII / Instinct MI50 class (vega20, 16GB) -- compute
 #   Device 1: NVIDIA CMP 50HX (10GB, nouveau)                         -- DO NOT USE
-# All workers pin QRACK_OCL_DEFAULT_DEVICE to device 0.
 #
-# THE OPENCL DMA RACE (Fix 34):
-#   OpenCL DMA transfers (InKet) can execute asynchronously on dedicated SDMA 
-#   engines while compute kernels execute on the main ring. 
-#   FIX: `fast_in_ket` now issues `InKet`, followed by a blocking `sim.prob(0)`.
-#   This forces a synchronous round-trip through the OpenCL queue, guaranteeing 
-#   the DMA transfer has fully populated VRAM BEFORE the Trotter gate sequence 
-#   begins. This prevents silent quantum state corruption.
-#
-# HOST RAM IPC BOTTLENECK (Fix 35):
-#   The `multiprocessing.Pool.map()` mechanism relies on pickling data through 
-#   IPC pipes. A 32-patch grid requires 32 GB of static Host RAM, but dispatches
-#   create an additional 32 GB of transient IPC serialization overhead, invoking
-#   the OS OOM killer on an 80 GB machine. 
-#   FIX: The grid is clamped to `(4, 4, 1)` (16 patches). Static RAM is ~17 GB,
-#   and transient IPC overhead peaks at ~17 GB, keeping total system footprint 
-#   safely under 40 GB.
+# ROOT CAUSE OF THE PERSISTENT 0x00008006fa682000 FAULT (Fix 40):
+#   PyQrack's C++ extension probes PCI device IDs by opening /dev/dri file
+#   descriptors directly via libdrm, completely bypassing the OpenCL ICD layer.
+#   RUSTICL_ENABLE and CUDA_VISIBLE_DEVICES only filter the OpenCL platform --
+#   they have no effect on libdrm's native DRM device enumeration. PyQrack was
+#   opening the NVIDIA CMP 50HX DRI node and allocating its internal state
+#   vector buffer in the nouveau VA space, which produces 57-bit pointers the
+#   Vega20 IOMMU cannot translate.
+#   FIX: `DRI_PRIME=pci-0000_44_00_0` is set at the top of every worker env
+#   block. This is a per-process libdrm directive that redirects all DRI device
+#   opens to the AMD card at PCI address 0000:44:00.0 before any fd is opened.
+#   It is non-destructive: other processes on the host or in other containers
+#   that do not have DRI_PRIME set continue using all cards normally.
 #
 # Fixes carried forward:
-#   Fix 1-11: Make_sim dense guards, Trotter S2 symmetry, ZZ mcmtrx logic.
+#   Fix 1-11: Trotter S2 symmetry, ZZ mcmtrx logic.
 #   Fix 12: Single MI50 hardware config.
 #   Fix 17: Zero-copy fast_in_ket/fast_out_ket via Qrack pinvoke.
 #   Fix 20: Pin QRACK_FPPOW=5 to standardize library float32 contract.
 #   Fix 26: Ephemeral `multiprocessing.Pool` (maxtasksperchild=1) teardown.
 #   Fix 28-30: `alloc_dma_buf` via `MAP_POPULATE` and 64GB hint with 2GB strides.
 #   Fix 31: `fast_out_ket` returns `np.array(copy=True)` to break mmap view binding.
-#   Fix 32: `fast_out_ket` issues `prob(0)` blocking drain before unmapping DMA.
+#   Fix 32: `fast_out_ket` and `fast_in_ket` blocking queue drains.
+#   Fix 35: 16-Patch memory clamp (17 GB static / 17 GB transient IPC).
+#   Fix 36-37: Environment variable configuration locked before pyqrack import,
+#              blinding the OpenCL ICD to the nouveau driver.
+#   Fix 38: RUSTICL_ALLOW_SVM=0 forces explicit clCreateBuffer allocation.
+#   Fix 39: Direct make_sim initialization, no TypeError fallback overhead.
 
 import os
 import gc
@@ -54,18 +55,8 @@ import ctypes.util
 PX, PY, PZ = 1, 2, 3
 
 def make_sim(QrackSimulator: Any, n: int) -> Any:
-    kwargs = dict(isTensorNetwork=False, isSchmidtDecompose=False,
-                  isStabilizerHybrid=False, isBinaryDecisionTree=False)
-    while True:
-        try:
-            return QrackSimulator(qubit_count=n, **kwargs)
-        except TypeError as e:
-            removed = False
-            for k in list(kwargs):
-                if k in str(e):
-                    kwargs.pop(k); removed = True; break
-            if not removed:
-                return QrackSimulator(qubit_count=n)
+    # Fix 39: Direct initialization, PyQrack 2.5.1 does not accept kwargs
+    return QrackSimulator(qubit_count=n)
 
 def apply_h(sim: Any, q: int) -> None:
     if hasattr(sim, 'h'): sim.h(q)
@@ -138,12 +129,13 @@ def zz_means_meanfield(z_exp: np.ndarray, edges: List[Tuple[int,int]]) -> np.nda
 
 
 # ==========================================
-# 0b. 48-BIT STRIDED ALLOCATOR & STATE TRANSFER 
+# 0b. 48-BIT STRIDED ALLOCATOR & STATE TRANSFER
 # ==========================================
 _LIBC = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
 
 _LIBC.mmap.restype = ctypes.c_void_p
-_LIBC.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_size_t]
+_LIBC.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+                       ctypes.c_int, ctypes.c_int, ctypes.c_size_t]
 _LIBC.munmap.restype = ctypes.c_int
 _LIBC.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
 
@@ -170,21 +162,21 @@ def alloc_dma_buf(num_qubits: int, worker_slot: int = 0) -> Tuple[np.ndarray, in
 
     hint_base = 0x1000000000
     hint_addr = ctypes.c_void_p(hint_base + worker_slot * (2 * 1024 * 1024 * 1024))
-    
+
     ptr = _LIBC.mmap(
-        hint_addr, nbytes, 
-        0x1 | 0x2,              
-        0x02 | 0x20 | 0x08000,  
+        hint_addr, nbytes,
+        0x1 | 0x2,              # PROT_READ | PROT_WRITE
+        0x02 | 0x20 | 0x08000,  # MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE
         -1, 0
     )
-    
+
     if ptr == 0xffffffffffffffff or ptr == -1:
         raise MemoryError(f"Failed to mmap 48-bit DMA buffer. Errno: {ctypes.get_errno()}")
 
     c_type = ctypes.c_float if dtype == np.complex64 else ctypes.c_double
     c_array = (c_type * ((1 << num_qubits) * 2)).from_address(ptr)
     buf = np.ndarray((1 << num_qubits,), dtype=dtype, buffer=c_array)
-    
+
     return buf, ptr, nbytes
 
 def free_dma_buf(ptr: int, nbytes: int) -> None:
@@ -200,8 +192,6 @@ def fast_in_ket(sim: Any, state: np.ndarray, dma_buf: np.ndarray) -> None:
         np.copyto(dma_buf, state)
         qrack.qrack_lib.InKet(sim.sid, dma_buf.ctypes.data_as(cptr))
         sim._throw_if_error()
-        
-        # Fix 34: Drain block until InKet DMA completes before any gate executes
         try:
             _ = sim.prob(0)
         except Exception:
@@ -215,14 +205,10 @@ def fast_out_ket(sim: Any, num_qubits: int, dma_buf: np.ndarray) -> np.ndarray:
         _, cptr = _state_dtype_and_ptr(qrack)
         qrack.qrack_lib.OutKet(sim.sid, dma_buf.ctypes.data_as(cptr))
         sim._throw_if_error()
-        
-        # Fix 32: Drain AFTER OutKet to guarantee DMA has completed
         try:
             _ = sim.prob(0)
         except Exception:
             pass
-            
-        # Fix 31: Deep copy severs the view from the mmap region
         return np.array(dma_buf, dtype=np.complex64, copy=True)
     return np.array(sim.out_ket(), dtype=np.complex64)
 
@@ -241,33 +227,50 @@ def generate_27q_lattice_subvolume() -> Tuple[List[Tuple[int,int]], Dict[str,Lis
                 if x < lx-1: edges.append((idx, (x+1)*(ly*lz)+y*lz+z))
                 if y < ly-1: edges.append((idx, x*(ly*lz)+(y+1)*lz+z))
                 if z < lz-1: edges.append((idx, x*(ly*lz)+y*lz+(z+1)))
-                if x == 0:      boundaries["-X"].append(idx)
+                if x == 0:    boundaries["-X"].append(idx)
                 if x == lx-1: boundaries["+X"].append(idx)
-                if y == 0:      boundaries["-Y"].append(idx)
+                if y == 0:    boundaries["-Y"].append(idx)
                 if y == ly-1: boundaries["+Y"].append(idx)
-                if z == 0:      boundaries["-Z"].append(idx)
+                if z == 0:    boundaries["-Z"].append(idx)
                 if z == lz-1: boundaries["+Z"].append(idx)
     return edges, boundaries
 
 
 # ==========================================
-# 2. EPHEMERAL WORKER TASKS
+# 2. WORKER ENVIRONMENT ISOLATION BLOCK
+# ==========================================
+def _isolate_worker_env(args: Dict[str, Any]) -> None:
+    """
+    Fix 40: DRI_PRIME forces libdrm to open only the AMD DRI node.
+    Fix 38: RUSTICL_ALLOW_SVM=0 forces explicit clCreateBuffer.
+    Fix 37: RUSTICL_ENABLE=radeonsi blinds OpenCL ICD to nouveau.
+    Fix 36: All env vars set before any pyqrack import.
+    """
+    os.environ["DRI_PRIME"]              = "pci-0000_44_00_0"
+    os.environ["CUDA_VISIBLE_DEVICES"]   = ""
+    os.environ["OCL_ICD_PLATFORM_SORT"]  = "none"
+    os.environ["RUSTICL_ENABLE"]         = "radeonsi"
+    os.environ["RUSTICL_ALLOW_SVM"]      = "0"
+    os.environ["MESA_VK_DEVICE_SELECT"]  = "amd"
+    os.environ["OMP_NUM_THREADS"]        = "1"
+    os.environ["OPENBLAS_NUM_THREADS"]   = "1"
+    os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
+    os.environ["QRACK_MAX_ALLOC_MB"]         = str(int(args["gpu_max_alloc_mb"]))
+    os.environ["QRACK_OCL_DEFAULT_DEVICE"]   = str(args["gpu_device_id"])
+    os.environ["QRACK_QPAGER_DEVICES"]       = "-1"
+    os.environ["QRACK_QUNITMULTI_DEVICES"]   = "-1"
+    os.environ["QRACK_FPPOW"]                = "5"
+
+
+# ==========================================
+# 3. EPHEMERAL WORKER TASKS
 # ==========================================
 def worker_init_state(args: Dict[str, Any]) -> Dict[str, Any]:
-    gpu_id = args["gpu_device_id"]
-    num_qubits = args["num_qubits"]
-    seed = args["seed"]
-    max_alloc = args["gpu_max_alloc_mb"]
-    worker_slot = args["worker_slot"]
+    _isolate_worker_env(args)
 
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
-    os.environ["QRACK_MAX_ALLOC_MB"] = str(int(max_alloc))
-    os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(gpu_id)
-    os.environ["QRACK_QPAGER_DEVICES"] = "-1"
-    os.environ["QRACK_QUNITMULTI_DEVICES"] = "-1"
-    os.environ.setdefault("QRACK_FPPOW", "5")
+    num_qubits  = args["num_qubits"]
+    seed        = args["seed"]
+    worker_slot = args["worker_slot"]
 
     from pyqrack import QrackSimulator
     dma_buf, ptr, nbytes = alloc_dma_buf(num_qubits, worker_slot)
@@ -282,30 +285,24 @@ def worker_init_state(args: Dict[str, Any]) -> Dict[str, Any]:
 
     del sim
     gc.collect()
-    time.sleep(0.01) 
+    time.sleep(0.01)
     free_dma_buf(ptr, nbytes)
-    
+
     return {"patch_idx": args["patch_idx"], "state": state}
 
-def worker_evolve_step(args: Dict[str, Any]) -> Dict[str, Any]:
-    gpu_id = args["gpu_device_id"]
-    num_qubits = args["num_qubits"]
-    state = args["state"]
-    intra_edges = args["intra_edges"]
-    J = args["J"]
-    hx = args["hx"]
-    hz = args["hz"]
-    dt = args["dt"]
-    steps = args["steps"]
-    max_alloc = args["gpu_max_alloc_mb"]
-    worker_slot = args["worker_slot"]
 
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["QRACK_MAX_ALLOC_MB"] = str(int(max_alloc))
-    os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(gpu_id)
-    os.environ["QRACK_QPAGER_DEVICES"] = "-1"
-    os.environ["QRACK_QUNITMULTI_DEVICES"] = "-1"
-    os.environ.setdefault("QRACK_FPPOW", "5")
+def worker_evolve_step(args: Dict[str, Any]) -> Dict[str, Any]:
+    _isolate_worker_env(args)
+
+    num_qubits  = args["num_qubits"]
+    state       = args["state"]
+    intra_edges = args["intra_edges"]
+    J           = args["J"]
+    hx          = args["hx"]
+    hz          = args["hz"]
+    dt          = args["dt"]
+    steps       = args["steps"]
+    worker_slot = args["worker_slot"]
 
     from pyqrack import QrackSimulator
     dma_buf, ptr, nbytes = alloc_dma_buf(num_qubits, worker_slot)
@@ -313,15 +310,15 @@ def worker_evolve_step(args: Dict[str, Any]) -> Dict[str, Any]:
 
     fast_in_ket(sim, state, dma_buf)
     trotter_step_body(sim, num_qubits, intra_edges, J, hx, hz, dt, steps)
-    
+
     stat_payload = None
     if args.get("measure_stats", False):
         bounds = args["boundaries"]
-        all_boundary_qubits = sorted(list(set(q for face in bounds.values() for q in face)))
+        all_boundary_qubits = sorted(list(set(
+            q for face in bounds.values() for q in face)))
         Z_mean = z_means(sim, all_boundary_qubits)
         X_mean = x_means(sim, all_boundary_qubits)
         Y_mean = y_means(sim, all_boundary_qubits)
-        
         Z_var = np.clip(1.0 - Z_mean**2, 0.0, 1.0)
         X_var = np.clip(1.0 - X_mean**2, 0.0, 1.0)
         Y_var = np.clip(1.0 - Y_mean**2, 0.0, 1.0)
@@ -332,32 +329,26 @@ def worker_evolve_step(args: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     new_state = fast_out_ket(sim, num_qubits, dma_buf)
-    
+
     del sim
     gc.collect()
     time.sleep(0.01)
     free_dma_buf(ptr, nbytes)
-    
+
     return {"patch_idx": args["patch_idx"], "state": new_state, "stats": stat_payload}
 
-def worker_apply_kicks(args: Dict[str, Any]) -> Dict[str, Any]:
-    gpu_id = args["gpu_device_id"]
-    num_qubits = args["num_qubits"]
-    state = args["state"]
-    kicks = args["kicks"]
-    J_val = args["J"]
-    hx_val = args["hx"]
-    hz_val = args["hz"]
-    intra_edges = args["intra_edges"]
-    max_alloc = args["gpu_max_alloc_mb"]
-    worker_slot = args["worker_slot"]
 
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["QRACK_MAX_ALLOC_MB"] = str(int(max_alloc))
-    os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(gpu_id)
-    os.environ["QRACK_QPAGER_DEVICES"] = "-1"
-    os.environ["QRACK_QUNITMULTI_DEVICES"] = "-1"
-    os.environ.setdefault("QRACK_FPPOW", "5")
+def worker_apply_kicks(args: Dict[str, Any]) -> Dict[str, Any]:
+    _isolate_worker_env(args)
+
+    num_qubits  = args["num_qubits"]
+    state       = args["state"]
+    kicks       = args["kicks"]
+    J_val       = args["J"]
+    hx_val      = args["hx"]
+    hz_val      = args["hz"]
+    intra_edges = args["intra_edges"]
+    worker_slot = args["worker_slot"]
 
     from pyqrack import QrackSimulator
     dma_buf, ptr, nbytes = alloc_dma_buf(num_qubits, worker_slot)
@@ -374,12 +365,12 @@ def worker_apply_kicks(args: Dict[str, Any]) -> Dict[str, Any]:
             sim.mtrx([complex(c, -nz*s), complex(-ny*s, -nx*s),
                       complex( ny*s, -nx*s), complex(c,  nz*s)], q)
 
-    all_q = list(range(num_qubits))
-    z_exp = z_means(sim, all_q)
-    x_exp = x_means(sim, all_q)
-    
+    all_q  = list(range(num_qubits))
+    z_exp  = z_means(sim, all_q)
+    x_exp  = x_means(sim, all_q)
+
     new_state = fast_out_ket(sim, num_qubits, dma_buf)
-    
+
     del sim
     gc.collect()
     time.sleep(0.01)
@@ -391,43 +382,38 @@ def worker_apply_kicks(args: Dict[str, Any]) -> Dict[str, Any]:
         - J_val  * float(np.sum(zz_exp))
         - hx_val * float(np.sum(x_exp))
     )
-    
+
     return {"patch_idx": args["patch_idx"], "state": new_state, "energy": local_energy}
 
-def worker_compute_benchmarks(args: Dict[str, Any]) -> Dict[str, Any]:
-    gpu_id = args["gpu_device_id"]
-    num_qubits = args["num_qubits"]
-    state = args["state"]
-    max_alloc = args["gpu_max_alloc_mb"]
-    worker_slot = args["worker_slot"]
 
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["QRACK_MAX_ALLOC_MB"] = str(int(max_alloc))
-    os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(gpu_id)
-    os.environ["QRACK_QPAGER_DEVICES"] = "-1"
-    os.environ["QRACK_QUNITMULTI_DEVICES"] = "-1"
-    os.environ.setdefault("QRACK_FPPOW", "5")
+def worker_compute_benchmarks(args: Dict[str, Any]) -> Dict[str, Any]:
+    _isolate_worker_env(args)
+
+    num_qubits  = args["num_qubits"]
+    state       = args["state"]
+    worker_slot = args["worker_slot"]
 
     from pyqrack import QrackSimulator
     dma_buf, ptr, nbytes = alloc_dma_buf(num_qubits, worker_slot)
     sim = make_sim(QrackSimulator, num_qubits)
-    
+
     all_q = list(range(num_qubits))
     fast_in_ket(sim, state, dma_buf)
     z_e = z_means(sim, all_q)
     x_e = x_means(sim, all_q)
     y_e = y_means(sim, all_q)
-    
+
     del sim
     gc.collect()
     time.sleep(0.01)
     free_dma_buf(ptr, nbytes)
-    
+
     avg_purity = float(np.mean(x_e**2 + y_e**2 + z_e**2))
     return {"patch_idx": args["patch_idx"], "purity": avg_purity}
 
+
 # ==========================================
-# 3. ORCHESTRATOR
+# 4. ORCHESTRATOR
 # ==========================================
 class VolumetricHadronEngine27Q:
     def __init__(
@@ -452,10 +438,12 @@ class VolumetricHadronEngine27Q:
 
         LIVE_MB = 2200
         residency: Dict[int,int] = {}
-        for g in self.gpu_allocation: residency[g] = residency.get(g,0) + 1
+        for g in self.gpu_allocation:
+            residency[g] = residency.get(g, 0) + 1
         for g, count in residency.items():
             cap = gpu_alloc_caps_mb.get(g)
-            if cap is None: raise ValueError(f"No VRAM cap for GPU {g}.")
+            if cap is None:
+                raise ValueError(f"No VRAM cap for GPU {g}.")
             concurrent = semaphore_limits.get(g, 1)
             need = concurrent * LIVE_MB
             if need > cap:
@@ -470,12 +458,13 @@ class VolumetricHadronEngine27Q:
         for x in range(self.grid_x):
             for y in range(self.grid_y):
                 for z in range(self.grid_z):
-                    self.patch_coords[idx] = (x, y, z); idx += 1
+                    self.patch_coords[idx] = (x, y, z)
+                    idx += 1
 
-        self.coord_to_patch = {v:k for k,v in self.patch_coords.items()}
+        self.coord_to_patch = {v: k for k, v in self.patch_coords.items()}
 
         self.pool_size = sum(semaphore_limits.values())
-        self.ctx = mp.get_context('spawn')
+        self.ctx  = mp.get_context('spawn')
         self.pool = self.ctx.Pool(processes=self.pool_size, maxtasksperchild=1)
 
         self.patch_states: Dict[int, np.ndarray] = {}
@@ -485,28 +474,28 @@ class VolumetricHadronEngine27Q:
         self._init_csv()
 
         total_sites = self.num_patches * self.qubits_per_patch
-        host_gb = self.num_patches * 1.074
+        host_gb     = self.num_patches * 1.074
 
         print(f"Initializing 27Q Ephemeral-Pool Engine...")
         print(f"Grid: {grid} = {self.num_patches} patches x {self.qubits_per_patch}q "
               f"= {total_sites} total logical qubits")
         print(f"Host RAM: {self.num_patches} arrays x 1.07GB = {host_gb:.1f}GB")
-        
+
         master_rng  = np.random.default_rng(master_seed)
         patch_seeds = master_rng.integers(0, 2**31-1, size=self.num_patches)
 
         print("Dispatching initial states to GPU Pool...")
         init_args = [
             {
-                "patch_idx": p,
-                "gpu_device_id": self.gpu_allocation[p],
-                "num_qubits": self.qubits_per_patch,
-                "seed": int(patch_seeds[p]),
+                "patch_idx":       p,
+                "gpu_device_id":   self.gpu_allocation[p],
+                "num_qubits":      self.qubits_per_patch,
+                "seed":            int(patch_seeds[p]),
                 "gpu_max_alloc_mb": self.gpu_alloc_caps_mb[self.gpu_allocation[p]],
-                "worker_slot": p 
+                "worker_slot":     p
             } for p in range(self.num_patches)
         ]
-        
+
         results = self.pool.map(worker_init_state, init_args)
         for r in results:
             self.patch_states[r["patch_idx"]] = r["state"]
@@ -515,16 +504,21 @@ class VolumetricHadronEngine27Q:
     def _init_csv(self) -> None:
         try:
             with open(self.csv_filename, mode='w', newline='') as f:
-                csv.DictWriter(f, fieldnames=["Step","Anneal_Percent","Energy"]).writeheader()
-        except Exception: pass
+                csv.DictWriter(
+                    f, fieldnames=["Step","Anneal_Percent","Energy"]
+                ).writeheader()
+        except Exception:
+            pass
 
     def _append_to_csv(self, data: Dict[str,Any]) -> None:
         try:
             with open(self.csv_filename, mode='a', newline='') as f:
                 w = csv.DictWriter(f, fieldnames=["Step","Anneal_Percent","Energy"])
-                w.writerow(data); f.flush(); os.fsync(f.fileno())
-        except Exception: pass
-
+                w.writerow(data)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            pass
 
     def anneal_to_ground_state(
         self,
@@ -540,11 +534,11 @@ class VolumetricHadronEngine27Q:
         if measure_every > 1:
             print(f"Measurement cadence: every {measure_every} steps")
         self.energy_history.clear()
-        noise_rng = np.random.default_rng()
+        noise_rng       = np.random.default_rng()
         effective_shots = 512.0
 
         for t in range(total_steps):
-            s = t / max(1, (total_steps-1))
+            s              = t / max(1, (total_steps - 1))
             current_hx     = (1.0-s)*3.0 + s*target_hx
             current_J      = s*target_J
             current_hz     = s*target_hz
@@ -553,34 +547,34 @@ class VolumetricHadronEngine27Q:
 
             step_args = [
                 {
-                    "patch_idx": p,
-                    "gpu_device_id": self.gpu_allocation[p],
-                    "num_qubits": self.qubits_per_patch,
-                    "state": self.patch_states[p],
-                    "intra_edges": self.intra_edges,
-                    "boundaries": self.boundaries,
-                    "J": current_J,
-                    "hx": current_hx,
-                    "hz": current_hz,
-                    "dt": dt,
-                    "steps": 1,
+                    "patch_idx":       p,
+                    "gpu_device_id":   self.gpu_allocation[p],
+                    "num_qubits":      self.qubits_per_patch,
+                    "state":           self.patch_states[p],
+                    "intra_edges":     self.intra_edges,
+                    "boundaries":      self.boundaries,
+                    "J":               current_J,
+                    "hx":              current_hx,
+                    "hz":              current_hz,
+                    "dt":              dt,
+                    "steps":           1,
                     "gpu_max_alloc_mb": self.gpu_alloc_caps_mb[self.gpu_allocation[p]],
-                    "measure_stats": is_measure,
-                    "worker_slot": p 
+                    "measure_stats":   is_measure,
+                    "worker_slot":     p
                 } for p in range(self.num_patches)
             ]
 
             results = self.pool.map(worker_evolve_step, step_args)
             for r in results:
                 self.patch_states[r["patch_idx"]] = r["state"]
-                
+
             if not is_measure:
                 print(f"Step {t:03d} | Anneal: {s*100:05.1f}% | (evolve-only)")
                 continue
 
             patch_profiles = {r["patch_idx"]: r["stats"] for r in results}
-            kick_payloads = {p: {"kicks":{}} for p in range(self.num_patches)}
-            
+            kick_payloads  = {p: {"kicks": {}} for p in range(self.num_patches)}
+
             macroscopic_boundary_energy = 0.0
             scale = np.sqrt(dt / effective_shots)
 
@@ -594,15 +588,15 @@ class VolumetricHadronEngine27Q:
                     if not np.all(np.isfinite(arr)): arr[:] = 0.0
                 stochastic_noise[p] = {
                     q: (X_noise[i], Y_noise[i], Z_noise[i])
-                    for i,q in enumerate(prof["qubits"])
+                    for i, q in enumerate(prof["qubits"])
                 }
 
             for p1, coord1 in self.patch_coords.items():
                 x1, y1, z1 = coord1
                 neighbors = {
-                    "+X":(x1+1,y1,z1), "-X":(x1-1,y1,z1),
-                    "+Y":(x1,y1+1,z1), "-Y":(x1,y1-1,z1),
-                    "+Z":(x1,y1,z1+1), "-Z":(x1,y1,z1-1),
+                    "+X": (x1+1,y1,z1), "-X": (x1-1,y1,z1),
+                    "+Y": (x1,y1+1,z1), "-Y": (x1,y1-1,z1),
+                    "+Z": (x1,y1,z1+1), "-Z": (x1,y1,z1-1),
                 }
                 for dir1, coord2 in neighbors.items():
                     if not (0<=coord2[0]<self.grid_x and
@@ -611,15 +605,15 @@ class VolumetricHadronEngine27Q:
                     p2 = self.coord_to_patch.get(coord2)
                     if p2 is None or p1 >= p2: continue
 
-                    dir2 = dir1.replace("+","temp").replace("-","+").replace("temp","-")
+                    dir2    = dir1.replace("+","temp").replace("-","+").replace("temp","-")
                     face1_q = self.boundaries[dir1]
                     face2_q = self.boundaries[dir2]
 
                     prof1, noise1 = patch_profiles[p1], stochastic_noise[p1]
                     prof2, noise2 = patch_profiles[p2], stochastic_noise[p2]
 
-                    q_to_i1 = {q:i for i,q in enumerate(prof1["qubits"])}
-                    q_to_i2 = {q:i for i,q in enumerate(prof2["qubits"])}
+                    q_to_i1 = {q: i for i, q in enumerate(prof1["qubits"])}
+                    q_to_i2 = {q: i for i, q in enumerate(prof2["qubits"])}
 
                     ax2=ay2=az2=0.0
                     for q2 in face2_q:
@@ -659,32 +653,32 @@ class VolumetricHadronEngine27Q:
 
             kick_args = [
                 {
-                    "patch_idx": p,
-                    "gpu_device_id": self.gpu_allocation[p],
-                    "num_qubits": self.qubits_per_patch,
-                    "state": self.patch_states[p],
-                    "kicks": kick_payloads[p]["kicks"],
-                    "J": current_J,
-                    "hx": current_hx,
-                    "hz": current_hz,
-                    "intra_edges": self.intra_edges,
+                    "patch_idx":       p,
+                    "gpu_device_id":   self.gpu_allocation[p],
+                    "num_qubits":      self.qubits_per_patch,
+                    "state":           self.patch_states[p],
+                    "kicks":           kick_payloads[p]["kicks"],
+                    "J":               current_J,
+                    "hx":              current_hx,
+                    "hz":              current_hz,
+                    "intra_edges":     self.intra_edges,
                     "gpu_max_alloc_mb": self.gpu_alloc_caps_mb[self.gpu_allocation[p]],
-                    "worker_slot": p 
+                    "worker_slot":     p
                 } for p in range(self.num_patches)
             ]
 
             kick_results = self.pool.map(worker_apply_kicks, kick_args)
-            bulk_energy = 0.0
+            bulk_energy  = 0.0
             for r in kick_results:
                 self.patch_states[r["patch_idx"]] = r["state"]
                 bulk_energy += r["energy"]
-                
+
             total_energy = bulk_energy + macroscopic_boundary_energy
 
             print(f"Step {t:03d} | Anneal: {s*100:05.1f}% | "
                   f"Total Setup Potential Energy: {total_energy:+.4f}")
 
-            step_data = {"Step":t, "Anneal_Percent":s*100, "Energy":total_energy}
+            step_data = {"Step": t, "Anneal_Percent": s*100, "Energy": total_energy}
             self.energy_history.append(step_data)
             self._append_to_csv(step_data)
 
@@ -692,15 +686,15 @@ class VolumetricHadronEngine27Q:
                 print(f"         +-- Calculating Final Benchmarks...")
                 bench_args = [
                     {
-                        "patch_idx": p,
-                        "gpu_device_id": self.gpu_allocation[p],
-                        "num_qubits": self.qubits_per_patch,
-                        "state": self.patch_states[p],
+                        "patch_idx":       p,
+                        "gpu_device_id":   self.gpu_allocation[p],
+                        "num_qubits":      self.qubits_per_patch,
+                        "state":           self.patch_states[p],
                         "gpu_max_alloc_mb": self.gpu_alloc_caps_mb[self.gpu_allocation[p]],
-                        "worker_slot": p 
+                        "worker_slot":     p
                     } for p in range(self.num_patches)
                 ]
-                bench_res = self.pool.map(worker_compute_benchmarks, bench_args)
+                bench_res  = self.pool.map(worker_compute_benchmarks, bench_args)
                 avg_purity = sum(r["purity"] for r in bench_res) / self.num_patches
                 print(f"         +-- Avg Sub-Volume Purity: {avg_purity:.4f}")
 
@@ -712,46 +706,43 @@ class VolumetricHadronEngine27Q:
         except Exception:
             pass
 
+
 # ==========================================
-# 4. EXECUTION
+# 5. EXECUTION
 # ==========================================
 if __name__ == "__main__":
     mp.freeze_support()
 
     gpu_0 = int(os.environ.get("WORMHOLE_GPU", "0"))
 
-    # Fix 35: SAFE BASELINE MODE
+    # SAFE BASELINE MODE:
     # 4x4x1 = 16 patches (caps Host RAM to ~17 GB static + ~17 GB IPC)
-    target_grid = (4, 4, 1)
-    explicit_gpu_allocation = [gpu_0] * 16
+    target_grid              = (4, 4, 1)
+    explicit_gpu_allocation  = [gpu_0] * 16
 
     # Throttled Concurrency: 2 simultaneous workers.
     # Prevents PCIe Gen 2 bus saturation and drops active VRAM to ~2.2 GB.
-    semaphore_caps = {
-        gpu_0: 2, 
-    }
+    semaphore_caps = {gpu_0: 2}
 
-    gpu_alloc_caps_mb = {
-        gpu_0: 14000,
-    }
+    gpu_alloc_caps_mb = {gpu_0: 14000}
 
     engine = VolumetricHadronEngine27Q(
-        gpu_allocation=explicit_gpu_allocation,
-        semaphore_limits=semaphore_caps,
-        gpu_alloc_caps_mb=gpu_alloc_caps_mb,
-        grid=target_grid,
-        master_seed=1337
+        gpu_allocation    = explicit_gpu_allocation,
+        semaphore_limits  = semaphore_caps,
+        gpu_alloc_caps_mb = gpu_alloc_caps_mb,
+        grid              = target_grid,
+        master_seed       = 1337
     )
 
     try:
         engine.anneal_to_ground_state(
-            total_steps=100,
-            dt=0.04,
-            target_g_face=0.15,
-            target_J=1.0,
-            target_hx=0.5,
-            target_hz=0.2,
-            measure_every=1
+            total_steps   = 100,
+            dt            = 0.04,
+            target_g_face = 0.15,
+            target_J      = 1.0,
+            target_hx     = 0.5,
+            target_hz     = 0.2,
+            measure_every = 1
         )
     except KeyboardInterrupt:
         print("\nExecution interrupted by user.")
