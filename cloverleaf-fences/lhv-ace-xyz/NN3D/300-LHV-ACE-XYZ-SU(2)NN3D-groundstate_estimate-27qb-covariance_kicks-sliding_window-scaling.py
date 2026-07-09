@@ -2,48 +2,39 @@
 # 27-Qubit 3x3x3 Lattice & Macroscopic Grid Annealing
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 33 - SINGLE-PROCESS RESIDENT SIMULATORS (PATCHED + BREADCRUMBS)
+# REVISION 36 - SINGLE-PROCESS RESIDENT SIMULATORS (OPTIMIZED & PATCHED)
 #
 # DESIGN CORRECTION:
-# The user story is: "evolve 16 independent 27-qubit patches with periodic
+# The user story is: "evolve independent 27-qubit patches with periodic
 # mean-field boundary coupling, approximating a larger stitched lattice."
 # Nothing in that story requires statevectors to leave the simulator.
-#
-# Every prior revision built infrastructure to ferry state between host
-# heap and device: multiprocessing pools, shared memory blocks, pinvoke
-# DMA (InKet/OutKet), spawn isolation, pickle transport. All of it existed
-# to solve problems the ferrying itself created (rusticl mprotect crashes,
-# pickle overhead, tolist() conversion cost, worker respawn latency).
 #
 # OpenCL already performs buffer residency management: allocations that
 # do not fit on-device and are not referenced by an executing kernel are
 # migrated to host by the runtime, transparently. QRack builds on this.
 #
-# THIS REVISION: sixteen QrackSimulator objects live in ONE process for
-# the lifetime of the run. Patches are evolved sequentially; only the
-# active patch's ~1GB buffer needs device residency at any instant.
-# The OpenCL runtime spills idle patch buffers automatically.
-# State never crosses the Python heap. No pool, no shm, no DMA code.
+# ONE-PASS ARCHITECTURE: 
+# To halve the PCIe paging penalty, boundary kicks evaluated at time t 
+# are stored in host memory and applied at the start of time t+1. 
+# Exactly one VRAM page-in per patch.
 #
-# Boundary coupling (the "stitching") needs only single-qubit expectation
-# values <X>, <Y>, <Z> on face qubits - tiny scalar reads via sim.prob(),
-# not statevector extraction. Kicks are single-qubit rotations applied
-# directly to the resident simulators.
+# DYNAMIC SCHMIDT SPLITTING & COMPRESSION:
+# Microscopic initialization jitter has been removed to allow lossless 
+# BDD compression. QUnit Fidelity Guard is RE-ENABLED with a separability 
+# threshold of 1e-7, allowing Qrack to dynamically tear apart weakly 
+# entangled statevectors to bypass TTM oversubscription limits.
 #
 # CARRIED FORWARD:
-# Environment isolation (DRI_PRIME, RUSTICL*, FPPOW=5) set once,
-# before pyqrack import, since there is now exactly one process.
+# Environment isolation (DRI_PRIME, RUSTICL*, FPPOW=5) set once.
 # Trotter S2 symmetry, ZZ mcmtrx decomposition, mean-field ZZ readout.
 # Stochastic variance injection on boundary measurements.
-# Breadcrumb trail: Energy split (Bulk/Boundary), per-face scalar profiles,
-# and JSON RNG state dump for deterministic post-mortem analysis.
+# Breadcrumb trail: Energy split, per-face profiles, RNG state dump.
+# Scorched-earth OS shutdown to prevent AMD driver VRAM locks.
 #
 # MEMORY BUDGET:
-# 16 patches x 2^27 amplitudes x 8 bytes (complex64, FPPOW=5) = 16 GB
-# Radeon Pro VII VRAM = 16 GB. Peak device residency is ONE active
-# patch (~1-2 GB with QRack workspace); the runtime pages the rest.
-# QRACK_MAX_ALLOC_MB is raised past 16GB to intentionally rely on 
-# the OpenCL runtime (TTM) to handle memory oversubscription.
+# 48 patches (4x4x3) x 1 GB = 48 GB theoretical statevector footprint.
+# Routed to a single 8 GB Radeon Pro V340 Vega die. 
+# Relies on Qrack dynamic compression + OpenCL TTM to manage load.
 
 import os
 import sys
@@ -59,13 +50,19 @@ os.environ["OCL_ICD_PLATFORM_SORT"] = "none"
 os.environ["RUSTICL_ENABLE"] = "radeonsi"
 os.environ["RUSTICL_ALLOW_SVM"] = "0"
 os.environ["MESA_VK_DEVICE_SELECT"] = "amd"
-os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
+
+# --- QRACK OPTIMIZATION SETTINGS ---
 os.environ["QRACK_OCL_DEFAULT_DEVICE"] = os.environ.get("WORMHOLE_GPU", "0")
 os.environ["QRACK_QPAGER_DEVICES"] = "-1"
 os.environ["QRACK_QUNITMULTI_DEVICES"] = "-1"
 os.environ["QRACK_FPPOW"] = "5"
-# Raised to 32000 to allow OpenCL runtime to handle oversubscription
-os.environ["QRACK_MAX_ALLOC_MB"] = "32000"
+os.environ["QRACK_MAX_ALLOC_MB"] = "64000"
+
+# Re-enable the dynamic separation guard
+os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "0"
+# Tell Qrack: "If tearing the statevector apart loses less than 1e-7 fidelity, do it."
+os.environ["QRACK_QUNIT_SEPARABILITY_THRESHOLD"] = "1e-7"
+# -------------------------------------------
 
 import gc
 import csv
@@ -200,12 +197,10 @@ class VolumetricHadronEngine27Q:
         total_sites = self.num_patches * self.qubits_per_patch
         vram_gb = self.num_patches * (1 << self.qubits_per_patch) * 8 / 1024 ** 3
         
-        print(f"Initializing 27Q Resident-Simulator Engine (Rev 33)...")
+        print(f"Initializing 27Q Resident-Simulator Engine...")
         print(f"Grid: {grid} = {self.num_patches} patches x {self.qubits_per_patch}q = {total_sites} total logical qubits")
-        print(f"Total statevector footprint: {vram_gb:.1f} GB (OpenCL runtime manages device residency)")
-        
-        master_rng = np.random.default_rng(master_seed)
-        patch_seeds = master_rng.integers(0, 2**31 - 1, size=self.num_patches)
+        print(f"Total theoretical statevector footprint: {vram_gb:.1f} GB")
+        print(f"Dynamic Separability Threshold set to 1e-7 to actively compress VRAM.")
         
         print("Allocating resident simulators...")
         t0 = time.perf_counter()
@@ -213,11 +208,9 @@ class VolumetricHadronEngine27Q:
         
         for p in range(self.num_patches):
             sim = QrackSimulator(qubit_count=self.qubits_per_patch)
-            rng = np.random.default_rng(int(patch_seeds[p]))
+            # Starting in a pure |+> state allows Qrack's BDD layer to perfectly compress the state.
             for q in range(self.qubits_per_patch):
                 apply_h(sim, q)
-                apply_rx(sim, rng.normal(0, 1e-5), q)
-                apply_rz(sim, rng.normal(0, 1e-5), q)
             self.sims.append(sim)
             print(f"  Patch {p:02d} initialized ({time.perf_counter() - t0:.1f}s elapsed)")
             
@@ -280,8 +273,11 @@ class VolumetricHadronEngine27Q:
             },
         }
 
-    def _apply_kicks_and_energy(self, sim: Any, kicks: Dict[int, Tuple[float, float, float]], J: float, hx: float, hz: float, dt: float, measure_every: int) -> float:
-        """Apply boundary kicks as single-qubit rotations directly on the resident simulator, then read bulk energy expectations."""
+    def _apply_kicks(self, sim: Any, kicks: Dict[int, Tuple[float, float, float]], dt: float, measure_every: int) -> None:
+        """Apply boundary kicks as single-qubit rotations directly on the resident simulator."""
+        if not kicks:
+            return
+            
         for raw_q, (kx, ky, kz) in kicks.items():
             q = int(raw_q)
             
@@ -298,7 +294,9 @@ class VolumetricHadronEngine27Q:
                     complex(c, -nz * s), complex(-ny * s, -nx * s),
                     complex(ny * s, -nx * s), complex(c, nz * s)
                 ], q)
-                
+
+    def _read_bulk_energy(self, sim: Any, J: float, hx: float, hz: float) -> float:
+        """Read bulk energy expectations directly from resident simulator."""
         all_q = list(range(self.qubits_per_patch))
         z_exp = z_means(sim, all_q)
         x_exp = x_means(sim, all_q)
@@ -324,6 +322,9 @@ class VolumetricHadronEngine27Q:
             
         effective_shots = 512.0
         
+        # Initialize an empty payload dictionary for the very first step
+        kick_payloads = {p: {} for p in range(self.num_patches)}
+        
         for t in range(total_steps):
             t0 = time.perf_counter()
             s = t / max(1, (total_steps - 1))
@@ -334,16 +335,33 @@ class VolumetricHadronEngine27Q:
             is_measure = (t % measure_every == 0) or (t == total_steps - 1)
             
             patch_profiles = {}
+            bulk_energy = 0.0
             
-            # Phases 1 & 2 (Merged): Trotter evolution & immediately measure boundary profiles 
+            # ---------------------------------------------------------
+            # THE SINGLE PASS (One VRAM load/unload cycle per patch)
+            # ---------------------------------------------------------
             for p in range(self.num_patches):
+                sim = self.sims[p]
+                
+                # 1. Apply boundary coupling from previous step (Trotter A)
+                if kick_payloads[p]:
+                    self._apply_kicks(sim, kick_payloads[p], dt, measure_every)
+                    kick_payloads[p] = {} # Clear payload after application
+                    
+                # 2. Evolve bulk (Trotter B)
                 trotter_step_body(
-                    self.sims[p], self.qubits_per_patch, self.intra_edges,
+                    sim, self.qubits_per_patch, self.intra_edges,
                     current_J, current_hx, current_hz, dt, 1
                 )
-                if is_measure:
-                    patch_profiles[p] = self._measure_boundary_profile(self.sims[p])
                 
+                # 3. Read profiles and energy synchronously on the cohesive state
+                if is_measure:
+                    patch_profiles[p] = self._measure_boundary_profile(sim)
+                    bulk_energy += self._read_bulk_energy(sim, current_J, current_hx, current_hz)
+                    
+            # ---------------------------------------------------------
+            # HOST MATH (No VRAM touches)
+            # ---------------------------------------------------------
             if not is_measure:
                 print(f"Step {t:03d} | Anneal: {s*100:05.1f}% | (evolve-only, {time.perf_counter() - t0:.1f}s)")
                 continue
@@ -351,11 +369,10 @@ class VolumetricHadronEngine27Q:
             # Log face-averaged profiles to secondary CSV
             self._append_profiles_csv(t, patch_profiles)
                 
-            # Phase 3: mean-field stitching (pure host-side arithmetic).
-            kick_payloads = {p: {} for p in range(self.num_patches)}
+            next_kick_payloads = {p: {} for p in range(self.num_patches)}
             macroscopic_boundary_energy = 0.0
             
-            # Corrected noise variance scaling relative to elapsed measure_every dt
+            # Noise variance scaling relative to elapsed measure_every dt
             scale = np.sqrt(dt * measure_every / effective_shots)
             stochastic_noise: Dict[int, Dict[int, Tuple[float, float, float]]] = {}
             
@@ -419,17 +436,15 @@ class VolumetricHadronEngine27Q:
                     macroscopic_boundary_energy += interaction_E
                     
                     for q1f in face1_q:
-                        k = kick_payloads[p1].get(q1f, (0., 0., 0.))
-                        kick_payloads[p1][q1f] = (k[0] + current_g_face * ax2, k[1] + current_g_face * ay2, k[2] + current_g_face * az2)
+                        k = next_kick_payloads[p1].get(q1f, (0., 0., 0.))
+                        next_kick_payloads[p1][q1f] = (k[0] + current_g_face * ax2, k[1] + current_g_face * ay2, k[2] + current_g_face * az2)
                         
                     for q2f in face2_q:
-                        k = kick_payloads[p2].get(q2f, (0., 0., 0.))
-                        kick_payloads[p2][q2f] = (k[0] + current_g_face * ax1, k[1] + current_g_face * ay1, k[2] + current_g_face * az1)
+                        k = next_kick_payloads[p2].get(q2f, (0., 0., 0.))
+                        next_kick_payloads[p2][q2f] = (k[0] + current_g_face * ax1, k[1] + current_g_face * ay1, k[2] + current_g_face * az1)
                         
-            # Phase 4: apply kicks in-place on resident sims, read energy.
-            bulk_energy = 0.0
-            for p in range(self.num_patches):
-                bulk_energy += self._apply_kicks_and_energy(self.sims[p], kick_payloads[p], current_J, current_hx, current_hz, dt, measure_every)
+            # Store generated payloads for the next sequential pass
+            kick_payloads = next_kick_payloads
                 
             total_energy = bulk_energy + macroscopic_boundary_energy
             elapsed = time.perf_counter() - t0
@@ -456,16 +471,26 @@ class VolumetricHadronEngine27Q:
                 print(f"--- Avg Sub-Volume Purity: {avg_purity:.4f}")
 
     def shutdown(self) -> None:
-        print("\nReleasing resident simulators...")
-        self.sims.clear()
+        print("\nInitiating scorched-earth VRAM teardown...")
+        # 1. Explicitly delete the simulators to trigger PyQrack C++ destructors
+        for _ in range(len(self.sims)):
+            del self.sims[0]
+            
+        # 2. Force Python garbage collection
         gc.collect()
-        print("Done.")
+        
+        print("Hardware contexts released. Terminating process.")
+        
+        # 3. Bypass standard sys.exit() and gracefully force the OS to reap the PID instantly.
+        # This prevents lingering C++ threads or locked OpenCL queues from zombifying the VRAM.
+        os._exit(0)
 
 # =====================================================================
 # EXECUTION
 # =====================================================================
 if __name__ == "__main__":
-    engine = VolumetricHadronEngine27Q(grid=(4, 4, 1), master_seed=1337)
+    # 48 Patches (4x4x3 grid) = 1,296 logical qubits.
+    engine = VolumetricHadronEngine27Q(grid=(4, 4, 3), master_seed=1337)
     try:
         engine.anneal_to_ground_state(
             total_steps=100,
@@ -478,5 +503,6 @@ if __name__ == "__main__":
         )
     except KeyboardInterrupt:
         print("\nInterrupted.")
+        engine.shutdown()
     finally:
         engine.shutdown()
