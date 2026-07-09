@@ -2,7 +2,7 @@
 # 27-Qubit 3x3x3 Lattice & Macroscopic Grid Annealing
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 36 - SINGLE-PROCESS RESIDENT SIMULATORS (OPTIMIZED & PATCHED)
+# REVISION 37 - SINGLE-PROCESS RESIDENT SIMULATORS (CLEAN STDOUT)
 #
 # DESIGN CORRECTION:
 # The user story is: "evolve independent 27-qubit patches with periodic
@@ -30,6 +30,7 @@
 # Stochastic variance injection on boundary measurements.
 # Breadcrumb trail: Energy split, per-face profiles, RNG state dump.
 # Scorched-earth OS shutdown to prevent AMD driver VRAM locks.
+# Per-patch initialization stdout suppressed for cleaner scaling logs.
 #
 # MEMORY BUDGET:
 # 48 patches (4x4x3) x 1 GB = 48 GB theoretical statevector footprint.
@@ -212,7 +213,6 @@ class VolumetricHadronEngine27Q:
             for q in range(self.qubits_per_patch):
                 apply_h(sim, q)
             self.sims.append(sim)
-            print(f"  Patch {p:02d} initialized ({time.perf_counter() - t0:.1f}s elapsed)")
             
         print(f"All {self.num_patches} simulators resident. Init: {time.perf_counter() - t0:.1f}s")
 
