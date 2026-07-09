@@ -2,7 +2,7 @@
 # 27-Qubit 3x3x3 Lattice & Macroscopic Grid Annealing
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 37 - SINGLE-PROCESS RESIDENT SIMULATORS (CLEAN STDOUT)
+# REVISION 39 - GENERAL ACCELERATOR COMPATIBILITY
 #
 # DESIGN CORRECTION:
 # The user story is: "evolve independent 27-qubit patches with periodic
@@ -25,17 +25,17 @@
 # entangled statevectors to bypass TTM oversubscription limits.
 #
 # CARRIED FORWARD:
-# Environment isolation (DRI_PRIME, RUSTICL*, FPPOW=5) set once.
+# Environment isolation and generic OpenCL platform initialization.
 # Trotter S2 symmetry, ZZ mcmtrx decomposition, mean-field ZZ readout.
 # Stochastic variance injection on boundary measurements.
 # Breadcrumb trail: Energy split, per-face profiles, RNG state dump.
-# Scorched-earth OS shutdown to prevent AMD driver VRAM locks.
+# Scorched-earth OS shutdown to prevent lingering VRAM locks.
 # Per-patch initialization stdout suppressed for cleaner scaling logs.
 #
 # MEMORY BUDGET:
 # 48 patches (4x4x3) x 1 GB = 48 GB theoretical statevector footprint.
-# Routed to a single 8 GB Radeon Pro V340 Vega die. 
-# Relies on Qrack dynamic compression + OpenCL TTM to manage load.
+# Routed to available compute hardware (auto-detected or via WORMHOLE_GPU).
+# Relies on Qrack dynamic compression + OpenCL TTM to manage load over PCIe.
 
 import os
 import sys
@@ -45,12 +45,9 @@ import sys
 # =====================================================================
 QRACK_LIB_PATH = "/usr/local/lib/qrack/libqrack_pinvoke.so"
 os.environ["PYQRACK_SHARED_LIB_PATH"] = QRACK_LIB_PATH
-os.environ["DRI_PRIME"] = "pci-0000_44_00_0"
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+# Generic OpenCL platform sorting rule
 os.environ["OCL_ICD_PLATFORM_SORT"] = "none"
-os.environ["RUSTICL_ENABLE"] = "radeonsi"
-os.environ["RUSTICL_ALLOW_SVM"] = "0"
-os.environ["MESA_VK_DEVICE_SELECT"] = "amd"
 
 # --- QRACK OPTIMIZATION SETTINGS ---
 os.environ["QRACK_OCL_DEFAULT_DEVICE"] = os.environ.get("WORMHOLE_GPU", "0")
@@ -78,16 +75,16 @@ from pyqrack import QrackSimulator
 # =====================================================================
 PX, PY, PZ = 1, 2, 3
 
-def apply_h(sim: Any, q: int) -> None:
+def apply_h(sim: QrackSimulator, q: int) -> None:
     sim.h(q)
 
-def apply_rx(sim: Any, theta: float, q: int) -> None:
+def apply_rx(sim: QrackSimulator, theta: float, q: int) -> None:
     sim.r(PX, float(theta), q)
 
-def apply_rz(sim: Any, theta: float, q: int) -> None:
+def apply_rz(sim: QrackSimulator, theta: float, q: int) -> None:
     sim.r(PZ, float(theta), q)
 
-def apply_zz(sim: Any, theta: float, q1: int, q2: int) -> None:
+def apply_zz(sim: QrackSimulator, theta: float, q1: int, q2: int) -> None:
     apply_rz(sim, theta, q1)
     apply_rz(sim, theta, q2)
     ph = complex(np.cos(2.0 * theta), -np.sin(2.0 * theta))
@@ -96,7 +93,7 @@ def apply_zz(sim: Any, theta: float, q1: int, q2: int) -> None:
     except TypeError:
         sim.mcmtrx([q1], [complex(1, 0), 0j, 0j, ph], [q2])
 
-def trotter_step_body(sim: Any, num_qubits: int, intra_edges: List[Tuple[int, int]], J: float, hx: float, hz: float, dt: float, steps: int) -> None:
+def trotter_step_body(sim: QrackSimulator, num_qubits: int, intra_edges: List[Tuple[int, int]], J: float, hx: float, hz: float, dt: float, steps: int) -> None:
     for _ in range(steps):
         for q in range(num_qubits):
             apply_rx(sim, -hx * dt, q)
@@ -109,10 +106,10 @@ def trotter_step_body(sim: Any, num_qubits: int, intra_edges: List[Tuple[int, in
         for q in range(num_qubits):
             apply_rx(sim, -hx * dt, q)
 
-def z_means(sim: Any, qubits: List[int]) -> np.ndarray:
+def z_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
     return np.array([1.0 - 2.0 * sim.prob(q) for q in qubits])
 
-def x_means(sim: Any, qubits: List[int]) -> np.ndarray:
+def x_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
     out = np.empty(len(qubits))
     for i, q in enumerate(qubits):
         apply_h(sim, q)
@@ -120,7 +117,7 @@ def x_means(sim: Any, qubits: List[int]) -> np.ndarray:
         apply_h(sim, q)
     return out
 
-def y_means(sim: Any, qubits: List[int]) -> np.ndarray:
+def y_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
     out = np.empty(len(qubits))
     for i, q in enumerate(qubits):
         apply_rx(sim, np.pi / 2, q)
@@ -205,7 +202,7 @@ class VolumetricHadronEngine27Q:
         
         print("Allocating resident simulators...")
         t0 = time.perf_counter()
-        self.sims: List[Any] = []
+        self.sims: List[QrackSimulator] = []
         
         for p in range(self.num_patches):
             sim = QrackSimulator(qubit_count=self.qubits_per_patch)
@@ -257,7 +254,7 @@ class VolumetricHadronEngine27Q:
         except Exception:
             pass
 
-    def _measure_boundary_profile(self, sim: Any) -> Dict[str, Any]:
+    def _measure_boundary_profile(self, sim: QrackSimulator) -> Dict[str, Any]:
         """Expectation values on boundary qubits. Scalar reads only - no statevector leaves the device."""
         Z_mean = z_means(sim, self.all_boundary_qubits)
         X_mean = x_means(sim, self.all_boundary_qubits)
@@ -273,7 +270,7 @@ class VolumetricHadronEngine27Q:
             },
         }
 
-    def _apply_kicks(self, sim: Any, kicks: Dict[int, Tuple[float, float, float]], dt: float, measure_every: int) -> None:
+    def _apply_kicks(self, sim: QrackSimulator, kicks: Dict[int, Tuple[float, float, float]], dt: float, measure_every: int) -> None:
         """Apply boundary kicks as single-qubit rotations directly on the resident simulator."""
         if not kicks:
             return
@@ -295,7 +292,7 @@ class VolumetricHadronEngine27Q:
                     complex(ny * s, -nx * s), complex(c, nz * s)
                 ], q)
 
-    def _read_bulk_energy(self, sim: Any, J: float, hx: float, hz: float) -> float:
+    def _read_bulk_energy(self, sim: QrackSimulator, J: float, hx: float, hz: float) -> float:
         """Read bulk energy expectations directly from resident simulator."""
         all_q = list(range(self.qubits_per_patch))
         z_exp = z_means(sim, all_q)
@@ -483,6 +480,8 @@ class VolumetricHadronEngine27Q:
         
         # 3. Bypass standard sys.exit() and gracefully force the OS to reap the PID instantly.
         # This prevents lingering C++ threads or locked OpenCL queues from zombifying the VRAM.
+        sys.stdout.flush()
+        sys.stderr.flush()
         os._exit(0)
 
 # =====================================================================
