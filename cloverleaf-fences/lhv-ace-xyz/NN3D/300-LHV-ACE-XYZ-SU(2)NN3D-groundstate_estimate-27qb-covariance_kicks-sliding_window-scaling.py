@@ -2,21 +2,18 @@
 # 27-Qubit 3x3x3 Lattice & Macroscopic Grid Annealing
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 39 - GENERAL ACCELERATOR COMPATIBILITY
+# REVISION 41 (GOLD MASTER) - MATHEMATICAL CORRECTNESS & S2 SYMMETRY
 #
 # DESIGN CORRECTION:
 # The user story is: "evolve independent 27-qubit patches with periodic
 # mean-field boundary coupling, approximating a larger stitched lattice."
 # Nothing in that story requires statevectors to leave the simulator.
 #
-# OpenCL already performs buffer residency management: allocations that
-# do not fit on-device and are not referenced by an executing kernel are
-# migrated to host by the runtime, transparently. QRack builds on this.
-#
 # ONE-PASS ARCHITECTURE: 
 # To halve the PCIe paging penalty, boundary kicks evaluated at time t 
 # are stored in host memory and applied at the start of time t+1. 
-# Exactly one VRAM page-in per patch.
+# Exactly one VRAM page-in per patch. Payload leaks across non-measure
+# steps have been explicitly patched.
 #
 # DYNAMIC SCHMIDT SPLITTING & COMPRESSION:
 # Microscopic initialization jitter has been removed to allow lossless 
@@ -24,9 +21,10 @@
 # threshold of 1e-7, allowing Qrack to dynamically tear apart weakly 
 # entangled statevectors to bypass TTM oversubscription limits.
 #
-# CARRIED FORWARD:
+# CARRIED FORWARD & FIXED:
 # Environment isolation and generic OpenCL platform initialization.
-# Trotter S2 symmetry, ZZ mcmtrx decomposition, mean-field ZZ readout.
+# Trotter S2 symmetry (properly balanced A/2 * B * A/2 splitting).
+# CNOT-based ZZ decomposition (exact phase matching without overcounting).
 # Stochastic variance injection on boundary measurements.
 # Breadcrumb trail: Energy split, per-face profiles, RNG state dump.
 # Scorched-earth OS shutdown to prevent lingering VRAM locks.
@@ -85,26 +83,30 @@ def apply_rz(sim: QrackSimulator, theta: float, q: int) -> None:
     sim.r(PZ, float(theta), q)
 
 def apply_zz(sim: QrackSimulator, theta: float, q1: int, q2: int) -> None:
-    apply_rz(sim, theta, q1)
-    apply_rz(sim, theta, q2)
-    ph = complex(np.cos(2.0 * theta), -np.sin(2.0 * theta))
-    try:
-        sim.mcmtrx([q1], [complex(1, 0), 0j, 0j, ph], q2)
-    except TypeError:
-        sim.mcmtrx([q1], [complex(1, 0), 0j, 0j, ph], [q2])
+    """Exact ZZ coupling via CNOTs to avoid Rz overcounting on |11>."""
+    sim.cnot(q1, q2)
+    apply_rz(sim, 2.0 * theta, q2)
+    sim.cnot(q1, q2)
 
 def trotter_step_body(sim: QrackSimulator, num_qubits: int, intra_edges: List[Tuple[int, int]], J: float, hx: float, hz: float, dt: float, steps: int) -> None:
+    """
+    Strang splitting S2 formulation: H = -hx*X - hz*Z - J*ZZ
+    Order: A/2 * B * A/2, where A is transverse (X) and B is longitudinal (Z, ZZ)
+    """
     for _ in range(steps):
+        # A/2 (Transverse Field)
         for q in range(num_qubits):
-            apply_rx(sim, -hx * dt, q)
+            apply_rx(sim, -hx * dt / 2.0, q)
+            
+        # B (Longitudinal Field + Interactions)
         for q in range(num_qubits):
             apply_rz(sim, -hz * dt, q)
         for q1, q2 in intra_edges:
             apply_zz(sim, -2.0 * J * dt, q1, q2)
+            
+        # A/2 (Transverse Field)
         for q in range(num_qubits):
-            apply_rz(sim, -hz * dt, q)
-        for q in range(num_qubits):
-            apply_rx(sim, -hx * dt, q)
+            apply_rx(sim, -hx * dt / 2.0, q)
 
 def z_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
     return np.array([1.0 - 2.0 * sim.prob(q) for q in qubits])
@@ -120,9 +122,10 @@ def x_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
 def y_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
     out = np.empty(len(qubits))
     for i, q in enumerate(qubits):
-        apply_rx(sim, np.pi / 2, q)
-        out[i] = 1.0 - 2.0 * sim.prob(q)
+        # Y-basis: rotate Y-axis onto Z, measure, then restore
         apply_rx(sim, -np.pi / 2, q)
+        out[i] = 1.0 - 2.0 * sim.prob(q)
+        apply_rx(sim, np.pi / 2, q)
     return out
 
 def zz_means_meanfield(z_exp: np.ndarray, edges: List[Tuple[int, int]]) -> np.ndarray:
@@ -238,6 +241,7 @@ class VolumetricHadronEngine27Q:
             with open(self.profiles_csv, mode='a', newline='') as f:
                 w = csv.DictWriter(f, fieldnames=["Step", "Patch", "Face", "X_mean", "Y_mean", "Z_mean"])
                 for p, prof in patch_profiles.items():
+                    # Note: face_qubits holds global patch indices, which are implicitly a subset of prof["qubits"].
                     q_to_i = {q: i for i, q in enumerate(prof["qubits"])}
                     for face_name, face_qubits in self.boundaries.items():
                         if not face_qubits:
@@ -343,7 +347,6 @@ class VolumetricHadronEngine27Q:
                 # 1. Apply boundary coupling from previous step (Trotter A)
                 if kick_payloads[p]:
                     self._apply_kicks(sim, kick_payloads[p], dt, measure_every)
-                    kick_payloads[p] = {} # Clear payload after application
                     
                 # 2. Evolve bulk (Trotter B)
                 trotter_step_body(
@@ -359,6 +362,10 @@ class VolumetricHadronEngine27Q:
             # ---------------------------------------------------------
             # HOST MATH (No VRAM touches)
             # ---------------------------------------------------------
+            
+            # Ensures kicks don't persist on non-measure steps (overwritten at loop end if is_measure)
+            kick_payloads = {p: {} for p in range(self.num_patches)}
+            
             if not is_measure:
                 print(f"Step {t:03d} | Anneal: {s*100:05.1f}% | (evolve-only, {time.perf_counter() - t0:.1f}s)")
                 continue
@@ -500,8 +507,15 @@ if __name__ == "__main__":
             target_hz=0.2,
             measure_every=1
         )
+        
+        # ---------------------------------------------------------
+        # POST-RUN ANALYSIS / CHECKPOINTING
+        # ---------------------------------------------------------
+        # Insert any final statevector evaluations or dataset aggregations here.
+        # The finally block will trigger the scorched-earth VRAM teardown 
+        # immediately after this code completes.
+        
     except KeyboardInterrupt:
         print("\nInterrupted.")
-        engine.shutdown()
     finally:
         engine.shutdown()
