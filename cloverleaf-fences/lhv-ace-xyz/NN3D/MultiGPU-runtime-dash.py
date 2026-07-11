@@ -287,13 +287,13 @@ def run_dashboard(mode="interactive"):
     y_labels = []
     if num_patches <= 32:
         y_ticks = np.arange(num_patches)
-        y_labels = [f"{i}: {patch_coords[i]}" for i in y_ticks]
+        y_labels = [f"X:{patch_coords[i][0]} Y:{patch_coords[i][1]} Z:{patch_coords[i][2]}" for i in y_ticks]
     else:
         z_mid = grid_z // 2
         for i in range(num_patches):
             if patch_coords[i][2] == z_mid:
                 y_ticks.append(i)
-                y_labels.append(f"X:{patch_coords[i][0]} Y:{patch_coords[i][1]}")
+                y_labels.append(f"X:{patch_coords[i][0]} Y:{patch_coords[i][1]} Z:{patch_coords[i][2]}")
 
     ax_heatmap.set_yticks(y_ticks)
     ax_heatmap.set_yticklabels(y_labels, fontsize=7)
@@ -336,7 +336,6 @@ def run_dashboard(mode="interactive"):
                 
             filename = f"dash_snapshot_{grid_x}x{grid_y}x{grid_z}_step{current_step}_E{e_str}.png"
             print(f"{prefix}Saving ultra-high resolution screenshot to {filename}...")
-            # 600 DPI on 18x10 figsize = 10,800 x 6,000 pixels
             fig.savefig(filename, dpi=600, bbox_inches='tight', facecolor=fig.get_facecolor())
             print(f"{prefix}Screenshot saved.")
 
