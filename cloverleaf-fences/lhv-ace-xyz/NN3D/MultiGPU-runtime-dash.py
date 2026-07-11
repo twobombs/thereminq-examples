@@ -173,10 +173,11 @@ def run_dashboard(mode="interactive"):
     gs = gridspec.GridSpec(1, 2, width_ratios=[2.5, 1], wspace=0.1)
     
     ax3d = fig.add_subplot(gs[0], projection='3d')
-    gs_right = gridspec.GridSpecFromSubplotSpec(3, 1, subplot_spec=gs[1], hspace=0.4)
+    gs_right = gridspec.GridSpecFromSubplotSpec(4, 1, subplot_spec=gs[1], hspace=0.6)
     ax_energy = fig.add_subplot(gs_right[0])
     ax_dis = fig.add_subplot(gs_right[1])
     ax_deriv = fig.add_subplot(gs_right[2])
+    ax_heatmap = fig.add_subplot(gs_right[3])
 
     def get_vector_data(step_idx):
         return history[step_idx, :, :, 0].flatten(), history[step_idx, :, :, 1].flatten(), history[step_idx, :, :, 2].flatten()
@@ -241,30 +242,66 @@ def run_dashboard(mode="interactive"):
     ax_energy.plot(energies['Total'], label='Total Energy', color='lightgreen')
     ax_energy.plot(energies['Bulk'], label='Bulk', color='dodgerblue')
     ax_energy.plot(energies['Boundary'], label='Boundary', color='orange')
-    ax_energy.set_title("Energy Components")
+    ax_energy.set_title("Energy Components", fontsize=10)
     ax_energy.legend(fontsize=8, loc='upper left')
     ax_energy.grid(True, alpha=0.2)
     vline_e = ax_energy.axvline(x=0, color='white', linestyle='--', alpha=0.7)
 
     if interfaces:
         ax_dis.plot(avg_disagreement, color='crimson', label='Mean Interface Disagreement')
-        ax_dis.set_title("Boundary Polarization Residuals")
+        ax_dis.set_title("Boundary Polarization Residuals", fontsize=10)
         ax_dis.legend(fontsize=8, loc='upper left')
         ax_dis.grid(True, alpha=0.2)
         vline_d = ax_dis.axvline(x=0, color='white', linestyle='--', alpha=0.7)
 
     ax_deriv.plot(dE_dt, label='dE/dt', color='lightgreen')
-    ax_deriv.set_ylabel("Energy Delta")
+    ax_deriv.set_ylabel("Energy Delta", fontsize=8)
     ax_deriv.legend(loc='upper left', fontsize=8)
     
     ax_deriv_r = ax_deriv.twinx()
     ax_deriv_r.plot(dRes_dt, label='dResidual/dt', color='crimson')
-    ax_deriv_r.set_ylabel("Residual Delta")
+    ax_deriv_r.set_ylabel("Residual Delta", fontsize=8)
     ax_deriv_r.legend(loc='upper right', fontsize=8)
     
-    ax_deriv.set_title("Derivatives (Convergence Rate)")
+    ax_deriv.set_title("Derivatives (Convergence Rate)", fontsize=10)
     ax_deriv.grid(True, alpha=0.2)
     vline_deriv = ax_deriv.axvline(x=0, color='white', linestyle='--', alpha=0.7)
+
+    # 7. Add 2D Polarization Matrix (Heatmap)
+    heatmap_colors = [
+        (0.15, 0.35, 0.85, 1.0), 
+        (0.10, 0.10, 0.10, 1.0), 
+        (0.85, 0.15, 0.25, 1.0)  
+    ]
+    heatmap_cmap = mcolors.LinearSegmentedColormap.from_list("heatmap_cmap", heatmap_colors)
+    
+    heatmap_img = ax_heatmap.imshow(history[0, :, :, 2], cmap=heatmap_cmap, vmin=-1.0, vmax=1.0, aspect='auto', interpolation='nearest')
+    
+    for i in range(1, num_patches):
+        if patch_coords[i][0] != patch_coords[i-1][0]:
+            ax_heatmap.axhline(i - 0.5, color='white', linewidth=1.5, alpha=1.0)
+        elif patch_coords[i][1] != patch_coords[i-1][1]:
+            ax_heatmap.axhline(i - 0.5, color='#aaaaaa', linewidth=0.8, alpha=0.7, linestyle=':')
+
+    y_ticks = []
+    y_labels = []
+    if num_patches <= 32:
+        y_ticks = np.arange(num_patches)
+        y_labels = [f"{i}: {patch_coords[i]}" for i in y_ticks]
+    else:
+        z_mid = grid_z // 2
+        for i in range(num_patches):
+            if patch_coords[i][2] == z_mid:
+                y_ticks.append(i)
+                y_labels.append(f"X:{patch_coords[i][0]} Y:{patch_coords[i][1]}")
+
+    ax_heatmap.set_yticks(y_ticks)
+    ax_heatmap.set_yticklabels(y_labels, fontsize=7)
+    
+    ax_heatmap.set_title("2D Qubit Polarization Matrix", fontsize=10)
+    ax_heatmap.set_ylabel("Patch Location (X, Y, Z)", fontsize=8)
+    ax_heatmap.set_xlabel("Local Qubit Index (0-26)", fontsize=8)
+    ax_heatmap.tick_params(axis='x', which='major', labelsize=8)
 
     fig.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.15)
     ax_slider = fig.add_axes([0.15, 0.05, 0.60, 0.02])
@@ -286,6 +323,24 @@ def run_dashboard(mode="interactive"):
         fig.canvas.draw_idle()
 
     fig.canvas.mpl_connect('scroll_event', on_scroll)
+
+    def on_key_press(event):
+        if event.key == ' ':
+            current_step = int(slider.val)
+            e_val = energies['Total'][current_step] if len(energies['Total']) > current_step else "NaN"
+            
+            if isinstance(e_val, float) and not np.isnan(e_val):
+                e_str = f"{e_val:.4f}"
+            else:
+                e_str = "NaN"
+                
+            filename = f"dash_snapshot_{grid_x}x{grid_y}x{grid_z}_step{current_step}_E{e_str}.png"
+            print(f"{prefix}Saving ultra-high resolution screenshot to {filename}...")
+            # 600 DPI on 18x10 figsize = 10,800 x 6,000 pixels
+            fig.savefig(filename, dpi=600, bbox_inches='tight', facecolor=fig.get_facecolor())
+            print(f"{prefix}Screenshot saved.")
+
+    fig.canvas.mpl_connect('key_press_event', on_key_press)
 
     def update(frame):
         frame = int(frame)
@@ -314,13 +369,15 @@ def run_dashboard(mode="interactive"):
             vline_d.set_xdata([frame, frame])
             vline_deriv.set_xdata([frame, frame])
             
+        heatmap_img.set_data(history[frame, :, :, 2])
+            
         ax3d.view_init(elev=ax3d.elev, azim=ax3d.azim + 0.3)
         
         slider.eventson = False
         slider.set_val(frame)
         slider.eventson = True
         
-        return quiver_obj[0], cloud, energy_text, line_collection
+        return quiver_obj[0], cloud, energy_text, line_collection, heatmap_img
 
     def on_slider_update(val):
         update(val)
