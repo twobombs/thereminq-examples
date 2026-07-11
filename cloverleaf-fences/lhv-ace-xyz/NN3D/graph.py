@@ -3,11 +3,14 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import matplotlib.colors as mcolors
+from matplotlib.widgets import Slider, Button
 from mpl_toolkits.mplot3d import Axes3D
 
 # --- CONFIGURATION ---
 DATA_FILE = "macroscopic_lattice_states.npy"
 CONFIG_FILE = "lattice_config.json"
+SAVE_FILE = "macroscopic_lattice_anim.mp4"
 # ---------------------
 
 def main():
@@ -79,19 +82,27 @@ def main():
     global_Z = np.array(global_Z)
 
     # 4. Setup the 3D Plot
-    fig = plt.figure(figsize=(12, 10))
     plt.style.use('dark_background')
+    fig = plt.figure(figsize=(12, 10))
+    
+    # Adjust subplot to make room for slider and button at the bottom
+    fig.subplots_adjust(bottom=0.25)
     ax = fig.add_subplot(111, projection='3d')
     
     def get_color_data(step_idx):
         # Index 2 retrieves the Z-mean
         return history[step_idx, :, :, 2].flatten()
 
-    # Initial scatter plot
     initial_colors = get_color_data(0)
+    
+    # Reverted to fixed absolute scaling [-1.0, 1.0] for true spin representation
+    norm = mcolors.Normalize(vmin=-1.0, vmax=1.0)
+    cmap = plt.get_cmap('coolwarm')
+
+    # Initial scatter plot
     sc = ax.scatter(global_X, global_Y, global_Z, 
-                    c=initial_colors, cmap='coolwarm', 
-                    s=60, vmin=-1, vmax=1, alpha=0.8, edgecolors='none')
+                    c=initial_colors, cmap=cmap, norm=norm, 
+                    s=60, alpha=0.8, edgecolors='none')
 
     # Formatting and Dynamic Axis Scaling
     cbar = plt.colorbar(sc, ax=ax, shrink=0.5, pad=0.1)
@@ -102,33 +113,82 @@ def main():
     ax.set_ylabel("Y (Logical Qubits)")
     ax.set_zlabel("Z (Logical Qubits)")
     
-    # Scale axes tightly to the actual deployed volume boundaries
-    # Each patch is 3 logical qubits wide
     ax.set_xlim(-0.5, grid_x * 3 - 0.5)
     ax.set_ylim(-0.5, grid_y * 3 - 0.5)
     ax.set_zlim(-0.5, grid_z * 3 - 0.5)
 
-    # Ensure cubic aspect ratio so the lattice doesn't look stretched if grid_z is small
     try:
         ax.set_box_aspect((grid_x, grid_y, max(1, grid_z))) 
     except AttributeError:
-        pass # Older matplotlib versions don't support set_box_aspect
+        pass 
         
     ax.xaxis.pane.fill = False
     ax.yaxis.pane.fill = False
     ax.zaxis.pane.fill = False
     ax.grid(color='grey', linestyle='--', linewidth=0.3, alpha=0.5)
 
-    # 5. Animation Loop
+    # 5. Interactive UI Elements (Slider & Button)
+    ax_slider = fig.add_axes([0.2, 0.1, 0.6, 0.03])
+    slider = Slider(
+        ax=ax_slider, 
+        label='Trotter Step', 
+        valmin=0, 
+        valmax=num_steps - 1, 
+        valinit=0, 
+        valstep=1,
+        color='#4a90e2'
+    )
+
+    ax_play = fig.add_axes([0.85, 0.1, 0.08, 0.04])
+    btn_play = Button(ax_play, 'Pause', color='#333333', hovercolor='#555555')
+    is_playing = [True] 
+
+    # 6. Update Logic
     def update(frame):
+        frame = int(frame)
         colors = get_color_data(frame)
+        
         sc.set_array(colors)
+        sc._facecolor3d = cmap(norm(colors))
+        
         ax.set_title(f"Macroscopic Lattice Annealing ({grid_x}x{grid_y}x{grid_z} Grid)\nTrotter Step: {frame}/{num_steps-1}", fontsize=14)
+        
+        slider.eventson = False
+        slider.set_val(frame)
+        slider.eventson = True
+        
         return sc,
 
+    def on_slider_update(val):
+        update(val)
+        fig.canvas.draw_idle()
+
+    slider.on_changed(on_slider_update)
+
+    def toggle_play(event):
+        if is_playing[0]:
+            ani.event_source.stop()
+            btn_play.label.set_text('Play')
+        else:
+            ani.event_source.start()
+            btn_play.label.set_text('Pause')
+        is_playing[0] = not is_playing[0]
+        fig.canvas.draw_idle()
+
+    btn_play.on_clicked(toggle_play)
+
+    # 7. Animation & Export
     print("Generating 3D Animation...")
     ani = animation.FuncAnimation(fig, update, frames=num_steps, interval=150, blit=False)
     
+    print(f"Saving animation to disk as '{SAVE_FILE}' (this may take a minute)...")
+    try:
+        ani.save(SAVE_FILE, writer='ffmpeg', fps=10)
+        print("Save complete.")
+    except Exception as e:
+        print(f"Failed to save to disk. Make sure 'ffmpeg' is installed. Error: {e}")
+
+    print("Opening interactive viewer...")
     plt.show()
 
 if __name__ == "__main__":
