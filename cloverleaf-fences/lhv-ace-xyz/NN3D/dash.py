@@ -34,7 +34,7 @@ def draw_patch_boundaries(ax, grid_x, grid_y, grid_z):
                 
                 for s, e in combinations(corners, 2):
                     if np.sum(np.abs(s - e)) == 3.0: 
-                        ax.plot3D(*zip(s, e), color='w', alpha=0.1, linewidth=0.5)
+                        ax.plot3D(*zip(s, e), color='#444444', alpha=0.4, linewidth=0.8)
 
 def load_analytics_data(num_steps, log_prefix=""):
     """Extracts energy components and boundary profiles for 2D analytics."""
@@ -95,6 +95,7 @@ def run_dashboard(mode="interactive"):
         sys.exit(1)
 
     num_steps, num_patches = history.shape[0], history.shape[1]
+    total_qubits = num_patches * 27
     
     # 3. Load Analytics, Calculate Disagreements, and Compute Derivatives
     energies, profiles = load_analytics_data(num_steps, prefix)
@@ -172,7 +173,6 @@ def run_dashboard(mode="interactive"):
     gs = gridspec.GridSpec(1, 2, width_ratios=[2.5, 1], wspace=0.1)
     
     ax3d = fig.add_subplot(gs[0], projection='3d')
-    # Expanded GridSpec to 3 rows to accommodate the new Derivatives panel
     gs_right = gridspec.GridSpecFromSubplotSpec(3, 1, subplot_spec=gs[1], hspace=0.4)
     ax_energy = fig.add_subplot(gs_right[0])
     ax_dis = fig.add_subplot(gs_right[1])
@@ -181,18 +181,31 @@ def run_dashboard(mode="interactive"):
     def get_vector_data(step_idx):
         return history[step_idx, :, :, 0].flatten(), history[step_idx, :, :, 1].flatten(), history[step_idx, :, :, 2].flatten()
 
-    ax3d.scatter(global_X, global_Y, global_Z, c='white', s=4, alpha=0.15, edgecolors='none')
     U, V, W = get_vector_data(0)
-    
     norm = mcolors.Normalize(vmin=-1.0, vmax=1.0)
-    cmap = plt.get_cmap('coolwarm')
-    quiver_obj = [ax3d.quiver(global_X, global_Y, global_Z, U, V, W, length=0.75, colors=cmap(norm(W)), arrow_length_ratio=0.3)]
+    
+    vector_colors = [
+        (0.15, 0.35, 0.85, 0.85), 
+        (0.85, 0.85, 0.85, 0.45), 
+        (0.85, 0.15, 0.25, 0.85)  
+    ]
+    vector_cmap = mcolors.LinearSegmentedColormap.from_list("ghost_vectors", vector_colors)
+
+    quiver_obj = [ax3d.quiver(global_X, global_Y, global_Z, U, V, W, length=0.75, colors=vector_cmap(norm(W)), arrow_length_ratio=0.3)]
+    
     draw_patch_boundaries(ax3d, grid_x, grid_y, grid_z)
     
+    cloud_colors = [
+        (0.15, 0.35, 0.85, 0.15), 
+        (0.10, 0.10, 0.10, 0.05), 
+        (0.85, 0.15, 0.25, 0.15)  
+    ]
+    cloud_cmap = mcolors.LinearSegmentedColormap.from_list("cloud_cmap", cloud_colors)
+    
     mean_Z_per_patch = np.mean(history[:, :, :, 2], axis=2)
-    cloud = ax3d.scatter(CX, CY, CZ, s=2500, c=mean_Z_per_patch[0], cmap=cmap, norm=norm, alpha=0.15, edgecolors='none')
+    cloud = ax3d.scatter(CX, CY, CZ, s=2500, c=mean_Z_per_patch[0], cmap=cloud_cmap, norm=norm, alpha=1.0, edgecolors='none')
 
-    # Correlation Network (Replaces isolated markers with a dynamic 3D web)
+    # Correlation Network
     network_lines = []
     if interfaces:
         for i, (p1, p2, _, _, _, _, _) in enumerate(interfaces):
@@ -207,14 +220,14 @@ def run_dashboard(mode="interactive"):
 
     # 6. Add Colorbar Legend on the Far Left
     ax_cbar = fig.add_axes([0.02, 0.25, 0.015, 0.5])
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm = plt.cm.ScalarMappable(cmap=vector_cmap, norm=norm)
     sm.set_array([])
     cbar = plt.colorbar(sm, cax=ax_cbar)
     cbar.set_label('<Z> Expectation (Spin State)', fontsize=10)
 
     energy_text = ax3d.text2D(0.04, 0.96, "", transform=ax3d.transAxes, color='lightgreen', fontsize=12, fontweight='bold')
     
-    ax3d.set_title(f"Macroscopic Lattice Annealing ({grid_x}x{grid_y}x{grid_z} Grid)\nTrotter Step: 0/{num_steps-1}", fontsize=14, pad=10)
+    ax3d.set_title(f"Macroscopic Lattice Annealing ({grid_x}x{grid_y}x{grid_z} Grid | {num_patches} Patches | {total_qubits} Qubits)\nTrotter Step: 0/{num_steps-1}", fontsize=14, pad=10)
     ax3d.set_xlim(-0.5, grid_x * 3 - 0.5)
     ax3d.set_ylim(-0.5, grid_y * 3 - 0.5)
     ax3d.set_zlim(-0.5, grid_z * 3 - 0.5)
@@ -222,7 +235,7 @@ def run_dashboard(mode="interactive"):
     except AttributeError: pass 
     
     ax3d.xaxis.pane.fill, ax3d.yaxis.pane.fill, ax3d.zaxis.pane.fill = False, False, False
-    ax3d.grid(color='grey', linestyle='--', linewidth=0.3, alpha=0.5)
+    ax3d.grid(color='#333333', linestyle='--', linewidth=0.3, alpha=0.5)
 
     # --- 2D Analytics Assembly ---
     ax_energy.plot(energies['Total'], label='Total Energy', color='lightgreen')
@@ -240,7 +253,6 @@ def run_dashboard(mode="interactive"):
         ax_dis.grid(True, alpha=0.2)
         vline_d = ax_dis.axvline(x=0, color='white', linestyle='--', alpha=0.7)
 
-    # New Derivatives Panel (Dual-axis)
     ax_deriv.plot(dE_dt, label='dE/dt', color='lightgreen')
     ax_deriv.set_ylabel("Energy Delta")
     ax_deriv.legend(loc='upper left', fontsize=8)
@@ -254,7 +266,6 @@ def run_dashboard(mode="interactive"):
     ax_deriv.grid(True, alpha=0.2)
     vline_deriv = ax_deriv.axvline(x=0, color='white', linestyle='--', alpha=0.7)
 
-    # Adjust layout to make room for the new left-aligned colorbar
     fig.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.15)
     ax_slider = fig.add_axes([0.15, 0.05, 0.60, 0.02])
     slider = Slider(ax=ax_slider, label='Trotter Step', valmin=0, valmax=num_steps-1, valinit=0, valstep=1, color='#4a90e2')
@@ -281,13 +292,13 @@ def run_dashboard(mode="interactive"):
         U, V, W = get_vector_data(frame)
         
         quiver_obj[0].remove()
-        quiver_obj[0] = ax3d.quiver(global_X, global_Y, global_Z, U, V, W, length=0.75, colors=cmap(norm(W)), arrow_length_ratio=0.3)
+        quiver_obj[0] = ax3d.quiver(global_X, global_Y, global_Z, U, V, W, length=0.75, colors=vector_cmap(norm(W)), arrow_length_ratio=0.3)
         cloud.set_array(mean_Z_per_patch[frame])
         
         if interfaces:
             line_collection.set_array(disagreements[frame])
             
-        ax3d.set_title(f"Macroscopic Lattice Annealing ({grid_x}x{grid_y}x{grid_z} Grid)\nTrotter Step: {frame}/{num_steps-1}", fontsize=14, pad=10)
+        ax3d.set_title(f"Macroscopic Lattice Annealing ({grid_x}x{grid_y}x{grid_z} Grid | {num_patches} Patches | {total_qubits} Qubits)\nTrotter Step: {frame}/{num_steps-1}", fontsize=14, pad=10)
         
         if len(energies['Total']) > 0 and frame < len(energies['Total']):
             e_val = energies['Total'][frame]
@@ -305,7 +316,6 @@ def run_dashboard(mode="interactive"):
             
         ax3d.view_init(elev=ax3d.elev, azim=ax3d.azim + 0.3)
         
-        # Visually update slider during MP4 save rendering
         slider.eventson = False
         slider.set_val(frame)
         slider.eventson = True
@@ -335,7 +345,6 @@ def run_dashboard(mode="interactive"):
     if mode == "save":
         print(f"{prefix}Commencing 4K FFmpeg render to '{SAVE_FILE}'...")
         try:
-            # DPI 216 on 18x10 figsize forces 3888x2160 UHD output
             ani.save(SAVE_FILE, writer='ffmpeg', fps=10, dpi=216)
             print(f"{prefix}Save complete.")
         except Exception as e:
@@ -345,17 +354,14 @@ def run_dashboard(mode="interactive"):
         plt.show()
 
 def main():
-    # Enforce spawn mode to guarantee clean Matplotlib context boundaries across processes
     mp.set_start_method('spawn', force=True)
     
     print("Forking 4K render to background process...")
     render_process = mp.Process(target=run_dashboard, args=("save",))
     render_process.start()
 
-    # Launch interactive viewer immediately on the main thread
     run_dashboard(mode="interactive")
 
-    # If the user closes the Matplotlib window before the background render is finished
     if render_process.is_alive():
         print("\nInteractive viewer closed. Waiting for the background 4K render to finish...")
         render_process.join()
