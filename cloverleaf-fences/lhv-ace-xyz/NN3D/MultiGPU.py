@@ -87,7 +87,6 @@ def gpu_worker_process(rank: int, assigned_patches: List[int], conn: mp.connecti
     os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(rank)
     os.environ["QRACK_QPAGER_DEVICES"] = "-1"
     os.environ["QRACK_QUNITMULTI_DEVICES"] = "-1"
-    os.environ["QRACK_FPPOW"] = "5"
     os.environ["QRACK_MAX_ALLOC_MB"] = "64000"
     os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
 
