@@ -1,7 +1,7 @@
 # -*- coding: us-ascii -*-
 # macroscopic_lattice_dash_v5.py
 # Changes vs v4:
-#   - Fourth heatmap panel added: ⟨X⟩+⟨Y⟩+⟨Z⟩ total polarization sum,
+#   - Fourth heatmap panel added: <X>+<Y>+<Z> total polarization sum,
 #     normalised over [-3, +3] with its own distinct colormap (viridis)
 #     so it reads visually differently from the per-component panels.
 #   - GridSpec right column expanded to 7 rows to fit the new panel.
@@ -160,8 +160,10 @@ def run_dashboard(mode="interactive"):
 
     avg_disagreement = np.mean(disagreements, axis=1) if interfaces else np.zeros(num_steps)
 
-    # FIX 4: use _safe_gradient so NaN-padded tails don't bleed into valid values
-    dE_dt = _safe_gradient(energies['Total'])
+    # _safe_gradient: avoids NaN bleed from trailing padding into valid values.
+    # dRes_dt is the rate of change of inter-patch boundary coupling error,
+    # NOT the derivative of a residual against any external reference.
+    dE_dt   = _safe_gradient(energies['Total'])
     dRes_dt = _safe_gradient(avg_disagreement)
 
     # 4. Setup Global 3D Coordinates
@@ -216,9 +218,9 @@ def run_dashboard(mode="interactive"):
     spin_norm = mcolors.Normalize(vmin=-1.0, vmax=1.0)
 
     vector_colors = [
-        (0.15, 0.35, 0.85, 0.85),  # spin-down  (-1) → blue
-        (0.85, 0.85, 0.85, 0.45),  # equatorial ( 0) → grey
-        (0.85, 0.15, 0.25, 0.85),  # spin-up    (+1) → red
+        (0.15, 0.35, 0.85, 0.85),  # spin-down  (-1) = blue
+        (0.85, 0.85, 0.85, 0.45),  # equatorial ( 0) = grey
+        (0.85, 0.15, 0.25, 0.85),  # spin-up    (+1) = red
     ]
     vector_cmap = mcolors.LinearSegmentedColormap.from_list("ghost_vectors", vector_colors)
 
@@ -232,9 +234,9 @@ def run_dashboard(mode="interactive"):
     )]
 
     # Patch boundary wireframes, cloud scatter, and correlation network are
-    # intentionally omitted — the view shows arrows only.
+    # intentionally omitted - the view shows arrows only.
 
-    # 6. Colorbar — driven by spin_norm so ticks span the true [-1, +1] range
+    # 6. Colorbar - driven by spin_norm so ticks span the true [-1, +1] range
     ax_cbar = fig.add_axes([0.02, 0.25, 0.015, 0.5])
     sm = plt.cm.ScalarMappable(cmap=vector_cmap, norm=spin_norm)
     sm.set_array([])
@@ -283,8 +285,18 @@ def run_dashboard(mode="interactive"):
     vline_deriv = None
 
     if interfaces:
-        ax_dis.plot(avg_disagreement, color='crimson', label='Mean Interface Disagreement')
-        ax_dis.set_title("Boundary Polarization Residuals", fontsize=10)
+        # NOTE: this quantity is NOT a residual against any external reference
+        # (no tensor network, mean-field, or exact solution exists at this scale).
+        # It is the L2 norm of the difference between the mean Bloch vectors on
+        # opposite faces of adjacent patches at each shared interface, averaged
+        # over all interfaces.  It measures internal self-consistency of the
+        # inter-patch boundary coupling (how well the boundary kick Hamiltonian
+        # is stitching independently-evolved patches together), NOT simulation
+        # accuracy relative to a ground truth.
+        ax_dis.plot(avg_disagreement, color='crimson', label='Mean ||d<s>|| across interfaces')
+        ax_dis.set_title("Inter-patch Boundary Coupling Error\n"
+                         "mean_ifaces( ||<s>+f - <s>-f|| )",
+                         fontsize=9)
         ax_dis.legend(fontsize=8, loc='upper left')
         ax_dis.grid(True, alpha=0.2)
         vline_d = ax_dis.axvline(x=0, color='white', linestyle='--', alpha=0.7)
@@ -294,19 +306,19 @@ def run_dashboard(mode="interactive"):
     ax_deriv.legend(loc='upper left', fontsize=8)
 
     ax_deriv_r = ax_deriv.twinx()
-    ax_deriv_r.plot(dRes_dt, label='dResidual/dt', color='crimson')
-    ax_deriv_r.set_ylabel("Residual Delta", fontsize=8)
+    ax_deriv_r.plot(dRes_dt, label='d||d<s>||/dt', color='crimson')
+    ax_deriv_r.set_ylabel("Coupling Error dt", fontsize=8)
     ax_deriv_r.legend(loc='upper right', fontsize=8)
 
     ax_deriv.set_title("Derivatives (Convergence Rate)", fontsize=10)
     ax_deriv.grid(True, alpha=0.2)
     vline_deriv = ax_deriv.axvline(x=0, color='white', linestyle='--', alpha=0.7)
 
-    # 7. Three stacked heatmaps — one per Bloch-sphere component (X, Y, Z)
+    # 7. Three stacked heatmaps - one per Bloch-sphere component (X, Y, Z)
     heatmap_colors = [
-        (0.15, 0.35, 0.85, 1.0),   # -1 → blue
-        (0.10, 0.10, 0.10, 1.0),   #  0 → near-black
-        (0.85, 0.15, 0.25, 1.0),   # +1 → red
+        (0.15, 0.35, 0.85, 1.0),   # -1 = blue
+        (0.10, 0.10, 0.10, 1.0),   #  0 = near-black
+        (0.85, 0.15, 0.25, 1.0),   # +1 = red
     ]
     heatmap_cmap = mcolors.LinearSegmentedColormap.from_list("heatmap_cmap", heatmap_colors)
 
@@ -356,21 +368,21 @@ def run_dashboard(mode="interactive"):
     comp_norm = mcolors.Normalize(vmin=-1.0, vmax=1.0)
 
     hmap_x = _init_heatmap(ax_hmap_x, history[0, :, :, 0],
-                            heatmap_cmap, comp_norm, "Polarization \u27e8X\u27e9",
+                            heatmap_cmap, comp_norm, "Polarization <X>",
                             show_ylabel=True,  show_xlabel=False)
     hmap_y = _init_heatmap(ax_hmap_y, history[0, :, :, 1],
-                            heatmap_cmap, comp_norm, "Polarization \u27e8Y\u27e9",
+                            heatmap_cmap, comp_norm, "Polarization <Y>",
                             show_ylabel=False, show_xlabel=False)
     hmap_z = _init_heatmap(ax_hmap_z, history[0, :, :, 2],
-                            heatmap_cmap, comp_norm, "Polarization \u27e8Z\u27e9",
+                            heatmap_cmap, comp_norm, "Polarization <Z>",
                             show_ylabel=False, show_xlabel=False)
 
-    # Sum panel: ⟨X⟩+⟨Y⟩+⟨Z⟩, range [-3, +3]; viridis distinguishes it from components
+    # Sum panel: <X>+<Y>+<Z>, range [-3, +3]; viridis distinguishes it from components
     sum_norm = mcolors.Normalize(vmin=-3.0, vmax=3.0)
     sum_data_0 = history[0, :, :, 0] + history[0, :, :, 1] + history[0, :, :, 2]
     hmap_sum = _init_heatmap(ax_hmap_sum, sum_data_0,
                               plt.get_cmap('viridis'), sum_norm,
-                              "Total Polarization \u27e8X\u27e9+\u27e8Y\u27e9+\u27e8Z\u27e9  [-3…+3]",
+                              "Total Polarization <X>+<Y>+<Z>  [-3 to +3]",
                               show_ylabel=False, show_xlabel=True)
 
     fig.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.15)
