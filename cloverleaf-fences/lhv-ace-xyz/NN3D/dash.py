@@ -1,3 +1,4 @@
+# -*- coding: us-ascii -*-
 import sys
 import csv
 import json
@@ -9,6 +10,7 @@ import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 from matplotlib.widgets import Slider, Button
 from mpl_toolkits.mplot3d import Axes3D
+from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from itertools import product, combinations
 
 # --- CONFIGURATION ---
@@ -49,6 +51,7 @@ def load_analytics_data(num_steps, log_prefix=""):
     except Exception as e:
         print(f"{log_prefix}Warning: Could not parse {ENERGY_FILE} properly: {e}")
 
+    # Ensure energy arrays match the number of steps (pad with NaN if aborted early)
     for key in energies:
         if len(energies[key]) < num_steps:
             energies[key].extend([np.nan] * (num_steps - len(energies[key])))
@@ -93,7 +96,7 @@ def run_dashboard(mode="interactive"):
 
     num_steps, num_patches = history.shape[0], history.shape[1]
     
-    # 3. Load Analytics and Calculate Disagreements
+    # 3. Load Analytics, Calculate Disagreements, and Compute Derivatives
     energies, profiles = load_analytics_data(num_steps, prefix)
     
     patch_coords = {}
@@ -132,6 +135,10 @@ def run_dashboard(mode="interactive"):
 
     avg_disagreement = np.mean(disagreements, axis=1) if interfaces else np.zeros(num_steps)
 
+    # Compute numerical gradients for the derivative panel
+    dE_dt = np.gradient(energies['Total']) if len(energies['Total']) > 1 else np.zeros(num_steps)
+    dRes_dt = np.gradient(avg_disagreement) if len(avg_disagreement) > 1 else np.zeros(num_steps)
+
     # 4. Setup Global 3D Coordinates
     q_coords = {}
     for x in range(3):
@@ -152,15 +159,24 @@ def run_dashboard(mode="interactive"):
     global_Y = np.array(global_Y)
     global_Z = np.array(global_Z)
 
+    # Calculate Macroscopic Patch Centers for Clouds and Network Links
+    CX, CY, CZ = [], [], []
+    for p in range(num_patches):
+        CX.append(patch_coords[p][0] * 3 + 1.0)
+        CY.append(patch_coords[p][1] * 3 + 1.0)
+        CZ.append(patch_coords[p][2] * 3 + 1.0)
+
     # 5. Initialize UI and GridSpec Layout
     plt.style.use('dark_background')
     fig = plt.figure(figsize=(18, 10))
     gs = gridspec.GridSpec(1, 2, width_ratios=[2.5, 1], wspace=0.1)
     
     ax3d = fig.add_subplot(gs[0], projection='3d')
-    gs_right = gridspec.GridSpecFromSubplotSpec(2, 1, subplot_spec=gs[1], hspace=0.3)
+    # Expanded GridSpec to 3 rows to accommodate the new Derivatives panel
+    gs_right = gridspec.GridSpecFromSubplotSpec(3, 1, subplot_spec=gs[1], hspace=0.4)
     ax_energy = fig.add_subplot(gs_right[0])
     ax_dis = fig.add_subplot(gs_right[1])
+    ax_deriv = fig.add_subplot(gs_right[2])
 
     def get_vector_data(step_idx):
         return history[step_idx, :, :, 0].flatten(), history[step_idx, :, :, 1].flatten(), history[step_idx, :, :, 2].flatten()
@@ -172,23 +188,22 @@ def run_dashboard(mode="interactive"):
     cmap = plt.get_cmap('coolwarm')
     quiver_obj = [ax3d.quiver(global_X, global_Y, global_Z, U, V, W, length=0.75, colors=cmap(norm(W)), arrow_length_ratio=0.3)]
     draw_patch_boundaries(ax3d, grid_x, grid_y, grid_z)
-
-    CX, CY, CZ = [], [], []
-    for p in range(num_patches):
-        CX.append(patch_coords[p][0] * 3 + 1.0)
-        CY.append(patch_coords[p][1] * 3 + 1.0)
-        CZ.append(patch_coords[p][2] * 3 + 1.0)
     
     mean_Z_per_patch = np.mean(history[:, :, :, 2], axis=2)
     cloud = ax3d.scatter(CX, CY, CZ, s=2500, c=mean_Z_per_patch[0], cmap=cmap, norm=norm, alpha=0.15, edgecolors='none')
 
-    IX = [i[4] for i in interfaces]
-    IY = [i[5] for i in interfaces]
-    IZ = [i[6] for i in interfaces]
+    # Correlation Network (Replaces isolated markers with a dynamic 3D web)
+    network_lines = []
     if interfaces:
+        for i, (p1, p2, _, _, _, _, _) in enumerate(interfaces):
+            network_lines.append([(CX[p1], CY[p1], CZ[p1]), (CX[p2], CY[p2], CZ[p2])])
+        
         dis_cmap = plt.get_cmap('RdYlGn_r')
         dis_norm = mcolors.Normalize(vmin=0.0, vmax=2.0)
-        interface_scatter = ax3d.scatter(IX, IY, IZ, s=80, c=disagreements[0], cmap=dis_cmap, norm=dis_norm, marker='s', alpha=0.8)
+        
+        line_collection = Line3DCollection(network_lines, cmap=dis_cmap, norm=dis_norm, linewidths=2.5, alpha=0.8)
+        line_collection.set_array(disagreements[0])
+        ax3d.add_collection3d(line_collection)
 
     # 6. Add Colorbar Legend on the Far Left
     ax_cbar = fig.add_axes([0.02, 0.25, 0.015, 0.5])
@@ -209,23 +224,38 @@ def run_dashboard(mode="interactive"):
     ax3d.xaxis.pane.fill, ax3d.yaxis.pane.fill, ax3d.zaxis.pane.fill = False, False, False
     ax3d.grid(color='grey', linestyle='--', linewidth=0.3, alpha=0.5)
 
+    # --- 2D Analytics Assembly ---
     ax_energy.plot(energies['Total'], label='Total Energy', color='lightgreen')
     ax_energy.plot(energies['Bulk'], label='Bulk', color='dodgerblue')
     ax_energy.plot(energies['Boundary'], label='Boundary', color='orange')
     ax_energy.set_title("Energy Components")
-    ax_energy.legend(fontsize=9, loc='upper left')
+    ax_energy.legend(fontsize=8, loc='upper left')
     ax_energy.grid(True, alpha=0.2)
     vline_e = ax_energy.axvline(x=0, color='white', linestyle='--', alpha=0.7)
 
     if interfaces:
         ax_dis.plot(avg_disagreement, color='crimson', label='Mean Interface Disagreement')
         ax_dis.set_title("Boundary Polarization Residuals")
-        ax_dis.legend(fontsize=9, loc='upper left')
+        ax_dis.legend(fontsize=8, loc='upper left')
         ax_dis.grid(True, alpha=0.2)
         vline_d = ax_dis.axvline(x=0, color='white', linestyle='--', alpha=0.7)
 
+    # New Derivatives Panel (Dual-axis)
+    ax_deriv.plot(dE_dt, label='dE/dt', color='lightgreen')
+    ax_deriv.set_ylabel("Energy Delta")
+    ax_deriv.legend(loc='upper left', fontsize=8)
+    
+    ax_deriv_r = ax_deriv.twinx()
+    ax_deriv_r.plot(dRes_dt, label='dResidual/dt', color='crimson')
+    ax_deriv_r.set_ylabel("Residual Delta")
+    ax_deriv_r.legend(loc='upper right', fontsize=8)
+    
+    ax_deriv.set_title("Derivatives (Convergence Rate)")
+    ax_deriv.grid(True, alpha=0.2)
+    vline_deriv = ax_deriv.axvline(x=0, color='white', linestyle='--', alpha=0.7)
+
     # Adjust layout to make room for the new left-aligned colorbar
-    fig.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.15)
+    fig.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.15)
     ax_slider = fig.add_axes([0.15, 0.05, 0.60, 0.02])
     slider = Slider(ax=ax_slider, label='Trotter Step', valmin=0, valmax=num_steps-1, valinit=0, valstep=1, color='#4a90e2')
 
@@ -255,7 +285,7 @@ def run_dashboard(mode="interactive"):
         cloud.set_array(mean_Z_per_patch[frame])
         
         if interfaces:
-            interface_scatter.set_array(disagreements[frame])
+            line_collection.set_array(disagreements[frame])
             
         ax3d.set_title(f"Macroscopic Lattice Annealing ({grid_x}x{grid_y}x{grid_z} Grid)\nTrotter Step: {frame}/{num_steps-1}", fontsize=14, pad=10)
         
@@ -269,7 +299,9 @@ def run_dashboard(mode="interactive"):
             energy_text.set_text("")
             
         if len(energies['Total']) > 0: vline_e.set_xdata([frame, frame])
-        if interfaces: vline_d.set_xdata([frame, frame])
+        if interfaces: 
+            vline_d.set_xdata([frame, frame])
+            vline_deriv.set_xdata([frame, frame])
             
         ax3d.view_init(elev=ax3d.elev, azim=ax3d.azim + 0.3)
         
@@ -278,7 +310,7 @@ def run_dashboard(mode="interactive"):
         slider.set_val(frame)
         slider.eventson = True
         
-        return quiver_obj[0], cloud, energy_text
+        return quiver_obj[0], cloud, energy_text, line_collection
 
     def on_slider_update(val):
         update(val)
