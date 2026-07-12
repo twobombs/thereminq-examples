@@ -2,45 +2,7 @@
 # 27-Qubit 3x3x3 Lattice & Macroscopic Grid Annealing
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 71 - MULTI-GPU DISTRIBUTED IPC ARCHITECTURE (PROD GOLD MASTER)
-#
-# BUGFIX (Rev 71):
-# - CRITICAL: Pauli code autodetect rewritten as sign-flip discrimination.
-#   The old magnitude-only probe accepted the first code with |<P>| > 0.5 on
-#   an eigenstate. PauliI (code 0) has <I> = +1 on EVERY state, so if
-#   pauli_expectation does not throw on the identity code, the old probe
-#   locked PZ (and potentially PX/PY) onto the identity: constant unit
-#   magnetization, garbage mean-field ZZ, garbage kicks, and a mis-detected
-#   ANGLE_SCALE=0.5 that silently halved every rotation in the run. The new
-#   probe requires the expectation to be near +/-1 on BOTH eigenstates of
-#   the candidate basis AND to flip sign between them. Identity never flips
-#   sign, so it is structurally excluded. This also defends against a
-#   swapped (paulis, qubits) argument-order build: identity-shaped results
-#   cannot pass the flip test.
-# - CRITICAL: Factor-of-2 convention mismatch between dynamics and the
-#   reported energy fixed. With half-angle r() (Rp(theta) = exp(-i theta P/2)),
-#   evolving under H = -J*ZZ - hx*X - hz*Z for dt requires:
-#     Rx(-2*hx*(dt/2)) per Strang half-step  (old code applied -hx*dt/2)
-#     Rz(-2*hz*dt)     per full step         (old code applied -hz*dt)
-#     exp(-i theta ZZ) with theta = -J*dt    (was already exact, unchanged)
-#   Old code simulated hx/2 and hz/2 while the CSV energy used full hx, hz.
-#   Kick rotation likewise corrected from exp(-i (K/2) n.sigma) to
-#   exp(-i K n.sigma): evolution under a mean field |k| for time t is the
-#   FULL angle K = |k|*t, not K/2. Dynamics and logged energies now describe
-#   the same Hamiltonian.
-# - FIXED: SIGN_Y is now measured from the |+i> probe instead of assumed
-#   equal to SIGN_X. PY detection failure is now a hard error (the old
-#   "lowest unused code" fallback could select the identity).
-# - FIXED: All fatal correctness checks converted from assert to explicit
-#   RuntimeError raises so they survive python -O.
-# - FIXED: fp16 is FPPOW=4 (comment previously said FPPOW=5, which is fp32).
-# - CLEANUP: math instead of cmath for real trig; initial transverse field
-#   hoisted from a hardcoded 3.0 into run(initial_hx=...); dead perf_counter
-#   on skipped steps removed.
-#
-# BUGFIX (Rev 70):
-# - FIXED: QrackSimulator constructor kwarg renamed from `is_qubdd` (nonexistent)
-#   to `is_binary_decision_tree` (correct name in this PyQrack build).
+# REVISION 72 - MULTI-GPU DISTRIBUTED IPC ARCHITECTURE
 
 import os
 import sys
@@ -103,10 +65,10 @@ def gpu_worker_process(
     conn: mp.connection.Connection,
     dt: float,
     total_steps: int,
+    initial_hx: float,
     target_J: float,
     target_hx: float,
     target_hz: float,
-    initial_hx: float,
     measure_every: int
 ):
     os.environ["PYQRACK_SHARED_LIB_PATH"] = "/usr/local/lib/qrack/libqrack_pinvoke.so"
@@ -123,91 +85,82 @@ def gpu_worker_process(
     sims = {}
 
     try:
-        # --- PAULI CODE AUTODETECT (sign-flip discrimination) ---
-        # For each basis we prepare the +1 eigenstate, record candidate
-        # expectations, flip to the -1 eigenstate, and accept only the code
-        # whose expectation is near +/-1 on BOTH states AND changes sign.
-        # The identity (<I> = +1 everywhere) can never pass the flip test,
-        # unlike the old magnitude-only probe which it could satisfy.
-        # Tolerance is loose (0.5) to accommodate fp16 (FPPOW=4) BDT precision.
-        _THRESH = 0.5
+        # --- PAULI CODE AUTODETECT ---
+        # fp16 (FPPOW=4) BDT precision tolerance
+        _THRESH = 0.5   
 
-        def _detect_pauli_code(sim, flip_gate, exclude):
-            """
-            sim must be prepared in the +1 eigenstate of the target basis.
-            flip_gate() must map it to the -1 eigenstate.
-            Returns (code, sign) where sign * qrack_value = physical value,
-            or (None, None) if no code passes.
-            """
-            vals_plus = {}
-            for code in range(8):
-                if code in exclude:
-                    continue
-                try:
-                    v = float(sim.pauli_expectation([0], [code]))
-                except Exception:
-                    continue
-                if abs(v) > _THRESH:
-                    vals_plus[code] = v
-            flip_gate()
-            for code, v_plus in vals_plus.items():
-                try:
-                    v_minus = float(sim.pauli_expectation([0], [code]))
-                except Exception:
-                    continue
-                if abs(v_minus) > _THRESH and v_plus * v_minus < 0.0:
-                    return code, (1.0 if v_plus > 0.0 else -1.0)
-            return None, None
-
-        # Z: |0> (<Z>=+1) -> X gate -> |1> (<Z>=-1)
-        _probe = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
-        PZ, SIGN_Z = _detect_pauli_code(_probe, lambda: _probe.x(0), exclude=())
-        del _probe
+        # Z Probe (Discriminate against Identity using |0> and |1>)
+        _probe_z = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
+        vals0_z = {}
+        for _code in range(8):
+            try: vals0_z[_code] = _probe_z.pauli_expectation([0], [_code])
+            except Exception: pass
+        _probe_z.x(0)  # Flip to |1>
+        PZ, SIGN_Z = None, None
+        for _code, v0 in vals0_z.items():
+            try: v1 = _probe_z.pauli_expectation([0], [_code])
+            except Exception: continue
+            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
+                PZ = _code
+                SIGN_Z = 1.0 if v0 > 0 else -1.0
+                break
         if PZ is None:
-            raise RuntimeError("Fatal: could not autodetect PZ code via sign-flip probe")
+            raise RuntimeError("Fatal: could not autodetect PZ code")
+        del _probe_z
 
-        # X: |+> (<X>=+1) -> Z gate -> |-> (<X>=-1)
-        _probe = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
-        _probe.h(0)
-        PX, SIGN_X = _detect_pauli_code(_probe, lambda: _probe.z(0), exclude=(PZ,))
-        del _probe
+        # X Probe (Discriminate using |+> and |->)
+        _probe_x = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
+        _probe_x.h(0)  # Prep |+>
+        vals0_x = {}
+        for _code in range(8):
+            if _code == PZ: continue
+            try: vals0_x[_code] = _probe_x.pauli_expectation([0], [_code])
+            except Exception: pass
+        _probe_x.z(0)  # Flip to |->
+        PX, SIGN_X = None, None
+        for _code, v0 in vals0_x.items():
+            try: v1 = _probe_x.pauli_expectation([0], [_code])
+            except Exception: continue
+            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
+                PX = _code
+                SIGN_X = 1.0 if v0 > 0 else -1.0
+                break
         if PX is None:
-            raise RuntimeError("Fatal: could not autodetect PX code via sign-flip probe")
+            raise RuntimeError("Fatal: could not autodetect PX code")
+        del _probe_x
 
-        # Y: |+i> (<Y>=+1) -> Z gate -> |-i> (<Y>=-1)
-        # |+i> is prepared with an explicit SU(2) matrix, Rx(-pi/2) =
-        # [[c, i*s], [i*s, c]] with c = s = cos(pi/4), to avoid any
-        # chicken-and-egg dependence on r() conventions.
-        _probe = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
-        _c = math.cos(math.pi / 4.0)
-        _s = math.sin(math.pi / 4.0)
-        _probe.mtrx([complex(_c, 0.0), complex(0.0, _s),
-                     complex(0.0, _s), complex(_c, 0.0)], 0)
-        PY, SIGN_Y = _detect_pauli_code(_probe, lambda: _probe.z(0), exclude=(PX, PZ))
-        del _probe
+        # Y Probe (Discriminate using |+i> and |-i>)
+        _probe_y = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
+        _c, _s = math.cos(math.pi / 4.0), math.sin(math.pi / 4.0)
+        # Rx(pi/2)|0> = |+i> (in PyQrack convention)
+        _probe_y.mtrx([complex(_c, 0), complex(0, _s), complex(0, _s), complex(_c, 0)], 0)
+        vals0_y = {}
+        for _code in range(8):
+            if _code in (PX, PZ): continue
+            try: vals0_y[_code] = _probe_y.pauli_expectation([0], [_code])
+            except Exception: pass
+        _probe_y.z(0)  # Z|+i> = |-i>
+        PY, SIGN_Y = None, None
+        for _code, v0 in vals0_y.items():
+            try: v1 = _probe_y.pauli_expectation([0], [_code])
+            except Exception: continue
+            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
+                PY = _code
+                SIGN_Y = 1.0 if v0 > 0 else -1.0
+                break
         if PY is None:
-            # Hard failure: the old "lowest unused code" fallback could
-            # silently select the identity and corrupt every Y kick component.
-            raise RuntimeError("Fatal: could not autodetect PY code via sign-flip probe")
-        # --------------------------------------------------------
+            raise RuntimeError("Fatal: could not autodetect PY code (Identity trap avoided)")
+        del _probe_y
+        # ----------------------------
 
-        # --- r() ANGLE CONVENTION AUTODETECT ---
-        # Detect whether r() is half-angle exp(-i*theta/2*P) or full-angle
-        # exp(-i*theta*P).
-        # r(PX, pi)|0> -> if <Z> flips to -1: half-angle (Rx(pi) = -iX maps |0>->|1>)
-        #                 if <Z> stays  +1: full-angle (exp(-i*pi*X)|0> = -|0>)
-        # ANGLE_SCALE = 1.0 for half-angle convention, 0.5 for full-angle.
-        # All physical angles below are expressed in the half-angle convention;
-        # ANGLE_SCALE corrects the actual r() call at runtime.
+        # --- ANGLE CONVENTION AUTODETECT ---
         _sim_mag = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
         _sim_mag.r(PX, math.pi, 0)
-        mag_check = float(_sim_mag.pauli_expectation([0], [PZ]))
+        mag_check = _sim_mag.pauli_expectation([0], [PZ])
         _corrected = SIGN_Z * mag_check
         if abs(_corrected + 1.0) < 0.1:
-            # r(PX, pi) flipped <Z> to -1: half-angle convention
             ANGLE_SCALE = 1.0
         elif abs(_corrected - 1.0) < 0.1:
-            # r(PX, pi) left <Z> at +1: full-angle convention
             ANGLE_SCALE = 0.5
         else:
             raise RuntimeError(
@@ -220,37 +173,25 @@ def gpu_worker_process(
         def apply_h(sim, q): sim.h(q)
 
         def apply_rx(sim, theta, q):
-            # theta is expressed in the half-angle convention:
-            # Rx(theta) = exp(-i * theta/2 * X).
-            # ANGLE_SCALE=1.0 for half-angle r(), 0.5 for full-angle r().
             sim.r(PX, float(theta) * ANGLE_SCALE, q)
 
         def apply_rz(sim, theta, q):
             sim.r(PZ, float(theta) * ANGLE_SCALE, q)
 
         def apply_zz(sim, theta, q1, q2):
-            # CNOT . Rz(2*theta) . CNOT implements exp(-i*theta*ZZ) exactly.
-            # The 2.0 here is structural (CNOT sandwich geometry), not a
-            # convention factor. apply_rz already applies ANGLE_SCALE, so
-            # 2*theta is the correct physical argument.
             sim.mcx([q1], q2); apply_rz(sim, 2.0 * theta, q2); sim.mcx([q1], q2)
 
         def trotter_step_body(sim, num_qubits, intra_edges, J, hx, hz, dt_local):
             """
-            2nd-order Strang splitting for H = -J*ZZ - hx*X - hz*Z:
-              A/2 (transverse, dt/2) -> B (longitudinal + ZZ, dt) -> A/2 (transverse, dt/2)
-
-            Angle derivation (half-angle convention, Rp(t) = exp(-i*t/2*P)):
-              X half-step: need exp(+i*hx*(dt/2)*X) = Rx(-2*hx*(dt/2)) = Rx(-hx*dt)
-              Z full-step: need exp(+i*hz*dt*Z)     = Rz(-2*hz*dt)
-              ZZ full-step: need exp(+i*J*dt*ZZ)    = apply_zz(-J*dt)  [exact]
-            The dynamics now generate exactly the Hamiltonian used in the
-            bulk/boundary energy accounting (Rev 71 factor-of-2 fix).
+            2nd-order Strang splitting.
+            Target unitaries: exp(+i hx X dt/2), exp(+i hz Z dt), exp(+i J ZZ dt).
+            Since PyQrack r() applies exp(-i (theta/2) P), we pass theta = -2.0 * coef.
             """
             dt_half = dt_local / 2.0
-            theta_x  = -2.0 * hx * dt_half   # = -hx*dt per half-step; two half-steps per dt
-            theta_z  = -2.0 * hz * dt_local  # full-step
-            theta_zz = -J * dt_local         # full-step (apply_zz is exact in theta)
+            
+            theta_x  = -2.0 * hx * dt_half
+            theta_z  = -2.0 * hz * dt_local
+            theta_zz = -J * dt_local  # apply_zz structurally provides the 2.0 multiplier
 
             for q in range(num_qubits): apply_rx(sim, theta_x, q)
             for q in range(num_qubits): apply_rz(sim, theta_z, q)
@@ -267,31 +208,30 @@ def gpu_worker_process(
             return np.array([SIGN_Y * float(sim.pauli_expectation([q], [PY])) for q in qubits])
 
         def zz_means_meanfield(z_exp, edges):
-            """Mean-field approximation: <ZZ> ~ <Z><Z>. Avoids O(edges) mcx pairs per step."""
             return np.array([z_exp[q1] * z_exp[q2] for q1, q2 in edges])
 
         def apply_kicks(sim, kicks, dt_local, m_every):
             """
-            Applies boundary mean-field kicks as a single SU(2) rotation per
-            boundary qubit, using explicit mtrx() (convention-independent).
-
-            Evolution under H_k = k . sigma for time t = dt * m_every is
-            exp(-i * K * n_hat . sigma) with K = |k| * t -- the FULL angle K,
-            not K/2 (Rev 71 fix). The matrix below is
-            cos(K)*I - i*sin(K)*(n . sigma) by construction.
+            Applies boundary mean-field kicks as a single SU(2) rotation per boundary qubit.
+            Target: exp(+i K_vec . sigma)
+            Explicitly maps to: 
+            [cos(K) + i nz sin(K),   ny sin(K) + i nx sin(K)]
+            [-ny sin(K) + i nx sin(K), cos(K) - i nz sin(K)]
             """
             if not kicks: return
             for raw_q, (kx, ky, kz) in kicks.items():
                 q = int(raw_q)
+                
                 kx *= dt_local * m_every
                 ky *= dt_local * m_every
                 kz *= dt_local * m_every
-                K = math.sqrt(kx**2 + ky**2 + kz**2)
+                
+                K = np.sqrt(kx**2 + ky**2 + kz**2)
                 if K > 0.0:
                     c, s = math.cos(K), math.sin(K)
                     nx, ny, nz = kx / K, ky / K, kz / K
-                    sim.mtrx([complex(c, -nz * s), complex(-ny * s, -nx * s),
-                              complex(ny * s, -nx * s), complex(c,  nz * s)], q)
+                    sim.mtrx([complex(c, nz * s), complex(ny * s, nx * s),
+                              complex(-ny * s, nx * s), complex(c, -nz * s)], q)
 
         intra_edges, boundaries = generate_27q_lattice_subvolume()
 
@@ -316,10 +256,14 @@ def gpu_worker_process(
                 if kick_payloads[p]:
                     apply_kicks(sim, kick_payloads[p], dt, measure_every)
 
+                t_start_trotter = time.perf_counter()
                 trotter_step_body(sim, QUBITS_PER_PATCH, intra_edges,
                                   current_J, current_hx, current_hz, dt)
+                t_lat_trotter = time.perf_counter() - t_start_trotter
 
+                t_lat_tomo = 0.0
                 if is_measure:
+                    t_start_tomo = time.perf_counter()
                     all_q = list(range(QUBITS_PER_PATCH))
                     state = {
                         "Z": z_means(sim, all_q),
@@ -330,7 +274,14 @@ def gpu_worker_process(
                     bulk_e = (-current_hz * float(np.sum(state["Z"]))
                               - current_J  * float(np.sum(zz_exp))
                               - current_hx * float(np.sum(state["X"])))
-                    patch_data_to_master[p] = {"state": state, "bulk_energy": bulk_e}
+                    t_lat_tomo = time.perf_counter() - t_start_tomo
+                    
+                    patch_data_to_master[p] = {
+                        "state": state, 
+                        "meanfield_bulk_energy": bulk_e,
+                        "lat_trotter_ms": t_lat_trotter * 1000.0,
+                        "lat_tomo_ms": t_lat_tomo * 1000.0
+                    }
 
             if is_measure:
                 conn.send(patch_data_to_master)
@@ -339,7 +290,6 @@ def gpu_worker_process(
                 kick_payloads = {p: {} for p in assigned_patches}
 
     finally:
-        # Drop all references simultaneously so C++ destructors free OpenCL VRAM at once.
         sims.clear()
         gc.collect()
         conn.close()
@@ -365,7 +315,7 @@ class MultiGpuHadronEngine:
         self.coord_to_patch = {v: k for k, v in self.patch_coords.items()}
 
         self.lattice_history  = []
-        self.energy_csv       = "ground_state_energy_curve_multi.csv"
+        self.energy_csv       = "meanfield_ground_state_energy_curve_multi.csv"
         self.profiles_csv     = "boundary_profiles_multi.csv"
         self.state_dump_file  = "macroscopic_lattice_states.npy"
         self.config_file      = "lattice_config.json"
@@ -384,8 +334,8 @@ class MultiGpuHadronEngine:
                            "qubits_per_patch": QUBITS_PER_PATCH}, f)
             with open(self.energy_csv, mode='w', newline='') as f:
                 csv.DictWriter(f, fieldnames=[
-                    "Step", "Anneal_Percent", "Bulk_Energy",
-                    "Boundary_Energy", "Total_Energy"
+                    "Step", "Anneal_Percent", "MeanField_Bulk_Energy",
+                    "MeanField_Boundary_Energy", "MeanField_Total_Energy"
                 ]).writeheader()
             with open(self.profiles_csv, mode='w', newline='') as f:
                 csv.DictWriter(f, fieldnames=[
@@ -398,11 +348,11 @@ class MultiGpuHadronEngine:
         try:
             with open(self.energy_csv, mode='a', newline='') as f:
                 csv.DictWriter(f, fieldnames=[
-                    "Step", "Anneal_Percent", "Bulk_Energy",
-                    "Boundary_Energy", "Total_Energy"
+                    "Step", "Anneal_Percent", "MeanField_Bulk_Energy",
+                    "MeanField_Boundary_Energy", "MeanField_Total_Energy"
                 ]).writerow({"Step": step, "Anneal_Percent": anneal,
-                             "Bulk_Energy": bulk, "Boundary_Energy": bound,
-                             "Total_Energy": total})
+                             "MeanField_Bulk_Energy": bulk, "MeanField_Boundary_Energy": bound,
+                             "MeanField_Total_Energy": total})
 
             with open(self.profiles_csv, mode='a', newline='') as f:
                 w = csv.DictWriter(f, fieldnames=[
@@ -419,12 +369,10 @@ class MultiGpuHadronEngine:
         except Exception as e:
             print(f"[CSV] Warning: Log write failed: {e}", file=sys.stderr)
 
-    def run(self, total_steps: int, dt: float, target_g_face: float, target_J: float,
-            target_hx: float, target_hz: float,
-            initial_hx: float = 3.0,
+    def run(self, total_steps: int, dt: float, initial_hx: float, target_g_face: float, 
+            target_J: float, target_hx: float, target_hz: float,
             measure_every: int = 1, effective_shots: float = 512.0):
 
-        # Explicit raises (not asserts) so validation survives python -O.
         if total_steps < 1:
             raise ValueError("total_steps must be at least 1")
         if measure_every < 1:
@@ -443,11 +391,10 @@ class MultiGpuHadronEngine:
             p = mp.Process(
                 target=gpu_worker_process,
                 args=(rank, self.worker_assignments[rank], child_conn,
-                      dt, total_steps, target_J, target_hx, target_hz,
-                      initial_hx, measure_every)
+                      dt, total_steps, initial_hx, target_J, target_hx, target_hz, measure_every)
             )
             p.start()
-            child_conn.close()   # Drop master's copy -> guarantees EOF propagation on worker crash
+            child_conn.close()
             workers.append(p)
             pipes.append(parent_conn)
 
@@ -467,6 +414,9 @@ class MultiGpuHadronEngine:
                 # --- GATHER ---
                 patch_full_states = {}
                 bulk_energy = 0.0
+                max_lat_trotter = 0.0
+                max_lat_tomo = 0.0
+                
                 for conn in pipes:
                     try:
                         data = conn.recv()
@@ -474,7 +424,9 @@ class MultiGpuHadronEngine:
                         raise RuntimeError("Worker IPC connection lost.")
                     for p, payload in data.items():
                         patch_full_states[p] = payload["state"]
-                        bulk_energy += payload["bulk_energy"]
+                        bulk_energy += payload["meanfield_bulk_energy"]
+                        max_lat_trotter = max(max_lat_trotter, payload["lat_trotter_ms"])
+                        max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
 
                 if len(patch_full_states) != TOTAL_PATCHES:
                     raise RuntimeError(
@@ -515,7 +467,11 @@ class MultiGpuHadronEngine:
                 # --- COMPUTE KICKS & BOUNDARY ENERGY ---
                 next_kick_payloads       = {p: {} for p in range(TOTAL_PATCHES)}
                 macroscopic_boundary_energy = 0.0
-                scale           = np.sqrt(dt * measure_every / effective_shots)
+                
+                # Dimensional note: This scale embeds both a standard shot-noise variance 
+                # (1/sqrt(effective_shots)) and a diffusion step factor (sqrt(dt*measure_every)) 
+                # resulting in a Langevin-style stochastic kick rather than pure readout noise.
+                scale = np.sqrt(dt * measure_every / effective_shots)
                 stochastic_noise = {}
                 n_b = len(self.all_boundary_qubits)
 
@@ -555,7 +511,7 @@ class MultiGpuHadronEngine:
                         az1 = np.mean([prof1["means"]["Z"][self._bq_to_idx[q]] + noise1[q][2] for q in face1_q])
 
                         macroscopic_boundary_energy += (
-                            current_g_face
+                            -current_g_face
                             * (ax1*ax2 + ay1*ay2 + az1*az2)
                             * ((len(face1_q) + len(face2_q)) / 2.0)
                         )
@@ -576,7 +532,7 @@ class MultiGpuHadronEngine:
                             )
 
                 total_energy = bulk_energy + macroscopic_boundary_energy
-                print(f"Step {t:03d} | E: {total_energy:+.4f} | {time.perf_counter() - t0:.2f}s")
+                print(f"Step {t:03d} | E: {total_energy:+.4f} | Lat(Trot/Tomo): {max_lat_trotter:5.1f}/{max_lat_tomo:5.1f}ms | {time.perf_counter() - t0:.2f}s")
                 self._log_csvs(t, s * 100, bulk_energy,
                                macroscopic_boundary_energy, total_energy, patch_profiles)
 
@@ -599,7 +555,6 @@ class MultiGpuHadronEngine:
                     print(f"\n[Master] Failed to save lattice history: {e}", file=sys.stderr)
 
             for p in workers:
-                # 15s to allow heavy OpenCL VRAM free on BDT destructors, then escalate
                 p.join(timeout=15)
                 if p.is_alive():
                     p.terminate()
@@ -617,11 +572,11 @@ if __name__ == "__main__":
         engine.run(
             total_steps=100,
             dt=0.04,
+            initial_hx=3.0,
             target_g_face=0.15,
             target_J=1.0,
             target_hx=0.5,
             target_hz=0.2,
-            initial_hx=3.0,
             measure_every=1,
             effective_shots=512.0
         )
