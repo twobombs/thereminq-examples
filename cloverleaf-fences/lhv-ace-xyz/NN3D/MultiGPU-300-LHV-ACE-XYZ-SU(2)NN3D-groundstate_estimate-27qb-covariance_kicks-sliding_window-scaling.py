@@ -2,13 +2,45 @@
 # 27-Qubit 3x3x3 Lattice & Macroscopic Grid Annealing
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 70 - MULTI-GPU DISTRIBUTED IPC ARCHITECTURE (PROD GOLD MASTER)
+# REVISION 71 - MULTI-GPU DISTRIBUTED IPC ARCHITECTURE (PROD GOLD MASTER)
+#
+# BUGFIX (Rev 71):
+# - CRITICAL: Pauli code autodetect rewritten as sign-flip discrimination.
+#   The old magnitude-only probe accepted the first code with |<P>| > 0.5 on
+#   an eigenstate. PauliI (code 0) has <I> = +1 on EVERY state, so if
+#   pauli_expectation does not throw on the identity code, the old probe
+#   locked PZ (and potentially PX/PY) onto the identity: constant unit
+#   magnetization, garbage mean-field ZZ, garbage kicks, and a mis-detected
+#   ANGLE_SCALE=0.5 that silently halved every rotation in the run. The new
+#   probe requires the expectation to be near +/-1 on BOTH eigenstates of
+#   the candidate basis AND to flip sign between them. Identity never flips
+#   sign, so it is structurally excluded. This also defends against a
+#   swapped (paulis, qubits) argument-order build: identity-shaped results
+#   cannot pass the flip test.
+# - CRITICAL: Factor-of-2 convention mismatch between dynamics and the
+#   reported energy fixed. With half-angle r() (Rp(theta) = exp(-i theta P/2)),
+#   evolving under H = -J*ZZ - hx*X - hz*Z for dt requires:
+#     Rx(-2*hx*(dt/2)) per Strang half-step  (old code applied -hx*dt/2)
+#     Rz(-2*hz*dt)     per full step         (old code applied -hz*dt)
+#     exp(-i theta ZZ) with theta = -J*dt    (was already exact, unchanged)
+#   Old code simulated hx/2 and hz/2 while the CSV energy used full hx, hz.
+#   Kick rotation likewise corrected from exp(-i (K/2) n.sigma) to
+#   exp(-i K n.sigma): evolution under a mean field |k| for time t is the
+#   FULL angle K = |k|*t, not K/2. Dynamics and logged energies now describe
+#   the same Hamiltonian.
+# - FIXED: SIGN_Y is now measured from the |+i> probe instead of assumed
+#   equal to SIGN_X. PY detection failure is now a hard error (the old
+#   "lowest unused code" fallback could select the identity).
+# - FIXED: All fatal correctness checks converted from assert to explicit
+#   RuntimeError raises so they survive python -O.
+# - FIXED: fp16 is FPPOW=4 (comment previously said FPPOW=5, which is fp32).
+# - CLEANUP: math instead of cmath for real trig; initial transverse field
+#   hoisted from a hardcoded 3.0 into run(initial_hx=...); dead perf_counter
+#   on skipped steps removed.
 #
 # BUGFIX (Rev 70):
 # - FIXED: QrackSimulator constructor kwarg renamed from `is_qubdd` (nonexistent)
 #   to `is_binary_decision_tree` (correct name in this PyQrack build).
-#   Applies to all 4 constructor calls in the worker: two sign probes,
-#   the magnitude probe, and the main patch simulators.
 
 import os
 import sys
@@ -16,6 +48,7 @@ import gc
 import csv
 import json
 import time
+import math
 import numpy as np
 import multiprocessing as mp
 from typing import List, Tuple, Dict, Any
@@ -73,6 +106,7 @@ def gpu_worker_process(
     target_J: float,
     target_hx: float,
     target_hz: float,
+    initial_hx: float,
     measure_every: int
 ):
     os.environ["PYQRACK_SHARED_LIB_PATH"] = "/usr/local/lib/qrack/libqrack_pinvoke.so"
@@ -89,98 +123,94 @@ def gpu_worker_process(
     sims = {}
 
     try:
-        # --- PAULI CODE AUTODETECT ---
-        # Empirically discover which integer codes map to X, Y, Z in this build.
-        # |0> has <Z>=+/-1 and <X>=<Y>=0 -> Z code is whichever gives |val|~1 on |0>
-        # |+> (after H) has <X>=+/-1      -> X code gives |val|~1 on |+>
-        # Rx(-pi/2)|0> = |+i> has <Y>=+/-1 -> Y code gives |val|~1 on |+i>
-        # Tolerance is loose (1e-2) to accommodate fp16 (FPPOW=5) BDT precision.
-        _THRESH = 0.5   # anything above 0.5 is unambiguously a unit eigenstate response
+        # --- PAULI CODE AUTODETECT (sign-flip discrimination) ---
+        # For each basis we prepare the +1 eigenstate, record candidate
+        # expectations, flip to the -1 eigenstate, and accept only the code
+        # whose expectation is near +/-1 on BOTH states AND changes sign.
+        # The identity (<I> = +1 everywhere) can never pass the flip test,
+        # unlike the old magnitude-only probe which it could satisfy.
+        # Tolerance is loose (0.5) to accommodate fp16 (FPPOW=4) BDT precision.
+        _THRESH = 0.5
 
-        _probe_z = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
-        PZ = None
-        for _code in range(8):
-            try:
-                _v = _probe_z.pauli_expectation([0], [_code])
-                if abs(_v) > _THRESH:
-                    PZ = _code
-                    break
-            except Exception:
-                continue
-        assert PZ is not None, "Fatal: could not autodetect PZ code"
-        del _probe_z
+        def _detect_pauli_code(sim, flip_gate, exclude):
+            """
+            sim must be prepared in the +1 eigenstate of the target basis.
+            flip_gate() must map it to the -1 eigenstate.
+            Returns (code, sign) where sign * qrack_value = physical value,
+            or (None, None) if no code passes.
+            """
+            vals_plus = {}
+            for code in range(8):
+                if code in exclude:
+                    continue
+                try:
+                    v = float(sim.pauli_expectation([0], [code]))
+                except Exception:
+                    continue
+                if abs(v) > _THRESH:
+                    vals_plus[code] = v
+            flip_gate()
+            for code, v_plus in vals_plus.items():
+                try:
+                    v_minus = float(sim.pauli_expectation([0], [code]))
+                except Exception:
+                    continue
+                if abs(v_minus) > _THRESH and v_plus * v_minus < 0.0:
+                    return code, (1.0 if v_plus > 0.0 else -1.0)
+            return None, None
 
-        _probe_x = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
-        _probe_x.h(0)
-        PX = None
-        for _code in range(8):
-            if _code == PZ: continue
-            try:
-                _v = _probe_x.pauli_expectation([0], [_code])
-                if abs(_v) > _THRESH:
-                    PX = _code
-                    break
-            except Exception:
-                continue
-        assert PX is not None, "Fatal: could not autodetect PX code"
-        del _probe_x
+        # Z: |0> (<Z>=+1) -> X gate -> |1> (<Z>=-1)
+        _probe = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
+        PZ, SIGN_Z = _detect_pauli_code(_probe, lambda: _probe.x(0), exclude=())
+        del _probe
+        if PZ is None:
+            raise RuntimeError("Fatal: could not autodetect PZ code via sign-flip probe")
 
-        _probe_y = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
-        # Rx(-pi/2)|0> rotates toward |+i> so <Y> becomes +/-1
-        # We use a hardcoded matrix here to avoid chicken-and-egg with PX
-        import cmath as _cm
-        _c = _cm.cos(np.pi / 4.0)
-        _s = _cm.sin(np.pi / 4.0)
-        _probe_y.mtrx([complex(_c, 0), complex(0, _s), complex(0, _s), complex(_c, 0)], 0)
-        PY = None
-        for _code in range(8):
-            if _code in (PX, PZ): continue
-            try:
-                _v = _probe_y.pauli_expectation([0], [_code])
-                if abs(_v) > _THRESH:
-                    PY = _code
-                    break
-            except Exception:
-                continue
+        # X: |+> (<X>=+1) -> Z gate -> |-> (<X>=-1)
+        _probe = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
+        _probe.h(0)
+        PX, SIGN_X = _detect_pauli_code(_probe, lambda: _probe.z(0), exclude=(PZ,))
+        del _probe
+        if PX is None:
+            raise RuntimeError("Fatal: could not autodetect PX code via sign-flip probe")
+
+        # Y: |+i> (<Y>=+1) -> Z gate -> |-i> (<Y>=-1)
+        # |+i> is prepared with an explicit SU(2) matrix, Rx(-pi/2) =
+        # [[c, i*s], [i*s, c]] with c = s = cos(pi/4), to avoid any
+        # chicken-and-egg dependence on r() conventions.
+        _probe = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
+        _c = math.cos(math.pi / 4.0)
+        _s = math.sin(math.pi / 4.0)
+        _probe.mtrx([complex(_c, 0.0), complex(0.0, _s),
+                     complex(0.0, _s), complex(_c, 0.0)], 0)
+        PY, SIGN_Y = _detect_pauli_code(_probe, lambda: _probe.z(0), exclude=(PX, PZ))
+        del _probe
         if PY is None:
-            # Fallback: use the lowest unused code; still better than a wrong constant
-            PY = next(c for c in range(8) if c not in (PX, PZ))
-        del _probe_y
-        # ----------------------------
+            # Hard failure: the old "lowest unused code" fallback could
+            # silently select the identity and corrupt every Y kick component.
+            raise RuntimeError("Fatal: could not autodetect PY code via sign-flip probe")
+        # --------------------------------------------------------
 
-        # --- SIGN & MAGNITUDE CONVENTION AUTODETECT ---
-        _sim_x = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
-        _sim_x.h(0)
-        qrack_x = _sim_x.pauli_expectation([0], [PX])
-        assert abs(_v := qrack_x) > _THRESH, f"Fatal: PX probe magnitude too small: {qrack_x}"
-        SIGN_X = 1.0 if qrack_x > 0 else -1.0
-        del _sim_x
-
-        SIGN_Y = SIGN_X
-
-        _sim_z = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
-        qrack_z = _sim_z.pauli_expectation([0], [PZ])
-        assert abs(qrack_z) > _THRESH, f"Fatal: PZ probe magnitude too small: {qrack_z}"
-        SIGN_Z = 1.0 if qrack_z > 0 else -1.0
-        del _sim_z
-
-        # Detect r() angle convention: half-angle exp(-i*theta/2*P) or full-angle exp(-i*theta*P).
-        # r(PX, pi)|0> -> if <Z> flips to -1: half-angle (Rx(pi) = X gate maps |0>->|1>)
-        #                 if <Z> stays  +1: full-angle (exp(-i*pi*X)|0> = -|0>, <Z>=+1)
-        # ANGLE_SCALE = 1.0 for half-angle convention, 0.5 for full-angle convention.
-        # All physical angles are expressed as if half-angle; ANGLE_SCALE corrects the call.
+        # --- r() ANGLE CONVENTION AUTODETECT ---
+        # Detect whether r() is half-angle exp(-i*theta/2*P) or full-angle
+        # exp(-i*theta*P).
+        # r(PX, pi)|0> -> if <Z> flips to -1: half-angle (Rx(pi) = -iX maps |0>->|1>)
+        #                 if <Z> stays  +1: full-angle (exp(-i*pi*X)|0> = -|0>)
+        # ANGLE_SCALE = 1.0 for half-angle convention, 0.5 for full-angle.
+        # All physical angles below are expressed in the half-angle convention;
+        # ANGLE_SCALE corrects the actual r() call at runtime.
         _sim_mag = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
-        _sim_mag.r(PX, np.pi, 0)
-        mag_check = _sim_mag.pauli_expectation([0], [PZ])
+        _sim_mag.r(PX, math.pi, 0)
+        mag_check = float(_sim_mag.pauli_expectation([0], [PZ]))
         _corrected = SIGN_Z * mag_check
         if abs(_corrected + 1.0) < 0.1:
-            # r(PX, pi) flipped <Z> to -1: half-angle convention, angles pass through as-is
+            # r(PX, pi) flipped <Z> to -1: half-angle convention
             ANGLE_SCALE = 1.0
         elif abs(_corrected - 1.0) < 0.1:
-            # r(PX, pi) left <Z> at +1: full-angle convention, divide physical angles by 2
+            # r(PX, pi) left <Z> at +1: full-angle convention
             ANGLE_SCALE = 0.5
         else:
-            raise AssertionError(
+            raise RuntimeError(
                 f"Fatal: r(PX,pi) returned ambiguous SIGN_Z*<Z> = {_corrected:.6f}; "
                 f"expected ~+1.0 or ~-1.0"
             )
@@ -190,7 +220,8 @@ def gpu_worker_process(
         def apply_h(sim, q): sim.h(q)
 
         def apply_rx(sim, theta, q):
-            # theta is the TRUE physical rotation angle (half-angle convention).
+            # theta is expressed in the half-angle convention:
+            # Rx(theta) = exp(-i * theta/2 * X).
             # ANGLE_SCALE=1.0 for half-angle r(), 0.5 for full-angle r().
             sim.r(PX, float(theta) * ANGLE_SCALE, q)
 
@@ -198,26 +229,28 @@ def gpu_worker_process(
             sim.r(PZ, float(theta) * ANGLE_SCALE, q)
 
         def apply_zz(sim, theta, q1, q2):
-            # CNOT . Rz(2*theta) . CNOT implements exp(-i*theta*ZZ).
-            # The 2.0 here is structural (CNOT sandwich geometry), not a convention factor.
-            # apply_rz already applies ANGLE_SCALE, so 2*theta is the correct physical arg.
+            # CNOT . Rz(2*theta) . CNOT implements exp(-i*theta*ZZ) exactly.
+            # The 2.0 here is structural (CNOT sandwich geometry), not a
+            # convention factor. apply_rz already applies ANGLE_SCALE, so
+            # 2*theta is the correct physical argument.
             sim.mcx([q1], q2); apply_rz(sim, 2.0 * theta, q2); sim.mcx([q1], q2)
 
         def trotter_step_body(sim, num_qubits, intra_edges, J, hx, hz, dt_local):
             """
-            2nd-order Strang splitting:
+            2nd-order Strang splitting for H = -J*ZZ - hx*X - hz*Z:
               A/2 (transverse, dt/2) -> B (longitudinal + ZZ, dt) -> A/2 (transverse, dt/2)
-            Angles here are TRUE physical half-angle values (what exp(-i*theta*P) needs).
-            ANGLE_SCALE inside apply_rx/apply_rz adapts them to the r() convention at runtime.
+
+            Angle derivation (half-angle convention, Rp(t) = exp(-i*t/2*P)):
+              X half-step: need exp(+i*hx*(dt/2)*X) = Rx(-2*hx*(dt/2)) = Rx(-hx*dt)
+              Z full-step: need exp(+i*hz*dt*Z)     = Rz(-2*hz*dt)
+              ZZ full-step: need exp(+i*J*dt*ZZ)    = apply_zz(-J*dt)  [exact]
+            The dynamics now generate exactly the Hamiltonian used in the
+            bulk/boundary energy accounting (Rev 71 factor-of-2 fix).
             """
             dt_half = dt_local / 2.0
-            # True physical angles (half-angle convention throughout):
-            #   Rx(hx, dt/2): rotate by hx*dt/2 around X (half-step)
-            #   Rz(hz, dt):   rotate by hz*dt   around Z (full-step)
-            #   ZZ(J,  dt):   rotate by J*dt    in ZZ plane (full-step, 2x inside apply_zz)
-            theta_x  = -hx * dt_half      # half-step; applied twice = -hx*dt total
-            theta_z  = -hz * dt_local     # full-step
-            theta_zz = -J  * dt_local     # full-step
+            theta_x  = -2.0 * hx * dt_half   # = -hx*dt per half-step; two half-steps per dt
+            theta_z  = -2.0 * hz * dt_local  # full-step
+            theta_zz = -J * dt_local         # full-step (apply_zz is exact in theta)
 
             for q in range(num_qubits): apply_rx(sim, theta_x, q)
             for q in range(num_qubits): apply_rz(sim, theta_z, q)
@@ -239,10 +272,13 @@ def gpu_worker_process(
 
         def apply_kicks(sim, kicks, dt_local, m_every):
             """
-            Applies boundary mean-field kicks as a single SU(2) rotation per boundary qubit.
-            Uses explicit mtrx() which is always convention-independent (pure SU(2) matrix).
-            Rotation angle = K = |k_vec| * dt * m_every.
-            The SU(2) matrix is exp(-i * K/2 * n_hat . sigma) by construction.
+            Applies boundary mean-field kicks as a single SU(2) rotation per
+            boundary qubit, using explicit mtrx() (convention-independent).
+
+            Evolution under H_k = k . sigma for time t = dt * m_every is
+            exp(-i * K * n_hat . sigma) with K = |k| * t -- the FULL angle K,
+            not K/2 (Rev 71 fix). The matrix below is
+            cos(K)*I - i*sin(K)*(n . sigma) by construction.
             """
             if not kicks: return
             for raw_q, (kx, ky, kz) in kicks.items():
@@ -250,9 +286,9 @@ def gpu_worker_process(
                 kx *= dt_local * m_every
                 ky *= dt_local * m_every
                 kz *= dt_local * m_every
-                K = np.sqrt(kx**2 + ky**2 + kz**2)
+                K = math.sqrt(kx**2 + ky**2 + kz**2)
                 if K > 0.0:
-                    c, s = np.cos(K / 2.0), np.sin(K / 2.0)
+                    c, s = math.cos(K), math.sin(K)
                     nx, ny, nz = kx / K, ky / K, kz / K
                     sim.mtrx([complex(c, -nz * s), complex(-ny * s, -nx * s),
                               complex(ny * s, -nx * s), complex(c,  nz * s)], q)
@@ -268,7 +304,7 @@ def gpu_worker_process(
 
         for t in range(total_steps):
             s = t / max(1, (total_steps - 1))
-            current_hx = (1.0 - s) * 3.0 + s * target_hx
+            current_hx = (1.0 - s) * initial_hx + s * target_hx
             current_J  = s * target_J
             current_hz = s * target_hz
             is_measure = (t % measure_every == 0) or (t == total_steps - 1)
@@ -385,10 +421,14 @@ class MultiGpuHadronEngine:
 
     def run(self, total_steps: int, dt: float, target_g_face: float, target_J: float,
             target_hx: float, target_hz: float,
+            initial_hx: float = 3.0,
             measure_every: int = 1, effective_shots: float = 512.0):
 
-        assert total_steps >= 1,   "total_steps must be at least 1"
-        assert measure_every >= 1, "measure_every must be a positive integer"
+        # Explicit raises (not asserts) so validation survives python -O.
+        if total_steps < 1:
+            raise ValueError("total_steps must be at least 1")
+        if measure_every < 1:
+            raise ValueError("measure_every must be a positive integer")
 
         total_qubits = TOTAL_PATCHES * QUBITS_PER_PATCH
         print(f"[Engine] {TOTAL_PATCHES} patches, {total_qubits} qubits, {WORKER_GPUS} GPUs, {total_steps} steps")
@@ -403,7 +443,8 @@ class MultiGpuHadronEngine:
             p = mp.Process(
                 target=gpu_worker_process,
                 args=(rank, self.worker_assignments[rank], child_conn,
-                      dt, total_steps, target_J, target_hx, target_hz, measure_every)
+                      dt, total_steps, target_J, target_hx, target_hz,
+                      initial_hx, measure_every)
             )
             p.start()
             child_conn.close()   # Drop master's copy -> guarantees EOF propagation on worker crash
@@ -414,13 +455,14 @@ class MultiGpuHadronEngine:
 
         try:
             for t in range(total_steps):
-                t0 = time.perf_counter()
                 s = t / max(1, (total_steps - 1))
                 current_g_face = s * target_g_face
                 is_measure = (t % measure_every == 0) or (t == total_steps - 1)
 
                 if not is_measure:
                     continue
+
+                t0 = time.perf_counter()
 
                 # --- GATHER ---
                 patch_full_states = {}
@@ -579,6 +621,7 @@ if __name__ == "__main__":
             target_J=1.0,
             target_hx=0.5,
             target_hz=0.2,
+            initial_hx=3.0,
             measure_every=1,
             effective_shots=512.0
         )
