@@ -1,8 +1,14 @@
 # -*- coding: us-ascii -*-
-# 27-Qubit 3x3x3 Lattice & Macroscopic Grid Annealing
+# 27-Qubit 3x3x3 Macroscopic Grid Annealing (27 Patches, 729 Qubits Total)
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 72 - MULTI-GPU DISTRIBUTED IPC ARCHITECTURE
+# REVISION 83 - FULL SCALE OVERSUBSCRIBED GPU ARCHITECTURE (GOLD MASTER)
+#
+# BUGFIXES (Rev 83):
+# - SMOKE TEST: Added a strict VRAM/PCIe allocation probe during initialization.
+#   Forces an immediate device-to-host read (pauli_expectation) on every 1GB 
+#   statevector to verify that the OpenCL driver successfully mapped the host-RAM 
+#   fallback buffers before entering the Trotter loop.
 
 import os
 import sys
@@ -16,18 +22,19 @@ import multiprocessing as mp
 from typing import List, Tuple, Dict, Any
 
 # --- GLOBAL CONFIGURATION ---
-GRID_X, GRID_Y, GRID_Z = 9, 9, 9
+GRID_X, GRID_Y, GRID_Z = 3, 3, 3
 TOTAL_PATCHES = GRID_X * GRID_Y * GRID_Z
 QUBITS_PER_PATCH = 27
 
-# Set this to the number of distinct GPU devices you want to target.
-WORKER_GPUS = 1
+# Topography tuning for raw statevectors
+GPUS_AVAILABLE = 1
+WORKERS_PER_GPU = 4  # 4 workers handling ~7 patches each
+TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
 
 # =====================================================================
 # ENVIRONMENT - set before pyqrack import
 # =====================================================================
 os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
-os.environ["QRACK_QUNIT_SEPARABILITY_THRESHOLD"] = "1e-7"
 
 # =====================================================================
 # PURE FUNCTIONS (Math & Topology)
@@ -61,6 +68,7 @@ def generate_27q_lattice_subvolume() -> Tuple[List[Tuple[int, int]], Dict[str, L
 # =====================================================================
 def gpu_worker_process(
     rank: int,
+    workers_per_gpu: int,
     assigned_patches: List[int],
     conn: mp.connection.Connection,
     dt: float,
@@ -73,9 +81,16 @@ def gpu_worker_process(
 ):
     os.environ["PYQRACK_SHARED_LIB_PATH"] = "/usr/local/lib/qrack/libqrack_pinvoke.so"
     os.environ["OCL_ICD_PLATFORM_SORT"] = "none"
-    os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(rank)
-    os.environ["QRACK_QPAGER_DEVICES"] = "-1"
-    os.environ["QRACK_QUNITMULTI_DEVICES"] = "-1"
+    
+    # Map multiple ranks to the same physical GPU device index
+    physical_gpu_index = rank // workers_per_gpu
+    os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(physical_gpu_index)
+    
+    # Bind QPager to the assigned device to enable driver-level PCIe paging
+    os.environ["QRACK_QPAGER_DEVICES"] = str(physical_gpu_index)
+    os.environ["QRACK_QUNITMULTI_DEVICES"] = str(physical_gpu_index)
+    
+    # Unleash VRAM allocations to allow native driver oversubscription handling
     os.environ["QRACK_MAX_ALLOC_MB"] = "64000"
     os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
 
@@ -86,16 +101,15 @@ def gpu_worker_process(
 
     try:
         # --- PAULI CODE AUTODETECT ---
-        # fp16 (FPPOW=4) BDT precision tolerance
         _THRESH = 0.5   
 
-        # Z Probe (Discriminate against Identity using |0> and |1>)
-        _probe_z = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
+        # Z Probe
+        _probe_z = QrackSimulator(qubit_count=1, is_tensor_network=False, is_binary_decision_tree=False)
         vals0_z = {}
         for _code in range(8):
             try: vals0_z[_code] = _probe_z.pauli_expectation([0], [_code])
             except Exception: pass
-        _probe_z.x(0)  # Flip to |1>
+        _probe_z.x(0)
         PZ, SIGN_Z = None, None
         for _code, v0 in vals0_z.items():
             try: v1 = _probe_z.pauli_expectation([0], [_code])
@@ -108,15 +122,15 @@ def gpu_worker_process(
             raise RuntimeError("Fatal: could not autodetect PZ code")
         del _probe_z
 
-        # X Probe (Discriminate using |+> and |->)
-        _probe_x = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
-        _probe_x.h(0)  # Prep |+>
+        # X Probe
+        _probe_x = QrackSimulator(qubit_count=1, is_tensor_network=False, is_binary_decision_tree=False)
+        _probe_x.h(0)
         vals0_x = {}
         for _code in range(8):
             if _code == PZ: continue
             try: vals0_x[_code] = _probe_x.pauli_expectation([0], [_code])
             except Exception: pass
-        _probe_x.z(0)  # Flip to |->
+        _probe_x.z(0)
         PX, SIGN_X = None, None
         for _code, v0 in vals0_x.items():
             try: v1 = _probe_x.pauli_expectation([0], [_code])
@@ -129,17 +143,16 @@ def gpu_worker_process(
             raise RuntimeError("Fatal: could not autodetect PX code")
         del _probe_x
 
-        # Y Probe (Discriminate using |+i> and |-i>)
-        _probe_y = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
+        # Y Probe
+        _probe_y = QrackSimulator(qubit_count=1, is_tensor_network=False, is_binary_decision_tree=False)
         _c, _s = math.cos(math.pi / 4.0), math.sin(math.pi / 4.0)
-        # Rx(pi/2)|0> = |+i> (in PyQrack convention)
         _probe_y.mtrx([complex(_c, 0), complex(0, _s), complex(0, _s), complex(_c, 0)], 0)
         vals0_y = {}
         for _code in range(8):
             if _code in (PX, PZ): continue
             try: vals0_y[_code] = _probe_y.pauli_expectation([0], [_code])
             except Exception: pass
-        _probe_y.z(0)  # Z|+i> = |-i>
+        _probe_y.z(0)
         PY, SIGN_Y = None, None
         for _code, v0 in vals0_y.items():
             try: v1 = _probe_y.pauli_expectation([0], [_code])
@@ -149,12 +162,12 @@ def gpu_worker_process(
                 SIGN_Y = 1.0 if v0 > 0 else -1.0
                 break
         if PY is None:
-            raise RuntimeError("Fatal: could not autodetect PY code (Identity trap avoided)")
+            raise RuntimeError("Fatal: could not autodetect PY code")
         del _probe_y
         # ----------------------------
 
         # --- ANGLE CONVENTION AUTODETECT ---
-        _sim_mag = QrackSimulator(qubit_count=1, is_binary_decision_tree=True)
+        _sim_mag = QrackSimulator(qubit_count=1, is_tensor_network=False, is_binary_decision_tree=False)
         _sim_mag.r(PX, math.pi, 0)
         mag_check = _sim_mag.pauli_expectation([0], [PZ])
         _corrected = SIGN_Z * mag_check
@@ -174,6 +187,9 @@ def gpu_worker_process(
 
         def apply_rx(sim, theta, q):
             sim.r(PX, float(theta) * ANGLE_SCALE, q)
+            
+        def apply_ry(sim, theta, q):
+            sim.r(PY, float(theta) * ANGLE_SCALE, q)
 
         def apply_rz(sim, theta, q):
             sim.r(PZ, float(theta) * ANGLE_SCALE, q)
@@ -182,16 +198,11 @@ def gpu_worker_process(
             sim.mcx([q1], q2); apply_rz(sim, 2.0 * theta, q2); sim.mcx([q1], q2)
 
         def trotter_step_body(sim, num_qubits, intra_edges, J, hx, hz, dt_local):
-            """
-            2nd-order Strang splitting.
-            Target unitaries: exp(+i hx X dt/2), exp(+i hz Z dt), exp(+i J ZZ dt).
-            Since PyQrack r() applies exp(-i (theta/2) P), we pass theta = -2.0 * coef.
-            """
             dt_half = dt_local / 2.0
             
             theta_x  = -2.0 * hx * dt_half
             theta_z  = -2.0 * hz * dt_local
-            theta_zz = -J * dt_local  # apply_zz structurally provides the 2.0 multiplier
+            theta_zz = -J * dt_local
 
             for q in range(num_qubits): apply_rx(sim, theta_x, q)
             for q in range(num_qubits): apply_rz(sim, theta_z, q)
@@ -211,34 +222,34 @@ def gpu_worker_process(
             return np.array([z_exp[q1] * z_exp[q2] for q1, q2 in edges])
 
         def apply_kicks(sim, kicks, dt_local, m_every):
-            """
-            Applies boundary mean-field kicks as a single SU(2) rotation per boundary qubit.
-            Target: exp(+i K_vec . sigma)
-            Explicitly maps to: 
-            [cos(K) + i nz sin(K),   ny sin(K) + i nx sin(K)]
-            [-ny sin(K) + i nx sin(K), cos(K) - i nz sin(K)]
-            """
             if not kicks: return
             for raw_q, (kx, ky, kz) in kicks.items():
                 q = int(raw_q)
                 
-                kx *= dt_local * m_every
-                ky *= dt_local * m_every
-                kz *= dt_local * m_every
+                coef = -2.0 * dt_local * m_every
                 
-                K = np.sqrt(kx**2 + ky**2 + kz**2)
-                if K > 0.0:
-                    c, s = math.cos(K), math.sin(K)
-                    nx, ny, nz = kx / K, ky / K, kz / K
-                    sim.mtrx([complex(c, nz * s), complex(ny * s, nx * s),
-                              complex(-ny * s, nx * s), complex(c, -nz * s)], q)
+                theta_x = kx * coef
+                theta_y = ky * coef
+                theta_z = kz * coef
+                
+                if abs(theta_x) > 1e-12: apply_rx(sim, theta_x, q)
+                if abs(theta_y) > 1e-12: apply_ry(sim, theta_y, q)
+                if abs(theta_z) > 1e-12: apply_rz(sim, theta_z, q)
 
         intra_edges, boundaries = generate_27q_lattice_subvolume()
 
         for p in assigned_patches:
-            sim = QrackSimulator(qubit_count=QUBITS_PER_PATCH, is_binary_decision_tree=True)
+            sim = QrackSimulator(qubit_count=QUBITS_PER_PATCH, is_tensor_network=False, is_binary_decision_tree=False)
             for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
             sims[p] = sim
+            
+            # --- VRAM PAGING SMOKE TEST ---
+            # Force a trivial read across the PCIe bus to confirm the driver 
+            # successfully mapped the oversubscribed host-RAM buffer.
+            try:
+                _ = sim.pauli_expectation([0], [PZ])
+            except Exception as e:
+                raise RuntimeError(f"Fatal: VRAM/PCIe paging allocation failed on patch {p}. Driver error: {e}")
 
         kick_payloads = {p: {} for p in assigned_patches}
 
@@ -290,6 +301,10 @@ def gpu_worker_process(
                 kick_payloads = {p: {} for p in assigned_patches}
 
     finally:
+        # Aggressively delete proxies to ensure OpenCL buffer release
+        for p in list(sims.keys()):
+            _s = sims.pop(p)
+            del _s
         sims.clear()
         gc.collect()
         conn.close()
@@ -322,9 +337,9 @@ class MultiGpuHadronEngine:
 
         self._init_files()
 
-        self.worker_assignments = [[] for _ in range(WORKER_GPUS)]
+        self.worker_assignments = [[] for _ in range(TOTAL_WORKERS)]
         for i in range(TOTAL_PATCHES):
-            self.worker_assignments[i % WORKER_GPUS].append(i)
+            self.worker_assignments[i % TOTAL_WORKERS].append(i)
 
     def _init_files(self):
         try:
@@ -379,9 +394,9 @@ class MultiGpuHadronEngine:
             raise ValueError("measure_every must be a positive integer")
 
         total_qubits = TOTAL_PATCHES * QUBITS_PER_PATCH
-        print(f"[Engine] {TOTAL_PATCHES} patches, {total_qubits} qubits, {WORKER_GPUS} GPUs, {total_steps} steps")
+        print(f"[Engine] {TOTAL_PATCHES} patches, {total_qubits} qubits, {GPUS_AVAILABLE} GPUs ({WORKERS_PER_GPU} workers/GPU), {total_steps} steps")
 
-        active_ranks = [r for r in range(WORKER_GPUS) if self.worker_assignments[r]]
+        active_ranks = [r for r in range(TOTAL_WORKERS) if self.worker_assignments[r]]
 
         workers = []
         pipes   = []
@@ -390,7 +405,7 @@ class MultiGpuHadronEngine:
             parent_conn, child_conn = mp.Pipe()
             p = mp.Process(
                 target=gpu_worker_process,
-                args=(rank, self.worker_assignments[rank], child_conn,
+                args=(rank, WORKERS_PER_GPU, self.worker_assignments[rank], child_conn,
                       dt, total_steps, initial_hx, target_J, target_hx, target_hz, measure_every)
             )
             p.start()
@@ -468,9 +483,6 @@ class MultiGpuHadronEngine:
                 next_kick_payloads       = {p: {} for p in range(TOTAL_PATCHES)}
                 macroscopic_boundary_energy = 0.0
                 
-                # Dimensional note: This scale embeds both a standard shot-noise variance 
-                # (1/sqrt(effective_shots)) and a diffusion step factor (sqrt(dt*measure_every)) 
-                # resulting in a Langevin-style stochastic kick rather than pure readout noise.
                 scale = np.sqrt(dt * measure_every / effective_shots)
                 stochastic_noise = {}
                 n_b = len(self.all_boundary_qubits)
@@ -577,8 +589,9 @@ if __name__ == "__main__":
             target_J=1.0,
             target_hx=0.5,
             target_hz=0.2,
-            measure_every=1,
+            measure_every=5,
             effective_shots=512.0
         )
     except KeyboardInterrupt:
         pass
+
