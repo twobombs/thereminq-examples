@@ -7,6 +7,13 @@
 #   - GridSpec right column expanded to 7 rows to fit the new panel.
 #   - _init_heatmap() accepts an explicit norm so each panel can use its own.
 #   - update() computes and pushes the sum slice each frame.
+#
+# FIXED (Rev 85 alignment):
+#   - ENERGY_FILE: corrected filename to "meanfield_ground_state_energy_curve_multi.csv"
+#   - CSV column names: "Total_Energy" -> "MeanField_Total_Energy",
+#     "Bulk_Energy" -> "MeanField_Bulk_Energy",
+#     "Boundary_Energy" -> "MeanField_Boundary_Energy"
+#     to match the fieldnames written by MultiGpuHadronEngine._log_csvs().
 import sys
 import csv
 import json
@@ -20,13 +27,12 @@ from matplotlib.widgets import Slider, Button
 from mpl_toolkits.mplot3d import Axes3D
 
 # --- CONFIGURATION ---
-DATA_FILE = "macroscopic_lattice_states.npy"
-CONFIG_FILE = "lattice_config.json"
-ENERGY_FILE = "ground_state_energy_curve_multi.csv"
+DATA_FILE     = "macroscopic_lattice_states.npy"
+CONFIG_FILE   = "lattice_config.json"
+ENERGY_FILE   = "meanfield_ground_state_energy_curve_multi.csv"   # Rev 85 filename
 PROFILES_FILE = "boundary_profiles_multi.csv"
-SAVE_FILE = "macroscopic_lattice_dash.mp4"
+SAVE_FILE     = "macroscopic_lattice_dash.mp4"
 # ---------------------
-
 
 
 def load_analytics_data(num_steps, log_prefix=""):
@@ -38,9 +44,10 @@ def load_analytics_data(num_steps, log_prefix=""):
         with open(ENERGY_FILE, mode='r') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                energies['Total'].append(float(row["Total_Energy"]))
-                energies['Bulk'].append(float(row["Bulk_Energy"]))
-                energies['Boundary'].append(float(row["Boundary_Energy"]))
+                # Column names match Rev 85 _log_csvs() fieldnames
+                energies['Total'].append(float(row["MeanField_Total_Energy"]))
+                energies['Bulk'].append(float(row["MeanField_Bulk_Energy"]))
+                energies['Boundary'].append(float(row["MeanField_Boundary_Energy"]))
     except Exception as e:
         print(f"{log_prefix}Warning: Could not parse {ENERGY_FILE} properly: {e}")
 
@@ -107,7 +114,7 @@ def run_dashboard(mode="interactive"):
         sys.exit(1)
 
     # 2. Load the state history.
-    # FIX 3: background render uses mmap_mode='r' to avoid loading the full
+    # background render uses mmap_mode='r' to avoid loading the full
     # array into RAM twice when the interactive viewer is also running.
     mmap = 'r' if mode == "save" else None
     try:
@@ -233,9 +240,6 @@ def run_dashboard(mode="interactive"):
         length=0.75, colors=_quiver_colors(W), arrow_length_ratio=0.3
     )]
 
-    # Patch boundary wireframes, cloud scatter, and correlation network are
-    # intentionally omitted - the view shows arrows only.
-
     # 6. Colorbar - driven by spin_norm so ticks span the true [-1, +1] range
     ax_cbar = fig.add_axes([0.02, 0.25, 0.015, 0.5])
     sm = plt.cm.ScalarMappable(cmap=vector_cmap, norm=spin_norm)
@@ -280,19 +284,16 @@ def run_dashboard(mode="interactive"):
     ax_energy.grid(True, alpha=0.2)
     vline_e = ax_energy.axvline(x=0, color='white', linestyle='--', alpha=0.7)
 
-    # FIX 2: always initialise vline_d / vline_deriv so update() never hits NameError
+    # always initialise vline_d / vline_deriv so update() never hits NameError
     vline_d = None
     vline_deriv = None
 
     if interfaces:
-        # NOTE: this quantity is NOT a residual against any external reference
-        # (no tensor network, mean-field, or exact solution exists at this scale).
-        # It is the L2 norm of the difference between the mean Bloch vectors on
-        # opposite faces of adjacent patches at each shared interface, averaged
-        # over all interfaces.  It measures internal self-consistency of the
-        # inter-patch boundary coupling (how well the boundary kick Hamiltonian
-        # is stitching independently-evolved patches together), NOT simulation
-        # accuracy relative to a ground truth.
+        # NOTE: this quantity is NOT a residual against any external reference.
+        # It measures internal self-consistency of the inter-patch boundary
+        # coupling (how well the boundary kick Hamiltonian is stitching
+        # independently-evolved patches together), NOT simulation accuracy
+        # relative to a ground truth.
         ax_dis.plot(avg_disagreement, color='crimson', label='Mean ||d<s>|| across interfaces')
         ax_dis.set_title("Inter-patch Boundary Coupling Error\n"
                          "mean_ifaces( ||<s>+f - <s>-f|| )",
@@ -395,10 +396,8 @@ def run_dashboard(mode="interactive"):
     ax_play = fig.add_axes([0.80, 0.035, 0.08, 0.04])
     btn_play = Button(ax_play, 'Pause', color='#333333', hovercolor='#555555')
 
-    # FIX 7: use a plain bool with nonlocal instead of the mutable-list closure hack
     is_playing = True
 
-    # FIX 5: true 3D perspective zoom via ax3d.dist instead of axis-limit manipulation
     def on_scroll(event):
         if event.inaxes != ax3d:
             return
@@ -422,7 +421,6 @@ def run_dashboard(mode="interactive"):
 
     fig.canvas.mpl_connect('key_press_event', on_key_press)
 
-    # FIX 6: track whether the current call is from FuncAnimation or from the slider
     _from_animation = [False]
 
     def update(frame):
@@ -461,7 +459,6 @@ def run_dashboard(mode="interactive"):
             history[frame, :, :, 0] + history[frame, :, :, 1] + history[frame, :, :, 2]
         )
 
-        # FIX 6: only auto-rotate during playback, not when the user scrubs the slider
         if _from_animation[0]:
             ax3d.view_init(elev=ax3d.elev, azim=ax3d.azim + 0.3)
 
@@ -485,7 +482,7 @@ def run_dashboard(mode="interactive"):
     slider.on_changed(on_slider_update)
 
     def toggle_play(event):
-        nonlocal is_playing  # FIX 7
+        nonlocal is_playing
         if is_playing:
             ani.event_source.stop()
             btn_play.label.set_text('Play')
