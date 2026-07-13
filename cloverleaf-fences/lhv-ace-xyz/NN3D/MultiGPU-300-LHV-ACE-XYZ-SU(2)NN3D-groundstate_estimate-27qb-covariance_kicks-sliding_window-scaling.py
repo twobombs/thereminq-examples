@@ -2,13 +2,20 @@
 # 27-Qubit 3x3x3 Macroscopic Grid Annealing (27 Patches, 729 Qubits Total)
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 83 - FULL SCALE OVERSUBSCRIBED GPU ARCHITECTURE (GOLD MASTER)
+# REVISION 85 - FULL SCALE OVERSUBSCRIBED GPU ARCHITECTURE (GOLD MASTER)
+#
+# BUGFIXES (Rev 85):
+# - PYQRACK V2.0.0 API ALIGNMENT: Updated all QrackSimulator constructors to match 
+#   the v2.0.0 signature. Removed deprecated kwargs (is_tensor_network, isPaged, 
+#   isCpuGpuHybrid, isOpenCL, isSchmidtDecompose) and reverted to snake_case kwargs 
+#   (qubit_count, is_binary_decision_tree, is_gpu).
+#
+# BUGFIXES (Rev 84):
+# - MEMORY SCOPING: Restored .copy() on step_state append to protect lattice_history 
+#   from aliasing corruption in the event of future loop optimization.
 #
 # BUGFIXES (Rev 83):
 # - SMOKE TEST: Added a strict VRAM/PCIe allocation probe during initialization.
-#   Forces an immediate device-to-host read (pauli_expectation) on every 1GB 
-#   statevector to verify that the OpenCL driver successfully mapped the host-RAM 
-#   fallback buffers before entering the Trotter loop.
 
 import os
 import sys
@@ -104,7 +111,7 @@ def gpu_worker_process(
         _THRESH = 0.5   
 
         # Z Probe
-        _probe_z = QrackSimulator(qubit_count=1, is_tensor_network=False, is_binary_decision_tree=False)
+        _probe_z = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
         vals0_z = {}
         for _code in range(8):
             try: vals0_z[_code] = _probe_z.pauli_expectation([0], [_code])
@@ -123,7 +130,7 @@ def gpu_worker_process(
         del _probe_z
 
         # X Probe
-        _probe_x = QrackSimulator(qubit_count=1, is_tensor_network=False, is_binary_decision_tree=False)
+        _probe_x = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
         _probe_x.h(0)
         vals0_x = {}
         for _code in range(8):
@@ -144,7 +151,7 @@ def gpu_worker_process(
         del _probe_x
 
         # Y Probe
-        _probe_y = QrackSimulator(qubit_count=1, is_tensor_network=False, is_binary_decision_tree=False)
+        _probe_y = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
         _c, _s = math.cos(math.pi / 4.0), math.sin(math.pi / 4.0)
         _probe_y.mtrx([complex(_c, 0), complex(0, _s), complex(0, _s), complex(_c, 0)], 0)
         vals0_y = {}
@@ -167,7 +174,7 @@ def gpu_worker_process(
         # ----------------------------
 
         # --- ANGLE CONVENTION AUTODETECT ---
-        _sim_mag = QrackSimulator(qubit_count=1, is_tensor_network=False, is_binary_decision_tree=False)
+        _sim_mag = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
         _sim_mag.r(PX, math.pi, 0)
         mag_check = _sim_mag.pauli_expectation([0], [PZ])
         _corrected = SIGN_Z * mag_check
@@ -239,7 +246,12 @@ def gpu_worker_process(
         intra_edges, boundaries = generate_27q_lattice_subvolume()
 
         for p in assigned_patches:
-            sim = QrackSimulator(qubit_count=QUBITS_PER_PATCH, is_tensor_network=False, is_binary_decision_tree=False)
+            sim = QrackSimulator(
+                qubit_count=QUBITS_PER_PATCH,
+                is_binary_decision_tree=False,
+                is_stabilizer_hybrid=False,
+                is_gpu=True,
+            )
             for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
             sims[p] = sim
             
@@ -450,7 +462,7 @@ class MultiGpuHadronEngine:
                     )
 
                 # --- BUILD PROFILES ---
-                step_state    = np.zeros((TOTAL_PATCHES, QUBITS_PER_PATCH, 3))
+                step_state = np.zeros((TOTAL_PATCHES, QUBITS_PER_PATCH, 3))
                 patch_profiles = {}
                 bq = self._bq_arr
 
@@ -480,7 +492,7 @@ class MultiGpuHadronEngine:
                         print(f"[Checkpoint] Warning: Failed to save: {e}", file=sys.stderr)
 
                 # --- COMPUTE KICKS & BOUNDARY ENERGY ---
-                next_kick_payloads       = {p: {} for p in range(TOTAL_PATCHES)}
+                next_kick_payloads = {p: {} for p in range(TOTAL_PATCHES)}
                 macroscopic_boundary_energy = 0.0
                 
                 scale = np.sqrt(dt * measure_every / effective_shots)
@@ -594,4 +606,3 @@ if __name__ == "__main__":
         )
     except KeyboardInterrupt:
         pass
-
