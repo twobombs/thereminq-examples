@@ -28,7 +28,7 @@ QUBITS_PER_PATCH = 27
 
 # Topography tuning for raw statevectors
 GPUS_AVAILABLE = 1
-WORKERS_PER_GPU = 4  # 4 workers handling ~7 patches each
+WORKERS_PER_GPU = 1  # 4 workers handling ~7 patches each
 TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
 
 # =====================================================================
