@@ -26,6 +26,38 @@ from openai import OpenAI
 # Global Configuration & Endpoints
 # ==============================================================================
 
+# Phase 0: Git Repository Intake Config
+GIT_CLONE_DEPTH = 1
+GIT_CLONE_TIMEOUT = 600
+REPO_MAX_FILE_CHARS = 200000        # Skip single files larger than this
+REPO_MAX_TOTAL_CHARS = 4000000      # Hard cap on total ingested source characters
+REPO_MANIFEST_MAX_ENTRIES = 400     # Cap manifest listing length in the intake doc
+REPO_SUMMARY_REDUCE_DEPTH = 3       # Max recursive reduce passes over batch summaries
+
+REPO_CODE_EXTENSIONS = {
+    ".py", ".pyx", ".pyi", ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".cu", ".cuh",
+    ".cl", ".rs", ".go", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".java", ".kt",
+    ".swift", ".rb", ".php", ".cs", ".sh", ".bash", ".zsh", ".ps1", ".pl", ".lua",
+    ".r", ".jl", ".scala", ".sql", ".m", ".mm", ".v", ".vhd", ".proto", ".cmake",
+    ".mk", ".gradle", ".tf", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".json",
+    ".md", ".rst", ".txt", ".dockerfile"
+}
+REPO_SPECIAL_FILENAMES = {
+    "dockerfile", "makefile", "cmakelists.txt", "requirements.txt", "setup.py",
+    "setup.cfg", "pyproject.toml", "package.json", "cargo.toml", "go.mod",
+    "readme", "license", "gemfile", "rakefile", "justfile"
+}
+REPO_EXCLUDE_FILENAMES = {
+    "package-lock.json", "yarn.lock", "poetry.lock", "cargo.lock", "pnpm-lock.yaml",
+    "composer.lock", "gemfile.lock"
+}
+REPO_EXCLUDE_DIRS = {
+    ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build", "target",
+    "__pycache__", ".venv", "venv", "env", ".tox", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", "site-packages", ".idea", ".vscode", "third_party", "external",
+    ".eggs", "htmlcov", ".ipynb_checkpoints"
+}
+
 # Phase 1: Raw Generation Config
 GEN_API_BASE = os.getenv("OPENAI_API_BASE", "http://localhost:8033/v1")
 GEN_API_KEY = os.getenv("OPENAI_API_KEY", "sk-local")
@@ -141,6 +173,373 @@ Do not include any conversational filler. Just output the raw document content."
         sys.exit(1)
 
 # ==============================================================================
+# Phase 0: Git Repository Intake
+# ==============================================================================
+
+GIT_URL_PATTERNS = [
+    r'^https?://[\w.\-]+(:\d+)?/[\w.\-~+/%]+(\.git)?/?$',
+    r'^git@[\w.\-]+:[\w.\-~+/%]+(\.git)?$',
+    r'^ssh://(git@)?[\w.\-]+(:\d+)?/[\w.\-~+/%]+(\.git)?$',
+    r'^git://[\w.\-]+/[\w.\-~+/%]+(\.git)?$',
+]
+
+_REPO_EXT_LANG_MAP = {
+    ".py": "python", ".pyx": "python", ".pyi": "python", ".c": "c", ".h": "c",
+    ".cpp": "cpp", ".hpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".cu": "cuda",
+    ".cuh": "cuda", ".cl": "c", ".rs": "rust", ".go": "go", ".js": "javascript",
+    ".mjs": "javascript", ".cjs": "javascript", ".ts": "typescript",
+    ".tsx": "tsx", ".jsx": "jsx", ".java": "java", ".kt": "kotlin",
+    ".swift": "swift", ".rb": "ruby", ".php": "php", ".cs": "csharp",
+    ".sh": "bash", ".bash": "bash", ".zsh": "bash", ".ps1": "powershell",
+    ".pl": "perl", ".lua": "lua", ".r": "r", ".jl": "julia", ".scala": "scala",
+    ".sql": "sql", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
+    ".json": "json", ".md": "markdown", ".rst": "rst", ".proto": "protobuf",
+    ".cmake": "cmake", ".tf": "hcl"
+}
+
+def validate_git_url(git_url: str) -> bool:
+    return any(re.match(p, git_url) for p in GIT_URL_PATTERNS)
+
+def clone_git_repository(git_url: str) -> tuple:
+    if shutil.which("git") is None:
+        print("[!] Fatal: 'git' executable not found on PATH.", flush=True)
+        sys.exit(1)
+
+    clone_dir = Path(tempfile.mkdtemp(prefix="autoresearch_repo_"))
+    print(f"[*] Cloning repository (depth={GIT_CLONE_DEPTH}): {git_url}", flush=True)
+
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    cmd = ["git", "clone", "--depth", str(GIT_CLONE_DEPTH), "--single-branch",
+           "--", git_url, str(clone_dir)]
+    try:
+        start_time = time.time()
+        res = subprocess.run(cmd, capture_output=True, encoding="ascii",
+                             errors="ignore", timeout=GIT_CLONE_TIMEOUT, env=env)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(clone_dir, ignore_errors=True)
+        print(f"[!] Fatal: git clone timed out after {GIT_CLONE_TIMEOUT}s.", flush=True)
+        sys.exit(1)
+
+    if res.returncode != 0:
+        shutil.rmtree(clone_dir, ignore_errors=True)
+        err_lines = [l for l in (res.stderr or "").strip().splitlines() if l.strip()]
+        err_tail = err_lines[-1] if err_lines else "unknown error"
+        print(f"[!] Fatal: git clone failed: {err_tail}", flush=True)
+        sys.exit(1)
+
+    commit_hash, branch_name = "unknown", "unknown"
+    try:
+        h = subprocess.run(["git", "-C", str(clone_dir), "rev-parse", "HEAD"],
+                           capture_output=True, encoding="ascii", errors="ignore", timeout=30)
+        if h.returncode == 0:
+            commit_hash = h.stdout.strip()
+        b = subprocess.run(["git", "-C", str(clone_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+                           capture_output=True, encoding="ascii", errors="ignore", timeout=30)
+        if b.returncode == 0:
+            branch_name = b.stdout.strip()
+    except Exception:
+        pass
+
+    elapsed = round(time.time() - start_time, 2)
+    print(f"    [+] Clone complete in {elapsed}s. HEAD: {commit_hash[:12]} (branch: {branch_name})", flush=True)
+    return clone_dir, commit_hash, branch_name
+
+def _read_repo_file(file_path: Path) -> str | None:
+    encodings = ['utf-8', 'latin-1', 'ascii']
+    for enc in encodings:
+        try:
+            errors = "ignore" if enc == 'ascii' else "strict"
+            with open(file_path, "r", encoding=enc, errors=errors) as f:
+                return f.read()
+        except Exception:
+            continue
+    return None
+
+def collect_repo_code_files(repo_dir: Path) -> tuple:
+    entries = []
+    stats = {"ingested": 0, "skipped_large": 0, "skipped_binary": 0,
+             "skipped_unreadable": 0, "total_chars": 0, "capped": False}
+
+    candidates = []
+    for path in repo_dir.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        rel = path.relative_to(repo_dir)
+        if any(part in REPO_EXCLUDE_DIRS for part in rel.parts):
+            continue
+        name_lower = path.name.lower()
+        stem_lower = path.stem.lower()
+        if name_lower in REPO_EXCLUDE_FILENAMES:
+            continue
+        if (path.suffix.lower() not in REPO_CODE_EXTENSIONS
+                and name_lower not in REPO_SPECIAL_FILENAMES
+                and stem_lower not in REPO_SPECIAL_FILENAMES):
+            continue
+        candidates.append((rel, path))
+
+    def sort_key(item):
+        rel, _ = item
+        name_lower = rel.name.lower()
+        is_priority = (name_lower.startswith("readme")
+                       or name_lower in REPO_SPECIAL_FILENAMES
+                       or rel.stem.lower() in REPO_SPECIAL_FILENAMES)
+        return (0 if is_priority else 1, len(rel.parts), str(rel).lower())
+
+    candidates.sort(key=sort_key)
+
+    for rel, path in candidates:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            stats["skipped_unreadable"] += 1
+            continue
+        if size == 0:
+            continue
+        if size > REPO_MAX_FILE_CHARS:
+            stats["skipped_large"] += 1
+            continue
+        try:
+            with open(path, "rb") as fb:
+                if b"\x00" in fb.read(8192):
+                    stats["skipped_binary"] += 1
+                    continue
+        except OSError:
+            stats["skipped_unreadable"] += 1
+            continue
+
+        content = _read_repo_file(path)
+        if content is None or not content.strip():
+            stats["skipped_unreadable"] += 1
+            continue
+        if stats["total_chars"] + len(content) > REPO_MAX_TOTAL_CHARS:
+            stats["capped"] = True
+            print(f"    [!] WARNING: Total ingest cap of {REPO_MAX_TOTAL_CHARS:,} characters reached. Remaining files skipped.", flush=True)
+            break
+
+        stats["total_chars"] += len(content)
+        stats["ingested"] += 1
+        rel_str = str(rel).replace("\\", "/")
+
+        if len(content) > MAX_CHUNK_CHARS:
+            part_count = (len(content) + MAX_CHUNK_CHARS - 1) // MAX_CHUNK_CHARS
+            for p_idx in range(part_count):
+                segment = content[p_idx * MAX_CHUNK_CHARS:(p_idx + 1) * MAX_CHUNK_CHARS]
+                entries.append({
+                    "path": f"{rel_str} (part {p_idx + 1}/{part_count})",
+                    "suffix": path.suffix.lower(),
+                    "content": segment, "chars": len(segment)
+                })
+        else:
+            entries.append({"path": rel_str, "suffix": path.suffix.lower(),
+                            "content": content, "chars": len(content)})
+
+    return entries, stats
+
+def batch_repo_entries(entries: list) -> list:
+    batches, current, current_chars = [], [], 0
+    for entry in entries:
+        if current and current_chars + entry["chars"] > MAX_CHUNK_CHARS:
+            batches.append(current)
+            current, current_chars = [], 0
+        current.append(entry)
+        current_chars += entry["chars"]
+    if current:
+        batches.append(current)
+    return batches
+
+def build_repo_manifest(git_url: str, repo_name: str, commit_hash: str,
+                        branch_name: str, entries: list, stats: dict, focus: str) -> str:
+    lines = [f"# Git Repository Analysis: {repo_name}", ""]
+    lines.append(f"- **Source URL:** {git_url}")
+    lines.append(f"- **Branch:** {branch_name}")
+    lines.append(f"- **HEAD Commit:** {commit_hash}")
+    lines.append(f"- **Cloned:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"- **Files ingested:** {stats['ingested']} ({stats['total_chars']:,} characters)")
+    skipped_total = stats["skipped_large"] + stats["skipped_binary"] + stats["skipped_unreadable"]
+    lines.append(f"- **Files skipped:** {skipped_total} ({stats['skipped_large']} oversized, "
+                 f"{stats['skipped_binary']} binary, {stats['skipped_unreadable']} unreadable)")
+    if stats.get("capped"):
+        lines.append(f"- **NOTE:** Ingestion stopped at the {REPO_MAX_TOTAL_CHARS:,} character cap; the repository was not fully ingested.")
+    if focus:
+        lines.append(f"- **Analysis focus:** {focus}")
+    lines.append("")
+    lines.append("## Ingested File Manifest")
+    lines.append("")
+    manifest_paths = [e["path"] for e in entries]
+    for p in manifest_paths[:REPO_MANIFEST_MAX_ENTRIES]:
+        lines.append(f"- {p}")
+    if len(manifest_paths) > REPO_MANIFEST_MAX_ENTRIES:
+        lines.append(f"- ... and {len(manifest_paths) - REPO_MANIFEST_MAX_ENTRIES} more file segments")
+    lines.append("")
+    return "\n".join(lines)
+
+def render_inline_source(entries: list) -> str:
+    sections = ["## Source Files", ""]
+    for entry in entries:
+        lang = _REPO_EXT_LANG_MAP.get(entry.get("suffix", ""), "")
+        fence = "````" if "```" in entry["content"] else "```"
+        sections.append(f"### {entry['path']}")
+        sections.append(f"{fence}{lang}")
+        sections.append(entry["content"].rstrip())
+        sections.append(fence)
+        sections.append("")
+    return "\n".join(sections)
+
+def _repo_worker_call(system_prompt: str, user_prompt: str, endpoint: str) -> str:
+    client = OpenAI(base_url=endpoint, api_key=WORKER_API_KEY, timeout=1800.0, max_retries=0)
+    response = client.chat.completions.create(
+        model=WORKER_MODEL,
+        messages=[{"role": "system", "content": system_prompt},
+                  {"role": "user", "content": user_prompt}],
+        temperature=0.2,
+        max_tokens=MAX_WORKER_TOKENS
+    )
+    return response.choices[0].message.content.strip()
+
+def _parallel_repo_jobs(jobs: list, job_fn, fallback_fn, label: str) -> list:
+    total = len(jobs)
+    slot_queue = queue.Queue()
+    for ep in WORKER_ENDPOINTS:
+        for _ in range(WORKER_PARALLEL_SLOTS):
+            slot_queue.put(ep)
+
+    results = [""] * total
+
+    def wrapper(idx: int, payload):
+        for _ in range(WORKER_RETRIES):
+            endpoint = slot_queue.get()
+            try:
+                output = job_fn(idx + 1, total, payload, endpoint)
+                if output and len(output.strip()) >= 20:
+                    return output.strip()
+            except Exception as e:
+                print(f"        [!] {label} {idx + 1}/{total} attempt failed: {e}", flush=True)
+            finally:
+                slot_queue.put(endpoint)
+            time.sleep(2)
+        print(f"        [!] {label} {idx + 1}/{total} exhausted retries. Using bounded fallback.", flush=True)
+        return fallback_fn(payload)
+
+    pool_size = max(1, len(WORKER_ENDPOINTS) * WORKER_PARALLEL_SLOTS)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as executor:
+        future_to_idx = {executor.submit(wrapper, i, job): i for i, job in enumerate(jobs)}
+        for future in concurrent.futures.as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            results[idx] = future.result()
+            print(f"        [+] {label} {idx + 1}/{total} complete.", flush=True)
+    return results
+
+def summarize_repo_batches(batches: list, focus: str) -> list:
+    def job_fn(batch_id: int, total: int, files: list, endpoint: str) -> str:
+        corpus = "\n\n".join(
+            [f"===== FILE: {f['path']} =====\n{f['content']}" for f in files]
+        )
+        system_prompt = (
+            "You are a senior staff engineer performing a rigorous code audit of a repository batch. "
+            "For EVERY file provided, output a markdown section starting with '### <file path>' containing: "
+            "1. Purpose of the file. "
+            "2. Key classes and functions with one-line descriptions (include signatures where useful). "
+            "3. External dependencies and relationships to other files. "
+            "4. Notable issues, bugs, TODOs, or architectural concerns. "
+            "Be dense and technical. Do not omit any file. Do not add conversational filler. "
+            "Output strictly in standard ASCII."
+        )
+        if focus:
+            system_prompt += f"\n\nANALYSIS FOCUS: Prioritize findings relevant to: {focus}"
+        user_prompt = f"Repository batch {batch_id}/{total}. Analyse these files:\n\n{corpus}"
+        return _repo_worker_call(system_prompt, user_prompt, endpoint)
+
+    def fallback_fn(files: list) -> str:
+        return "\n\n".join(
+            [f"### {f['path']}\n(Summarization failed; truncated raw preview below.)\n\n"
+             f"{f['content'][:2000]}" for f in files]
+        )
+
+    print(f"    [*] Summarizing {len(batches)} batches across "
+          f"{len(WORKER_ENDPOINTS)} worker endpoint(s) x {WORKER_PARALLEL_SLOTS} slots...", flush=True)
+    return _parallel_repo_jobs(batches, job_fn, fallback_fn, "Repo batch")
+
+def reduce_repo_summaries(summaries: list, focus: str, char_budget: int) -> str:
+    combined = "\n\n".join(summaries)
+
+    def job_fn(chunk_id: int, total: int, chunk_text: str, endpoint: str) -> str:
+        system_prompt = (
+            "You are a consolidation node merging per-file code audit notes from a large repository. "
+            "Merge and deduplicate the notes into a compressed but information-dense markdown analysis. "
+            "Preserve every distinct file path as a '### <file path>' header. "
+            "Retain concrete technical detail: function names, dependencies, issues, TODOs. "
+            "Remove repetition and filler. Output strictly in standard ASCII."
+        )
+        if focus:
+            system_prompt += f"\n\nANALYSIS FOCUS: Prioritize findings relevant to: {focus}"
+        user_prompt = f"Consolidation chunk {chunk_id}/{total}:\n\n{chunk_text}"
+        return _repo_worker_call(system_prompt, user_prompt, endpoint)
+
+    def fallback_fn(chunk_text: str) -> str:
+        return chunk_text[:MAX_CHUNK_CHARS // 2]
+
+    depth = 0
+    while len(combined) > char_budget and depth < REPO_SUMMARY_REDUCE_DEPTH:
+        depth += 1
+        print(f"    [*] Reduce pass {depth}: consolidating {len(combined):,} chars "
+              f"toward {char_budget:,} char budget...", flush=True)
+        chunks = split_into_logical_chunks(combined, MAX_CHUNK_CHARS)
+        merged = _parallel_repo_jobs(chunks, job_fn, fallback_fn, "Reduce chunk")
+        new_combined = "\n\n".join(merged)
+        if len(new_combined) >= len(combined):
+            print("    [!] Reduce pass produced no compression. Stopping reduction.", flush=True)
+            break
+        combined = new_combined
+
+    if len(combined) > char_budget:
+        combined = combined[:char_budget] + "\n\n...[REPO ANALYSIS TRUNCATED FOR CONTEXT LIMITS]..."
+    return combined
+
+def ingest_git_repository(git_url: str, target_dir: Path, focus: str = "") -> Path:
+    print(f"\n[PHASE 0] GIT REPOSITORY INTAKE", flush=True)
+
+    if not validate_git_url(git_url):
+        print(f"[!] Fatal: '{git_url}' does not look like a valid git URL (https/ssh/git).", flush=True)
+        sys.exit(1)
+
+    clone_dir, commit_hash, branch_name = clone_git_repository(git_url)
+    try:
+        entries, stats = collect_repo_code_files(clone_dir)
+        if not entries:
+            print("[!] Fatal: No ingestible code or documentation files found in repository.", flush=True)
+            sys.exit(1)
+
+        repo_tail = git_url.rstrip('/').split('/')[-1].split(':')[-1]
+        repo_name = re.sub(r'\.git$', '', repo_tail) or "repository"
+
+        header = build_repo_manifest(git_url, repo_name, commit_hash, branch_name,
+                                     entries, stats, focus)
+        body_budget = max(10000, MAX_CONTEXT_CHARS - len(header))
+
+        if stats["total_chars"] + len(header) <= MAX_CONTEXT_CHARS:
+            print(f"    [*] Repository fits in context ({stats['total_chars']:,} chars). Embedding source directly.", flush=True)
+            body = render_inline_source(entries)
+        else:
+            print(f"    [*] Repository exceeds context ({stats['total_chars']:,} chars). Engaging worker map-reduce summarization.", flush=True)
+            batches = batch_repo_entries(entries)
+            print(f"    [*] Packed {len(entries)} file segments into {len(batches)} batches "
+                  f"(<= {MAX_CHUNK_CHARS:,} chars each).", flush=True)
+            summaries = summarize_repo_batches(batches, focus)
+            body = "## Repository Analysis\n\n" + reduce_repo_summaries(summaries, focus, body_budget)
+
+        document = f"{header}\n{body}"
+        filename = generate_safe_filename(f"git repo analysis {repo_name}")
+        filepath = target_dir / filename
+        with open(filepath, "w", encoding="ascii", errors="ignore") as f:
+            f.write(document.strip() + "\n")
+
+        print(f"[+] Repository intake document saved to: {filepath.absolute()} ({len(document):,} chars)", flush=True)
+        return filepath
+    finally:
+        shutil.rmtree(clone_dir, ignore_errors=True)
+
+# ==============================================================================
 # Phase 2: Fluff-to-Action Technical Distillation
 # ==============================================================================
 
@@ -247,15 +646,28 @@ Output ONLY a valid, flat JSON array of strings. No markdown formatting, no conv
         
         try:
             start_time = time.time()
-            response = client.chat.completions.create(
-                model=ORCHESTRATOR_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Decompose this to the atomic level:\n\n{large_query}"}
-                ],
-                temperature=0.7, max_tokens=40960, stream=True,
-                stream_options={"include_usage": True}
-            )
+            try:
+                response = client.chat.completions.create(
+                    model=ORCHESTRATOR_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Decompose this to the atomic level:\n\n{large_query}"}
+                    ],
+                    temperature=0.7, max_tokens=40960, stream=True,
+                    stream_options={"include_usage": True}
+                )
+            except Exception as e:
+                if "stream_options" in str(e).lower() or "unrecognized" in str(e).lower():
+                    response = client.chat.completions.create(
+                        model=ORCHESTRATOR_MODEL,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"Decompose this to the atomic level:\n\n{large_query}"}
+                        ],
+                        temperature=0.7, max_tokens=40960, stream=True
+                    )
+                else:
+                    raise e
             
             for chunk in response:
                 if chunk.choices and chunk.choices[0].delta.content is not None:
@@ -405,6 +817,10 @@ def rolling_master_stitch(chunk_id: int, current_master: str, new_chunk: str, en
     return res_content, p_tok, c_tok, elapsed
 
 def execute_continuous_map_reduce(sub_tasks: list, original_query: str, run_dir: Path) -> tuple:
+    if not ORCHESTRATOR_ENDPOINTS or not WORKER_ENDPOINTS:
+        print("\n[!] FATAL: Endpoints not defined for map-reduce cluster.", flush=True)
+        sys.exit(1)
+
     if not sub_tasks:
         return "", 0, 0, 0, 0, []
         
@@ -455,10 +871,8 @@ def execute_continuous_map_reduce(sub_tasks: list, original_query: str, run_dir:
                         res["result"] = res["result"][:safe_char_limit] + "\n\n...[OUTPUT TRUNCATED DUE TO LENGTH LIMIT]..."
                         res["completion_tokens"] = MAX_WORKER_TOKENS
                     
-                    accum_c_tok += res["completion_tokens"]
                     res["prompt_tokens"] = accum_p_tok
-                    res["completion_tokens"] = accum_c_tok
-                    res["total_tokens"] = accum_p_tok + accum_c_tok
+                    res["total_tokens"] = res["prompt_tokens"] + res["completion_tokens"]
                     
                     event_queue.put(("worker", res))
                     return  
@@ -485,7 +899,7 @@ def execute_continuous_map_reduce(sub_tasks: list, original_query: str, run_dir:
                 event_queue.put(("chunk", b_id, text, p_tok, c_tok, elap, slot_name))
                 return
             except Exception as e:
-                pass
+                print(f"        [!] chunk_wrapper attempt {attempt} failed: {e}", flush=True)
             finally:
                 orch_queue.put((endpoint, slot_name))
             time.sleep(2)
@@ -497,6 +911,7 @@ def execute_continuous_map_reduce(sub_tasks: list, original_query: str, run_dir:
     
     def master_stitch_consumer():
         nonlocal master_document, stitch_p_tok, stitch_c_tok
+        orch_endpoint = ORCHESTRATOR_ENDPOINTS[0]
         while True:
             item = stitch_queue.get()
             if item is None: 
@@ -509,7 +924,6 @@ def execute_continuous_map_reduce(sub_tasks: list, original_query: str, run_dir:
             else:
                 success = False
                 for attempt in range(1, MAX_RETRIES + 1):
-                    orch_endpoint, slot_name = orch_queue.get()
                     try:
                         new_doc, p, c, elap = rolling_master_stitch(c_id, master_document, c_text, orch_endpoint, original_query)
                         master_document = new_doc
@@ -518,10 +932,8 @@ def execute_continuous_map_reduce(sub_tasks: list, original_query: str, run_dir:
                         success = True
                         break
                     except Exception as e:
-                        pass
-                    finally:
-                        orch_queue.put((orch_endpoint, slot_name))
-                    time.sleep(2)
+                        print(f"        [!] master_stitch attempt {attempt} failed: {e}", flush=True)
+                        time.sleep(2)
                 if not success:
                     master_document += f"\n\n\n" + c_text
             stitch_queue.task_done()
@@ -637,7 +1049,7 @@ def extract_and_protect_blocks(markdown_text: str) -> Tuple[str, Dict[str, str]]
 def split_into_logical_chunks(text: str, max_chars: int) -> List[str]:
     chunks = []
     current_chunk = ""
-    sections = re.split(r'(?=\n## )', text)
+    sections = [s for s in re.split(r'(?=\n## )', text) if s.strip()]
 
     for section in sections:
         if len(current_chunk) + len(section) < max_chars:
@@ -708,6 +1120,9 @@ def semantic_deduplication(chunk_text: str, chunk_id: int, total_chunks: int, en
         return chunk_text
 
 def parallel_edit_chunks(chunks: List[str]) -> str:
+    if not ORCHESTRATOR_ENDPOINTS:
+        return "\n\n".join(chunks)
+
     total_chunks = len(chunks)
     endpoint_queue = queue.Queue()
     for ep in ORCHESTRATOR_ENDPOINTS:
@@ -727,7 +1142,9 @@ def parallel_edit_chunks(chunks: List[str]) -> str:
         finally:
             endpoint_queue.put((endpoint, slot_name))
 
-    pool_size = max(1, endpoint_queue.qsize())
+    total_slots = len(ORCHESTRATOR_ENDPOINTS) * CONCURRENT_SLOTS_PER_ENDPOINT
+    pool_size = max(1, total_slots)
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as executor:
         future_to_idx = {executor.submit(worker_wrapper, i, chunk): i for i, chunk in enumerate(chunks)}
         for future in concurrent.futures.as_completed(future_to_idx):
@@ -897,6 +1314,12 @@ def extract_code_blocks(md_content: str, output_dir: str | Path) -> list:
     
     while i < len(lines):
         line = lines[i]
+        
+        if "</file>" in line:
+            detected_filename = None
+            i += 1
+            continue
+            
         xml_match = re.search(r'<file path="([^"]+)">', line)
         if xml_match:
             detected_filename = xml_match.group(1)
@@ -1213,17 +1636,20 @@ def run_phase6_project_distillation(project_dir: Path):
     print(f"\n[PHASE 6] STARTING PROJECT DISTILLATION", flush=True)
     project_name = project_dir.name
     
-    exclude_dirs = {"tests", "reports", "tasks", "artifacts"}
+    exclude_dirs = {"tests", "tasks", "artifacts"}
+    p6_exclude_names = {"DISTILLED_TASKS", "project_state", "FINAL_SYNTHESIS", "POLISHED_SYNTHESIS"}
+    
     raw_files = list(project_dir.rglob("*.txt")) + list(project_dir.rglob("*.md")) + list(project_dir.rglob("*.csv")) + list(project_dir.rglob("*.json"))
     raw_files = [f for f in raw_files if 
-        "DISTILLED_TASKS" not in f.name 
-        and "project_state" not in f.name
-        and "execution_report" not in f.name
+        not any(ex in f.name for ex in p6_exclude_names)
         and not any(p.name in exclude_dirs for p in f.parents)]
         
     if not raw_files:
         print(f"[{project_name}] No raw documentation or test logs found. Skipping.", flush=True)
         return
+        
+    # Ensure execution reports are processed first before MAX_CONTEXT_CHARS truncation hits
+    raw_files.sort(key=lambda x: 0 if "execution_report" in x.name else 1)
         
     aggregated_content = []
     for file_path in raw_files:
@@ -1257,17 +1683,23 @@ def main():
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument("-p", "--prompt", type=str, help="Direct prompt for the full pipeline.")
     group.add_argument("-f", "--file", type=str, help="Path to a text file containing the prompt.")
+    group.add_argument("-g", "--git", type=str, help="Git repository URL to clone and analyse as the pipeline input.")
     
+    parser.add_argument("--focus", type=str, default="", help="Optional analysis focus applied during git repository intake (used with -g).")
     parser.add_argument("-d", "--dir", type=str, default="run_data", help="Base directory for outputs.")
     parser.add_argument("-c", "--category", type=str, default="projects", help="Category folder.")
     parser.add_argument("-r", "--resume", action="store_true", help="Resume pipeline from the furthest completed artifact in the target directory.")
     
     args = parser.parse_args()
     
-    if args.resume and (args.prompt or args.file):
-        parser.error("--resume cannot be combined with -p or -f.")
-    if not args.resume and not args.prompt and not args.file:
-        parser.error("Must provide either a prompt (-p), a prompt file (-f), or use the resume flag (-r).")
+    if args.resume and (args.prompt or args.file or args.git):
+        parser.error("--resume cannot be combined with -p, -f, or -g.")
+    if not args.resume and not args.prompt and not args.file and not args.git:
+        parser.error("Must provide a prompt (-p), a prompt file (-f), a git URL (-g), or use the resume flag (-r).")
+    if args.focus and not args.git:
+        parser.error("--focus can only be used together with -g/--git.")
+    if args.git and not validate_git_url(args.git):
+        parser.error(f"'{args.git}' does not look like a valid git URL (https/ssh/git).")
         
     target_prompt = ""
     if args.file:
@@ -1305,16 +1737,15 @@ def main():
     # State tracking
     raw_filepath = None
     distilled_filepath = None
-    run_directory = target_directory
-    final_file_path = run_directory / "FINAL_SYNTHESIS.md"
+    final_file_path = target_directory / "FINAL_SYNTHESIS.md"
     output_path = target_directory / "POLISHED_SYNTHESIS.md"
     report_path = target_directory / "reports" / "execution_report.json"
     distilled_tasks_path = target_directory / "DISTILLED_TASKS.md"
 
     if args.resume:
         md_files = list(target_directory.glob("*.md"))
-        exclude_names = {"FINAL_SYNTHESIS.md", "POLISHED_SYNTHESIS.md", "DISTILLED_TASKS.md"}
-        valid_raw = [f for f in md_files if re.match(r'^\d{8}_\d{6}_.*\.md$', f.name) and f.name not in exclude_names]
+        resume_exclude_names = {"FINAL_SYNTHESIS.md", "POLISHED_SYNTHESIS.md", "DISTILLED_TASKS.md"}
+        valid_raw = [f for f in md_files if re.match(r'^\d{8}_\d{6}_.*\.md$', f.name) and f.name not in resume_exclude_names]
         
         if valid_raw:
             raw_filepath = max(valid_raw, key=os.path.getmtime)
@@ -1330,9 +1761,11 @@ def main():
             sys.exit(1)
     
     # ---------------------------------------------------------
-    # PHASE 1: GENERATE
+    # PHASE 0/1: INTAKE (GIT REPOSITORY OR GENERATED CONTENT)
     if args.resume and raw_filepath and raw_filepath.exists():
         print(f"[PHASE 1] Bypassed. Resuming from existing raw file: {raw_filepath.name}")
+    elif args.git:
+        raw_filepath = ingest_git_repository(args.git, target_directory, args.focus)
     else:
         raw_filepath = generate_content(target_prompt, target_directory)
 
@@ -1356,8 +1789,8 @@ def main():
         master_start_time = time.time()
         fragments, p_tok, c_tok = decompose_to_atomic_pieces(target_query)
         
-        run_directory = export_to_split_files(fragments, distilled_filepath.parent)
-        final_output, w_p, w_c, o_p, o_c, worker_stats = execute_continuous_map_reduce(fragments, target_query, run_directory)
+        export_to_split_files(fragments, target_directory)
+        final_output, w_p, w_c, o_p, o_c, worker_stats = execute_continuous_map_reduce(fragments, target_query, target_directory)
         
         master_elapsed_time = time.time() - master_start_time
 
@@ -1372,7 +1805,6 @@ def main():
         
         final_output += stats_md + agg_md
         
-        final_file_path = run_directory / "FINAL_SYNTHESIS.md"
         with open(final_file_path, "w", encoding="ascii", errors="ignore") as f:
             f.write(final_output)
 
