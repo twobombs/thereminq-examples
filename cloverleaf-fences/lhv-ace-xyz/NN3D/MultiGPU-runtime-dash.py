@@ -1,12 +1,10 @@
 # -*- coding: us-ascii -*-
-# macroscopic_lattice_dash_v5.py
-# Changes vs v4:
-#   - Fourth heatmap panel added: <X>+<Y>+<Z> total polarization sum,
-#     normalised over [-3, +3] with its own distinct colormap (viridis)
-#     so it reads visually differently from the per-component panels.
-#   - GridSpec right column expanded to 7 rows to fit the new panel.
-#   - _init_heatmap() accepts an explicit norm so each panel can use its own.
-#   - update() computes and pushes the sum slice each frame.
+# macroscopic_lattice_dash_v6.py
+# Changes vs v5:
+#   - Removed the fourth heatmap panel (total polarization sum).
+#   - GridSpec right column reduced to 6 rows.
+#   - Enabled y-axis (XYZ coordinates) labels on hmap_y and hmap_z.
+#   - Shifted x-axis label (Local Qubit Index) to hmap_z since it is now the bottom panel.
 #
 # FIXED (Rev 85 alignment):
 #   - ENERGY_FILE: corrected filename to "meanfield_ground_state_energy_curve_multi.csv"
@@ -203,15 +201,14 @@ def run_dashboard(mode="interactive"):
     gs = gridspec.GridSpec(1, 2, width_ratios=[2.5, 1], wspace=0.1)
 
     ax3d = fig.add_subplot(gs[0], projection='3d')
-    # 7 rows: energy, disagreement, derivatives, heatmap-X, heatmap-Y, heatmap-Z, heatmap-Sum
-    gs_right = gridspec.GridSpecFromSubplotSpec(7, 1, subplot_spec=gs[1], hspace=0.80)
+    # 6 rows: energy, disagreement, derivatives, heatmap-X, heatmap-Y, heatmap-Z
+    gs_right = gridspec.GridSpecFromSubplotSpec(6, 1, subplot_spec=gs[1], hspace=0.80)
     ax_energy   = fig.add_subplot(gs_right[0])
     ax_dis      = fig.add_subplot(gs_right[1])
     ax_deriv    = fig.add_subplot(gs_right[2])
     ax_hmap_x   = fig.add_subplot(gs_right[3])
     ax_hmap_y   = fig.add_subplot(gs_right[4])
     ax_hmap_z   = fig.add_subplot(gs_right[5])
-    ax_hmap_sum = fig.add_subplot(gs_right[6])
 
     def get_vector_data(step_idx):
         return (
@@ -323,7 +320,7 @@ def run_dashboard(mode="interactive"):
     ]
     heatmap_cmap = mcolors.LinearSegmentedColormap.from_list("heatmap_cmap", heatmap_colors)
 
-    # Build shared y-tick labels (only on the top panel to save space)
+    # Build shared y-tick labels
     y_ticks = []
     y_labels = []
     if num_patches <= 32:
@@ -373,18 +370,10 @@ def run_dashboard(mode="interactive"):
                             show_ylabel=True,  show_xlabel=False)
     hmap_y = _init_heatmap(ax_hmap_y, history[0, :, :, 1],
                             heatmap_cmap, comp_norm, "Polarization <Y>",
-                            show_ylabel=False, show_xlabel=False)
+                            show_ylabel=True, show_xlabel=False)
     hmap_z = _init_heatmap(ax_hmap_z, history[0, :, :, 2],
                             heatmap_cmap, comp_norm, "Polarization <Z>",
-                            show_ylabel=False, show_xlabel=False)
-
-    # Sum panel: <X>+<Y>+<Z>, range [-3, +3]; viridis distinguishes it from components
-    sum_norm = mcolors.Normalize(vmin=-3.0, vmax=3.0)
-    sum_data_0 = history[0, :, :, 0] + history[0, :, :, 1] + history[0, :, :, 2]
-    hmap_sum = _init_heatmap(ax_hmap_sum, sum_data_0,
-                              plt.get_cmap('viridis'), sum_norm,
-                              "Total Polarization <X>+<Y>+<Z>  [-3 to +3]",
-                              show_ylabel=False, show_xlabel=True)
+                            show_ylabel=True, show_xlabel=True)
 
     fig.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.15)
     ax_slider = fig.add_axes([0.15, 0.05, 0.60, 0.02])
@@ -455,9 +444,6 @@ def run_dashboard(mode="interactive"):
         hmap_x.set_data(history[frame, :, :, 0])
         hmap_y.set_data(history[frame, :, :, 1])
         hmap_z.set_data(history[frame, :, :, 2])
-        hmap_sum.set_data(
-            history[frame, :, :, 0] + history[frame, :, :, 1] + history[frame, :, :, 2]
-        )
 
         if _from_animation[0]:
             ax3d.view_init(elev=ax3d.elev, azim=ax3d.azim + 0.3)
@@ -466,7 +452,7 @@ def run_dashboard(mode="interactive"):
         slider.set_val(frame)
         slider.eventson = True
 
-        return quiver_obj[0], energy_text, hmap_x, hmap_y, hmap_z, hmap_sum
+        return quiver_obj[0], energy_text, hmap_x, hmap_y, hmap_z
 
     def _animation_update(frame):
         _from_animation[0] = True
