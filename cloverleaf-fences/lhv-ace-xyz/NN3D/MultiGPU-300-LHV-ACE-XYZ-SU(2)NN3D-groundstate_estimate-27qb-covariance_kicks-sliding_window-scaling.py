@@ -601,7 +601,7 @@ if __name__ == "__main__":
             target_J=1.0,
             target_hx=0.5,
             target_hz=0.2,
-            measure_every=5,
+            measure_every=1,
             effective_shots=512.0
         )
     except KeyboardInterrupt:
