@@ -30,7 +30,7 @@ Workers perform intra-patch evolution and extract Pauli expectation values and v
 ## Conclusion
 The 729-qubit $3\times3\times3$ macroscopic grid annealing engine demonstrates a scalable pathway for simulating extensive multi-body quantum systems. By constraining exact statevector evolution to 27-qubit subvolumes and orchestrating their interaction via mean-field boundaries augmented by stochastic variance injection, the architecture successfully bypasses the exponential memory bottleneck while retaining critical quantum fluctuation dynamics.
 
-Future implications for this framework include the scaling of macroscopic quantum state estimation to even larger 3D Neural-Network (NN3D) topographies, where localized clusters of strongly interacting spins can be treated as semi-classical macroscopic nodes. The variance injection mechanism opens avenues for exploring thermodynamic phase transitions and investigating how well such LHV-approximated systems capture true long-range quantum correlations in the presence of noise.
+Future implications for this framework include the scaling of macroscopic quantum state estimation to even larger 3D Nearest Neighbour (NN3D) topographies, where localized clusters of strongly interacting spins can be treated as semi-classical macroscopic nodes. The variance injection mechanism opens avenues for exploring thermodynamic phase transitions and investigating how well such LHV-approximated systems capture true long-range quantum correlations in the presence of noise.
 
 ## References
 [1] B. D. M. Jones, G. O. O'Brien, D. R. White, E. T. Campbell, and J. A. Clark, "Optimising Trotter-Suzuki Decompositions for Quantum Simulation Using Evolutionary Strategies," arXiv:1904.01336 [quant-ph] (2019).
