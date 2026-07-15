@@ -2,20 +2,18 @@
 # 27-Qubit 3x3x3 Macroscopic Grid Annealing (27 Patches, 729 Qubits Total)
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 85 - FULL SCALE OVERSUBSCRIBED GPU ARCHITECTURE (GOLD MASTER)
+# REVISION 88 - LATENT VARIANCE SCALING FIX
 #
-# BUGFIXES (Rev 85):
-# - PYQRACK V2.0.0 API ALIGNMENT: Updated all QrackSimulator constructors to match 
-#   the v2.0.0 signature. Removed deprecated kwargs (is_tensor_network, isPaged, 
-#   isCpuGpuHybrid, isOpenCL, isSchmidtDecompose) and reverted to snake_case kwargs 
-#   (qubit_count, is_binary_decision_tree, is_gpu).
+# BUGFIXES (Rev 88):
+# - STOCHASTIC SCALING: Removed `measure_every` from the `scale` calculation 
+#   (now `np.sqrt(dt / effective_shots)`). Since the boundary field payload is 
+#   applied at every intermediate Trotter step, baking the lumped measurement 
+#   interval variance into the continuous field artificially inflated the noise.
 #
-# BUGFIXES (Rev 84):
-# - MEMORY SCOPING: Restored .copy() on step_state append to protect lattice_history 
-#   from aliasing corruption in the event of future loop optimization.
-#
-# BUGFIXES (Rev 83):
-# - SMOKE TEST: Added a strict VRAM/PCIe allocation probe during initialization.
+# BUGFIXES (Rev 87):
+# - CONTINUOUS COUPLING: Removed the non-measure payload reset in the worker loop. 
+# - INTEGRATION SCALING: Dropped the `m_every` multiplier from `apply_kicks`.
+# - FIDELITY WARNING: Added a one-time stderr alert for missing PyQrack fidelity bindings.
 
 import os
 import sys
@@ -35,7 +33,7 @@ QUBITS_PER_PATCH = 27
 
 # Topography tuning for raw statevectors
 GPUS_AVAILABLE = 1
-WORKERS_PER_GPU = 1  # 4 workers handling ~7 patches each
+WORKERS_PER_GPU = 1  # Adjust >1 for decisive experiment comparison
 TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
 
 # =====================================================================
@@ -97,8 +95,9 @@ def gpu_worker_process(
     os.environ["QRACK_QPAGER_DEVICES"] = str(physical_gpu_index)
     os.environ["QRACK_QUNITMULTI_DEVICES"] = str(physical_gpu_index)
     
-    # Unleash VRAM allocations to allow native driver oversubscription handling
-    os.environ["QRACK_MAX_ALLOC_MB"] = "64000"
+    # Unleash VRAM allocations, proportionally capping by worker density
+    alloc_mb = 64000 // workers_per_gpu
+    os.environ["QRACK_MAX_ALLOC_MB"] = str(alloc_mb)
     os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
 
     import pyqrack
@@ -228,12 +227,13 @@ def gpu_worker_process(
         def zz_means_meanfield(z_exp, edges):
             return np.array([z_exp[q1] * z_exp[q2] for q1, q2 in edges])
 
-        def apply_kicks(sim, kicks, dt_local, m_every):
+        def apply_kicks(sim, kicks, dt_local):
             if not kicks: return
             for raw_q, (kx, ky, kz) in kicks.items():
                 q = int(raw_q)
                 
-                coef = -2.0 * dt_local * m_every
+                # Continuous evolution across all steps: m_every multiplier removed
+                coef = -2.0 * dt_local 
                 
                 theta_x = kx * coef
                 theta_y = ky * coef
@@ -256,14 +256,13 @@ def gpu_worker_process(
             sims[p] = sim
             
             # --- VRAM PAGING SMOKE TEST ---
-            # Force a trivial read across the PCIe bus to confirm the driver 
-            # successfully mapped the oversubscribed host-RAM buffer.
             try:
                 _ = sim.pauli_expectation([0], [PZ])
             except Exception as e:
                 raise RuntimeError(f"Fatal: VRAM/PCIe paging allocation failed on patch {p}. Driver error: {e}")
 
         kick_payloads = {p: {} for p in assigned_patches}
+        _warned_fidelity = False
 
         for t in range(total_steps):
             s = t / max(1, (total_steps - 1))
@@ -277,7 +276,7 @@ def gpu_worker_process(
             for p in assigned_patches:
                 sim = sims[p]
                 if kick_payloads[p]:
-                    apply_kicks(sim, kick_payloads[p], dt, measure_every)
+                    apply_kicks(sim, kick_payloads[p], dt)
 
                 t_start_trotter = time.perf_counter()
                 trotter_step_body(sim, QUBITS_PER_PATCH, intra_edges,
@@ -299,21 +298,30 @@ def gpu_worker_process(
                               - current_hx * float(np.sum(state["X"])))
                     t_lat_tomo = time.perf_counter() - t_start_tomo
                     
+                    try:
+                        fidelity = float(sim.get_unitary_fidelity())
+                    except AttributeError:
+                        fidelity = 1.0  # Fallback if API lacks binding
+                        if not _warned_fidelity:
+                            print(f"[Worker {rank}] Warning: sim.get_unitary_fidelity() not found. Upgrade PyQrack for true fidelity tracking.", file=sys.stderr)
+                            _warned_fidelity = True
+                    
                     patch_data_to_master[p] = {
                         "state": state, 
                         "meanfield_bulk_energy": bulk_e,
                         "lat_trotter_ms": t_lat_trotter * 1000.0,
-                        "lat_tomo_ms": t_lat_tomo * 1000.0
+                        "lat_tomo_ms": t_lat_tomo * 1000.0,
+                        "unitary_fidelity": fidelity
                     }
 
             if is_measure:
                 conn.send(patch_data_to_master)
                 kick_payloads = conn.recv()
-            else:
-                kick_payloads = {p: {} for p in assigned_patches}
+            
+            # The 'else: kick_payloads = {}' block was removed here to 
+            # retain the boundary field across non-measure intermediate steps.
 
     finally:
-        # Aggressively delete proxies to ensure OpenCL buffer release
         for p in list(sims.keys()):
             _s = sims.pop(p)
             del _s
@@ -362,7 +370,8 @@ class MultiGpuHadronEngine:
             with open(self.energy_csv, mode='w', newline='') as f:
                 csv.DictWriter(f, fieldnames=[
                     "Step", "Anneal_Percent", "MeanField_Bulk_Energy",
-                    "MeanField_Boundary_Energy", "MeanField_Total_Energy"
+                    "MeanField_Boundary_Energy", "MeanField_Total_Energy",
+                    "Min_Unitary_Fidelity"
                 ]).writeheader()
             with open(self.profiles_csv, mode='w', newline='') as f:
                 csv.DictWriter(f, fieldnames=[
@@ -371,15 +380,17 @@ class MultiGpuHadronEngine:
         except Exception as e:
             print(f"[CSV] Warning: Setup configuration write failed: {e}", file=sys.stderr)
 
-    def _log_csvs(self, step, anneal, bulk, bound, total, patch_profiles):
+    def _log_csvs(self, step, anneal, bulk, bound, total, min_fidelity, patch_profiles):
         try:
             with open(self.energy_csv, mode='a', newline='') as f:
                 csv.DictWriter(f, fieldnames=[
                     "Step", "Anneal_Percent", "MeanField_Bulk_Energy",
-                    "MeanField_Boundary_Energy", "MeanField_Total_Energy"
+                    "MeanField_Boundary_Energy", "MeanField_Total_Energy",
+                    "Min_Unitary_Fidelity"
                 ]).writerow({"Step": step, "Anneal_Percent": anneal,
                              "MeanField_Bulk_Energy": bulk, "MeanField_Boundary_Energy": bound,
-                             "MeanField_Total_Energy": total})
+                             "MeanField_Total_Energy": total,
+                             "Min_Unitary_Fidelity": min_fidelity})
 
             with open(self.profiles_csv, mode='a', newline='') as f:
                 w = csv.DictWriter(f, fieldnames=[
@@ -425,8 +436,6 @@ class MultiGpuHadronEngine:
             workers.append(p)
             pipes.append(parent_conn)
 
-        noise_rng = np.random.default_rng(self.master_seed)
-
         try:
             for t in range(total_steps):
                 s = t / max(1, (total_steps - 1))
@@ -443,6 +452,7 @@ class MultiGpuHadronEngine:
                 bulk_energy = 0.0
                 max_lat_trotter = 0.0
                 max_lat_tomo = 0.0
+                min_fidelity = 1.0
                 
                 for conn in pipes:
                     try:
@@ -454,6 +464,7 @@ class MultiGpuHadronEngine:
                         bulk_energy += payload["meanfield_bulk_energy"]
                         max_lat_trotter = max(max_lat_trotter, payload["lat_trotter_ms"])
                         max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
+                        min_fidelity = min(min_fidelity, payload.get("unitary_fidelity", 1.0))
 
                 if len(patch_full_states) != TOTAL_PATCHES:
                     raise RuntimeError(
@@ -495,14 +506,18 @@ class MultiGpuHadronEngine:
                 next_kick_payloads = {p: {} for p in range(TOTAL_PATCHES)}
                 macroscopic_boundary_energy = 0.0
                 
-                scale = np.sqrt(dt * measure_every / effective_shots)
+                scale = np.sqrt(dt / effective_shots)
                 stochastic_noise = {}
                 n_b = len(self.all_boundary_qubits)
 
-                for p, prof in patch_profiles.items():
-                    xn = noise_rng.normal(0.0, 1.0, n_b) * np.sqrt(prof["vars"]["X"]) * scale
-                    yn = noise_rng.normal(0.0, 1.0, n_b) * np.sqrt(prof["vars"]["Y"]) * scale
-                    zn = noise_rng.normal(0.0, 1.0, n_b) * np.sqrt(prof["vars"]["Z"]) * scale
+                for p in range(TOTAL_PATCHES):
+                    prof = patch_profiles[p]
+                    rng_p = np.random.default_rng([self.master_seed, t, p])
+                    
+                    xn = rng_p.normal(0.0, 1.0, n_b) * np.sqrt(prof["vars"]["X"]) * scale
+                    yn = rng_p.normal(0.0, 1.0, n_b) * np.sqrt(prof["vars"]["Y"]) * scale
+                    zn = rng_p.normal(0.0, 1.0, n_b) * np.sqrt(prof["vars"]["Z"]) * scale
+                    
                     stochastic_noise[p] = {
                         q: (xn[i], yn[i], zn[i])
                         for i, q in enumerate(self.all_boundary_qubits)
@@ -556,9 +571,9 @@ class MultiGpuHadronEngine:
                             )
 
                 total_energy = bulk_energy + macroscopic_boundary_energy
-                print(f"Step {t:03d} | E: {total_energy:+.4f} | Lat(Trot/Tomo): {max_lat_trotter:5.1f}/{max_lat_tomo:5.1f}ms | {time.perf_counter() - t0:.2f}s")
+                print(f"Step {t:03d} | E: {total_energy:+.4f} | Lat(Trot/Tomo): {max_lat_trotter:5.1f}/{max_lat_tomo:5.1f}ms | Fid: {min_fidelity:.5f} | {time.perf_counter() - t0:.2f}s")
                 self._log_csvs(t, s * 100, bulk_energy,
-                               macroscopic_boundary_energy, total_energy, patch_profiles)
+                               macroscopic_boundary_energy, total_energy, min_fidelity, patch_profiles)
 
                 # --- SCATTER ---
                 for i, w_rank in enumerate(active_ranks):
