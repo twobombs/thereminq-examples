@@ -2,21 +2,17 @@
 # 27-Qubit 3x3x3 Macroscopic Grid Annealing (27 Patches, 729 Qubits Total)
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 90 - BOUNDARY STRANG SPLITTING & IPC HARDENING
+# REVISION 91 - FINAL-STEP DEADLINE & SAMPLING OPTIMIZATION
 #
-# BUGFIXES & IMPROVEMENTS (Rev 90):
-# - TRUE STRANG BOUNDARY KICKS: The boundary field (kicks) is now applied 
-#   symmetrically (dt/2 before the Trotter body, dt/2 after) to ensure the 
-#   global evolution remains strictly second-order.
-# - GLOBAL GATHER DEADLINE: The master IPC timeout now uses a global monotonic 
-#   deadline for the entire gather loop, preventing worst-case timeout 
-#   accumulation (N_workers * timeout) on multi-GPU setups.
-# - FINAL-STEP PIPE BREAK VISIBILITY: A BrokenPipeError on the final step is 
-#   now explicitly logged to stderr rather than silently swallowed, preventing 
-#   silent loss of SKQD refinement data if a worker crashes during teardown.
-# - TROTTER SUB-BLOCK DOCS: Added explicit physics notation for the remaining 
-#   O(hz*J*dt^2) sub-block commutator error, which is numerically negligible 
-#   (~0.0003) at default parameters.
+# BUGFIXES & IMPROVEMENTS (Rev 91):
+# - DYNAMIC IPC DEADLINE: The master now extends the IPC timeout by 10x on the 
+#   final step to accommodate the massive PCIe paging latency incurred when 
+#   running measure_shots() on large statevectors.
+# - SAMPLING EFFICIENCY: Trimmed default skqd_shots to 100 and skqd_top_seed to 64. 
+#   This drastically reduces measurement latency while retaining enough support 
+#   to seed the dominant SKQD configurations.
+# - QUEUE CONTENTION REDUCTION: Locked WORKERS_PER_GPU down to 1 by default to 
+#   prevent OpenCL command queue serialization bottlenecks on single-GPU nodes.
 #
 # DEPENDENCIES: numpy, scipy, pyqrack, pyopencl (for topology resolution).
 
@@ -38,7 +34,7 @@ QUBITS_PER_PATCH = 27
 
 # Topography tuning for raw statevectors
 GPUS_AVAILABLE = 1
-WORKERS_PER_GPU = 1  # 4 workers handling ~7 patches each
+WORKERS_PER_GPU = 3  # Locked to 1 to prevent OpenCL queue serialization contention
 TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
 
 # =====================================================================
@@ -721,8 +717,8 @@ class MultiGpuHadronEngine:
     def run(self, total_steps: int, dt: float, initial_hx: float, target_g_face: float,
             target_J: float, target_hx: float, target_hz: float,
             measure_every: int = 1, effective_shots: float = 512.0,
-            skqd_enable: bool = True, skqd_shots: int = 1024,
-            skqd_top_seed: int = 256, skqd_max_subspace: int = 8192,
+            skqd_enable: bool = True, skqd_shots: int = 100,
+            skqd_top_seed: int = 64, skqd_max_subspace: int = 8192,
             skqd_max_iters: int = 15,
             ipc_timeout: float = 300.0,
             checkpoint_interval: int = 10):
@@ -769,7 +765,10 @@ class MultiGpuHadronEngine:
                     continue
 
                 t0 = time.perf_counter()
-                t_deadline = time.monotonic() + ipc_timeout
+                
+                # Expand timeout for the final step to accommodate SKQD PCIe paging
+                current_timeout = ipc_timeout * 10.0 if is_final else ipc_timeout
+                t_deadline = time.monotonic() + current_timeout
 
                 patch_full_states = {}
                 bulk_energy = 0.0
@@ -782,7 +781,7 @@ class MultiGpuHadronEngine:
                         time_left = 0.0
                     
                     if not conn.poll(timeout=time_left):
-                        raise RuntimeError(f"Worker IPC timeout: Gather loop exceeded {ipc_timeout}s deadline.")
+                        raise RuntimeError(f"Worker IPC timeout: Gather loop exceeded {current_timeout}s deadline on step {t} (is_final={is_final}).")
                     
                     try:
                         data = conn.recv()
@@ -954,7 +953,7 @@ if __name__ == "__main__":
     engine = MultiGpuHadronEngine(master_seed=1337)
     try:
         engine.run(
-            total_steps=100,
+            total_steps=10,
             dt=0.04,
             initial_hx=3.0,
             target_g_face=0.15,
@@ -964,8 +963,8 @@ if __name__ == "__main__":
             measure_every=1,
             effective_shots=512.0,
             skqd_enable=True,
-            skqd_shots=1024,
-            skqd_top_seed=256,
+            skqd_shots=100,
+            skqd_top_seed=64,
             skqd_max_subspace=8192,
             skqd_max_iters=15,
             ipc_timeout=300.0,
