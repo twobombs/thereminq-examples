@@ -362,17 +362,14 @@ def run_dashboard(mode="interactive"):
             ax.set_xticks([])
         return img
 
-    # Per-component norm: each axis spans [-1, +1]
-    comp_norm = mcolors.Normalize(vmin=-1.0, vmax=1.0)
-
     hmap_x = _init_heatmap(ax_hmap_x, history[0, :, :, 0],
-                            heatmap_cmap, comp_norm, "Polarization <X>",
+                            heatmap_cmap, spin_norm, "Polarization <X>",
                             show_ylabel=True,  show_xlabel=False)
     hmap_y = _init_heatmap(ax_hmap_y, history[0, :, :, 1],
-                            heatmap_cmap, comp_norm, "Polarization <Y>",
+                            heatmap_cmap, spin_norm, "Polarization <Y>",
                             show_ylabel=True, show_xlabel=False)
     hmap_z = _init_heatmap(ax_hmap_z, history[0, :, :, 2],
-                            heatmap_cmap, comp_norm, "Polarization <Z>",
+                            heatmap_cmap, spin_norm, "Polarization <Z>",
                             show_ylabel=True, show_xlabel=True)
 
     fig.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.15)
@@ -390,7 +387,22 @@ def run_dashboard(mode="interactive"):
     def on_scroll(event):
         if event.inaxes != ax3d:
             return
-        ax3d.dist *= 1.1 if event.button == 'down' else 0.9
+            
+        # Matplotlib 3.8+ compatible zoom: scroll down zooms out (box shrinks)
+        if not hasattr(ax3d, 'custom_zoom'):
+            ax3d.custom_zoom = 1.0
+        ax3d.custom_zoom *= 0.9 if event.button == 'down' else 1.1
+        
+        try:
+            current_aspect = ax3d.get_box_aspect()
+            if current_aspect is None:
+                current_aspect = (grid_x, grid_y, max(1, grid_z))
+            ax3d.set_box_aspect(current_aspect, zoom=ax3d.custom_zoom)
+        except TypeError:
+            # Fallback for Matplotlib < 3.8 where zoom kwarg doesn't exist
+            # Scroll down zooms out (distance increases)
+            ax3d.dist *= 0.9 if event.button == 'down' else 1.1
+            
         fig.canvas.draw_idle()
 
     fig.canvas.mpl_connect('scroll_event', on_scroll)
