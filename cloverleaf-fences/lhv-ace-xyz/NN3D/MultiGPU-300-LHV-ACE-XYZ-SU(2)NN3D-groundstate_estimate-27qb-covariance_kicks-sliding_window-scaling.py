@@ -33,7 +33,7 @@ QUBITS_PER_PATCH = 27
 
 # Topography tuning for raw statevectors
 GPUS_AVAILABLE = 1
-WORKERS_PER_GPU = 1  # Adjust >1 for decisive experiment comparison
+WORKERS_PER_GPU = 3  # Adjust >1 for decisive experiment comparison
 TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
 
 # =====================================================================
