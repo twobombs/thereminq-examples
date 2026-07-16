@@ -1,3 +1,6 @@
+<img width="2816" height="1536" alt="Gemini_Generated_Image_19jl5o19jl5o19jl" src="https://github.com/user-attachments/assets/5b36fd10-0ea6-4501-9d2a-2116cb1aadd2" />
+
+
 # Introduction
 
 The exact classical simulation of quantum many-body systems is
