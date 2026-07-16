@@ -1,0 +1,183 @@
+[Engine] 4x4x4 block lattice x 4 branes/block = 256 patches, 4096 qubits | interfaces: 192 Z-intra, 48 Z-inter, 384 XY | 1 GPUs (20 workers/GPU), 100 steps
+Device #0, Building JIT.
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Device #0, Building JIT.
+Device #0, Building JIT.
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Device #0, Building JIT.
+Device #0, Building JIT.
+Device #0, Building JIT.
+Device #0, Building JIT.
+Device #0, Building JIT.
+Device #0, Building JIT.
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+Default platform: NVIDIA CUDA
+OpenCL device #0: NVIDIA CMP 50HX
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+Default platform: NVIDIA CUDA
+OpenCL device #0: NVIDIA CMP 50HX
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Device #0, Building JIT.
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Device #0, Building JIT.
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Device #0, Building JIT.
+Device #0, Building JIT.
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Device #0, Building JIT.
+Device #0, Building JIT.
+Device #0, Building JIT.
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Device #0, Building JIT.
+Device #0, Building JIT.
+Device #0, Building JIT.
+Device #0, Building JIT.
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Default platform: NVIDIA CUDA
+Default device: #0, NVIDIA CMP 50HX
+OpenCL device #0: NVIDIA CMP 50HX
+Step 000 | E: -12288.0000 (Zi +0.000 / Ze +0.000 / XY +0.000) | Lat(Trot/Tomo):   2.3/  2.5ms | Fid: 1.00000 | 12.04s
+Step 001 | E: -12189.6938 (Zi -3.724 / Ze -0.465 / XY -0.931) | Lat(Trot/Tomo):   8.5/  5.3ms | Fid: 1.00000 | 0.24s
+Step 002 | E: -12091.3915 (Zi -7.447 / Ze -0.931 / XY -1.862) | Lat(Trot/Tomo):   3.7/  3.3ms | Fid: 1.00000 | 0.26s
+Step 003 | E: -11993.0820 (Zi -11.171 / Ze -1.396 / XY -2.793) | Lat(Trot/Tomo):  16.0/ 23.8ms | Fid: 1.00000 | 0.27s
+Step 004 | E: -11894.7183 (Zi -14.895 / Ze -1.862 / XY -3.724) | Lat(Trot/Tomo):   7.5/  6.2ms | Fid: 1.00000 | 0.26s
+Step 005 | E: -11796.4076 (Zi -18.618 / Ze -2.327 / XY -4.655) | Lat(Trot/Tomo):  19.0/ 33.8ms | Fid: 1.00000 | 0.28s
+Step 006 | E: -11698.0986 (Zi -22.342 / Ze -2.793 / XY -5.585) | Lat(Trot/Tomo):  10.9/ 10.8ms | Fid: 1.00000 | 0.27s
+Step 007 | E: -11599.8097 (Zi -26.065 / Ze -3.258 / XY -6.516) | Lat(Trot/Tomo):  16.7/ 21.8ms | Fid: 1.00000 | 0.26s
+Step 008 | E: -11501.4361 (Zi -29.789 / Ze -3.724 / XY -7.447) | Lat(Trot/Tomo):  13.9/ 19.7ms | Fid: 1.00000 | 0.28s
+Step 009 | E: -11403.1495 (Zi -33.513 / Ze -4.189 / XY -8.378) | Lat(Trot/Tomo):   6.2/  7.5ms | Fid: 1.00000 | 0.27s
+Step 010 | E: -11304.8531 (Zi -37.236 / Ze -4.655 / XY -9.309) | Lat(Trot/Tomo):  10.9/ 21.8ms | Fid: 1.00000 | 0.27s
+Step 011 | E: -11206.5150 (Zi -40.960 / Ze -5.120 / XY -10.240) | Lat(Trot/Tomo):   4.9/ 11.4ms | Fid: 1.00000 | 0.26s
+Step 012 | E: -11108.2220 (Zi -44.684 / Ze -5.585 / XY -11.171) | Lat(Trot/Tomo):  13.9/ 15.7ms | Fid: 1.00000 | 0.26s
+Step 013 | E: -11009.9283 (Zi -48.407 / Ze -6.051 / XY -12.102) | Lat(Trot/Tomo):   4.9/ 18.8ms | Fid: 1.00000 | 0.26s
+Step 014 | E: -10911.6380 (Zi -52.131 / Ze -6.516 / XY -13.033) | Lat(Trot/Tomo):   5.0/  7.7ms | Fid: 1.00000 | 0.25s
+Step 015 | E: -10813.3856 (Zi -55.855 / Ze -6.982 / XY -13.964) | Lat(Trot/Tomo):   4.4/  2.9ms | Fid: 1.00000 | 0.26s
+Step 016 | E: -10715.0684 (Zi -59.578 / Ze -7.447 / XY -14.895) | Lat(Trot/Tomo):   3.7/  5.2ms | Fid: 1.00000 | 0.26s
+Step 017 | E: -10616.7231 (Zi -63.302 / Ze -7.913 / XY -15.825) | Lat(Trot/Tomo):   3.6/  2.9ms | Fid: 1.00000 | 0.25s
+Step 018 | E: -10518.4834 (Zi -67.026 / Ze -8.378 / XY -16.756) | Lat(Trot/Tomo):   5.3/  4.8ms | Fid: 1.00000 | 0.26s
+Step 019 | E: -10420.2040 (Zi -70.749 / Ze -8.844 / XY -17.687) | Lat(Trot/Tomo):   2.9/  2.7ms | Fid: 1.00000 | 0.26s
+Step 020 | E: -10321.8599 (Zi -74.473 / Ze -9.309 / XY -18.618) | Lat(Trot/Tomo):   7.5/  3.0ms | Fid: 1.00000 | 0.26s
+Step 021 | E: -10223.2960 (Zi -78.196 / Ze -9.775 / XY -19.549) | Lat(Trot/Tomo):   3.2/  2.5ms | Fid: 1.00000 | 0.26s
+Step 022 | E: -10124.9325 (Zi -81.920 / Ze -10.240 / XY -20.480) | Lat(Trot/Tomo):   3.7/  3.0ms | Fid: 1.00000 | 0.26s
+Step 023 | E: -10026.6478 (Zi -85.644 / Ze -10.705 / XY -21.411) | Lat(Trot/Tomo):   3.9/  2.9ms | Fid: 1.00000 | 0.25s
+Step 024 | E: -9928.4143 (Zi -89.367 / Ze -11.171 / XY -22.342) | Lat(Trot/Tomo):   4.5/  3.4ms | Fid: 1.00000 | 0.27s
+Step 025 | E: -9830.1379 (Zi -93.091 / Ze -11.636 / XY -23.273) | Lat(Trot/Tomo):   3.2/  3.7ms | Fid: 1.00000 | 0.26s
+Step 026 | E: -9731.6748 (Zi -96.815 / Ze -12.102 / XY -24.204) | Lat(Trot/Tomo):   3.6/  2.8ms | Fid: 1.00000 | 0.25s
+Step 027 | E: -9633.3916 (Zi -100.538 / Ze -12.567 / XY -25.135) | Lat(Trot/Tomo):   3.3/  2.7ms | Fid: 1.00000 | 0.26s
+Step 028 | E: -9535.1812 (Zi -104.262 / Ze -13.033 / XY -26.065) | Lat(Trot/Tomo):   5.1/  4.8ms | Fid: 1.00000 | 0.27s
+Step 029 | E: -9436.9072 (Zi -107.985 / Ze -13.498 / XY -26.996) | Lat(Trot/Tomo):   4.1/  2.6ms | Fid: 1.00000 | 0.27s
+Step 030 | E: -9338.6385 (Zi -111.709 / Ze -13.964 / XY -27.927) | Lat(Trot/Tomo):   3.3/  2.7ms | Fid: 1.00000 | 0.26s
+Step 031 | E: -9240.3578 (Zi -115.433 / Ze -14.429 / XY -28.858) | Lat(Trot/Tomo):   3.2/  2.8ms | Fid: 1.00000 | 0.26s
+Step 032 | E: -9141.9864 (Zi -119.156 / Ze -14.895 / XY -29.789) | Lat(Trot/Tomo):   3.4/  6.0ms | Fid: 1.00000 | 0.26s
+Step 033 | E: -9043.7157 (Zi -122.880 / Ze -15.360 / XY -30.720) | Lat(Trot/Tomo):  24.8/ 33.0ms | Fid: 1.00000 | 0.35s
+Step 034 | E: -8945.5272 (Zi -126.604 / Ze -15.825 / XY -31.651) | Lat(Trot/Tomo):   5.2/  4.7ms | Fid: 1.00000 | 0.25s
+Step 035 | E: -8847.2634 (Zi -130.327 / Ze -16.291 / XY -32.582) | Lat(Trot/Tomo):   5.0/  4.8ms | Fid: 1.00000 | 0.26s
+Step 036 | E: -8749.0050 (Zi -134.051 / Ze -16.756 / XY -33.513) | Lat(Trot/Tomo):   8.4/  7.7ms | Fid: 1.00000 | 0.27s
+Step 037 | E: -8650.5471 (Zi -137.775 / Ze -17.222 / XY -34.444) | Lat(Trot/Tomo):   3.4/  3.4ms | Fid: 1.00000 | 0.25s
+Step 038 | E: -8552.2871 (Zi -141.498 / Ze -17.687 / XY -35.375) | Lat(Trot/Tomo):  13.4/ 15.8ms | Fid: 1.00000 | 0.25s
+Step 039 | E: -9000.1109 (Zi -240.790 / Ze -30.099 / XY -47.117) | Lat(Trot/Tomo):   3.7/208.7ms | Fid: 1.00000 | 2.60s
+Step 040 | E: -6673.1781 (Zi -148.386 / Ze -18.549 / XY -18.607) | Lat(Trot/Tomo):   4.1/246.1ms | Fid: 1.00000 | 2.67s
+Step 041 | E: -6595.8718 (Zi -151.329 / Ze -18.916 / XY -19.467) | Lat(Trot/Tomo):   7.2/283.1ms | Fid: 1.00000 | 2.80s
+Step 042 | E: -6530.2730 (Zi -154.384 / Ze -19.297 / XY -20.637) | Lat(Trot/Tomo):   4.8/269.3ms | Fid: 1.00000 | 2.79s
+Step 043 | E: -6471.1376 (Zi -157.748 / Ze -19.716 / XY -21.880) | Lat(Trot/Tomo):   7.8/274.2ms | Fid: 1.00000 | 2.79s
+Step 044 | E: -6399.5170 (Zi -160.608 / Ze -20.072 / XY -22.815) | Lat(Trot/Tomo):   6.8/268.6ms | Fid: 1.00000 | 2.76s
+Step 045 | E: -6341.9778 (Zi -163.951 / Ze -20.490 / XY -23.947) | Lat(Trot/Tomo):   4.9/291.9ms | Fid: 1.00000 | 2.86s
+Step 046 | E: -6287.9468 (Zi -167.460 / Ze -20.929 / XY -24.975) | Lat(Trot/Tomo):   9.7/288.3ms | Fid: 1.00000 | 2.78s
+Step 047 | E: -6243.2331 (Zi -171.388 / Ze -21.417 / XY -26.028) | Lat(Trot/Tomo):   5.8/276.7ms | Fid: 1.00000 | 2.82s
+Step 048 | E: -6215.1591 (Zi -175.908 / Ze -21.984 / XY -27.224) | Lat(Trot/Tomo):  10.3/272.6ms | Fid: 1.00000 | 2.71s
+Step 049 | E: -6188.2643 (Zi -180.598 / Ze -22.566 / XY -28.286) | Lat(Trot/Tomo):  11.0/270.4ms | Fid: 1.00000 | 2.85s
+Step 050 | E: -6184.6800 (Zi -186.219 / Ze -23.268 / XY -29.486) | Lat(Trot/Tomo):  11.6/287.0ms | Fid: 1.00000 | 2.91s
+Step 051 | E: -6191.9694 (Zi -192.399 / Ze -24.041 / XY -30.791) | Lat(Trot/Tomo):  12.5/292.5ms | Fid: 1.00000 | 2.86s
+Step 052 | E: -6210.3195 (Zi -199.166 / Ze -24.893 / XY -32.141) | Lat(Trot/Tomo):   5.2/275.3ms | Fid: 1.00000 | 2.83s
+Step 053 | E: -6230.4646 (Zi -206.091 / Ze -25.761 / XY -33.510) | Lat(Trot/Tomo):   7.2/276.6ms | Fid: 1.00000 | 2.86s
+Step 054 | E: -6264.3546 (Zi -213.874 / Ze -26.730 / XY -35.029) | Lat(Trot/Tomo):   5.5/288.7ms | Fid: 1.00000 | 2.98s
+Step 055 | E: -6339.3380 (Zi -224.475 / Ze -28.047 / XY -37.173) | Lat(Trot/Tomo):   7.8/273.8ms | Fid: 1.00000 | 2.84s
+Step 056 | E: -6425.7453 (Zi -236.168 / Ze -29.508 / XY -39.614) | Lat(Trot/Tomo):  12.9/283.3ms | Fid: 1.00000 | 2.79s
+Step 057 | E: -6512.5637 (Zi -248.224 / Ze -31.013 / XY -42.084) | Lat(Trot/Tomo):   5.0/282.3ms | Fid: 1.00000 | 2.85s
+Step 058 | E: -6596.3778 (Zi -260.370 / Ze -32.538 / XY -44.508) | Lat(Trot/Tomo):   6.5/274.4ms | Fid: 1.00000 | 2.77s
+Step 059 | E: -6687.2546 (Zi -273.144 / Ze -34.140 / XY -47.103) | Lat(Trot/Tomo):   4.8/279.6ms | Fid: 1.00000 | 2.82s
+Step 060 | E: -6716.8370 (Zi -277.415 / Ze -35.755 / XY -48.478) | Lat(Trot/Tomo):   4.9/275.3ms | Fid: 1.00000 | 2.75s
+Step 061 | E: -6377.8198 (Zi -244.383 / Ze -37.333 / XY -43.990) | Lat(Trot/Tomo):   4.9/270.9ms | Fid: 1.00000 | 2.89s
+Step 062 | E: -6448.0179 (Zi -254.437 / Ze -38.905 / XY -46.211) | Lat(Trot/Tomo):   6.1/295.8ms | Fid: 1.00000 | 2.89s
+Step 063 | E: -6570.8028 (Zi -268.851 / Ze -40.471 / XY -49.170) | Lat(Trot/Tomo):   7.6/414.8ms | Fid: 1.00000 | 3.37s
+Step 064 | E: -6661.4753 (Zi -280.949 / Ze -42.089 / XY -51.924) | Lat(Trot/Tomo):   6.8/495.6ms | Fid: 1.00000 | 3.62s
+Step 065 | E: -6695.2942 (Zi -286.261 / Ze -43.713 / XY -54.290) | Lat(Trot/Tomo):   4.9/497.2ms | Fid: 1.00000 | 3.67s
+Step 066 | E: -6594.4104 (Zi -273.863 / Ze -45.360 / XY -51.910) | Lat(Trot/Tomo):   7.3/499.1ms | Fid: 1.00000 | 3.80s
+Step 067 | E: -6819.0807 (Zi -300.009 / Ze -47.047 / XY -57.391) | Lat(Trot/Tomo):   8.4/517.2ms | Fid: 1.00000 | 4.49s
+Step 068 | E: -6901.1581 (Zi -309.883 / Ze -48.770 / XY -60.521) | Lat(Trot/Tomo):   4.9/502.6ms | Fid: 1.00000 | 4.74s
+Step 069 | E: -6971.2350 (Zi -318.582 / Ze -50.511 / XY -63.412) | Lat(Trot/Tomo):   6.6/504.1ms | Fid: 1.00000 | 4.78s
+Step 070 | E: -7023.1691 (Zi -324.842 / Ze -52.243 / XY -66.097) | Lat(Trot/Tomo):   6.2/510.8ms | Fid: 1.00000 | 4.77s
+Step 071 | E: -7045.9409 (Zi -333.087 / Ze -51.896 / XY -67.859) | Lat(Trot/Tomo):  16.2/617.0ms | Fid: 1.00000 | 4.84s
+Step 072 | E: -7046.7149 (Zi -339.741 / Ze -51.597 / XY -68.834) | Lat(Trot/Tomo):  12.6/503.2ms | Fid: 1.00000 | 4.78s
+Step 073 | E: -7121.4283 (Zi -350.006 / Ze -54.004 / XY -72.293) | Lat(Trot/Tomo):  20.9/553.9ms | Fid: 1.00000 | 4.97s
+Step 074 | E: -7185.4539 (Zi -359.635 / Ze -55.746 / XY -75.336) | Lat(Trot/Tomo):   6.1/550.3ms | Fid: 1.00000 | 5.02s
+Step 075 | E: -7242.9167 (Zi -369.393 / Ze -57.304 / XY -78.321) | Lat(Trot/Tomo):   7.8/580.2ms | Fid: 1.00000 | 5.08s
+Step 076 | E: -7181.7093 (Zi -367.796 / Ze -57.345 / XY -78.240) | Lat(Trot/Tomo):   7.7/552.5ms | Fid: 1.00000 | 5.01s
+Step 077 | E: -7135.3780 (Zi -367.521 / Ze -58.196 / XY -79.096) | Lat(Trot/Tomo):   6.2/558.3ms | Fid: 1.00000 | 5.06s
+Step 078 | E: -7083.2815 (Zi -366.805 / Ze -58.741 / XY -79.641) | Lat(Trot/Tomo):   8.5/555.2ms | Fid: 1.00000 | 5.08s
+Step 079 | E: -7032.6589 (Zi -367.066 / Ze -59.305 / XY -80.365) | Lat(Trot/Tomo):  33.6/611.0ms | Fid: 1.00000 | 5.08s
+Step 080 | E: -6983.6139 (Zi -368.284 / Ze -59.850 / XY -81.179) | Lat(Trot/Tomo):   9.3/601.4ms | Fid: 1.00000 | 5.10s
+Step 081 | E: -6935.2083 (Zi -369.871 / Ze -60.422 / XY -81.867) | Lat(Trot/Tomo):   5.5/591.6ms | Fid: 1.00000 | 5.11s
+Step 082 | E: -6892.7120 (Zi -372.226 / Ze -60.973 / XY -82.523) | Lat(Trot/Tomo):  29.9/566.6ms | Fid: 1.00000 | 5.08s
+Step 083 | E: -6859.4107 (Zi -375.775 / Ze -61.538 / XY -83.178) | Lat(Trot/Tomo):  38.8/663.2ms | Fid: 1.00000 | 5.09s
+Step 084 | E: -6846.4157 (Zi -380.973 / Ze -62.126 / XY -83.703) | Lat(Trot/Tomo):   8.7/564.4ms | Fid: 1.00000 | 5.05s
+Step 085 | E: -6785.4714 (Zi -382.298 / Ze -62.684 / XY -83.854) | Lat(Trot/Tomo):  29.8/559.4ms | Fid: 1.00000 | 5.09s
+Step 086 | E: -6785.9144 (Zi -387.828 / Ze -62.525 / XY -84.401) | Lat(Trot/Tomo):   5.0/556.9ms | Fid: 1.00000 | 5.07s
+Step 087 | E: -6719.9651 (Zi -386.967 / Ze -63.560 / XY -83.887) | Lat(Trot/Tomo):   8.2/553.1ms | Fid: 1.00000 | 5.06s
+Step 088 | E: -6653.1467 (Zi -384.632 / Ze -63.994 / XY -83.033) | Lat(Trot/Tomo):  11.5/466.5ms | Fid: 1.00000 | 3.46s
+Step 089 | E: -6625.3270 (Zi -383.573 / Ze -64.267 / XY -82.475) | Lat(Trot/Tomo):   6.7/520.5ms | Fid: 1.00000 | 3.43s
+Step 090 | E: -6583.4218 (Zi -380.256 / Ze -64.385 / XY -81.698) | Lat(Trot/Tomo):   7.3/465.1ms | Fid: 1.00000 | 3.43s
+Step 091 | E: -6532.8561 (Zi -375.814 / Ze -64.382 / XY -80.837) | Lat(Trot/Tomo):   5.5/503.9ms | Fid: 1.00000 | 3.44s
+Step 092 | E: -6474.0185 (Zi -370.398 / Ze -63.671 / XY -79.715) | Lat(Trot/Tomo):   6.5/468.1ms | Fid: 1.00000 | 3.44s
+Step 093 | E: -6420.6112 (Zi -367.666 / Ze -63.555 / XY -79.080) | Lat(Trot/Tomo):  11.2/457.9ms | Fid: 1.00000 | 3.47s
+Step 094 | E: -6368.8702 (Zi -366.117 / Ze -63.519 / XY -78.469) | Lat(Trot/Tomo):   8.2/647.8ms | Fid: 1.00000 | 3.39s
+Step 095 | E: -6388.2368 (Zi -376.201 / Ze -64.267 / XY -79.892) | Lat(Trot/Tomo):   7.2/483.4ms | Fid: 1.00000 | 3.43s
+Step 096 | E: -6416.7638 (Zi -388.567 / Ze -65.417 / XY -81.564) | Lat(Trot/Tomo):   9.6/545.0ms | Fid: 1.00000 | 3.44s
+Step 097 | E: -6441.0145 (Zi -400.744 / Ze -66.905 / XY -83.013) | Lat(Trot/Tomo):   7.8/465.8ms | Fid: 1.00000 | 3.45s
+Step 098 | E: -6476.5540 (Zi -415.889 / Ze -68.769 / XY -85.031) | Lat(Trot/Tomo):  76.3/552.4ms | Fid: 1.00000 | 3.43s
+Step 099 | E: -6525.7648 (Zi -434.803 / Ze -70.930 / XY -87.974) | Lat(Trot/Tomo):   5.0/472.4ms | Fid: 1.00000 | 3.43s
+
+[Master] Dumped history matrix to macroscopic_lattice_states.npy
