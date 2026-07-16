@@ -1,84 +1,8 @@
 [Engine] 4x4x4 block lattice x 4 branes/block = 256 patches, 4096 qubits | interfaces: 192 Z-intra, 48 Z-inter, 384 XY | 1 GPUs (20 workers/GPU), 100 steps
 Device #0, Building JIT.
 Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Device #0, Building JIT.
-Device #0, Building JIT.
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Device #0, Building JIT.
-Device #0, Building JIT.
-Device #0, Building JIT.
-Device #0, Building JIT.
-Device #0, Building JIT.
-Device #0, Building JIT.
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-Default platform: NVIDIA CUDA
-OpenCL device #0: NVIDIA CMP 50HX
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-Default platform: NVIDIA CUDA
-OpenCL device #0: NVIDIA CMP 50HX
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Device #0, Building JIT.
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Device #0, Building JIT.
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Device #0, Building JIT.
-Device #0, Building JIT.
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Device #0, Building JIT.
-Device #0, Building JIT.
-Device #0, Building JIT.
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Device #0, Building JIT.
-Device #0, Building JIT.
-Device #0, Building JIT.
-Device #0, Building JIT.
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
-Default platform: NVIDIA CUDA
-Default device: #0, NVIDIA CMP 50HX
-OpenCL device #0: NVIDIA CMP 50HX
+[....]
+
 Step 000 | E: -12288.0000 (Zi +0.000 / Ze +0.000 / XY +0.000) | Lat(Trot/Tomo):   2.3/  2.5ms | Fid: 1.00000 | 12.04s
 Step 001 | E: -12189.6938 (Zi -3.724 / Ze -0.465 / XY -0.931) | Lat(Trot/Tomo):   8.5/  5.3ms | Fid: 1.00000 | 0.24s
 Step 002 | E: -12091.3915 (Zi -7.447 / Ze -0.931 / XY -1.862) | Lat(Trot/Tomo):   3.7/  3.3ms | Fid: 1.00000 | 0.26s
