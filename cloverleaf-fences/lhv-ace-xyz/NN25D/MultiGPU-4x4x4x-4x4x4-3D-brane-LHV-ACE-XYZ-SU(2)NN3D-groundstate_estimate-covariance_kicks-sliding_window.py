@@ -97,7 +97,7 @@ PERIODIC_Z = False                         # True -> torus along global Z
 
 # Topography tuning for raw statevectors
 GPUS_AVAILABLE = 1
-WORKERS_PER_GPU = 4  # 256 branes -> 64 patches per worker, evolved sequentially
+WORKERS_PER_GPU = 40  # 256 branes -> evolved sequentially
 TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
 
 # =====================================================================
