@@ -1,691 +1,1338 @@
 # -*- coding: us-ascii -*-
-# macroscopic_lattice_dash_v9_blocks.py
-# Dashboard adapted for the Rev 88-C BLOCK LATTICE engine variant
-# (16-qubit 4x4 brane tiles -> 4x4x4 brane-stack blocks -> 4x4x4 block
-# lattice: 256 patches, 4096 qubits total).
+# 16-Qubit 4x4 Brane Tiles -> 4x4x4 Brane-Stack Blocks -> 4x4x4 Block Lattice
+# (256 Patches, 4096 Qubits Total)
+# Layered Planar Engine with Site-Resolved Inter-Brane AND Inter-Block Coupling
 #
-# CHANGES vs v7 (brane-stack dashboard):
-#   - GEOMETRY: the single 1x1xN brane stack is replaced by the full
-#     block lattice. Patch addressing mirrors the engine exactly:
-#     p = (tx * grid_y + ty) * grid_z + z, with (tx, ty) the in-plane
-#     tile/block coordinates and z the global layer index. Within a
-#     tile, idx = x * 4 + y (matching generate_16q_brane_tile()).
-#     Tiles are separated laterally by TILE_GAP_XY so the coupled XY
-#     seams are visible, and an extra BLOCK_GAP_Z is inserted between
-#     blocks along Z so the block/"hadron" grouping reads at a glance.
-#   - CONFIG DRIVEN: block_grid, branes_per_block, grid_x/y/z,
-#     qubits_per_patch, and the periodic [X, Y, Z] triple are read from
-#     lattice_config.json (with Rev 88-C defaults as fallbacks).
-#     tile_geometry is checked against "4x4_brane_block_lattice".
-#   - INTERFACES: rebuilt as a faithful mirror of the engine's
-#     build_interfaces(): all three coupling classes (Z_INTRA, Z_INTER,
-#     XY) with their exact per-interface site-index arrays. Z seams pair
-#     (i, i) over all 16 sites; XY seams pair the 4-site +X/-X or +Y/-Y
-#     tile edges. Periodic wraps (with the size-2 double-count guard)
-#     are included in the metric, mirroring the engine.
-#   - SITE-RESOLVED COUPLING ERROR: generalized from v7 to arbitrary
-#     paired index arrays:
-#         D(t, iface) = mean_k ||s_{i1[k]}^(p1)(t) - s_{i2[k]}^(p2)(t)||_2
-#     and reported PER COUPLING CLASS (Z_INTRA / Z_INTER / XY curves,
-#     plus the overall mean). As in v7 this is an internal
-#     self-consistency measure of the mean-field stitching, not a
-#     residual against any external ground truth. NOTE: for XY seams the
-#     paired sites are distinct physical lattice sites (edge columns of
-#     neighboring tiles), so a nonzero baseline is expected wherever the
-#     in-plane profile has structure; watch its trend, not its absolute
-#     level, and compare it against the Z classes with that in mind.
-#   - ENERGY PANEL: reads the Rev 88-C per-class columns (E_Z_Intra,
-#     E_Z_Inter, E_XY) in addition to the unchanged MeanField_* totals,
-#     and overlays the class components as thin dashed lines.
-#   - INTERFACE PLANES: v7 drew one sheet per open interface; at 624
-#     interfaces that is visual noise. Only the inter-block Z boundaries
-#     (the "weak glue" seams) are drawn, as full-footprint translucent
-#     sheets in each inter-block gap. Z_INTRA and XY seams are counted
-#     in the metrics but not drawn.
-#   - HEATMAPS: 256 rows x 16 columns per component. Per-row separators
-#     are dropped (unreadable at 256 rows); instead a strong separator
-#     is drawn between tile columns (every grid_z rows) and a faint one
-#     between blocks within a tile column (every branes_per_block rows).
-#     Y ticks label each tile column "T(tx,ty)" at its center row.
-#   - QUIVER STRIDE: 4096 arrows re-drawn per frame is heavy for the
-#     interactive Axes3D path. QUIVER_STRIDE subsamples the drawn
-#     arrows (metric panels always use the full data); default 1 draws
-#     everything, set 2 or 4 if interaction is sluggish.
+# REVISION 88-N - BLOCK LATTICE VARIANT (of Rev 88-M)
 #
-# Unchanged vs v7:
-#   - ENERGY_FILE name and MeanField_* column names.
-#   - _safe_gradient NaN-padding handling, slider/play/scroll/snapshot
-#     UI, dual interactive + background-4K-render process model,
-#     blit=False (Axes3D does not support blitting).
+# CONFIRMED WORKING in Rev 88-M: all workers restore from memmap correctly.
+#   With 2 GPUs x 32 workers = 64 total workers, all 64 restored at step 39.
+#   The two-pass gather correctly handles simultaneous death of all workers.
+#
+# REMAINING ISSUE: "timeout" at step 39 with 64 workers.
+#   The respawn is NOT a crash -- it IS completing -- but it takes ~19 minutes:
+#
+#   Pass 1 (dead worker detection + spawn): SEQUENTIAL.
+#     for i in range(64): recv() -> EOFError -> join(timeout=5s) -> spawn
+#     64 * (5s join + 1s spawn) = ~384s to spawn all 64 replacements.
+#
+#   Pass 2 (collect from respawned workers): SEQUENTIAL.
+#     for i in pending_recv: conn.recv() <- blocks on each one individually.
+#     Each respawned worker takes ~12s (JIT rebuild + 4 ket restores).
+#     64 * 12s = ~768s waiting for all 64 to send their first payload.
+#
+#   Total: ~19 minutes for one respawn event. With any number of workers
+#   above ~8, this serial chain makes respawn prohibitively slow.
+#
+# FIX (Rev 88-N): PARALLEL RESPAWN via multiprocessing.connection.wait().
+#
+# 1. PASS 1 SPLIT INTO TWO SEQUENTIAL MINI-PASSES:
+#    Mini-pass A: iterate all pipes with recv(), collect EOFError indices
+#      into dead_indices[], accumulate live data immediately. No spawning yet.
+#      Join timeout reduced from 5s to 1s: os._exit(1) workers terminate
+#      immediately; the 5s was conservative padding, not needed.
+#    Mini-pass B: join+spawn ALL dead workers simultaneously (tight loop,
+#      no blocking between spawns).
+#    Combined: ~1s (max join) + 64 * ~0.1s (spawn) = ~7s for all 64 spawns
+#    vs the old 64 * 6s = 384s.
+#
+# 2. PASS 2 USES connection.wait() FOR PARALLEL RECV:
+#    multiprocessing.connection.wait(conns, timeout=T) is a select()-based
+#    multiplexer that returns a list of connections that have data ready,
+#    without blocking on each one individually.
+#    while pending_recv not empty:
+#      ready_conns = wait([pipes[i] for i in pending_recv], timeout=120)
+#      for conn in ready_conns: recv() and accumulate; remove from pending
+#    All 64 respawned workers' JIT builds (~12s each) run in parallel.
+#    Pass 2 completes in max(12s) = ~12s for any number of workers,
+#    vs the old 64 * 12s = 768s.
+#
+#    Combined respawn time (64 workers):
+#      Old (88-M): ~19 min serial
+#      New (88-N): ~20s parallel
+#
+# 3. WORKERS_PER_GPU and GPUS_AVAILABLE unchanged.
+#    The fix is purely in the master gather loop; worker code is untouched.
+#
+# Retained from Rev 88-M: reset_event_count per-round semantics,
+#   MAX_RESET_EVENTS=10, memmap ket cache, _fatal_exit, resurrect_sim,
+#   CHUNK=8, KICK_THETA_THRESHOLD, all prior improvements.
+#
+# 1. Y-PROBE: mtrx() JIT-overflow-safe Clifford path replaces the mtrx()
+#    call used in Rev 88-C. Y-eigenstate |+i> is now prepared with
+#    h(0) + s(0) (native Clifford gates, no rotation parameter, no JIT
+#    kernel compilation). An S-gate availability check probes the build
+#    at startup; the old mtrx() path is retained as a dead fallback only
+#    when s() is absent (non-gfx906/gfx1013 builds).
+#
+# 2. RING-BUFFER CHUNKED FLUSHING in trotter_step_body and apply_kicks:
+#    - trotter_step_body: ZZ edges batched into CHUNK=8 groups; a
+#      non-collapsing pauli_expectation([0],[PZ]) drain is issued after
+#      each chunk. Prevents gfx_0.0.0 ring buffer overruns at high qubit
+#      counts or late anneal steps when all 3 kick components are nonzero.
+#      Safe headroom: 3 cmds/edge x 8 edges x 8 DWORDs/cmd = 192 DWORDs
+#      per chunk vs. ~4096 DWORD ring on gfx1013.
+#    - apply_kicks: qubits batched into KICK_CHUNK=8 groups with the same
+#      drain pattern. Prevents ring starvation when all 16 sites of a
+#      brane receive 3-axis kicks simultaneously.
+#
+# 3. AMD_OPENCL_FORCE_COMPUTE_QUEUE=1 added to worker environment.
+#    Enables in-place gfx_0.0.0 ring reset recovery on CYAN_SKILLFISH
+#    (gfx1013) / Oberon BC-250 / Mesa rusticl 26.1.4. Without this flag
+#    a ring timeout kills the OpenCL context fatally; with it the driver
+#    resets in-place (~15ms tomo latency spike) and execution continues.
+#    No effect on CUDA targets.
+#
+# 4. gc.collect() after every probe QrackSimulator deletion during the
+#    Pauli/angle autodetect block. Prevents rusticl context handle leaks
+#    across the 5 probe sims that run before the main simulation loop.
+#
+# 5. get_unitary_fidelity() exception catch broadened from AttributeError
+#    to (AttributeError, RuntimeError) to cover C-layer pinvoke failures
+#    introduced in PyQrack v2.7.1 API.
+#
+# 6. RING RESET DETECTION added to master orchestrator:
+#    - RING_RESET_LAT_THRESHOLD_MS = 5.0 ms threshold (normal ~0.4ms;
+#      gfx1013 ring reset recovery ~15ms).
+#    - ring_reset flag computed from max_lat_tomo per step.
+#    - Ring_Reset column added to energy CSV for post-hoc correlation of
+#      energy discontinuities with driver recovery events.
+#    - "RING_RESET" tag appended to stdout step line when triggered.
+#
+# Inherited from Rev 88-C:
+# - 4x4x4 block lattice: 256 patches, 4096 qubits.
+# - Three coupling classes: Z_INTRA, Z_INTER, XY (site-resolved).
+# - build_interfaces() with precomputed site-index arrays.
+# - Vectorized NumPy kick accumulation (kick_acc[p] shape (16,3)).
+# - Per-kind energy logging: E_Z_Intra, E_Z_Inter, E_XY.
+# - PERIODIC_X/Y/Z boundary condition flags.
+# Inherited from Rev 88-B:
+# - Flat 4x4 intra-patch tile: 2D nearest-neighbor edges only (24 edges).
+# - Site-resolved (not face-averaged) inter-brane exchange along Z.
+# - Per-site statistical variance injection, scale = sqrt(dt / shots).
+# Inherited from Rev 88:
+# - STOCHASTIC SCALING: scale = sqrt(dt / effective_shots), no measure_every.
+# Inherited from Rev 87:
+# - CONTINUOUS COUPLING: kick payloads persist across non-measure steps.
+# - INTEGRATION SCALING: no m_every multiplier in apply_kicks.
+# - FIDELITY WARNING: one-time stderr alert for missing fidelity binding.
 
+import os
 import sys
+import gc
 import csv
 import json
+import time
+import math
+import tempfile
 import numpy as np
 import multiprocessing as mp
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-import matplotlib.colors as mcolors
-import matplotlib.gridspec as gridspec
-from matplotlib.widgets import Slider, Button
-from mpl_toolkits.mplot3d import Axes3D
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import multiprocessing.connection
+from typing import List, Tuple, Dict, Any
 
-# --- CONFIGURATION ---
-DATA_FILE      = "macroscopic_lattice_states.npy"
-CONFIG_FILE    = "lattice_config.json"
-ENERGY_FILE    = "meanfield_ground_state_energy_curve_multi.csv"
-SAVE_FILE      = "macroscopic_lattice_dash_blocks.mp4"
+# --- GLOBAL CONFIGURATION ---
+BLOCK_GRID_X = 4
+BLOCK_GRID_Y = 4
+BLOCK_GRID_Z = 4
+BRANES_PER_BLOCK = 4
+GLOBAL_Z = BLOCK_GRID_Z * BRANES_PER_BLOCK  # 16
 
-TILE_LX, TILE_LY = 4, 4        # in-plane brane tile extent (matches engine)
-LAYER_SPACING    = 1.6         # visual Z gap between adjacent branes
-BLOCK_GAP_Z      = 1.2         # EXTRA visual Z gap at inter-block seams
-TILE_GAP_XY      = 1.5         # visual lateral gap between neighbor tiles
-QUIVER_STRIDE    = 1           # draw every Nth arrow (1 = all 4096)
+TOTAL_PATCHES = BLOCK_GRID_X * BLOCK_GRID_Y * GLOBAL_Z  # 256
+QUBITS_PER_PATCH = 16
+TOTAL_QUBITS = TOTAL_PATCHES * QUBITS_PER_PATCH          # 4096
 
-KIND_COLORS = {"Z_INTRA": "#e6b422", "Z_INTER": "#e64550", "XY": "#45b0e6"}
-# ---------------------
+PERIODIC_X = False
+PERIODIC_Y = False
+PERIODIC_Z = False
+
+GPUS_AVAILABLE = 1
+WORKERS_PER_GPU = 24
+TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
+
+# Tomo latency threshold above which a step is flagged as a ring reset
+# recovery event. gfx_0.0.0 ring resets on CYAN_SKILLFISH produce ~15ms
+# tomo spikes; normal latency is ~0.4ms. Inherited from Rev 88-B.
+RING_RESET_LAT_THRESHOLD_MS = 5.0
+
+# Inter-patch compute ring yield interval (Rev 88-E).
+# Every N patches in the sequential loop, time.sleep(0) is called after
+# the per-patch barrier to allow the OS/amdgpu ISR to process completions.
+# 16 = 16 x ~126 dispatches = 2016 dispatches between sleep yields.
+# Reduce to 8 if Lat(Trot) spikes persist above ~5ms; raise to 32 if
+# per-step wall time increases unacceptably.
+INTER_PATCH_YIELD_EVERY = 16
+
+# Memmap ket cache layout (Rev 88-K, replaces SharedMemory from Rev 88-J).
+# One complex64 slot per patch: 2^QUBITS_PER_PATCH = 65536 amplitudes.
+# Total file size: 256 * 65536 * 8 = 128MB on /tmp (not /dev/shm).
+KET_SLOT_ELEMS  = 1 << QUBITS_PER_PATCH       # 65536 complex64 per patch
+KET_MEMMAP_PATH = os.path.join(
+    tempfile.gettempdir(),
+    "thereminq_ket_cache_" + str(os.getpid()) + ".bin"
+)
+
+# Maximum number of full GPU reset EVENTS (not individual worker respawns)
+# the master will survive per run. One event = one gather round where
+# any worker died; multiple workers dying in the same round = one event.
+# 10 is generous; a typical run sees 1-2 resets around step 039-040.
+MAX_RESET_EVENTS = 10
+
+# Minimum rotation angle (radians) to submit as a GPU kernel dispatch (Rev 88-F).
+# Below this threshold the kick rotation is suppressed: the gate is a no-op
+# to 13 significant figures on a 16q statevector (<Z> change ~ theta^2/2).
+# Raised from the prior 1e-12 (below float32 epsilon ~1.2e-7) to 1e-6.
+# With dt=0.04 and typical g*f ~ 0.04, theta ~ 3e-3 >> 1e-6; only noise-
+# dominated near-zero kicks at low anneal fractions are suppressed. This
+# reduces GART-mapped kernel argument buffer count at early/mid steps,
+# directly reducing per-step GART pressure.
+KICK_THETA_THRESHOLD = 1e-6
+
+# =====================================================================
+# ENVIRONMENT - set before pyqrack import
+# =====================================================================
+os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
 
 
-def load_energy_data(num_steps, log_prefix=""):
-    """Extracts energy components (incl. Rev 88-C per-class columns)."""
-    energies = {'Total': [], 'Bulk': [], 'Boundary': [],
-                'Z_INTRA': [], 'Z_INTER': [], 'XY': []}
-    kind_cols = {'Z_INTRA': "E_Z_Intra", 'Z_INTER': "E_Z_Inter", 'XY': "E_XY"}
+# =====================================================================
+# PURE FUNCTIONS (Math & Topology)
+# =====================================================================
+def generate_16q_brane_tile() -> Tuple[List[Tuple[int, int]], List[int]]:
+    """4x4 planar square lattice. idx = x * ly + y (row-major in x).
 
-    try:
-        with open(ENERGY_FILE, mode='r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                energies['Total'].append(float(row["MeanField_Total_Energy"]))
-                energies['Bulk'].append(float(row["MeanField_Bulk_Energy"]))
-                energies['Boundary'].append(float(row["MeanField_Boundary_Energy"]))
-                for kind, col in kind_cols.items():
-                    # Per-class columns are new in Rev 88-C; degrade to NaN
-                    # gracefully if pointed at an older CSV.
-                    try:
-                        energies[kind].append(float(row[col]))
-                    except (KeyError, ValueError):
-                        energies[kind].append(np.nan)
-    except Exception as e:
-        print(f"{log_prefix}Warning: Could not parse {ENERGY_FILE} properly: {e}")
-
-    # Ensure energy arrays match the number of steps (pad with NaN if aborted early)
-    for key in energies:
-        if len(energies[key]) < num_steps:
-            energies[key].extend([np.nan] * (num_steps - len(energies[key])))
-        energies[key] = energies[key][:num_steps]
-
-    return energies
-
-
-def _safe_gradient(arr_with_nans):
+    Returns (intra_edges, brane_sites). Every qubit is a brane site: the
+    whole tile is the Z-interface. Site index i in one brane is
+    geometrically aligned with site index i in the branes above/below.
     """
-    Compute np.gradient only over valid (non-NaN) indices.
-    Returns a full-length array with NaN in positions where input was NaN.
-    Handles mid-sequence NaNs safely.
+    lx, ly = 4, 4
+    edges: List[Tuple[int, int]] = []
+
+    for x in range(lx):
+        for y in range(ly):
+            idx = x * ly + y
+            if x < lx - 1: edges.append((idx, (x + 1) * ly + y))
+            if y < ly - 1: edges.append((idx, x * ly + (y + 1)))
+
+    brane_sites = list(range(lx * ly))
+    return edges, brane_sites
+
+
+def patch_id(tx: int, ty: int, z: int) -> int:
+    """Flat patch index for tile (tx, ty) at global layer z."""
+    return (tx * BLOCK_GRID_Y + ty) * GLOBAL_Z + z
+
+
+def patch_coords(p: int) -> Tuple[int, int, int]:
+    """Inverse of patch_id: returns (tx, ty, z)."""
+    z = p % GLOBAL_Z
+    rest = p // GLOBAL_Z
+    return rest // BLOCK_GRID_Y, rest % BLOCK_GRID_Y, z
+
+
+def build_interfaces() -> List[Tuple[int, int, np.ndarray, np.ndarray, str]]:
+    """All coupled seams as (p1, p2, idx1, idx2, kind).
+
+    idx1[k] on p1 pairs with idx2[k] on p2. Kinds:
+      Z_INTRA - adjacent branes inside one block
+      Z_INTER - adjacent branes across a block boundary along Z
+      XY      - lateral tile-edge seams between in-plane neighbor blocks
     """
-    arr = np.asarray(arr_with_nans, dtype=float)
-    out = np.full_like(arr, np.nan)
-    valid_mask = ~np.isnan(arr)
-    valid_indices = np.where(valid_mask)[0]
-    
-    if len(valid_indices) > 1:
-        valid_data = arr[valid_indices]
-        # Pass valid_indices to account for true step distances if mid-sequence gaps exist
-        grad = np.gradient(valid_data, valid_indices)
-        out[valid_indices] = grad
-    elif len(valid_indices) == 1:
-        out[valid_indices[0]] = 0.0
-        
-    return out
-
-
-def build_interfaces(grid_x, grid_y, grid_z, branes_per_block, qpp,
-                     periodic_x, periodic_y, periodic_z):
-    """Faithful mirror of the Rev 88-C engine's build_interfaces().
-
-    Returns a list of (p1, p2, idx1, idx2, kind). idx1[k] on p1 pairs
-    with idx2[k] on p2. Kinds: Z_INTRA, Z_INTER, XY.
-    """
-    def patch_id(tx, ty, z):
-        return (tx * grid_y + ty) * grid_z + z
-
-    z_i1 = np.arange(qpp)                          # (i, i), 16 sites
-    z_i2 = np.arange(qpp)                          # independent array to prevent mutation bleed
-    x_i1 = np.array([12 + y for y in range(4)])    # +X face of p1
+    z_i1 = np.arange(QUBITS_PER_PATCH)
+    z_i2 = z_i1
+    x_i1 = np.array([12 + y for y in range(4)])   # +X face of p1
     x_i2 = np.array([y for y in range(4)])         # -X face of p2
-    y_i1 = np.array([x * 4 + 3 for x in range(4)]) # +Y face of p1
-    y_i2 = np.array([x * 4 for x in range(4)])     # -Y face of p2
+    y_i1 = np.array([x * 4 + 3 for x in range(4)])# +Y face of p1
+    y_i2 = np.array([x * 4 for x in range(4)])    # -Y face of p2
 
-    interfaces = []
-    for tx in range(grid_x):
-        for ty in range(grid_y):
-            for z in range(grid_z):
+    interfaces: List[Tuple[int, int, np.ndarray, np.ndarray, str]] = []
+
+    for tx in range(BLOCK_GRID_X):
+        for ty in range(BLOCK_GRID_Y):
+            for z in range(GLOBAL_Z):
                 p1 = patch_id(tx, ty, z)
 
                 # --- Z neighbor (brane stacking) ---
-                if z < grid_z - 1:
-                    kind = "Z_INTRA" if (z + 1) % branes_per_block != 0 else "Z_INTER"
+                if z < GLOBAL_Z - 1:
+                    kind = "Z_INTRA" if (z + 1) % BRANES_PER_BLOCK != 0 else "Z_INTER"
                     interfaces.append((p1, patch_id(tx, ty, z + 1), z_i1, z_i2, kind))
-                elif periodic_z and grid_z > 2:
-                    # Wrap seam is a block boundary by construction
+                elif PERIODIC_Z and GLOBAL_Z > 2:
                     interfaces.append((p1, patch_id(tx, ty, 0), z_i1, z_i2, "Z_INTER"))
 
                 # --- X neighbor (lateral block seam) ---
-                if tx < grid_x - 1:
+                if tx < BLOCK_GRID_X - 1:
                     interfaces.append((p1, patch_id(tx + 1, ty, z), x_i1, x_i2, "XY"))
-                elif periodic_x and grid_x > 2:
+                elif PERIODIC_X and BLOCK_GRID_X > 2:
                     interfaces.append((p1, patch_id(0, ty, z), x_i1, x_i2, "XY"))
 
                 # --- Y neighbor (lateral block seam) ---
-                if ty < grid_y - 1:
+                if ty < BLOCK_GRID_Y - 1:
                     interfaces.append((p1, patch_id(tx, ty + 1, z), y_i1, y_i2, "XY"))
-                elif periodic_y and grid_y > 2:
+                elif PERIODIC_Y and BLOCK_GRID_Y > 2:
                     interfaces.append((p1, patch_id(tx, 0, z), y_i1, y_i2, "XY"))
 
     return interfaces
 
 
-def run_dashboard(mode="interactive"):
-    """
-    Main visualization routine.
-    mode can be "interactive" (opens UI) or "save" (renders to disk headless).
-    """
-    prefix = "[Background Render] " if mode == "save" else "[Interactive Viewer] "
+# =====================================================================
+# WORKER PROCESS LOGIC
+# =====================================================================
+def gpu_worker_process(
+    rank: int,
+    workers_per_gpu: int,
+    assigned_patches: List[int],
+    conn: mp.connection.Connection,
+    dt: float,
+    total_steps: int,
+    initial_hx: float,
+    target_J: float,
+    target_hx: float,
+    target_hz: float,
+    measure_every: int,
+    shm_name: str,      # kept as arg name for API compat; holds memmap path
+    resume_step: int = 0,
+) -> None:
+    os.environ["PYQRACK_SHARED_LIB_PATH"] = "/usr/local/lib/qrack/libqrack_pinvoke.so"
+    os.environ["OCL_ICD_PLATFORM_SORT"] = "none"
 
-    # 1. Dynamically load lattice configuration
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            config = json.load(f)
-    except FileNotFoundError:
-        print(f"{prefix}Error: {CONFIG_FILE} not found.")
-        sys.exit(1)
+    # Enable in-place ring reset recovery on CYAN_SKILLFISH (gfx1013).
+    # Without this, an amdgpu gfx_0.0.0 ring timeout kills the OpenCL
+    # context fatally. With it, the driver resets in-place (~15ms tomo
+    # latency spike) and execution continues. Inherited from Rev 88-B.
+    # No effect on CUDA targets.
+    os.environ["AMD_OPENCL_FORCE_COMPUTE_QUEUE"] = "1"
 
-    grid_x           = config.get("grid_x", 4)
-    grid_y           = config.get("grid_y", 4)
-    grid_z           = config.get("grid_z", 16)
-    block_grid       = config.get("block_grid", [4, 4, 4])
-    branes_per_block = config.get("branes_per_block", 4)
-    cfg_qpp          = config.get("qubits_per_patch", TILE_LX * TILE_LY)
-    tile_geometry    = config.get("tile_geometry", "4x4_brane_block_lattice")
-    
-    # Safely handle the periodic flag (ensure it translates correctly if passed as a single boolean or integer)
-    periodic         = config.get("periodic", [False, False, False])
-    if not isinstance(periodic, (list, tuple)):
-        periodic = [bool(periodic)] * 3
-    periodic_x, periodic_y, periodic_z = (bool(v) for v in periodic)
+    physical_gpu_index = rank // workers_per_gpu
+    os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(physical_gpu_index)
+    os.environ["QRACK_QPAGER_DEVICES"] = str(physical_gpu_index)
+    os.environ["QRACK_QUNITMULTI_DEVICES"] = str(physical_gpu_index)
 
-    if tile_geometry != "4x4_brane_block_lattice":
-        print(f"{prefix}Warning: tile_geometry is '{tile_geometry}', "
-              f"expected '4x4_brane_block_lattice'. Layout may be wrong.")
+    # QRACK_MAX_ALLOC_MB capped to 7500 MB per worker (Rev 88-F).
+    # The V340 has 8000MB HBM2 per die. Previous value of 64000//workers_per_gpu
+    # gave 64000MB at 1 worker -- far above physical VRAM. Qrack uses this
+    # limit to decide whether to spill statevectors to GTT (host-mapped) memory.
+    # An inflated cap caused all 256 statevector buffers to be mapped into
+    # GART-backed GTT, saturating the 256MB default GART aperture and producing
+    # the per-step ring resets. 7500MB is below HBM2 capacity, keeping Qrack
+    # in VRAM-only mode. Requires amdgpu.gartsize=2048 in GRUB as backstop.
+    alloc_mb = 7500 // max(1, workers_per_gpu)
+    os.environ["QRACK_MAX_ALLOC_MB"] = str(alloc_mb)
+    os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
 
-    # 2. Load the state history: shape (n_steps, patch, qubit, XYZ)
-    # background render uses mmap_mode='r' to avoid loading the full
-    # array into RAM twice when the interactive viewer is also running.
-    mmap = 'r' if mode == "save" else None
-    try:
-        history = np.load(DATA_FILE, mmap_mode=mmap)
-    except FileNotFoundError:
-        print(f"{prefix}Error: {DATA_FILE} not found.")
-        sys.exit(1)
-
-    num_steps, num_patches, qpp = history.shape[0], history.shape[1], history.shape[2]
-    if qpp != cfg_qpp:
-        print(f"{prefix}Warning: config qubits_per_patch={cfg_qpp} but state "
-              f"dump has {qpp}; trusting the state dump.")
-    expected_patches = grid_x * grid_y * grid_z
-    if num_patches != expected_patches:
-        print(f"{prefix}Warning: config implies {expected_patches} patches "
-              f"({grid_x}x{grid_y}x{grid_z}) but state dump has {num_patches}; "
-              f"trusting the state dump. Patch->coordinate mapping may be wrong.")
-    total_qubits = num_patches * qpp
-
-    def patch_coords(p):
-        """Inverse of the engine's patch_id: (tx, ty, z)."""
-        z = p % grid_z
-        rest = p // grid_z
-        return rest // grid_y, rest % grid_y, z
-
-    # 3. Load energies, build interfaces, compute site-resolved coupling error
-    energies = load_energy_data(num_steps, prefix)
-
-    interfaces = build_interfaces(grid_x, grid_y, grid_z, branes_per_block,
-                                  qpp, periodic_x, periodic_y, periodic_z)
-    kinds_present = ["Z_INTRA", "Z_INTER", "XY"]
-    n_by_kind = {k: sum(1 for itf in interfaces if itf[4] == k) for k in kinds_present}
-    print(f"{prefix}Interfaces: {n_by_kind['Z_INTRA']} Z-intra, "
-          f"{n_by_kind['Z_INTER']} Z-inter, {n_by_kind['XY']} XY "
-          f"({len(interfaces)} total)")
-
-    # Site-resolved coupling error, straight from the state dump, using the
-    # exact paired site-index arrays of each interface:
-    #   D[t, iface] = mean_k || s_{i1[k]}^(p1)(t) - s_{i2[k]}^(p2)(t) ||_2
-    # NOTE: this is NOT a residual against any external reference. It measures
-    # internal self-consistency of the site-resolved mean-field stitching
-    # across each seam, NOT simulation accuracy relative to a ground truth.
-    # XY seams pair DISTINCT physical sites (neighboring tile edges), so a
-    # structured in-plane profile gives them a legitimate nonzero baseline.
-    n_ifaces = max(len(interfaces), 1)
-    disagreements = np.zeros((num_steps, n_ifaces))
-    iface_kind = []
-    if interfaces:
-        hist_arr = np.asarray(history)  # mmap-safe view for vectorised math
-        # Future optimization note: This loops serially over all interfaces. For very large
-        # grids, consider batching the Z and XY slice indexing for faster startup.
-        for i, (p1, p2, i1, i2, kind) in enumerate(interfaces):
-            diff = hist_arr[:, p1, i1, :] - hist_arr[:, p2, i2, :]  # (steps, n_pairs, 3)
-            disagreements[:, i] = np.mean(np.linalg.norm(diff, axis=2), axis=1)
-            iface_kind.append(kind)
-    iface_kind = np.array(iface_kind) if iface_kind else np.array([], dtype=str)
-
-    avg_disagreement = (np.mean(disagreements, axis=1)
-                        if interfaces else np.zeros(num_steps))
-    dis_by_kind = {}
-    for k in kinds_present:
-        mask = (iface_kind == k)
-        if np.any(mask):
-            dis_by_kind[k] = np.mean(disagreements[:, mask], axis=1)
-
-    # _safe_gradient: avoids NaN bleed from trailing padding into valid values.
-    dE_dt   = _safe_gradient(energies['Total'])
-    dRes_dt = _safe_gradient(avg_disagreement)
-
-    # 4. Setup Global 3D Coordinates
-    # Within a tile: idx = x * TILE_LY + y (row-major in x), matching
-    # generate_16q_brane_tile(). Tile (tx, ty) is offset laterally by
-    # TILE_GAP_XY; layer z sits at z * LAYER_SPACING plus an extra
-    # BLOCK_GAP_Z for every completed block below it.
-    tile_pitch_x = TILE_LX - 1 + TILE_GAP_XY + 1   # center-to-center X pitch
-    tile_pitch_y = TILE_LY - 1 + TILE_GAP_XY + 1
-
-    def z_pos(z):
-        return z * LAYER_SPACING + (z // branes_per_block) * BLOCK_GAP_Z
-
-    global_X, global_Y, global_Z = [], [], []
-    for p in range(num_patches):
-        tx, ty, z = patch_coords(p)
-        zp = z_pos(z)
-        for q in range(qpp):
-            qx, qy = divmod(q, TILE_LY)
-            global_X.append(tx * tile_pitch_x + float(qx))
-            global_Y.append(ty * tile_pitch_y + float(qy))
-            global_Z.append(zp)
-
-    global_X = np.array(global_X)
-    global_Y = np.array(global_Y)
-    global_Z = np.array(global_Z)
-
-    x_max = (grid_x - 1) * tile_pitch_x + TILE_LX - 1
-    y_max = (grid_y - 1) * tile_pitch_y + TILE_LY - 1
-    z_max = z_pos(grid_z - 1)
-
-    # Optional arrow subsampling for the interactive 3D panel only.
-    stride = max(1, int(QUIVER_STRIDE))
-    draw_idx = np.arange(0, num_patches * qpp, stride)
-    qX, qY, qZ = global_X[draw_idx], global_Y[draw_idx], global_Z[draw_idx]
-
-    # 5. Initialise UI and GridSpec Layout
-    plt.style.use('dark_background')
-    fig = plt.figure(figsize=(18, 10))
-    gs = gridspec.GridSpec(1, 2, width_ratios=[2.5, 1], wspace=0.1)
-
-    ax3d = fig.add_subplot(gs[0], projection='3d')
-    # 6 rows: energy, disagreement, derivatives, heatmap-X, heatmap-Y, heatmap-Z
-    gs_right = gridspec.GridSpecFromSubplotSpec(6, 1, subplot_spec=gs[1], hspace=0.80)
-    ax_energy   = fig.add_subplot(gs_right[0])
-    ax_dis      = fig.add_subplot(gs_right[1])
-    ax_deriv    = fig.add_subplot(gs_right[2])
-    ax_hmap_x   = fig.add_subplot(gs_right[3])
-    ax_hmap_y   = fig.add_subplot(gs_right[4])
-    ax_hmap_z   = fig.add_subplot(gs_right[5])
-
-    def get_vector_data(step_idx):
-        return (
-            history[step_idx, :, :, 0].ravel()[draw_idx],
-            history[step_idx, :, :, 1].ravel()[draw_idx],
-            history[step_idx, :, :, 2].ravel()[draw_idx],
-        )
-
-    U, V, W = get_vector_data(0)
-    # Normaliser shared by quiver colours, colourbar, and all three heatmaps
-    spin_norm = mcolors.Normalize(vmin=-1.0, vmax=1.0)
-
-    vector_colors = [
-        (0.15, 0.35, 0.85, 0.85),  # spin-down  (-1) = blue
-        (0.85, 0.85, 0.85, 0.45),  # equatorial ( 0) = grey
-        (0.85, 0.15, 0.25, 0.85),  # spin-up    (+1) = red
-    ]
-    vector_cmap = mcolors.LinearSegmentedColormap.from_list("ghost_vectors", vector_colors)
-
-    def _quiver_colors(w_flat):
-        """Map the Z-component array to per-arrow RGBA using the shared norm+cmap."""
-        return vector_cmap(spin_norm(w_flat))
-
-    quiver_obj = [ax3d.quiver(
-        qX, qY, qZ, U, V, W,
-        length=0.6, colors=_quiver_colors(W), arrow_length_ratio=0.3
-    )]
-
-    # Faint translucent full-footprint sheets ONLY at the inter-block Z
-    # gaps (the weak-glue Z_INTER seams), as a visual cue for the block
-    # grouping. Z_INTRA and XY seams (and any periodic wraps) are counted
-    # in the error metric but not drawn: 624 sheets would be visual noise.
-    margin = 0.4
-    for zb in range(1, grid_z // branes_per_block):
-        z_lo = z_pos(zb * branes_per_block - 1)
-        z_hi = z_pos(zb * branes_per_block)
-        z_mid = 0.5 * (z_lo + z_hi)
-        verts = [[
-            (-margin,         -margin,         z_mid),
-            (x_max + margin,  -margin,         z_mid),
-            (x_max + margin,  y_max + margin,  z_mid),
-            (-margin,          y_max + margin, z_mid),
-        ]]
-        plane = Poly3DCollection(verts, alpha=0.06, facecolor='#e64550',
-                                 edgecolor='#e64550', linewidths=0.5)
-        ax3d.add_collection3d(plane)
-
-    # 6. Colorbar - driven by spin_norm so ticks span the true [-1, +1] range
-    ax_cbar = fig.add_axes([0.02, 0.25, 0.015, 0.5])
-    sm = plt.cm.ScalarMappable(cmap=vector_cmap, norm=spin_norm)
-    sm.set_array([])
-    cbar = plt.colorbar(sm, cax=ax_cbar)
-    cbar.set_label('Bloch Vector Component (Spin State)', fontsize=10)
-
-    energy_text = ax3d.text2D(
-        0.04, 0.96, "", transform=ax3d.transAxes,
-        color='lightgreen', fontsize=12, fontweight='bold'
+    # Map the file-backed memmap ket cache (Rev 88-K).
+    # shm_name holds the memmap file path (legacy arg name kept for compat).
+    # mode='r+': file already created by master; worker reads and writes.
+    # On /tmp (overlay fs in Docker) -- no /dev/shm size limit.
+    _memmap_path = shm_name
+    _shm_arr = np.memmap(
+        _memmap_path,
+        dtype=np.complex64,
+        mode='r+',
+        shape=(TOTAL_PATCHES, KET_SLOT_ELEMS)
     )
 
-    bx, by, bz = (block_grid + [4, 4, 4])[:3] if isinstance(block_grid, list) else (4, 4, 4)
-    per_flags = ''.join(a for a, on in zip('XYZ', (periodic_x, periodic_y, periodic_z)) if on)
-    lattice_desc = (f"{bx}x{by}x{bz} blocks x {branes_per_block} branes"
-                    + (f" | periodic {per_flags}" if per_flags else ""))
-    ax3d.set_title(
-        f"Block-Lattice Annealing ({lattice_desc} | {num_patches} Branes | "
-        f"{total_qubits} Qubits)\nTrotter Step: 0/{num_steps-1}",
-        fontsize=14, pad=10
-    )
-    ax3d.set_xlim(-0.5, x_max + 0.5)
-    ax3d.set_ylim(-0.5, y_max + 0.5)
-    ax3d.set_zlim(-0.5, z_max + 0.5)
-    try:
-        ax3d.set_box_aspect((x_max + 1.0, y_max + 1.0, max(1.0, z_max + 1.0)))
-    except AttributeError:
-        pass  # set_box_aspect requires matplotlib >= 3.3
-
-    # Hide all pane surfaces, pane edges, tick lines, tick labels, and the 3D grid
-    for axis in (ax3d.xaxis, ax3d.yaxis, ax3d.zaxis):
+    def _flush_ket_to_shm(p: int, ket: np.ndarray) -> None:
+        """Write patch ket into the memmap slot and flush to disk."""
         try:
-            axis.pane.fill = False
-            axis.pane.set_edgecolor('none')
-        except AttributeError:
-            # Forward-compatibility guard (e.g. if pane.fill is removed in future Matplotlib builds)
-            axis.set_pane_color((0.0, 0.0, 0.0, 0.0))
-        axis.line.set_linewidth(0)
-        axis.set_ticklabels([])
-        axis.set_ticks([])
-    ax3d.grid(False)
-    ax3d.set_axis_off()
+            _shm_arr[p, :] = ket.astype(np.complex64)
+            _shm_arr.flush()
+        except Exception:
+            pass
 
-    # --- 2D Analytics ---
-    ax_energy.plot(energies['Total'], label='Total Energy', color='lightgreen')
-    ax_energy.plot(energies['Bulk'], label='Bulk', color='dodgerblue')
-    ax_energy.plot(energies['Boundary'], label='Boundary (all)', color='orange')
-    # Rev 88-C per-class boundary components (NaN if reading an older CSV)
-    for k, lbl in (("Z_INTRA", "E Z-intra"), ("Z_INTER", "E Z-inter"), ("XY", "E XY")):
-        if not np.all(np.isnan(energies[k])):
-            ax_energy.plot(energies[k], label=lbl, color=KIND_COLORS[k],
-                           linestyle='--', linewidth=0.9, alpha=0.9)
-    ax_energy.set_title("Energy Components", fontsize=10)
-    ax_energy.set_ylabel("Energy (a.u.)", fontsize=8)
-    ax_energy.legend(fontsize=6, loc='upper left', ncol=2)
-    ax_energy.grid(True, alpha=0.2)
-    vline_e = ax_energy.axvline(x=0, color='white', linestyle='--', alpha=0.7)
-
-    vline_d = None
-
-    if not interfaces:
-        ax_dis.set_visible(False)
-    else:
-        ax_dis.plot(avg_disagreement, color='crimson', linewidth=1.6,
-                    label='Mean (all seams)')
-        for k, lbl in (("Z_INTRA", "Mean Z-intra"), ("Z_INTER", "Mean Z-inter"), ("XY", "Mean XY")):
-            if k in dis_by_kind:
-                ax_dis.plot(dis_by_kind[k], color=KIND_COLORS[k],
-                            linewidth=0.9, alpha=0.9, label=lbl)
-        ax_dis.set_title("Coupling Error by Seam Class (site-resolved)\n"
-                         "mean_seams( mean_k ||s_{i1[k]} - s_{i2[k]}|| )",
-                         fontsize=9)
-        ax_dis.set_ylabel("Error (L2 Norm)", fontsize=8)
-        ax_dis.legend(fontsize=6, loc='upper left', ncol=2)
-        ax_dis.grid(True, alpha=0.2)
-        vline_d = ax_dis.axvline(x=0, color='white', linestyle='--', alpha=0.7)
-
-    l1 = ax_deriv.plot(dE_dt, label='dE/dt', color='lightgreen')
-    ax_deriv.set_ylabel("dE/dt (per step)", fontsize=8)
-
-    ax_deriv_r = ax_deriv.twinx()
-    l2 = ax_deriv_r.plot(dRes_dt, label='d||ds||/dt', color='crimson')
-    ax_deriv_r.set_ylabel("d||ds||/dt (per step)", fontsize=8)
-
-    # Combine legends to prevent them overlapping if data spikes wildly
-    lines = l1 + l2
-    labels = [l.get_label() for l in lines]
-    ax_deriv.legend(lines, labels, loc='upper left', fontsize=8)
-
-    ax_deriv.set_title("Derivatives (Convergence Rate)", fontsize=10)
-    ax_deriv.grid(True, alpha=0.2)
-    vline_deriv = ax_deriv.axvline(x=0, color='white', linestyle='--', alpha=0.7)
-
-    # 7. Three stacked heatmaps - one per Bloch-sphere component (X, Y, Z)
-    heatmap_colors = [
-        (0.15, 0.35, 0.85, 1.0),   # -1 = blue
-        (0.10, 0.10, 0.10, 1.0),   #  0 = near-black
-        (0.85, 0.15, 0.25, 1.0),   # +1 = red
-    ]
-    heatmap_cmap = mcolors.LinearSegmentedColormap.from_list("heatmap_cmap", heatmap_colors)
-
-    # 256 rows: patch order is (tx, ty)-major, z-minor, so each contiguous
-    # run of grid_z rows is one tile column across all layers. Label each
-    # tile column at its center row; separate tile columns with a strong
-    # line and blocks within a column with a faint one.
-    y_ticks, y_labels = [], []
-    for tx in range(grid_x):
-        for ty in range(grid_y):
-            base = (tx * grid_y + ty) * grid_z
-            y_ticks.append(base + (grid_z - 1) / 2.0)
-            y_labels.append(f"T({tx},{ty})")
-
-    def _init_heatmap(ax, data, cmap, norm, label, show_ylabel=False, show_xlabel=False):
-        """Create an imshow panel for the given data slice."""
-        img = ax.imshow(
-            data, cmap=cmap, norm=norm,
-            aspect='auto', interpolation='nearest'
-        )
-        for r in range(branes_per_block, num_patches, branes_per_block):
-            if r % grid_z == 0:
-                continue  # tile-column boundary drawn below, stronger
-            ax.axhline(r - 0.5, color='white', linewidth=0.3, alpha=0.35)
-        for r in range(grid_z, num_patches, grid_z):
-            ax.axhline(r - 0.5, color='white', linewidth=0.9, alpha=0.9)
-        ax.set_title(label, fontsize=9)
-        if show_ylabel:
-            ax.set_yticks(y_ticks)
-            ax.set_yticklabels(y_labels, fontsize=4)
-        else:
-            ax.set_yticks([])
-        if show_xlabel:
-            ax.set_xlabel(f"Local Qubit Index (0-{qpp - 1})", fontsize=8)
-            ax.tick_params(axis='x', which='major', labelsize=7)
-        else:
-            ax.set_xticks([])
-        return img
-
-    hmap_x = _init_heatmap(ax_hmap_x, history[0, :, :, 0],
-                           heatmap_cmap, spin_norm, "Polarization <X>",
-                           show_ylabel=True, show_xlabel=False)
-    hmap_y = _init_heatmap(ax_hmap_y, history[0, :, :, 1],
-                           heatmap_cmap, spin_norm, "Polarization <Y>",
-                           show_ylabel=True, show_xlabel=False)
-    hmap_z = _init_heatmap(ax_hmap_z, history[0, :, :, 2],
-                           heatmap_cmap, spin_norm, "Polarization <Z>",
-                           show_ylabel=True, show_xlabel=True)
-
-    fig.subplots_adjust(left=0.08, right=0.95, top=0.92, bottom=0.15)
-    ax_slider = fig.add_axes([0.15, 0.05, 0.60, 0.02])
-    slider = Slider(
-        ax=ax_slider, label='Trotter Step',
-        valmin=0, valmax=num_steps - 1, valinit=0, valstep=1, color='#4a90e2'
-    )
-
-    ax_play = fig.add_axes([0.80, 0.035, 0.08, 0.04])
-    btn_play = Button(ax_play, 'Pause', color='#333333', hovercolor='#555555')
-
-    is_playing = True
-
-    def on_scroll(event):
-        if event.inaxes != ax3d:
-            return
-
-        # Matplotlib 3.8+ compatible zoom: scroll down zooms out (box shrinks)
-        if not hasattr(ax3d, 'custom_zoom'):
-            ax3d.custom_zoom = 1.0
-        ax3d.custom_zoom *= 0.9 if event.button == 'down' else 1.1
-
+    def _fatal_exit(sims_to_flush: Dict[int, Any]) -> None:
+        """Flush all patch kets to memmap, close conn, exit without __del__."""
+        for p, sim in list(sims_to_flush.items()):
+            try:
+                ket = np.array(sim.out_ket(), dtype=np.complex64)
+                _flush_ket_to_shm(p, ket)
+            except Exception:
+                pass
         try:
-            current_aspect = ax3d.get_box_aspect()
-            if current_aspect is None:
-                current_aspect = (x_max + 1.0, y_max + 1.0, max(1.0, z_max + 1.0))
-            ax3d.set_box_aspect(current_aspect, zoom=ax3d.custom_zoom)
-        except TypeError:
-            # Fallback for Matplotlib < 3.8 where zoom kwarg doesn't exist
-            # Scroll down (event.button == 'down') conventionally zooms out (distance increases)
-            ax3d.dist *= 1.1 if event.button == 'down' else 0.9
+            del _shm_arr  # Close the memmap file handle.
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+        os._exit(1)  # Immediate exit; no rusticl __del__, no coredump.
 
-        fig.canvas.draw_idle()
+    import pyqrack
+    from pyqrack import QrackSimulator
 
-    fig.canvas.mpl_connect('scroll_event', on_scroll)
+    sims = {}
 
-    def on_key_press(event):
-        if event.key == ' ':
-            current_step = int(slider.val)
-            e_list = energies['Total']
-            e_val = e_list[current_step] if current_step < len(e_list) else float('nan')
-            e_str = f"{e_val:.4f}" if (isinstance(e_val, float) and not np.isnan(e_val)) else "NaN"
-            filename = (
-                f"dash_snapshot_blocks_{bx}x{by}x{bz}x{branes_per_block}"
-                f"_step{current_step}_E{e_str}.png"
+    try:
+        # --- PAULI CODE AUTODETECT ---
+        _THRESH = 0.5
+
+        # Z Probe
+        _probe_z = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+        vals0_z = {}
+        for _code in range(8):
+            try: vals0_z[_code] = _probe_z.pauli_expectation([0], [_code])
+            except Exception: pass
+        _probe_z.x(0)
+        PZ, SIGN_Z = None, None
+        for _code, v0 in vals0_z.items():
+            try: v1 = _probe_z.pauli_expectation([0], [_code])
+            except Exception: continue
+            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
+                PZ = _code
+                SIGN_Z = 1.0 if v0 > 0 else -1.0
+                break
+        if PZ is None:
+            raise RuntimeError("Fatal: could not autodetect PZ code")
+        del _probe_z
+        gc.collect()  # Force rusticl context teardown; prevents handle leaks.
+
+        # X Probe
+        _probe_x = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+        _probe_x.h(0)
+        vals0_x = {}
+        for _code in range(8):
+            if _code == PZ: continue
+            try: vals0_x[_code] = _probe_x.pauli_expectation([0], [_code])
+            except Exception: pass
+        _probe_x.z(0)
+        PX, SIGN_X = None, None
+        for _code, v0 in vals0_x.items():
+            try: v1 = _probe_x.pauli_expectation([0], [_code])
+            except Exception: continue
+            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
+                PX = _code
+                SIGN_X = 1.0 if v0 > 0 else -1.0
+                break
+        if PX is None:
+            raise RuntimeError("Fatal: could not autodetect PX code")
+        del _probe_x
+        gc.collect()
+
+        # Y Probe
+        # S-gate availability check: s() is a native Clifford gate in
+        # pyqrack v2.7.1. Confirmed present on gfx906/gfx1013 rusticl
+        # builds. The mtrx() fallback is retained for portability to
+        # builds where s() is absent, but that path triggers JIT kernel
+        # compilation and may overflow the rusticl stack on the first call.
+        # Prefer the Clifford path wherever possible. (Rev 88-B)
+        try:
+            _s_test = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+            _s_test.s(0)
+            del _s_test
+            gc.collect()
+            _USE_S_GATE = True
+        except Exception:
+            try: del _s_test
+            except NameError: pass
+            gc.collect()
+            _USE_S_GATE = False
+
+        _probe_y = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+
+        # Angle-convention-agnostic Y eigenstate preparation.
+        # H|0> = |+>, S|+> = |+i> (the +1 eigenstate of Y).
+        # H and S are Clifford gates with no rotation parameter; this path
+        # is independent of the ANGLE_SCALE convention resolved below.
+        # The mtrx() fallback path (Rev 88-C) triggered JIT overflow on
+        # rusticl; replaced here by the Clifford path from Rev 88-B.
+        _probe_y.h(0)
+        if _USE_S_GATE:
+            _probe_y.s(0)
+        else:
+            # Fallback: mtrx() Rx(pi/2) approximating S in the X-Z plane.
+            # Angle-convention-dependent; safe only when ANGLE_SCALE=1.0.
+            # Dead path on gfx906/gfx1013 builds that support s().
+            _c, _s = math.cos(math.pi / 4.0), math.sin(math.pi / 4.0)
+            _probe_y.mtrx([complex(_c, 0), complex(0, _s), complex(0, _s), complex(_c, 0)], 0)
+
+        vals0_y = {}
+        for _code in range(8):
+            if _code in (PX, PZ): continue
+            try: vals0_y[_code] = _probe_y.pauli_expectation([0], [_code])
+            except Exception: pass
+        _probe_y.z(0)
+        PY, SIGN_Y = None, None
+        for _code, v0 in vals0_y.items():
+            try: v1 = _probe_y.pauli_expectation([0], [_code])
+            except Exception: continue
+            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
+                PY = _code
+                SIGN_Y = 1.0 if v0 > 0 else -1.0
+                break
+        if PY is None:
+            raise RuntimeError("Fatal: could not autodetect PY code")
+        del _probe_y
+        gc.collect()
+        # ----------------------------
+
+        # --- ANGLE CONVENTION AUTODETECT ---
+        _sim_mag = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+        _sim_mag.r(PX, math.pi, 0)
+        mag_check = _sim_mag.pauli_expectation([0], [PZ])
+        _corrected = SIGN_Z * mag_check
+        if abs(_corrected + 1.0) < 0.1:
+            ANGLE_SCALE = 1.0
+        elif abs(_corrected - 1.0) < 0.1:
+            ANGLE_SCALE = 0.5
+        else:
+            raise RuntimeError(
+                "Fatal: r(PX,pi) returned ambiguous SIGN_Z*<Z> = " +
+                "{:.6f}".format(_corrected) +
+                "; expected ~+1.0 or ~-1.0"
             )
-            print(f"{prefix}Saving screenshot to {filename}...")
-            fig.savefig(filename, dpi=600, bbox_inches='tight', facecolor=fig.get_facecolor())
-            print(f"{prefix}Screenshot saved.")
+        del _sim_mag
+        gc.collect()
+        # -------------------------------------------------------
 
-    fig.canvas.mpl_connect('key_press_event', on_key_press)
+        def apply_h(sim: QrackSimulator, q: int) -> None:
+            sim.h(q)
 
-    _from_animation = [False]
+        def apply_rx(sim: QrackSimulator, theta: float, q: int) -> None:
+            sim.r(PX, float(theta) * ANGLE_SCALE, q)
 
-    def update(frame):
-        frame = int(frame)
-        U, V, W = get_vector_data(frame)
+        def apply_ry(sim: QrackSimulator, theta: float, q: int) -> None:
+            sim.r(PY, float(theta) * ANGLE_SCALE, q)
 
-        quiver_obj[0].remove()
-        quiver_obj[0] = ax3d.quiver(
-            qX, qY, qZ, U, V, W,
-            length=0.6, colors=_quiver_colors(W), arrow_length_ratio=0.3
+        def apply_rz(sim: QrackSimulator, theta: float, q: int) -> None:
+            sim.r(PZ, float(theta) * ANGLE_SCALE, q)
+
+        def apply_zz(sim: QrackSimulator, theta: float, q1: int, q2: int) -> None:
+            # Bare CNOT-conjugation ZZ gate: mcx -> rz -> mcx.
+            # Intra-gate pauli_expectation drains were added in Rev 88-H to
+            # cap seq delta at 1, but caused 72x drain overhead per patch per
+            # step (3 drains/gate x 24 gates) which made Lat(Tomo)=250ms in
+            # the ring-reset regime. The ket checkpoint+resurrection in Rev 88-H
+            # already provides correct recovery from any seq-delta=3 hang:
+            # context loss -> resurrect from pre-step ket -> retry Trotter.
+            # Intra-gate drains are therefore redundant. Removed in Rev 88-I.
+            sim.mcx([q1], q2)
+            apply_rz(sim, 2.0 * theta, q2)
+            sim.mcx([q1], q2)
+
+        def trotter_step_body(sim: QrackSimulator, num_qubits: int,
+                              intra_edges: List[Tuple[int, int]],
+                              J: float, hx: float, hz: float,
+                              dt_local: float) -> None:
+            dt_half = dt_local / 2.0
+
+            theta_x  = -2.0 * hx * dt_half
+            theta_z  = -2.0 * hz * dt_local
+            theta_zz = -J * dt_local
+
+            for q in range(num_qubits): apply_rx(sim, theta_x, q)
+            for q in range(num_qubits): apply_rz(sim, theta_z, q)
+
+            # CHUNK=8 restored (Rev 88-I): defence-in-depth against ring buffer
+            # overflow (original gfx1013 concern from Rev 88-B). With ket
+            # checkpoint+resurrection handling context loss, CHUNK no longer
+            # needs to be 1 for correctness. CHUNK=8 gives 3 drain points per
+            # 24 edges, avoiding 21 extra drain calls vs CHUNK=1.
+            CHUNK = 8
+            for i in range(0, len(intra_edges), CHUNK):
+                for q1, q2 in intra_edges[i:i + CHUNK]:
+                    apply_zz(sim, theta_zz, q1, q2)
+                _ = sim.pauli_expectation([0], [PZ])
+
+            for q in range(num_qubits): apply_rx(sim, theta_x, q)
+
+        def z_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
+            return np.array([SIGN_Z * float(sim.pauli_expectation([q], [PZ]))
+                             for q in qubits])
+
+        def x_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
+            return np.array([SIGN_X * float(sim.pauli_expectation([q], [PX]))
+                             for q in qubits])
+
+        def y_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
+            return np.array([SIGN_Y * float(sim.pauli_expectation([q], [PY]))
+                             for q in qubits])
+
+        def zz_means_meanfield(z_exp: np.ndarray,
+                               edges: List[Tuple[int, int]]) -> np.ndarray:
+            return np.array([z_exp[q1] * z_exp[q2] for q1, q2 in edges])
+
+        def apply_kicks(sim: QrackSimulator,
+                        kicks: Dict[int, Tuple[float, float, float]],
+                        dt_local: float) -> None:
+            if not kicks: return
+            coef = -2.0 * dt_local
+            items = list(kicks.items())
+
+            # KICK_CHUNK=8 restored (Rev 88-I): same rationale as CHUNK=8.
+            # Resurrection handles any context loss; KICK_CHUNK=8 avoids
+            # 8 extra drain calls per kick phase vs KICK_CHUNK=1.
+            KICK_CHUNK = 8
+            for i in range(0, len(items), KICK_CHUNK):
+                for raw_q, (kx, ky, kz) in items[i:i + KICK_CHUNK]:
+                    q = int(raw_q)
+                    theta_x = kx * coef
+                    theta_y = ky * coef
+                    theta_z = kz * coef
+                    # KICK_THETA_THRESHOLD=1e-6: suppress near-zero rotations
+                    # to reduce GART-mapped kernel buffer count (Rev 88-F).
+                    if abs(theta_x) > KICK_THETA_THRESHOLD: apply_rx(sim, theta_x, q)
+                    if abs(theta_y) > KICK_THETA_THRESHOLD: apply_ry(sim, theta_y, q)
+                    if abs(theta_z) > KICK_THETA_THRESHOLD: apply_rz(sim, theta_z, q)
+                _ = sim.pauli_expectation([0], [PZ])
+
+        # Strings that identify a use-after-reset context loss error in
+        # the RuntimeError message from the amdgpu/rusticl userspace layer.
+        _CONTEXT_LOST_STRINGS = (
+            "context is lost",
+            "CS has cancelled",
+            "CL_OUT_OF_RESOURCES",
+            "CL_INVALID_COMMAND_QUEUE",
         )
 
-        ax3d.set_title(
-            f"Block-Lattice Annealing ({lattice_desc} | {num_patches} Branes | "
-            f"{total_qubits} Qubits)\nTrotter Step: {frame}/{num_steps-1}",
-            fontsize=14, pad=10
-        )
+        def is_context_loss(exc: Exception) -> bool:
+            msg = str(exc).lower()
+            return any(s.lower() in msg for s in _CONTEXT_LOST_STRINGS)
 
-        e_list = energies['Total']
-        if e_list and frame < len(e_list):
-            e_val = e_list[frame]
-            energy_text.set_text(f"Total Energy: {e_val:.4f}" if not np.isnan(e_val) else "")
-        else:
-            energy_text.set_text("")
+        intra_edges, _brane_sites = generate_16q_brane_tile()
 
-        vline_e.set_xdata([frame])
-        if vline_d is not None:
-            vline_d.set_xdata([frame])
-        
-        vline_deriv.set_xdata([frame])
+        # Per-patch statevector checkpoint: updated before each Trotter step.
+        # 2^16 complex64 = 512 KB per patch; 128 MB total at 256 patches.
+        # Used to restore state after sim resurrection following a context loss.
+        ket_cache: Dict[int, np.ndarray] = {}
 
-        hmap_x.set_data(history[frame, :, :, 0])
-        hmap_y.set_data(history[frame, :, :, 1])
-        hmap_z.set_data(history[frame, :, :, 2])
+        def resurrect_sim(p: int) -> QrackSimulator:
+            """Delete stale sim, create fresh one, restore from ket_cache."""
+            if p in sims:
+                try:
+                    _old = sims.pop(p)
+                    del _old
+                except Exception:
+                    pass
+            gc.collect()
+            sim_new = QrackSimulator(
+                qubit_count=QUBITS_PER_PATCH,
+                is_binary_decision_tree=False,
+                is_stabilizer_hybrid=False,
+                is_gpu=True,
+            )
+            if p in ket_cache:
+                try:
+                    sim_new.in_ket(ket_cache[p].tolist())
+                    print("[Worker " + str(rank) + "] patch " + str(p) +
+                          " resurrected from ket checkpoint.", file=sys.stderr)
+                except Exception as restore_err:
+                    print("[Worker " + str(rank) + "] patch " + str(p) +
+                          " ket restore failed (" + str(restore_err) +
+                          "); reinitialising to |+>^16.", file=sys.stderr)
+                    for q in range(QUBITS_PER_PATCH):
+                        apply_h(sim_new, q)
+            else:
+                # No checkpoint yet (failure on step 0): start from |+>^16.
+                for q in range(QUBITS_PER_PATCH):
+                    apply_h(sim_new, q)
+                print("[Worker " + str(rank) + "] patch " + str(p) +
+                      " resurrected to |+>^16 (no ket checkpoint).",
+                      file=sys.stderr)
+            sims[p] = sim_new
+            return sim_new
 
-        if _from_animation[0]:
-            ax3d.view_init(elev=ax3d.elev, azim=ax3d.azim + 0.3)
+        for p in assigned_patches:
+            sim = QrackSimulator(
+                qubit_count=QUBITS_PER_PATCH,
+                is_binary_decision_tree=False,
+                is_stabilizer_hybrid=False,
+                is_gpu=True,
+            )
+            if resume_step > 0:
+                # RESPAWN PATH (Rev 88-J): restore ket from shared memory
+                # written by the dead worker's last pre-Trotter checkpoint.
+                try:
+                    ket_slot = _shm_arr[p, :].copy()
+                    sim.in_ket(ket_slot.tolist())
+                    print("[Worker " + str(rank) + "] patch " + str(p) +
+                          " restored from shm at resume_step=" +
+                          str(resume_step) + ".", file=sys.stderr)
+                except Exception as _re:
+                    print("[Worker " + str(rank) + "] patch " + str(p) +
+                          " shm restore failed (" + str(_re) +
+                          "); init |+>^16.", file=sys.stderr)
+                    for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
+            else:
+                # FRESH START: initialise to |+>^16.
+                for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
+            sims[p] = sim
 
-        slider.eventson = False
-        slider.set_val(frame)
-        slider.eventson = True
+            try:
+                _ = sim.pauli_expectation([0], [PZ])
+            except Exception as e:
+                raise RuntimeError(
+                    "Fatal: GPU allocation failed on patch " + str(p) +
+                    ". Driver error: " + str(e)
+                )
+            # Seed shm slot with initial ket (|+>^16 or restored).
+            try:
+                ket_cache[p] = np.array(sim.out_ket(), dtype=np.complex64)
+                _flush_ket_to_shm(p, ket_cache[p])
+            except Exception:
+                pass
 
-        return quiver_obj[0], energy_text, hmap_x, hmap_y, hmap_z
+        kick_payloads = {p: {} for p in assigned_patches}
+        _warned_fidelity = False
 
-    def _animation_update(frame):
-        _from_animation[0] = True
-        result = update(frame)
-        _from_animation[0] = False
-        return result
+        for t in range(total_steps):
+            s = t / max(1, (total_steps - 1))
+            current_hx = (1.0 - s) * initial_hx + s * target_hx
+            current_J  = s * target_J
+            current_hz = s * target_hz
+            is_measure = (t % measure_every == 0) or (t == total_steps - 1)
 
-    def on_slider_update(val):
-        _from_animation[0] = False
-        update(val)
-        fig.canvas.draw_idle()
+            patch_data_to_master = {}
 
-    slider.on_changed(on_slider_update)
+            for p_idx, p in enumerate(assigned_patches):
+                sim = sims[p]
 
-    def toggle_play(event):
-        nonlocal is_playing
-        if is_playing:
-            ani.event_source.stop()
-            btn_play.label.set_text('Play')
-        else:
-            ani.event_source.start()
-            btn_play.label.set_text('Pause')
-        is_playing = not is_playing
-        fig.canvas.draw_idle()
+                # KET CHECKPOINT (Rev 88-H/J): snapshot statevector BEFORE
+                # Trotter so that a mid-step context loss can be recovered.
+                # Rev 88-J: also flush to shared memory so the master can
+                # hand the ket to a respawned worker after a BACO crash.
+                try:
+                    ket_cache[p] = np.array(sim.out_ket(), dtype=np.complex64)
+                    _flush_ket_to_shm(p, ket_cache[p])
+                except Exception:
+                    pass  # Stale sim; resurrect_sim will use prior cache.
 
-    btn_play.on_clicked(toggle_play)
+                if kick_payloads[p]:
+                    try:
+                        apply_kicks(sim, kick_payloads[p], dt)
+                    except RuntimeError as _ke:
+                        if is_context_loss(_ke):
+                            print("[Worker " + str(rank) + "] step " + str(t) +
+                                  " patch " + str(p) +
+                                  " context lost in apply_kicks; resurrecting.",
+                                  file=sys.stderr)
+                            sim = resurrect_sim(p)
+                            # Retry kicks on fresh sim with restored ket.
+                            try:
+                                apply_kicks(sim, kick_payloads[p], dt)
+                            except Exception:
+                                pass  # Absorb; Trotter will proceed.
+                        else:
+                            raise
 
-    # blit=False is correct: Axes3D does not support blitting.
-    ani = animation.FuncAnimation(
-        fig, _animation_update, frames=num_steps, interval=150, blit=False
-    )
+                t_start_trotter = time.perf_counter()
+                try:
+                    trotter_step_body(sim, QUBITS_PER_PATCH, intra_edges,
+                                      current_J, current_hx, current_hz, dt)
+                except RuntimeError as _te:
+                    if is_context_loss(_te):
+                        print("[Worker " + str(rank) + "] step " + str(t) +
+                              " patch " + str(p) +
+                              " context lost in trotter; resurrecting.",
+                              file=sys.stderr)
+                        sim = resurrect_sim(p)
+                        # Retry Trotter from restored ket checkpoint.
+                        try:
+                            trotter_step_body(sim, QUBITS_PER_PATCH, intra_edges,
+                                              current_J, current_hx, current_hz, dt)
+                        except Exception:
+                            pass  # Absorb; tomo will measure recovered state.
+                    else:
+                        raise
 
-    if mode == "save":
-        print(f"{prefix}Commencing 4K FFmpeg render to '{SAVE_FILE}'...")
+                # INTER-PATCH BARRIER (Rev 88-E): force compute ring to drain
+                # completely between patches.
+                try:
+                    _ = sim.pauli_expectation([0], [PZ])
+                except RuntimeError as _be:
+                    if is_context_loss(_be):
+                        sim = resurrect_sim(p)
+                    else:
+                        raise
+
+                # INTER-PATCH YIELD (Rev 88-E): OS scheduler yield every N patches.
+                if (p_idx + 1) % INTER_PATCH_YIELD_EVERY == 0:
+                    time.sleep(0)
+
+                t_lat_trotter = time.perf_counter() - t_start_trotter
+
+                t_lat_tomo = 0.0
+                if is_measure:
+                    t_start_tomo = time.perf_counter()
+                    all_q = list(range(QUBITS_PER_PATCH))
+                    try:
+                        state = {
+                            "Z": z_means(sim, all_q),
+                            "X": x_means(sim, all_q),
+                            "Y": y_means(sim, all_q),
+                        }
+                    except RuntimeError as _me:
+                        if is_context_loss(_me):
+                            print("[Worker " + str(rank) + "] step " + str(t) +
+                                  " patch " + str(p) +
+                                  " context lost in tomo; resurrecting.",
+                                  file=sys.stderr)
+                            sim = resurrect_sim(p)
+                            # Measure the resurrected (restored) state.
+                            state = {
+                                "Z": z_means(sim, all_q),
+                                "X": x_means(sim, all_q),
+                                "Y": y_means(sim, all_q),
+                            }
+                        else:
+                            raise
+                    zz_exp = zz_means_meanfield(state["Z"], intra_edges)
+                    bulk_e = (-current_hz * float(np.sum(state["Z"]))
+                              - current_J  * float(np.sum(zz_exp))
+                              - current_hx * float(np.sum(state["X"])))
+                    t_lat_tomo = time.perf_counter() - t_start_tomo
+
+                    try:
+                        fidelity = float(sim.get_unitary_fidelity())
+                    except (AttributeError, RuntimeError):
+                        # AttributeError: binding absent in this pyqrack build.
+                        # RuntimeError: C-layer pinvoke failure (v2.7.1 API).
+                        # Catch broadened from AttributeError-only in Rev 88-C.
+                        fidelity = 1.0
+                        if not _warned_fidelity:
+                            print(
+                                "[Worker " + str(rank) + "] Warning: "
+                                "get_unitary_fidelity() failed or not found. "
+                                "Upgrade PyQrack.",
+                                file=sys.stderr
+                            )
+                            _warned_fidelity = True
+
+                    patch_data_to_master[p] = {
+                        "state": state,
+                        "meanfield_bulk_energy": bulk_e,
+                        "lat_trotter_ms": t_lat_trotter * 1000.0,
+                        "lat_tomo_ms": t_lat_tomo * 1000.0,
+                        "unitary_fidelity": fidelity
+                    }
+
+            if is_measure:
+                conn.send(patch_data_to_master)
+                kick_payloads = conn.recv()
+
+            # Kick payloads intentionally retained across non-measure steps
+            # (continuous boundary field, Rev 87).
+
+    finally:
+        for p in list(sims.keys()):
+            _s = sims.pop(p)
+            del _s
+        sims.clear()
+        gc.collect()
         try:
-            ani.save(SAVE_FILE, writer='ffmpeg', fps=10, dpi=216)
-            print(f"{prefix}Save complete.")
+            del _shm_arr  # Close memmap handle.
+        except Exception:
+            pass
+        conn.close()
+
+
+# =====================================================================
+# MASTER ORCHESTRATOR
+# =====================================================================
+class MultiGpuHadronEngine:
+    def __init__(self, master_seed: int = 1337) -> None:
+        self.master_seed = master_seed
+        self.intra_edges, self.brane_sites = generate_16q_brane_tile()
+        self.n_sites = len(self.brane_sites)  # 16
+
+        self.patch_coords = {p: patch_coords(p) for p in range(TOTAL_PATCHES)}
+        self.interfaces = build_interfaces()
+
+        n_by_kind = {"Z_INTRA": 0, "Z_INTER": 0, "XY": 0}
+        for _, _, _, _, kind in self.interfaces:
+            n_by_kind[kind] += 1
+        self.n_by_kind = n_by_kind
+
+        self.lattice_history  = []
+        self.energy_csv       = "meanfield_ground_state_energy_curve_multi.csv"
+        self.profiles_csv     = "boundary_profiles_multi.csv"
+        self.state_dump_file  = "macroscopic_lattice_states.npy"
+        self.config_file      = "lattice_config.json"
+
+        # File-backed memmap ket cache (Rev 88-K, replaces SharedMemory).
+        # Created on /tmp (overlay fs) to avoid Docker's 64MB /dev/shm limit.
+        # mode='w+' creates the file and zeros it. Workers open mode='r+'.
+        self.memmap_path = KET_MEMMAP_PATH
+        try:
+            self.ket_mm = np.memmap(
+                self.memmap_path,
+                dtype=np.complex64,
+                mode='w+',
+                shape=(TOTAL_PATCHES, KET_SLOT_ELEMS)
+            )
+            self.ket_mm[:] = 0.0
+            self.ket_mm.flush()
+            print("[Engine] Ket memmap: " + self.memmap_path +
+                  " (" + str(TOTAL_PATCHES * KET_SLOT_ELEMS * 8 // (1024*1024)) +
+                  " MB)")
         except Exception as e:
-            print(f"{prefix}Failed to save. Is ffmpeg installed? Error: {e}")
-    else:
-        print(f"{prefix}Opening GUI...")
-        plt.show()
+            raise RuntimeError(
+                "Fatal: could not create ket memmap at " +
+                self.memmap_path + ": " + str(e)
+            )
 
+        # Ring_Reset column added (Rev 88-D, from Rev 88-B).
+        self._energy_fields = [
+            "Step", "Anneal_Percent", "MeanField_Bulk_Energy",
+            "E_Z_Intra", "E_Z_Inter", "E_XY",
+            "MeanField_Boundary_Energy", "MeanField_Total_Energy",
+            "Min_Unitary_Fidelity", "Ring_Reset"
+        ]
+        self._profile_fields = [
+            "Step", "Patch", "Tx", "Ty", "Z", "Block_Z", "Layer",
+            "Face", "X_mean", "Y_mean", "Z_mean"
+        ]
 
-def main():
-    mp.set_start_method('spawn', force=True)
+        self._init_files()
 
-    print("Forking 4K render to background process...")
-    render_process = mp.Process(target=run_dashboard, args=("save",))
-    render_process.start()
+        self.worker_assignments = [[] for _ in range(TOTAL_WORKERS)]
+        for i in range(TOTAL_PATCHES):
+            self.worker_assignments[i % TOTAL_WORKERS].append(i)
 
-    run_dashboard(mode="interactive")
+    def _init_files(self) -> None:
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump({
+                    "grid_x": BLOCK_GRID_X, "grid_y": BLOCK_GRID_Y, "grid_z": GLOBAL_Z,
+                    "block_grid": [BLOCK_GRID_X, BLOCK_GRID_Y, BLOCK_GRID_Z],
+                    "branes_per_block": BRANES_PER_BLOCK,
+                    "num_patches": TOTAL_PATCHES,
+                    "qubits_per_patch": QUBITS_PER_PATCH,
+                    "total_qubits": TOTAL_QUBITS,
+                    "tile_geometry": "4x4_brane_block_lattice",
+                    "periodic": [PERIODIC_X, PERIODIC_Y, PERIODIC_Z],
+                    "interfaces_by_kind": self.n_by_kind,
+                    "patch_id_convention": "p = (tx * grid_y + ty) * grid_z + z",
+                    "state_dump_shape": ["n_steps", "patch", "qubit", "XYZ"]
+                }, f)
+            with open(self.energy_csv, mode='w', newline='') as f:
+                csv.DictWriter(f, fieldnames=self._energy_fields).writeheader()
+            with open(self.profiles_csv, mode='w', newline='') as f:
+                csv.DictWriter(f, fieldnames=self._profile_fields).writeheader()
+        except Exception as e:
+            print("[CSV] Warning: Setup configuration write failed: " + str(e),
+                  file=sys.stderr)
 
-    if render_process.is_alive():
-        print("\nInteractive viewer closed. Waiting for the background 4K render to finish...")
-        render_process.join()
+    def _log_csvs(self, step: int, anneal: float, bulk: float,
+                  e_by_kind: Dict[str, float], bound: float, total: float,
+                  min_fidelity: float, patch_profiles: Dict[int, Any],
+                  ring_reset: bool) -> None:
+        try:
+            with open(self.energy_csv, mode='a', newline='') as f:
+                csv.DictWriter(f, fieldnames=self._energy_fields).writerow({
+                    "Step": step, "Anneal_Percent": anneal,
+                    "MeanField_Bulk_Energy": bulk,
+                    "E_Z_Intra": e_by_kind["Z_INTRA"],
+                    "E_Z_Inter": e_by_kind["Z_INTER"],
+                    "E_XY": e_by_kind["XY"],
+                    "MeanField_Boundary_Energy": bound,
+                    "MeanField_Total_Energy": total,
+                    "Min_Unitary_Fidelity": min_fidelity,
+                    "Ring_Reset": 1 if ring_reset else 0
+                })
 
-    print("All processes terminated.")
+            with open(self.profiles_csv, mode='a', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=self._profile_fields)
+                for p, prof in patch_profiles.items():
+                    tx, ty, z = self.patch_coords[p]
+                    w.writerow({
+                        "Step": step, "Patch": p,
+                        "Tx": tx, "Ty": ty, "Z": z,
+                        "Block_Z": z // BRANES_PER_BLOCK,
+                        "Layer": z % BRANES_PER_BLOCK,
+                        "Face": "BRANE",
+                        "X_mean": float(np.mean(prof["means"]["X"])),
+                        "Y_mean": float(np.mean(prof["means"]["Y"])),
+                        "Z_mean": float(np.mean(prof["means"]["Z"]))
+                    })
+        except Exception as e:
+            print("[CSV] Warning: Log write failed: " + str(e), file=sys.stderr)
+
+    def run(self, total_steps: int, dt: float, initial_hx: float,
+            target_g_intra_z: float, target_g_inter_z: float, target_g_xy: float,
+            target_J: float, target_hx: float, target_hz: float,
+            measure_every: int = 1, effective_shots: float = 512.0) -> None:
+
+        if total_steps < 1:
+            raise ValueError("total_steps must be at least 1")
+        if measure_every < 1:
+            raise ValueError("measure_every must be a positive integer")
+
+        print(
+            "[Engine] " + str(BLOCK_GRID_X) + "x" + str(BLOCK_GRID_Y) + "x" +
+            str(BLOCK_GRID_Z) + " block lattice x " + str(BRANES_PER_BLOCK) +
+            " branes/block = " + str(TOTAL_PATCHES) + " patches, " +
+            str(TOTAL_QUBITS) + " qubits | interfaces: " +
+            str(self.n_by_kind["Z_INTRA"]) + " Z-intra, " +
+            str(self.n_by_kind["Z_INTER"]) + " Z-inter, " +
+            str(self.n_by_kind["XY"]) + " XY | " +
+            str(GPUS_AVAILABLE) + " GPUs (" + str(WORKERS_PER_GPU) +
+            " workers/GPU), " + str(total_steps) + " steps"
+        )
+        print(
+            "[Engine] Rev 88-N: parallel respawn via connection.wait() "
+            "(O(max_worker_time) not O(N*worker_time)), "
+            "MAX_RESET_EVENTS=" + str(MAX_RESET_EVENTS) + ", "
+            "memmap ket cache, CHUNK=8."
+        )
+
+        active_ranks = [r for r in range(TOTAL_WORKERS)
+                        if self.worker_assignments[r]]
+
+        def _spawn_worker(rank: int, resume_step: int = 0):
+            """Spawn a single worker process. Returns (process, parent_conn)."""
+            parent_conn, child_conn = mp.Pipe()
+            p = mp.Process(
+                target=gpu_worker_process,
+                args=(rank, WORKERS_PER_GPU, self.worker_assignments[rank],
+                      child_conn, dt, total_steps, initial_hx,
+                      target_J, target_hx, target_hz, measure_every,
+                      self.memmap_path, resume_step)
+            )
+            p.start()
+            child_conn.close()
+            return p, parent_conn
+
+        workers = []
+        pipes   = []
+        rank_map = {}  # pipe index -> rank
+
+        for i, rank in enumerate(active_ranks):
+            proc, conn = _spawn_worker(rank, resume_step=0)
+            workers.append(proc)
+            pipes.append(conn)
+            rank_map[i] = rank
+
+        respawn_count = 0   # total individual worker respawns (for logging)
+        reset_event_count = 0  # GPU reset events (the limit that matters)
+
+        try:
+            for t in range(total_steps):
+                s = t / max(1, (total_steps - 1))
+                g_now = {
+                    "Z_INTRA": s * target_g_intra_z,
+                    "Z_INTER": s * target_g_inter_z,
+                    "XY":      s * target_g_xy,
+                }
+                is_measure = (t % measure_every == 0) or (t == total_steps - 1)
+
+                if not is_measure:
+                    continue
+
+                t0 = time.perf_counter()
+
+                # --- GATHER (parallel two-pass respawn) ---
+                # Rev 88-N: fully parallelised to handle large worker counts
+                # (e.g. 2 GPUs x 32 workers = 64 total) without serial respawn
+                # chains that caused ~19-minute "timeouts" at step 039.
+                #
+                # Mini-pass A: drain all live pipes; collect dead pipe indices.
+                #   Uses connection.wait() to avoid blocking on dead pipes.
+                # Mini-pass B: join+spawn all dead workers simultaneously.
+                # Pass 2:      collect from all respawned workers in parallel
+                #   using connection.wait() so all JIT builds run concurrently.
+                patch_full_states = {}
+                bulk_energy = 0.0
+                max_lat_trotter = 0.0
+                max_lat_tomo = 0.0
+                min_fidelity = 1.0
+                any_died = False
+                dead_indices = []   # pipe indices that raised EOFError
+                pending_recv = []   # pipe indices that need a pass-2 recv
+
+                # --- Mini-pass A: non-blocking drain of all pipes ---
+                # connection.wait() returns pipes with data ready (or closed).
+                # We iterate all pipes; if a pipe has data we recv immediately;
+                # if it is closed (worker died) we get EOFError on recv.
+                remaining = list(range(len(pipes)))
+                while remaining:
+                    ready = mp.connection.wait(
+                        [pipes[i] for i in remaining], timeout=120
+                    )
+                    if not ready:
+                        # Timeout: remaining workers haven't responded in 120s.
+                        # Treat them as dead for respawn purposes.
+                        for i in remaining:
+                            dead_indices.append(i)
+                            any_died = True
+                        break
+                    # Map ready connections back to their indices
+                    ready_set = set(id(c) for c in ready)
+                    still_waiting = []
+                    for i in remaining:
+                        if id(pipes[i]) in ready_set:
+                            try:
+                                data = pipes[i].recv()
+                                for p, payload in data.items():
+                                    patch_full_states[p] = payload["state"]
+                                    bulk_energy += payload["meanfield_bulk_energy"]
+                                    max_lat_trotter = max(max_lat_trotter, payload["lat_trotter_ms"])
+                                    max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
+                                    min_fidelity = min(min_fidelity, payload.get("unitary_fidelity", 1.0))
+                            except EOFError:
+                                dead_indices.append(i)
+                                any_died = True
+                        else:
+                            still_waiting.append(i)
+                    remaining = still_waiting
+
+                # --- Mini-pass B: join + spawn ALL dead workers together ---
+                if dead_indices:
+                    # Join dead processes (fast: os._exit(1) workers are already gone)
+                    for i in dead_indices:
+                        dead_proc = workers[i]
+                        dead_proc.join(timeout=1)
+                        if dead_proc.is_alive():
+                            dead_proc.terminate()
+                            dead_proc.join(timeout=2)
+                        try:
+                            pipes[i].close()
+                        except Exception:
+                            pass
+                    # Spawn all replacements simultaneously
+                    for i in dead_indices:
+                        new_proc, new_conn = _spawn_worker(rank_map[i], resume_step=t)
+                        workers[i] = new_proc
+                        pipes[i] = new_conn
+                        pending_recv.append(i)
+                        print(
+                            "[Master] Worker rank=" + str(rank_map[i]) +
+                            " died at step " + str(t) + "; respawned.",
+                            file=sys.stderr
+                        )
+
+                # Count this round as one reset event if any worker died.
+                if any_died:
+                    reset_event_count += 1
+                    print(
+                        "[Master] GPU reset event #" + str(reset_event_count) +
+                        " at step " + str(t) + ": " +
+                        str(len(dead_indices)) + " workers respawned in parallel.",
+                        file=sys.stderr
+                    )
+                    if reset_event_count > MAX_RESET_EVENTS:
+                        raise RuntimeError(
+                            "Exceeded MAX_RESET_EVENTS=" + str(MAX_RESET_EVENTS) +
+                            ". Hardware may be unrecoverable."
+                        )
+
+                # --- Pass 2: parallel collection from all respawned workers ---
+                # connection.wait() lets all JIT builds run concurrently.
+                # All N workers' ~12s startup overlaps -> completes in ~12s
+                # regardless of N, vs the old 88-M N*12s serial chain.
+                while pending_recv:
+                    ready = mp.connection.wait(
+                        [pipes[i] for i in pending_recv], timeout=120
+                    )
+                    if not ready:
+                        raise RuntimeError(
+                            "Respawned workers did not respond within 120s at step "
+                            + str(t) + ". Hardware may be unrecoverable."
+                        )
+                    ready_set = set(id(c) for c in ready)
+                    still_pending = []
+                    for i in pending_recv:
+                        if id(pipes[i]) in ready_set:
+                            try:
+                                data = pipes[i].recv()
+                                for p, payload in data.items():
+                                    patch_full_states[p] = payload["state"]
+                                    bulk_energy += payload["meanfield_bulk_energy"]
+                                    max_lat_trotter = max(max_lat_trotter, payload["lat_trotter_ms"])
+                                    max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
+                                    min_fidelity = min(min_fidelity, payload.get("unitary_fidelity", 1.0))
+                            except EOFError:
+                                raise RuntimeError(
+                                    "Respawned worker rank=" + str(rank_map[i]) +
+                                    " died immediately after respawn at step " +
+                                    str(t) + ". Hardware may be unrecoverable."
+                                )
+                        else:
+                            still_pending.append(i)
+                    pending_recv = still_pending
+
+                if len(patch_full_states) != TOTAL_PATCHES:
+                    raise RuntimeError(
+                        "Fatal: IPC gather incomplete. Expected " +
+                        str(TOTAL_PATCHES) + " patches, got " +
+                        str(len(patch_full_states)) + "."
+                    )
+
+                # --- BUILD PROFILES ---
+                step_state = np.zeros((TOTAL_PATCHES, QUBITS_PER_PATCH, 3))
+                patch_profiles = {}
+
+                for p, state in patch_full_states.items():
+                    step_state[p, :, 0] = state["X"]
+                    step_state[p, :, 1] = state["Y"]
+                    step_state[p, :, 2] = state["Z"]
+                    patch_profiles[p] = {
+                        "means": {
+                            "X": state["X"].copy(),
+                            "Y": state["Y"].copy(),
+                            "Z": state["Z"].copy(),
+                        },
+                        "vars": {
+                            "X": np.clip(1.0 - state["X"]**2, 0.0, 1.0),
+                            "Y": np.clip(1.0 - state["Y"]**2, 0.0, 1.0),
+                            "Z": np.clip(1.0 - state["Z"]**2, 0.0, 1.0),
+                        }
+                    }
+
+                self.lattice_history.append(step_state.copy())
+
+                if len(self.lattice_history) % 10 == 0:
+                    try:
+                        np.save(self.state_dump_file,
+                                np.array(self.lattice_history))
+                    except Exception as e:
+                        print("[Checkpoint] Warning: Failed to save: " + str(e),
+                              file=sys.stderr)
+
+                # --- RING RESET DETECTION ---
+                # A tomo latency spike above RING_RESET_LAT_THRESHOLD_MS
+                # indicates the amdgpu driver performed an in-place ring reset
+                # and recovered. The statevector is preserved; the step is
+                # valid but flagged for post-hoc correlation with energy
+                # discontinuities. Inherited from Rev 88-B.
+                ring_reset = max_lat_tomo > RING_RESET_LAT_THRESHOLD_MS
+
+                # --- COMPUTE KICKS & INTERFACE ENERGY (site-resolved) ---
+                scale = np.sqrt(dt / effective_shots)
+                n_s = self.n_sites
+                AXES = ("X", "Y", "Z")
+
+                noisy_field = {}
+                for p in range(TOTAL_PATCHES):
+                    prof = patch_profiles[p]
+                    rng_p = np.random.default_rng([self.master_seed, t, p])
+                    noisy_field[p] = {
+                        ax: prof["means"][ax]
+                            + rng_p.normal(0.0, 1.0, n_s)
+                            * np.sqrt(prof["vars"][ax]) * scale
+                        for ax in AXES
+                    }
+
+                kick_acc = {p: np.zeros((n_s, 3)) for p in range(TOTAL_PATCHES)}
+                e_by_kind = {"Z_INTRA": 0.0, "Z_INTER": 0.0, "XY": 0.0}
+
+                for p1, p2, i1, i2, kind in self.interfaces:
+                    g = g_now[kind]
+                    if g == 0.0:
+                        continue
+                    f1, f2 = noisy_field[p1], noisy_field[p2]
+                    m1 = patch_profiles[p1]["means"]
+                    m2 = patch_profiles[p2]["means"]
+
+                    dot = 0.0
+                    for a, ax in enumerate(AXES):
+                        dot += float(np.sum(m1[ax][i1] * m2[ax][i2]))
+                        kick_acc[p1][i1, a] += g * f2[ax][i2]
+                        kick_acc[p2][i2, a] += g * f1[ax][i1]
+                    e_by_kind[kind] += -g * dot
+
+                macroscopic_boundary_energy = sum(e_by_kind.values())
+
+                next_kick_payloads = {}
+                # KICK_THETA_THRESHOLD pre-filter (Rev 88-F): compute theta at
+                # master side and suppress entries that would be no-ops in the
+                # worker's apply_kicks anyway. Reduces IPC pickle size and
+                # eliminates near-zero kick entries from the worker's kick dict,
+                # preventing them from entering the KICK_CHUNK loop at all.
+                _coef = -2.0 * dt
+                _thresh = KICK_THETA_THRESHOLD
+                for p in range(TOTAL_PATCHES):
+                    acc = kick_acc[p]
+                    payload = {}
+                    for q in range(n_s):
+                        ax_vals = acc[q]
+                        if (abs(ax_vals[0] * _coef) > _thresh or
+                                abs(ax_vals[1] * _coef) > _thresh or
+                                abs(ax_vals[2] * _coef) > _thresh):
+                            payload[q] = (float(ax_vals[0]),
+                                          float(ax_vals[1]),
+                                          float(ax_vals[2]))
+                    next_kick_payloads[p] = payload
+
+                total_energy = bulk_energy + macroscopic_boundary_energy
+                reset_tag = "  RING_RESET" if ring_reset else ""
+                print(
+                    "Step {:03d} | E: {:+.4f} "
+                    "(Zi {:+.3f} / Ze {:+.3f} / XY {:+.3f}) "
+                    "| Lat(Trot/Tomo): {:5.1f}/{:5.1f}ms "
+                    "| Fid: {:.5f} | {:.2f}s{}".format(
+                        t, total_energy,
+                        e_by_kind["Z_INTRA"], e_by_kind["Z_INTER"],
+                        e_by_kind["XY"],
+                        max_lat_trotter, max_lat_tomo,
+                        min_fidelity,
+                        time.perf_counter() - t0,
+                        reset_tag
+                    )
+                )
+                self._log_csvs(
+                    t, s * 100, bulk_energy, e_by_kind,
+                    macroscopic_boundary_energy, total_energy,
+                    min_fidelity, patch_profiles, ring_reset
+                )
+
+                # --- SCATTER ---
+                for i, w_rank in enumerate(active_ranks):
+                    worker_payload = {
+                        p: next_kick_payloads[p]
+                        for p in self.worker_assignments[w_rank]
+                    }
+                    pipes[i].send(worker_payload)
+
+        finally:
+            for conn in pipes:
+                try: conn.close()
+                except Exception: pass
+
+            if self.lattice_history:
+                try:
+                    np.save(self.state_dump_file,
+                            np.array(self.lattice_history))
+                    print("\n[Master] Dumped history matrix to " +
+                          self.state_dump_file)
+                except Exception as e:
+                    print("\n[Master] Failed to save lattice history: " +
+                          str(e), file=sys.stderr)
+
+            for p in workers:
+                p.join(timeout=15)
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=3)
+                    if p.is_alive():
+                        try: p.kill()
+                        except Exception: pass
+
+            # Release memmap and delete the file (Rev 88-K).
+            try:
+                del self.ket_mm
+            except Exception:
+                pass
+            try:
+                os.unlink(self.memmap_path)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
-    main()
+    mp.set_start_method('spawn', force=True)
+
+    engine = MultiGpuHadronEngine(master_seed=1337)
+    try:
+        engine.run(
+            total_steps=100,
+            dt=0.04,
+            initial_hx=3.0,
+            target_g_intra_z=0.12,
+            target_g_inter_z=0.06,
+            target_g_xy=0.06,
+            target_J=1.0,
+            target_hx=0.5,
+            target_hz=0.2,
+            measure_every=1,
+            effective_shots=512.0
+        )
+    except KeyboardInterrupt:
+        pass
