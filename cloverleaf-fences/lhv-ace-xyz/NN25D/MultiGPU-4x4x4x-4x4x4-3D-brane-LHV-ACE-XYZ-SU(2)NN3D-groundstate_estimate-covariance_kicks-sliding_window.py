@@ -3,81 +3,28 @@
 # (256 Patches, 4096 Qubits Total)
 # Layered Planar Engine with Site-Resolved Inter-Brane AND Inter-Block Coupling
 #
-# REVISION 88-H - BLOCK LATTICE VARIANT (of Rev 88-G)
+# REVISION 88-M - BLOCK LATTICE VARIANT (of Rev 88-L)
 #
-# CHANGES (Rev 88-H) - use-after-reset cascading failure fixed:
+# Rev 88-L CONFIRMED WORKING: respawn path fully functional.
+#   Worker 0 detected dead -> respawned -> JIT rebuilt -> all 6 devices
+#   re-enumerated -> 11 patches restored from memmap at resume_step=39.
+#   The ket handoff via memmap is correct end-to-end.
 #
-# NEW KERNEL LOG EVIDENCE (seq delta=3, hqd deactivate failure, BACO reset):
+# SINGLE REMAINING BUG: respawn counter semantics wrong.
+#   With TOTAL_WORKERS=24, a single GPU reset kills all 24 workers.
+#   The 88-L counter increments once per individual worker respawn,
+#   so one GPU reset event consumed 24 of the MAX_WORKER_RESPAWNS=20
+#   budget, exhausting it before all workers were respawned. The master
+#   aborted at respawn #21 with worker 20 still dead.
 #
-#   comp_1.1.0 timeout: signaled=1874, emitted=1877 -> seq delta=3
-#   "fail to wait on hqd deactive"
-#   "Ring comp_1.1.0 reset failed"
-#   "BACO reset"  (Bus-Active Chip-Off: full power cycle of the GPU die)
-#   "VRAM is lost due to GPU reset!"
-#   7 "innocent context" kills (down from 9 in prior runs with CHUNK=8)
-#
-#   seq delta=3 directly identifies apply_zz as the failure unit:
-#   apply_zz = mcx -> rz -> mcx = exactly 3 kernels submitted to the
-#   comp ring before any drain. CHUNK=1 chunked at edge granularity
-#   but not at gate granularity -- the 3 kernels within a single ZZ
-#   gate were still submitted as an unbarriered burst. The GPU hangs
-#   on the first of those 3 kernels, the other 2 remain in-flight,
-#   and the ring timeout fires with emitted=signaled+3.
-#
-#   "fail to wait on hqd deactive" = the compute CU is truly STUCK,
-#   not merely slow. The MEC cannot deactivate the Hardware Queue
-#   Descriptor within the timeout. This is a memory access fault:
-#   the kernel is trying to read/write a VRAM address that became
-#   invalid after a prior ring reset zeroed or reallocated its
-#   backing buffer. This is a USE-AFTER-RESET pattern.
-#
-#   "psp gfx command UNLOAD_TA(0x2) failed (0x117)" = PSP firmware
-#   itself is in a bad state; soft ring reset cannot proceed, forcing
-#   BACO (full die power cycle). After BACO, VRAM is wiped clean.
-#   The sims{} dict in the worker still holds QrackSimulator objects
-#   whose cl_mem handles now point to zeroed or nonexistent VRAM.
-#   The next kernel dispatch on any of these stale sims hangs the CU
-#   again, triggering another BACO reset (reset counter = 3 in the
-#   second 0000:65:00.0 crash). This is cascading use-after-reset.
-#
-# FIX 1 - INTRA-GATE DRAIN in apply_zz (this file):
-#   Insert a pauli_expectation drain after EACH of the 3 kernels
-#   within apply_zz (mcx, rz, mcx). This makes every kernel
-#   submission immediately followed by a blocking sync before the
-#   next kernel is dispatched. Maximum in-flight on any comp ring
-#   = 1 at all times. seq delta cannot exceed 1 under this scheme.
-#   The pauli_expectation is non-collapsing (does not project the
-#   statevector). Cost: 3 extra drains per ZZ gate x 24 edges per
-#   patch x 256 patches = 18,432 extra drain calls per step.
-#   At ~0.1ms/drain (16q) = ~1.8s/step overhead, acceptable given
-#   the BACO reset overhead (~1s per event) already dominates.
-#
-# FIX 2 - KET CHECKPOINTING + SIM RESURRECTION (this file):
-#   Even with intra-gate drains, a ring reset between steps can
-#   leave sims{} holding stale cl_mem handles. The worker now:
-#   a) Checkpoints the statevector via out_ket() into ket_cache[p]
-#      BEFORE each patch's Trotter step (one DMA per patch per step:
-#      2^16 complex64 = 512KB per patch, 128MB total in-worker RAM).
-#   b) On any RuntimeError whose message contains "context is lost"
-#      or "CS has cancelled" (the userspace amdgpu error strings),
-#      calls resurrect_sim(p): deletes the stale sim, gc.collect()s
-#      the OpenCL context, creates a fresh QrackSimulator, and
-#      restores the statevector via in_ket(ket_cache[p]).
-#   c) Retries the failed operation once after resurrection.
-#   d) If resurrection fails (no ket_cache yet, or in_ket errors),
-#      falls back to |+>^16 (H on all qubits) -- the t=0 state.
-#      This patch's evolution restarts from the last checkpointed
-#      ket, introducing at most one step of discontinuity.
-#   Note: ket_cache is populated at the START of each step (before
-#   Trotter), so a crash mid-Trotter reverts to the PRE-step ket,
-#   not a partially-evolved intermediate. This is the correct
-#   recovery semantics: re-evolve the step from the clean checkpoint.
-#
-# Rev 88-G/F/E/D changes retained:
-#   CHUNK=1 (edge-level, now redundant given intra-gate drains but
-#   kept as defence-in-depth), KICK_CHUNK=1, KICK_THETA_THRESHOLD=1e-6,
-#   QRACK_MAX_ALLOC_MB=7500/worker, inter-patch barrier+yield/16,
-#   RING_RESET detection, all Rev 88-B/D worker improvements.
+# FIX (Rev 88-M): count GPU reset EVENTS, not individual worker respawns.
+#   - Rename counter to reset_event_count.
+#   - Increment it ONCE per gather round that had any EOFError,
+#     regardless of how many workers died in that round.
+#   - Rename limit to MAX_RESET_EVENTS = 10 (hard limit on full GPU
+#     resets per run; 10 is generous since one run typically sees 1-2).
+#   - Individual worker respawns within one reset event: unlimited
+#     (all dead workers in the batch are respawned unconditionally).
 #
 # 1. Y-PROBE: mtrx() JIT-overflow-safe Clifford path replaces the mtrx()
 #    call used in Rev 88-C. Y-eigenstate |+i> is now prepared with
@@ -145,6 +92,7 @@ import csv
 import json
 import time
 import math
+import tempfile
 import numpy as np
 import multiprocessing as mp
 import multiprocessing.connection
@@ -165,7 +113,7 @@ PERIODIC_X = False
 PERIODIC_Y = False
 PERIODIC_Z = False
 
-GPUS_AVAILABLE = 6
+GPUS_AVAILABLE = 1
 WORKERS_PER_GPU = 24
 TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
 
@@ -181,6 +129,21 @@ RING_RESET_LAT_THRESHOLD_MS = 5.0
 # Reduce to 8 if Lat(Trot) spikes persist above ~5ms; raise to 32 if
 # per-step wall time increases unacceptably.
 INTER_PATCH_YIELD_EVERY = 16
+
+# Memmap ket cache layout (Rev 88-K, replaces SharedMemory from Rev 88-J).
+# One complex64 slot per patch: 2^QUBITS_PER_PATCH = 65536 amplitudes.
+# Total file size: 256 * 65536 * 8 = 128MB on /tmp (not /dev/shm).
+KET_SLOT_ELEMS  = 1 << QUBITS_PER_PATCH       # 65536 complex64 per patch
+KET_MEMMAP_PATH = os.path.join(
+    tempfile.gettempdir(),
+    "thereminq_ket_cache_" + str(os.getpid()) + ".bin"
+)
+
+# Maximum number of full GPU reset EVENTS (not individual worker respawns)
+# the master will survive per run. One event = one gather round where
+# any worker died; multiple workers dying in the same round = one event.
+# 10 is generous; a typical run sees 1-2 resets around step 039-040.
+MAX_RESET_EVENTS = 10
 
 # Minimum rotation angle (radians) to submit as a GPU kernel dispatch (Rev 88-F).
 # Below this threshold the kick rotation is suppressed: the gate is a no-op
@@ -291,7 +254,9 @@ def gpu_worker_process(
     target_J: float,
     target_hx: float,
     target_hz: float,
-    measure_every: int
+    measure_every: int,
+    shm_name: str,      # kept as arg name for API compat; holds memmap path
+    resume_step: int = 0,
 ) -> None:
     os.environ["PYQRACK_SHARED_LIB_PATH"] = "/usr/local/lib/qrack/libqrack_pinvoke.so"
     os.environ["OCL_ICD_PLATFORM_SORT"] = "none"
@@ -319,6 +284,44 @@ def gpu_worker_process(
     alloc_mb = 7500 // max(1, workers_per_gpu)
     os.environ["QRACK_MAX_ALLOC_MB"] = str(alloc_mb)
     os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
+
+    # Map the file-backed memmap ket cache (Rev 88-K).
+    # shm_name holds the memmap file path (legacy arg name kept for compat).
+    # mode='r+': file already created by master; worker reads and writes.
+    # On /tmp (overlay fs in Docker) -- no /dev/shm size limit.
+    _memmap_path = shm_name
+    _shm_arr = np.memmap(
+        _memmap_path,
+        dtype=np.complex64,
+        mode='r+',
+        shape=(TOTAL_PATCHES, KET_SLOT_ELEMS)
+    )
+
+    def _flush_ket_to_shm(p: int, ket: np.ndarray) -> None:
+        """Write patch ket into the memmap slot and flush to disk."""
+        try:
+            _shm_arr[p, :] = ket.astype(np.complex64)
+            _shm_arr.flush()
+        except Exception:
+            pass
+
+    def _fatal_exit(sims_to_flush: Dict[int, Any]) -> None:
+        """Flush all patch kets to memmap, close conn, exit without __del__."""
+        for p, sim in list(sims_to_flush.items()):
+            try:
+                ket = np.array(sim.out_ket(), dtype=np.complex64)
+                _flush_ket_to_shm(p, ket)
+            except Exception:
+                pass
+        try:
+            del _shm_arr  # Close the memmap file handle.
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+        os._exit(1)  # Immediate exit; no rusticl __del__, no coredump.
 
     import pyqrack
     from pyqrack import QrackSimulator
@@ -460,18 +463,17 @@ def gpu_worker_process(
             sim.r(PZ, float(theta) * ANGLE_SCALE, q)
 
         def apply_zz(sim: QrackSimulator, theta: float, q1: int, q2: int) -> None:
-            # INTRA-GATE DRAIN (Rev 88-H): drain after EACH of the 3 kernels
-            # within this ZZ gate. seq delta=3 in the crash log showed that
-            # mcx/rz/mcx were all 3 in-flight simultaneously; the ring hung
-            # on the first, leaving 2 more pending. Each pauli_expectation
-            # is a non-collapsing blocking sync that empties the comp ring
-            # before the next kernel is dispatched. Max in-flight = 1.
+            # Bare CNOT-conjugation ZZ gate: mcx -> rz -> mcx.
+            # Intra-gate pauli_expectation drains were added in Rev 88-H to
+            # cap seq delta at 1, but caused 72x drain overhead per patch per
+            # step (3 drains/gate x 24 gates) which made Lat(Tomo)=250ms in
+            # the ring-reset regime. The ket checkpoint+resurrection in Rev 88-H
+            # already provides correct recovery from any seq-delta=3 hang:
+            # context loss -> resurrect from pre-step ket -> retry Trotter.
+            # Intra-gate drains are therefore redundant. Removed in Rev 88-I.
             sim.mcx([q1], q2)
-            _ = sim.pauli_expectation([0], [PZ])
             apply_rz(sim, 2.0 * theta, q2)
-            _ = sim.pauli_expectation([0], [PZ])
             sim.mcx([q1], q2)
-            _ = sim.pauli_expectation([0], [PZ])
 
         def trotter_step_body(sim: QrackSimulator, num_qubits: int,
                               intra_edges: List[Tuple[int, int]],
@@ -486,16 +488,12 @@ def gpu_worker_process(
             for q in range(num_qubits): apply_rx(sim, theta_x, q)
             for q in range(num_qubits): apply_rz(sim, theta_z, q)
 
-            # CHUNK=1 (Rev 88-G): submit ONE ZZ edge (3 kernels: mcx/rz/mcx),
-            # then immediately drain with pauli_expectation before the next.
-            # Limits maximum simultaneous in-flight CL command queue submissions
-            # to 1 at any time, eliminating the 9-context burst pattern that
-            # caused the hardware reset. Previous CHUNK=8 submitted 8 ZZ bursts
-            # before draining, leaving 9 cl_command_queues with pending work
-            # simultaneously -- exactly matching the 9 "innocent context" kills
-            # seen in the crash log. Cost: 24 drain calls vs 3 at CHUNK=8,
-            # but ring-reset overhead already dominates step latency.
-            CHUNK = 1
+            # CHUNK=8 restored (Rev 88-I): defence-in-depth against ring buffer
+            # overflow (original gfx1013 concern from Rev 88-B). With ket
+            # checkpoint+resurrection handling context loss, CHUNK no longer
+            # needs to be 1 for correctness. CHUNK=8 gives 3 drain points per
+            # 24 edges, avoiding 21 extra drain calls vs CHUNK=1.
+            CHUNK = 8
             for i in range(0, len(intra_edges), CHUNK):
                 for q1, q2 in intra_edges[i:i + CHUNK]:
                     apply_zz(sim, theta_zz, q1, q2)
@@ -526,12 +524,10 @@ def gpu_worker_process(
             coef = -2.0 * dt_local
             items = list(kicks.items())
 
-            # KICK_CHUNK=1 (Rev 88-G): same principle as CHUNK=1 in
-            # trotter_step_body. Submit one qubit's rotations (up to 3
-            # kernels: Rx, Ry, Rz) then drain before the next qubit.
-            # Prevents simultaneous in-flight submissions across multiple
-            # qubit kick contexts during the apply_kicks phase.
-            KICK_CHUNK = 1
+            # KICK_CHUNK=8 restored (Rev 88-I): same rationale as CHUNK=8.
+            # Resurrection handles any context loss; KICK_CHUNK=8 avoids
+            # 8 extra drain calls per kick phase vs KICK_CHUNK=1.
+            KICK_CHUNK = 8
             for i in range(0, len(items), KICK_CHUNK):
                 for raw_q, (kx, ky, kz) in items[i:i + KICK_CHUNK]:
                     q = int(raw_q)
@@ -608,7 +604,23 @@ def gpu_worker_process(
                 is_stabilizer_hybrid=False,
                 is_gpu=True,
             )
-            for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
+            if resume_step > 0:
+                # RESPAWN PATH (Rev 88-J): restore ket from shared memory
+                # written by the dead worker's last pre-Trotter checkpoint.
+                try:
+                    ket_slot = _shm_arr[p, :].copy()
+                    sim.in_ket(ket_slot.tolist())
+                    print("[Worker " + str(rank) + "] patch " + str(p) +
+                          " restored from shm at resume_step=" +
+                          str(resume_step) + ".", file=sys.stderr)
+                except Exception as _re:
+                    print("[Worker " + str(rank) + "] patch " + str(p) +
+                          " shm restore failed (" + str(_re) +
+                          "); init |+>^16.", file=sys.stderr)
+                    for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
+            else:
+                # FRESH START: initialise to |+>^16.
+                for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
             sims[p] = sim
 
             try:
@@ -618,12 +630,12 @@ def gpu_worker_process(
                     "Fatal: GPU allocation failed on patch " + str(p) +
                     ". Driver error: " + str(e)
                 )
-            # Seed ket_cache with the initial |+>^16 state so that
-            # resurrect_sim() can restore even on a step-0 failure.
+            # Seed shm slot with initial ket (|+>^16 or restored).
             try:
                 ket_cache[p] = np.array(sim.out_ket(), dtype=np.complex64)
+                _flush_ket_to_shm(p, ket_cache[p])
             except Exception:
-                pass  # Cache miss; resurrect_sim falls back to |+>^16.
+                pass
 
         kick_payloads = {p: {} for p in assigned_patches}
         _warned_fidelity = False
@@ -640,11 +652,13 @@ def gpu_worker_process(
             for p_idx, p in enumerate(assigned_patches):
                 sim = sims[p]
 
-                # KET CHECKPOINT (Rev 88-H): snapshot statevector BEFORE
-                # Trotter so that a mid-step context loss can be recovered
-                # by re-evolving from this clean pre-step state.
+                # KET CHECKPOINT (Rev 88-H/J): snapshot statevector BEFORE
+                # Trotter so that a mid-step context loss can be recovered.
+                # Rev 88-J: also flush to shared memory so the master can
+                # hand the ket to a respawned worker after a BACO crash.
                 try:
                     ket_cache[p] = np.array(sim.out_ket(), dtype=np.complex64)
+                    _flush_ket_to_shm(p, ket_cache[p])
                 except Exception:
                     pass  # Stale sim; resurrect_sim will use prior cache.
 
@@ -770,6 +784,10 @@ def gpu_worker_process(
             del _s
         sims.clear()
         gc.collect()
+        try:
+            del _shm_arr  # Close memmap handle.
+        except Exception:
+            pass
         conn.close()
 
 
@@ -795,6 +813,28 @@ class MultiGpuHadronEngine:
         self.profiles_csv     = "boundary_profiles_multi.csv"
         self.state_dump_file  = "macroscopic_lattice_states.npy"
         self.config_file      = "lattice_config.json"
+
+        # File-backed memmap ket cache (Rev 88-K, replaces SharedMemory).
+        # Created on /tmp (overlay fs) to avoid Docker's 64MB /dev/shm limit.
+        # mode='w+' creates the file and zeros it. Workers open mode='r+'.
+        self.memmap_path = KET_MEMMAP_PATH
+        try:
+            self.ket_mm = np.memmap(
+                self.memmap_path,
+                dtype=np.complex64,
+                mode='w+',
+                shape=(TOTAL_PATCHES, KET_SLOT_ELEMS)
+            )
+            self.ket_mm[:] = 0.0
+            self.ket_mm.flush()
+            print("[Engine] Ket memmap: " + self.memmap_path +
+                  " (" + str(TOTAL_PATCHES * KET_SLOT_ELEMS * 8 // (1024*1024)) +
+                  " MB)")
+        except Exception as e:
+            raise RuntimeError(
+                "Fatal: could not create ket memmap at " +
+                self.memmap_path + ": " + str(e)
+            )
 
         # Ring_Reset column added (Rev 88-D, from Rev 88-B).
         self._energy_fields = [
@@ -895,30 +935,40 @@ class MultiGpuHadronEngine:
             " workers/GPU), " + str(total_steps) + " steps"
         )
         print(
-            "[Engine] Rev 88-H: intra-ZZ drain (seq-delta=1), ket checkpoint "
-            "+ sim resurrection on context loss, CHUNK=1/KICK_CHUNK=1, "
-            "KICK_THETA_THRESHOLD=" + str(KICK_THETA_THRESHOLD) + ", "
-            "QRACK_MAX_ALLOC_MB=7500/worker."
+            "[Engine] Rev 88-M: respawn counter fixed (per reset EVENT not "
+            "per worker), MAX_RESET_EVENTS=" + str(MAX_RESET_EVENTS) +
+            ", memmap ket cache, two-pass gather."
         )
 
         active_ranks = [r for r in range(TOTAL_WORKERS)
                         if self.worker_assignments[r]]
 
-        workers = []
-        pipes   = []
-
-        for rank in active_ranks:
+        def _spawn_worker(rank: int, resume_step: int = 0):
+            """Spawn a single worker process. Returns (process, parent_conn)."""
             parent_conn, child_conn = mp.Pipe()
             p = mp.Process(
                 target=gpu_worker_process,
                 args=(rank, WORKERS_PER_GPU, self.worker_assignments[rank],
                       child_conn, dt, total_steps, initial_hx,
-                      target_J, target_hx, target_hz, measure_every)
+                      target_J, target_hx, target_hz, measure_every,
+                      self.memmap_path, resume_step)
             )
             p.start()
             child_conn.close()
-            workers.append(p)
-            pipes.append(parent_conn)
+            return p, parent_conn
+
+        workers = []
+        pipes   = []
+        rank_map = {}  # pipe index -> rank
+
+        for i, rank in enumerate(active_ranks):
+            proc, conn = _spawn_worker(rank, resume_step=0)
+            workers.append(proc)
+            pipes.append(conn)
+            rank_map[i] = rank
+
+        respawn_count = 0   # total individual worker respawns (for logging)
+        reset_event_count = 0  # GPU reset events (the limit that matters)
 
         try:
             for t in range(total_steps):
@@ -935,27 +985,81 @@ class MultiGpuHadronEngine:
 
                 t0 = time.perf_counter()
 
-                # --- GATHER ---
+                # --- GATHER (two-pass multi-respawn) ---
                 patch_full_states = {}
                 bulk_energy = 0.0
                 max_lat_trotter = 0.0
                 max_lat_tomo = 0.0
                 min_fidelity = 1.0
 
-                for conn in pipes:
+                pending_recv = []   # indices of pipes that need a second recv
+                any_died = False    # tracks whether this round had any death
+
+                for i in range(len(pipes)):
+                    conn = pipes[i]
                     try:
                         data = conn.recv()
+                        for p, payload in data.items():
+                            patch_full_states[p] = payload["state"]
+                            bulk_energy += payload["meanfield_bulk_energy"]
+                            max_lat_trotter = max(max_lat_trotter, payload["lat_trotter_ms"])
+                            max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
+                            min_fidelity = min(min_fidelity, payload.get("unitary_fidelity", 1.0))
                     except EOFError:
-                        raise RuntimeError("Worker IPC connection lost.")
-                    for p, payload in data.items():
-                        patch_full_states[p] = payload["state"]
-                        bulk_energy += payload["meanfield_bulk_energy"]
-                        max_lat_trotter = max(max_lat_trotter,
-                                              payload["lat_trotter_ms"])
-                        max_lat_tomo = max(max_lat_tomo,
-                                          payload["lat_tomo_ms"])
-                        min_fidelity = min(min_fidelity,
-                                          payload.get("unitary_fidelity", 1.0))
+                        any_died = True
+                        dead_rank = rank_map[i]
+                        dead_proc = workers[i]
+                        print(
+                            "[Master] Worker rank=" + str(dead_rank) +
+                            " died at step " + str(t) + ".",
+                            file=sys.stderr
+                        )
+                        dead_proc.join(timeout=5)
+                        if dead_proc.is_alive():
+                            dead_proc.terminate()
+                            dead_proc.join(timeout=3)
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        new_proc, new_conn = _spawn_worker(dead_rank, resume_step=t)
+                        workers[i] = new_proc
+                        pipes[i] = new_conn
+                        rank_map[i] = dead_rank
+                        pending_recv.append(i)
+
+                # Count this gather round as one reset event if any worker died.
+                if any_died:
+                    reset_event_count += 1
+                    print(
+                        "[Master] GPU reset event #" + str(reset_event_count) +
+                        " at step " + str(t) + ": " +
+                        str(len(pending_recv)) + " workers respawned.",
+                        file=sys.stderr
+                    )
+                    if reset_event_count > MAX_RESET_EVENTS:
+                        raise RuntimeError(
+                            "Exceeded MAX_RESET_EVENTS=" + str(MAX_RESET_EVENTS) +
+                            ". Hardware may be unrecoverable."
+                        )
+
+                # Pass 2: collect from all respawned workers.
+                for i in pending_recv:
+                    conn = pipes[i]
+                    try:
+                        data = conn.recv()
+                        for p, payload in data.items():
+                            patch_full_states[p] = payload["state"]
+                            bulk_energy += payload["meanfield_bulk_energy"]
+                            max_lat_trotter = max(max_lat_trotter, payload["lat_trotter_ms"])
+                            max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
+                            min_fidelity = min(min_fidelity, payload.get("unitary_fidelity", 1.0))
+                    except EOFError:
+                        raise RuntimeError(
+                            "Respawned worker rank=" + str(rank_map[i]) +
+                            " died immediately after respawn at step " + str(t) +
+                            ". Hardware may be unrecoverable."
+                        )
 
                 if len(patch_full_states) != TOTAL_PATCHES:
                     raise RuntimeError(
@@ -1113,6 +1217,16 @@ class MultiGpuHadronEngine:
                     if p.is_alive():
                         try: p.kill()
                         except Exception: pass
+
+            # Release memmap and delete the file (Rev 88-K).
+            try:
+                del self.ket_mm
+            except Exception:
+                pass
+            try:
+                os.unlink(self.memmap_path)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
