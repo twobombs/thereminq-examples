@@ -1,1338 +1,747 @@
 # -*- coding: us-ascii -*-
-# 16-Qubit 4x4 Brane Tiles -> 4x4x4 Brane-Stack Blocks -> 4x4x4 Block Lattice
-# (256 Patches, 4096 Qubits Total)
-# Layered Planar Engine with Site-Resolved Inter-Brane AND Inter-Block Coupling
+# macroscopic_lattice_dash_blocks_v10.py
+# Dashboard for Rev 88-M+ Block-Lattice engine (256 patches, 4096 qubits).
 #
-# REVISION 88-N - BLOCK LATTICE VARIANT (of Rev 88-M)
+# PORTED FROM cloverfield rubics dash (Rev 120):
+#   - Min_Unitary_Fidelity overlay on energy panel (purple twin axis)
+#   - Ring_Reset events panel: per-step bar chart + vlines on all panels
+#   - Anneal schedule panel: Anneal_Percent curve
+#   - Status bar: step / anneal % / fidelity / ring-reset count live readout
+#   - Panel style: #1a1a1a face, #333333 spines, tick color #aaaaaa throughout
+#   - Energy panel now uses proper dark-panel draw_energy() function style
+#   - Convergence (derivatives) panel rewritten to match cloverfield pattern:
+#     dE/dt left axis (green), d||ds||/dt right axis (crimson), both from
+#     valid data only via _safe_gradient
+#   - Ring_Reset vlines on energy, coupling-error, convergence, anneal panels
 #
-# CONFIRMED WORKING in Rev 88-M: all workers restore from memmap correctly.
-#   With 2 GPUs x 32 workers = 64 total workers, all 64 restored at step 39.
-#   The two-pass gather correctly handles simultaneous death of all workers.
+# KEPT FROM largeblock v9:
+#   - Full block-lattice 3D quiver (4096 arrows, QUIVER_STRIDE subsampling)
+#   - Inter-block Z translucent plane sheets (Z_INTER visual cue)
+#   - Per-kind coupling-error panel (Z_INTRA / Z_INTER / XY lines)
+#   - Config-driven geometry from lattice_config.json
+#   - Background 4K FFmpeg render process (dual-process model)
+#   - Heatmap tile-column / block separators (per-tile labels)
+#   - Scroll-to-zoom on 3D panel, SPACE = PNG snapshot
 #
-# REMAINING ISSUE: "timeout" at step 39 with 64 workers.
-#   The respawn is NOT a crash -- it IS completing -- but it takes ~19 minutes:
-#
-#   Pass 1 (dead worker detection + spawn): SEQUENTIAL.
-#     for i in range(64): recv() -> EOFError -> join(timeout=5s) -> spawn
-#     64 * (5s join + 1s spawn) = ~384s to spawn all 64 replacements.
-#
-#   Pass 2 (collect from respawned workers): SEQUENTIAL.
-#     for i in pending_recv: conn.recv() <- blocks on each one individually.
-#     Each respawned worker takes ~12s (JIT rebuild + 4 ket restores).
-#     64 * 12s = ~768s waiting for all 64 to send their first payload.
-#
-#   Total: ~19 minutes for one respawn event. With any number of workers
-#   above ~8, this serial chain makes respawn prohibitively slow.
-#
-# FIX (Rev 88-N): PARALLEL RESPAWN via multiprocessing.connection.wait().
-#
-# 1. PASS 1 SPLIT INTO TWO SEQUENTIAL MINI-PASSES:
-#    Mini-pass A: iterate all pipes with recv(), collect EOFError indices
-#      into dead_indices[], accumulate live data immediately. No spawning yet.
-#      Join timeout reduced from 5s to 1s: os._exit(1) workers terminate
-#      immediately; the 5s was conservative padding, not needed.
-#    Mini-pass B: join+spawn ALL dead workers simultaneously (tight loop,
-#      no blocking between spawns).
-#    Combined: ~1s (max join) + 64 * ~0.1s (spawn) = ~7s for all 64 spawns
-#    vs the old 64 * 6s = 384s.
-#
-# 2. PASS 2 USES connection.wait() FOR PARALLEL RECV:
-#    multiprocessing.connection.wait(conns, timeout=T) is a select()-based
-#    multiplexer that returns a list of connections that have data ready,
-#    without blocking on each one individually.
-#    while pending_recv not empty:
-#      ready_conns = wait([pipes[i] for i in pending_recv], timeout=120)
-#      for conn in ready_conns: recv() and accumulate; remove from pending
-#    All 64 respawned workers' JIT builds (~12s each) run in parallel.
-#    Pass 2 completes in max(12s) = ~12s for any number of workers,
-#    vs the old 64 * 12s = 768s.
-#
-#    Combined respawn time (64 workers):
-#      Old (88-M): ~19 min serial
-#      New (88-N): ~20s parallel
-#
-# 3. WORKERS_PER_GPU and GPUS_AVAILABLE unchanged.
-#    The fix is purely in the master gather loop; worker code is untouched.
-#
-# Retained from Rev 88-M: reset_event_count per-round semantics,
-#   MAX_RESET_EVENTS=10, memmap ket cache, _fatal_exit, resurrect_sim,
-#   CHUNK=8, KICK_THETA_THRESHOLD, all prior improvements.
-#
-# 1. Y-PROBE: mtrx() JIT-overflow-safe Clifford path replaces the mtrx()
-#    call used in Rev 88-C. Y-eigenstate |+i> is now prepared with
-#    h(0) + s(0) (native Clifford gates, no rotation parameter, no JIT
-#    kernel compilation). An S-gate availability check probes the build
-#    at startup; the old mtrx() path is retained as a dead fallback only
-#    when s() is absent (non-gfx906/gfx1013 builds).
-#
-# 2. RING-BUFFER CHUNKED FLUSHING in trotter_step_body and apply_kicks:
-#    - trotter_step_body: ZZ edges batched into CHUNK=8 groups; a
-#      non-collapsing pauli_expectation([0],[PZ]) drain is issued after
-#      each chunk. Prevents gfx_0.0.0 ring buffer overruns at high qubit
-#      counts or late anneal steps when all 3 kick components are nonzero.
-#      Safe headroom: 3 cmds/edge x 8 edges x 8 DWORDs/cmd = 192 DWORDs
-#      per chunk vs. ~4096 DWORD ring on gfx1013.
-#    - apply_kicks: qubits batched into KICK_CHUNK=8 groups with the same
-#      drain pattern. Prevents ring starvation when all 16 sites of a
-#      brane receive 3-axis kicks simultaneously.
-#
-# 3. AMD_OPENCL_FORCE_COMPUTE_QUEUE=1 added to worker environment.
-#    Enables in-place gfx_0.0.0 ring reset recovery on CYAN_SKILLFISH
-#    (gfx1013) / Oberon BC-250 / Mesa rusticl 26.1.4. Without this flag
-#    a ring timeout kills the OpenCL context fatally; with it the driver
-#    resets in-place (~15ms tomo latency spike) and execution continues.
-#    No effect on CUDA targets.
-#
-# 4. gc.collect() after every probe QrackSimulator deletion during the
-#    Pauli/angle autodetect block. Prevents rusticl context handle leaks
-#    across the 5 probe sims that run before the main simulation loop.
-#
-# 5. get_unitary_fidelity() exception catch broadened from AttributeError
-#    to (AttributeError, RuntimeError) to cover C-layer pinvoke failures
-#    introduced in PyQrack v2.7.1 API.
-#
-# 6. RING RESET DETECTION added to master orchestrator:
-#    - RING_RESET_LAT_THRESHOLD_MS = 5.0 ms threshold (normal ~0.4ms;
-#      gfx1013 ring reset recovery ~15ms).
-#    - ring_reset flag computed from max_lat_tomo per step.
-#    - Ring_Reset column added to energy CSV for post-hoc correlation of
-#      energy discontinuities with driver recovery events.
-#    - "RING_RESET" tag appended to stdout step line when triggered.
-#
-# Inherited from Rev 88-C:
-# - 4x4x4 block lattice: 256 patches, 4096 qubits.
-# - Three coupling classes: Z_INTRA, Z_INTER, XY (site-resolved).
-# - build_interfaces() with precomputed site-index arrays.
-# - Vectorized NumPy kick accumulation (kick_acc[p] shape (16,3)).
-# - Per-kind energy logging: E_Z_Intra, E_Z_Inter, E_XY.
-# - PERIODIC_X/Y/Z boundary condition flags.
-# Inherited from Rev 88-B:
-# - Flat 4x4 intra-patch tile: 2D nearest-neighbor edges only (24 edges).
-# - Site-resolved (not face-averaged) inter-brane exchange along Z.
-# - Per-site statistical variance injection, scale = sqrt(dt / shots).
-# Inherited from Rev 88:
-# - STOCHASTIC SCALING: scale = sqrt(dt / effective_shots), no measure_every.
-# Inherited from Rev 87:
-# - CONTINUOUS COUPLING: kick payloads persist across non-measure steps.
-# - INTEGRATION SCALING: no m_every multiplier in apply_kicks.
-# - FIDELITY WARNING: one-time stderr alert for missing fidelity binding.
+# RIGHT PANEL LAYOUT (7 rows):
+#   Row 0 : Energy components + fidelity twin axis
+#   Row 1 : Ring_Reset events (bar + count)
+#   Row 2 : Coupling error by seam class (Z_INTRA / Z_INTER / XY)
+#   Row 3 : Anneal schedule + convergence derivatives (twin)
+#   Row 4 : <X> heatmap
+#   Row 5 : <Y> heatmap
+#   Row 6 : <Z> heatmap
 
-import os
 import sys
-import gc
 import csv
 import json
-import time
-import math
-import tempfile
 import numpy as np
 import multiprocessing as mp
-import multiprocessing.connection
-from typing import List, Tuple, Dict, Any
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+import matplotlib.colors as mcolors
+import matplotlib.gridspec as gridspec
+from matplotlib.widgets import Slider, Button
+from mpl_toolkits.mplot3d import Axes3D           # noqa: F401
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-# --- GLOBAL CONFIGURATION ---
-BLOCK_GRID_X = 4
-BLOCK_GRID_Y = 4
-BLOCK_GRID_Z = 4
-BRANES_PER_BLOCK = 4
-GLOBAL_Z = BLOCK_GRID_Z * BRANES_PER_BLOCK  # 16
+# --- CONFIGURATION ---
+DATA_FILE   = "macroscopic_lattice_states.npy"
+CONFIG_FILE = "lattice_config.json"
+ENERGY_FILE = "meanfield_ground_state_energy_curve_multi.csv"
+SAVE_FILE   = "macroscopic_lattice_dash_blocks.mp4"
 
-TOTAL_PATCHES = BLOCK_GRID_X * BLOCK_GRID_Y * GLOBAL_Z  # 256
-QUBITS_PER_PATCH = 16
-TOTAL_QUBITS = TOTAL_PATCHES * QUBITS_PER_PATCH          # 4096
+TILE_LX, TILE_LY = 4, 4
+LAYER_SPACING    = 1.6
+BLOCK_GAP_Z      = 1.2
+TILE_GAP_XY      = 1.5
+QUIVER_STRIDE    = 1        # set >1 to speed up interactive 3D
 
-PERIODIC_X = False
-PERIODIC_Y = False
-PERIODIC_Z = False
+KIND_COLORS = {"Z_INTRA": "#e6b422", "Z_INTER": "#e64550", "XY": "#45b0e6"}
 
-GPUS_AVAILABLE = 1
-WORKERS_PER_GPU = 24
-TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
-
-# Tomo latency threshold above which a step is flagged as a ring reset
-# recovery event. gfx_0.0.0 ring resets on CYAN_SKILLFISH produce ~15ms
-# tomo spikes; normal latency is ~0.4ms. Inherited from Rev 88-B.
-RING_RESET_LAT_THRESHOLD_MS = 5.0
-
-# Inter-patch compute ring yield interval (Rev 88-E).
-# Every N patches in the sequential loop, time.sleep(0) is called after
-# the per-patch barrier to allow the OS/amdgpu ISR to process completions.
-# 16 = 16 x ~126 dispatches = 2016 dispatches between sleep yields.
-# Reduce to 8 if Lat(Trot) spikes persist above ~5ms; raise to 32 if
-# per-step wall time increases unacceptably.
-INTER_PATCH_YIELD_EVERY = 16
-
-# Memmap ket cache layout (Rev 88-K, replaces SharedMemory from Rev 88-J).
-# One complex64 slot per patch: 2^QUBITS_PER_PATCH = 65536 amplitudes.
-# Total file size: 256 * 65536 * 8 = 128MB on /tmp (not /dev/shm).
-KET_SLOT_ELEMS  = 1 << QUBITS_PER_PATCH       # 65536 complex64 per patch
-KET_MEMMAP_PATH = os.path.join(
-    tempfile.gettempdir(),
-    "thereminq_ket_cache_" + str(os.getpid()) + ".bin"
-)
-
-# Maximum number of full GPU reset EVENTS (not individual worker respawns)
-# the master will survive per run. One event = one gather round where
-# any worker died; multiple workers dying in the same round = one event.
-# 10 is generous; a typical run sees 1-2 resets around step 039-040.
-MAX_RESET_EVENTS = 10
-
-# Minimum rotation angle (radians) to submit as a GPU kernel dispatch (Rev 88-F).
-# Below this threshold the kick rotation is suppressed: the gate is a no-op
-# to 13 significant figures on a 16q statevector (<Z> change ~ theta^2/2).
-# Raised from the prior 1e-12 (below float32 epsilon ~1.2e-7) to 1e-6.
-# With dt=0.04 and typical g*f ~ 0.04, theta ~ 3e-3 >> 1e-6; only noise-
-# dominated near-zero kicks at low anneal fractions are suppressed. This
-# reduces GART-mapped kernel argument buffer count at early/mid steps,
-# directly reducing per-step GART pressure.
-KICK_THETA_THRESHOLD = 1e-6
-
-# =====================================================================
-# ENVIRONMENT - set before pyqrack import
-# =====================================================================
-os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
+# Colour constants matching cloverfield style
+RING_RESET_COLOR = "#ff4444"
+FIDELITY_COLOR   = "#cc88ff"
+ANNEAL_COLOR     = "#f5c518"
+# ---------------------
 
 
 # =====================================================================
-# PURE FUNCTIONS (Math & Topology)
+# DATA LOADING
 # =====================================================================
-def generate_16q_brane_tile() -> Tuple[List[Tuple[int, int]], List[int]]:
-    """4x4 planar square lattice. idx = x * ly + y (row-major in x).
 
-    Returns (intra_edges, brane_sites). Every qubit is a brane site: the
-    whole tile is the Z-interface. Site index i in one brane is
-    geometrically aligned with site index i in the branes above/below.
-    """
-    lx, ly = 4, 4
-    edges: List[Tuple[int, int]] = []
+def load_energy_data(num_steps, log_prefix=""):
+    """Load all columns from the energy CSV, including Rev 88-D+ additions."""
+    energies = {
+        'Total': [], 'Bulk': [], 'Boundary': [],
+        'Z_INTRA': [], 'Z_INTER': [], 'XY': [],
+        'Fidelity': [], 'Anneal': [], 'Ring_Reset': [],
+    }
+    kind_cols = {'Z_INTRA': "E_Z_Intra", 'Z_INTER': "E_Z_Inter", 'XY': "E_XY"}
 
-    for x in range(lx):
-        for y in range(ly):
-            idx = x * ly + y
-            if x < lx - 1: edges.append((idx, (x + 1) * ly + y))
-            if y < ly - 1: edges.append((idx, x * ly + (y + 1)))
+    try:
+        with open(ENERGY_FILE, mode='r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                def _get(col, default=np.nan):
+                    try:
+                        return float(row[col])
+                    except (KeyError, ValueError):
+                        return default
 
-    brane_sites = list(range(lx * ly))
-    return edges, brane_sites
+                energies['Total'].append(_get("MeanField_Total_Energy"))
+                energies['Bulk'].append(_get("MeanField_Bulk_Energy"))
+                energies['Boundary'].append(_get("MeanField_Boundary_Energy"))
+                energies['Fidelity'].append(_get("Min_Unitary_Fidelity"))
+                energies['Anneal'].append(_get("Anneal_Percent"))
+                energies['Ring_Reset'].append(_get("Ring_Reset", 0.0))
+                for kind, col in kind_cols.items():
+                    energies[kind].append(_get(col))
+    except Exception as e:
+        print(f"{log_prefix}Warning: Could not parse {ENERGY_FILE}: {e}")
+
+    for key in energies:
+        arr = energies[key]
+        if len(arr) < num_steps:
+            arr.extend([np.nan] * (num_steps - len(arr)))
+        energies[key] = np.array(arr[:num_steps], dtype=float)
+
+    return energies
 
 
-def patch_id(tx: int, ty: int, z: int) -> int:
-    """Flat patch index for tile (tx, ty) at global layer z."""
-    return (tx * BLOCK_GRID_Y + ty) * GLOBAL_Z + z
+def _safe_gradient(arr_with_nans):
+    arr = np.asarray(arr_with_nans, dtype=float)
+    out = np.full_like(arr, np.nan)
+    valid_mask = ~np.isnan(arr)
+    valid_indices = np.where(valid_mask)[0]
+    if len(valid_indices) > 1:
+        out[valid_indices] = np.gradient(arr[valid_indices], valid_indices)
+    elif len(valid_indices) == 1:
+        out[valid_indices[0]] = 0.0
+    return out
 
 
-def patch_coords(p: int) -> Tuple[int, int, int]:
-    """Inverse of patch_id: returns (tx, ty, z)."""
-    z = p % GLOBAL_Z
-    rest = p // GLOBAL_Z
-    return rest // BLOCK_GRID_Y, rest % BLOCK_GRID_Y, z
+# =====================================================================
+# INTERFACE GEOMETRY (mirrors engine build_interfaces exactly)
+# =====================================================================
 
+def build_interfaces(grid_x, grid_y, grid_z, branes_per_block, qpp,
+                     periodic_x, periodic_y, periodic_z):
+    def patch_id(tx, ty, z):
+        return (tx * grid_y + ty) * grid_z + z
 
-def build_interfaces() -> List[Tuple[int, int, np.ndarray, np.ndarray, str]]:
-    """All coupled seams as (p1, p2, idx1, idx2, kind).
+    z_i1 = np.arange(qpp)
+    z_i2 = np.arange(qpp)
+    x_i1 = np.array([12 + y for y in range(4)])
+    x_i2 = np.array([y for y in range(4)])
+    y_i1 = np.array([x * 4 + 3 for x in range(4)])
+    y_i2 = np.array([x * 4 for x in range(4)])
 
-    idx1[k] on p1 pairs with idx2[k] on p2. Kinds:
-      Z_INTRA - adjacent branes inside one block
-      Z_INTER - adjacent branes across a block boundary along Z
-      XY      - lateral tile-edge seams between in-plane neighbor blocks
-    """
-    z_i1 = np.arange(QUBITS_PER_PATCH)
-    z_i2 = z_i1
-    x_i1 = np.array([12 + y for y in range(4)])   # +X face of p1
-    x_i2 = np.array([y for y in range(4)])         # -X face of p2
-    y_i1 = np.array([x * 4 + 3 for x in range(4)])# +Y face of p1
-    y_i2 = np.array([x * 4 for x in range(4)])    # -Y face of p2
-
-    interfaces: List[Tuple[int, int, np.ndarray, np.ndarray, str]] = []
-
-    for tx in range(BLOCK_GRID_X):
-        for ty in range(BLOCK_GRID_Y):
-            for z in range(GLOBAL_Z):
+    interfaces = []
+    for tx in range(grid_x):
+        for ty in range(grid_y):
+            for z in range(grid_z):
                 p1 = patch_id(tx, ty, z)
-
-                # --- Z neighbor (brane stacking) ---
-                if z < GLOBAL_Z - 1:
-                    kind = "Z_INTRA" if (z + 1) % BRANES_PER_BLOCK != 0 else "Z_INTER"
+                if z < grid_z - 1:
+                    kind = "Z_INTRA" if (z + 1) % branes_per_block != 0 else "Z_INTER"
                     interfaces.append((p1, patch_id(tx, ty, z + 1), z_i1, z_i2, kind))
-                elif PERIODIC_Z and GLOBAL_Z > 2:
+                elif periodic_z and grid_z > 2:
                     interfaces.append((p1, patch_id(tx, ty, 0), z_i1, z_i2, "Z_INTER"))
-
-                # --- X neighbor (lateral block seam) ---
-                if tx < BLOCK_GRID_X - 1:
+                if tx < grid_x - 1:
                     interfaces.append((p1, patch_id(tx + 1, ty, z), x_i1, x_i2, "XY"))
-                elif PERIODIC_X and BLOCK_GRID_X > 2:
+                elif periodic_x and grid_x > 2:
                     interfaces.append((p1, patch_id(0, ty, z), x_i1, x_i2, "XY"))
-
-                # --- Y neighbor (lateral block seam) ---
-                if ty < BLOCK_GRID_Y - 1:
+                if ty < grid_y - 1:
                     interfaces.append((p1, patch_id(tx, ty + 1, z), y_i1, y_i2, "XY"))
-                elif PERIODIC_Y and BLOCK_GRID_Y > 2:
+                elif periodic_y and grid_y > 2:
                     interfaces.append((p1, patch_id(tx, 0, z), y_i1, y_i2, "XY"))
-
     return interfaces
 
 
 # =====================================================================
-# WORKER PROCESS LOGIC
+# PANEL DRAW HELPERS (cloverfield-style: clear+redraw per frame)
 # =====================================================================
-def gpu_worker_process(
-    rank: int,
-    workers_per_gpu: int,
-    assigned_patches: List[int],
-    conn: mp.connection.Connection,
-    dt: float,
-    total_steps: int,
-    initial_hx: float,
-    target_J: float,
-    target_hx: float,
-    target_hz: float,
-    measure_every: int,
-    shm_name: str,      # kept as arg name for API compat; holds memmap path
-    resume_step: int = 0,
-) -> None:
-    os.environ["PYQRACK_SHARED_LIB_PATH"] = "/usr/local/lib/qrack/libqrack_pinvoke.so"
-    os.environ["OCL_ICD_PLATFORM_SORT"] = "none"
 
-    # Enable in-place ring reset recovery on CYAN_SKILLFISH (gfx1013).
-    # Without this, an amdgpu gfx_0.0.0 ring timeout kills the OpenCL
-    # context fatally. With it, the driver resets in-place (~15ms tomo
-    # latency spike) and execution continues. Inherited from Rev 88-B.
-    # No effect on CUDA targets.
-    os.environ["AMD_OPENCL_FORCE_COMPUTE_QUEUE"] = "1"
+def _style_ax(ax):
+    """Apply cloverfield panel style: dark face, dim spines, grey ticks."""
+    ax.set_facecolor('#1a1a1a')
+    for sp in ax.spines.values():
+        sp.set_edgecolor('#333333')
+    ax.tick_params(colors='#aaaaaa', labelsize=6)
 
-    physical_gpu_index = rank // workers_per_gpu
-    os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(physical_gpu_index)
-    os.environ["QRACK_QPAGER_DEVICES"] = str(physical_gpu_index)
-    os.environ["QRACK_QUNITMULTI_DEVICES"] = str(physical_gpu_index)
 
-    # QRACK_MAX_ALLOC_MB capped to 7500 MB per worker (Rev 88-F).
-    # The V340 has 8000MB HBM2 per die. Previous value of 64000//workers_per_gpu
-    # gave 64000MB at 1 worker -- far above physical VRAM. Qrack uses this
-    # limit to decide whether to spill statevectors to GTT (host-mapped) memory.
-    # An inflated cap caused all 256 statevector buffers to be mapped into
-    # GART-backed GTT, saturating the 256MB default GART aperture and producing
-    # the per-step ring resets. 7500MB is below HBM2 capacity, keeping Qrack
-    # in VRAM-only mode. Requires amdgpu.gartsize=2048 in GRUB as backstop.
-    alloc_mb = 7500 // max(1, workers_per_gpu)
-    os.environ["QRACK_MAX_ALLOC_MB"] = str(alloc_mb)
-    os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
+def _ring_reset_vlines(ax, ring_reset_arr, alpha=0.18):
+    """Draw faint red axvspans on steps where Ring_Reset==1."""
+    for i, v in enumerate(ring_reset_arr):
+        if v == 1.0:
+            ax.axvspan(i - 0.5, i + 0.5, color=RING_RESET_COLOR,
+                       alpha=alpha, linewidth=0)
 
-    # Map the file-backed memmap ket cache (Rev 88-K).
-    # shm_name holds the memmap file path (legacy arg name kept for compat).
-    # mode='r+': file already created by master; worker reads and writes.
-    # On /tmp (overlay fs in Docker) -- no /dev/shm size limit.
-    _memmap_path = shm_name
-    _shm_arr = np.memmap(
-        _memmap_path,
-        dtype=np.complex64,
-        mode='r+',
-        shape=(TOTAL_PATCHES, KET_SLOT_ELEMS)
-    )
 
-    def _flush_ket_to_shm(p: int, ket: np.ndarray) -> None:
-        """Write patch ket into the memmap slot and flush to disk."""
-        try:
-            _shm_arr[p, :] = ket.astype(np.complex64)
-            _shm_arr.flush()
-        except Exception:
-            pass
+def draw_energy_panel(ax, energies, step_cursor, num_steps):
+    ax.cla(); _style_ax(ax)
+    xs = np.arange(num_steps)
 
-    def _fatal_exit(sims_to_flush: Dict[int, Any]) -> None:
-        """Flush all patch kets to memmap, close conn, exit without __del__."""
-        for p, sim in list(sims_to_flush.items()):
-            try:
-                ket = np.array(sim.out_ket(), dtype=np.complex64)
-                _flush_ket_to_shm(p, ket)
-            except Exception:
-                pass
-        try:
-            del _shm_arr  # Close the memmap file handle.
-        except Exception:
-            pass
-        try:
-            conn.close()
-        except Exception:
-            pass
-        os._exit(1)  # Immediate exit; no rusticl __del__, no coredump.
+    _ring_reset_vlines(ax, energies['Ring_Reset'])
 
-    import pyqrack
-    from pyqrack import QrackSimulator
+    def _plot(col, color, lw, label, ls='-'):
+        arr = energies[col]
+        if not np.all(np.isnan(arr)):
+            ax.plot(xs, arr, color=color, linewidth=lw,
+                    linestyle=ls, label=label)
 
-    sims = {}
+    _plot('Total',    'lightgreen',  1.2, 'Total')
+    _plot('Bulk',     'dodgerblue',  1.0, 'Bulk')
+    _plot('Boundary', 'orange',      1.0, 'Bndry (all)')
+    for k, lbl in (("Z_INTRA", "Zi"), ("Z_INTER", "Ze"), ("XY", "XY")):
+        if not np.all(np.isnan(energies[k])):
+            ax.plot(xs, energies[k], color=KIND_COLORS[k],
+                    linewidth=0.8, linestyle='--', alpha=0.9, label=lbl)
 
+    # Fidelity on twin axis
+    fid = energies['Fidelity']
+    if not np.all(np.isnan(fid)):
+        ax2 = ax.twinx()
+        ax2.plot(xs, fid, color=FIDELITY_COLOR, linewidth=0.8,
+                 linestyle=':', label='Fidelity')
+        ax2.set_ylim(0, 1.05)
+        ax2.set_ylabel("Fidelity", fontsize=6, color=FIDELITY_COLOR)
+        ax2.tick_params(colors=FIDELITY_COLOR, labelsize=5)
+        ax2.set_facecolor('#1a1a1a')
+        for sp in ax2.spines.values():
+            sp.set_edgecolor('#333333')
+
+    ax.axvline(step_cursor, color='white', linewidth=0.8, linestyle='--', alpha=0.7)
+    ax.set_title("Energy components + fidelity", fontsize=9, color='#cccccc', pad=3)
+    ax.set_ylabel("Energy (a.u.)", fontsize=7, color='#aaaaaa')
+    ax.legend(fontsize=5, loc='upper left', ncol=3,
+              facecolor='#1a1a1a', labelcolor='#cccccc', framealpha=0.5)
+    ax.grid(True, alpha=0.15)
+
+
+def draw_ring_reset_panel(ax, energies, step_cursor, num_steps):
+    ax.cla(); _style_ax(ax)
+    xs = np.arange(num_steps)
+    rr = energies['Ring_Reset']
+
+    # Bar chart: 1 = reset, 0 = clean
+    ax.bar(xs, rr, color=RING_RESET_COLOR, width=1.0, alpha=0.75)
+    # Cumulative count on twin axis
+    cumsum = np.nancumsum(np.where(np.isnan(rr), 0, rr))
+    ax2 = ax.twinx()
+    ax2.plot(xs, cumsum, color='#ffaa44', linewidth=0.9,
+             linestyle='-', label='Cumulative resets')
+    ax2.set_ylabel("Cumul. resets", fontsize=6, color='#ffaa44')
+    ax2.tick_params(colors='#ffaa44', labelsize=5)
+    ax2.set_facecolor('#1a1a1a')
+    for sp in ax2.spines.values():
+        sp.set_edgecolor('#333333')
+
+    ax.axvline(step_cursor, color='white', linewidth=0.8, linestyle='--', alpha=0.7)
+    total_rr = int(np.nansum(rr))
+    ax.set_title(f"Ring Reset events  (total: {total_rr})",
+                 fontsize=9, color='#cccccc', pad=3)
+    ax.set_ylim(-0.1, 1.4)
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(['ok', 'RESET'], fontsize=5, color='#aaaaaa')
+    ax.grid(True, alpha=0.1)
+
+
+def draw_coupling_error_panel(ax, avg_disagreement, dis_by_kind,
+                               energies, step_cursor, num_steps):
+    ax.cla(); _style_ax(ax)
+    if avg_disagreement is None:
+        ax.text(0.5, 0.5, "No interface data",
+                ha='center', va='center', transform=ax.transAxes,
+                color='#555555', fontsize=9)
+        ax.set_title("Coupling error", fontsize=9, color='#cccccc', pad=3)
+        return
+
+    xs = np.arange(num_steps)
+    _ring_reset_vlines(ax, energies['Ring_Reset'])
+
+    ax.plot(xs, avg_disagreement, color='crimson', linewidth=1.4,
+            label='Mean (all seams)')
+    for k, lbl in (("Z_INTRA", "Z-intra"), ("Z_INTER", "Z-inter"), ("XY", "XY")):
+        if k in dis_by_kind:
+            ax.plot(xs, dis_by_kind[k], color=KIND_COLORS[k],
+                    linewidth=0.8, alpha=0.9, label=lbl)
+
+    ax.axvline(step_cursor, color='white', linewidth=0.8, linestyle='--', alpha=0.7)
+    ax.set_title("Coupling error by seam class\n"
+                 "mean_seams( mean_k ||s_{i1} - s_{i2}|| )",
+                 fontsize=8, color='#cccccc', pad=3)
+    ax.set_ylabel("Error (L2)", fontsize=7, color='#aaaaaa')
+    ax.legend(fontsize=5, loc='upper left', ncol=2,
+              facecolor='#1a1a1a', labelcolor='#cccccc', framealpha=0.5)
+    ax.grid(True, alpha=0.15)
+
+
+def draw_anneal_deriv_panel(ax, energies, avg_disagreement,
+                             step_cursor, num_steps):
+    """Anneal schedule (left) + dE/dt and d||ds||/dt (right twin)."""
+    ax.cla(); _style_ax(ax)
+    xs = np.arange(num_steps)
+
+    _ring_reset_vlines(ax, energies['Ring_Reset'])
+
+    # Anneal % on left axis
+    ann = energies['Anneal']
+    if not np.all(np.isnan(ann)):
+        ax.plot(xs, ann, color=ANNEAL_COLOR, linewidth=1.0,
+                label='Anneal %')
+    ax.set_ylabel("Anneal %", fontsize=7, color=ANNEAL_COLOR)
+    ax.tick_params(axis='y', colors=ANNEAL_COLOR, labelsize=5)
+
+    # dE/dt and d||ds||/dt on right twin axis
+    ax2 = ax.twinx()
+    dE = _safe_gradient(energies['Total'])
+    ax2.plot(xs, dE, color='lightgreen', linewidth=0.85,
+             linestyle='-', label='dE/dt')
+    if avg_disagreement is not None:
+        dR = _safe_gradient(avg_disagreement)
+        ax2.plot(xs, dR, color='crimson', linewidth=0.85,
+                 linestyle='--', label='d||ds||/dt')
+    ax2.set_ylabel("Rate (per step)", fontsize=6, color='#aaaaaa')
+    ax2.tick_params(colors='#aaaaaa', labelsize=5)
+    ax2.set_facecolor('#1a1a1a')
+    for sp in ax2.spines.values():
+        sp.set_edgecolor('#333333')
+
+    # Combined legend
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=5, loc='upper left',
+              facecolor='#1a1a1a', labelcolor='#cccccc', framealpha=0.5)
+
+    ax.axvline(step_cursor, color='white', linewidth=0.8, linestyle='--', alpha=0.7)
+    ax.set_title("Anneal schedule + convergence rates", fontsize=9,
+                 color='#cccccc', pad=3)
+    ax.grid(True, alpha=0.15)
+
+
+# =====================================================================
+# MAIN DASHBOARD
+# =====================================================================
+
+def run_dashboard(mode="interactive"):
+    prefix = "[Background Render] " if mode == "save" else "[Interactive Viewer] "
+
+    # --- Config ---
     try:
-        # --- PAULI CODE AUTODETECT ---
-        _THRESH = 0.5
+        with open(CONFIG_FILE, "r") as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        print(f"{prefix}Error: {CONFIG_FILE} not found.")
+        sys.exit(1)
 
-        # Z Probe
-        _probe_z = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
-        vals0_z = {}
-        for _code in range(8):
-            try: vals0_z[_code] = _probe_z.pauli_expectation([0], [_code])
-            except Exception: pass
-        _probe_z.x(0)
-        PZ, SIGN_Z = None, None
-        for _code, v0 in vals0_z.items():
-            try: v1 = _probe_z.pauli_expectation([0], [_code])
-            except Exception: continue
-            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
-                PZ = _code
-                SIGN_Z = 1.0 if v0 > 0 else -1.0
-                break
-        if PZ is None:
-            raise RuntimeError("Fatal: could not autodetect PZ code")
-        del _probe_z
-        gc.collect()  # Force rusticl context teardown; prevents handle leaks.
+    grid_x           = config.get("grid_x", 4)
+    grid_y           = config.get("grid_y", 4)
+    grid_z           = config.get("grid_z", 16)
+    block_grid       = config.get("block_grid", [4, 4, 4])
+    branes_per_block = config.get("branes_per_block", 4)
+    cfg_qpp          = config.get("qubits_per_patch", TILE_LX * TILE_LY)
+    tile_geometry    = config.get("tile_geometry", "4x4_brane_block_lattice")
+    periodic         = config.get("periodic", [False, False, False])
+    if not isinstance(periodic, (list, tuple)):
+        periodic = [bool(periodic)] * 3
+    periodic_x, periodic_y, periodic_z = (bool(v) for v in periodic)
 
-        # X Probe
-        _probe_x = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
-        _probe_x.h(0)
-        vals0_x = {}
-        for _code in range(8):
-            if _code == PZ: continue
-            try: vals0_x[_code] = _probe_x.pauli_expectation([0], [_code])
-            except Exception: pass
-        _probe_x.z(0)
-        PX, SIGN_X = None, None
-        for _code, v0 in vals0_x.items():
-            try: v1 = _probe_x.pauli_expectation([0], [_code])
-            except Exception: continue
-            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
-                PX = _code
-                SIGN_X = 1.0 if v0 > 0 else -1.0
-                break
-        if PX is None:
-            raise RuntimeError("Fatal: could not autodetect PX code")
-        del _probe_x
-        gc.collect()
+    if tile_geometry != "4x4_brane_block_lattice":
+        print(f"{prefix}Warning: tile_geometry='{tile_geometry}'")
 
-        # Y Probe
-        # S-gate availability check: s() is a native Clifford gate in
-        # pyqrack v2.7.1. Confirmed present on gfx906/gfx1013 rusticl
-        # builds. The mtrx() fallback is retained for portability to
-        # builds where s() is absent, but that path triggers JIT kernel
-        # compilation and may overflow the rusticl stack on the first call.
-        # Prefer the Clifford path wherever possible. (Rev 88-B)
-        try:
-            _s_test = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
-            _s_test.s(0)
-            del _s_test
-            gc.collect()
-            _USE_S_GATE = True
-        except Exception:
-            try: del _s_test
-            except NameError: pass
-            gc.collect()
-            _USE_S_GATE = False
+    # --- State history ---
+    mmap = 'r' if mode == "save" else None
+    try:
+        history = np.load(DATA_FILE, mmap_mode=mmap)
+    except FileNotFoundError:
+        print(f"{prefix}Error: {DATA_FILE} not found.")
+        sys.exit(1)
 
-        _probe_y = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+    num_steps  = history.shape[0]
+    num_patches = history.shape[1]
+    qpp        = history.shape[2]
+    total_qubits = num_patches * qpp
 
-        # Angle-convention-agnostic Y eigenstate preparation.
-        # H|0> = |+>, S|+> = |+i> (the +1 eigenstate of Y).
-        # H and S are Clifford gates with no rotation parameter; this path
-        # is independent of the ANGLE_SCALE convention resolved below.
-        # The mtrx() fallback path (Rev 88-C) triggered JIT overflow on
-        # rusticl; replaced here by the Clifford path from Rev 88-B.
-        _probe_y.h(0)
-        if _USE_S_GATE:
-            _probe_y.s(0)
-        else:
-            # Fallback: mtrx() Rx(pi/2) approximating S in the X-Z plane.
-            # Angle-convention-dependent; safe only when ANGLE_SCALE=1.0.
-            # Dead path on gfx906/gfx1013 builds that support s().
-            _c, _s = math.cos(math.pi / 4.0), math.sin(math.pi / 4.0)
-            _probe_y.mtrx([complex(_c, 0), complex(0, _s), complex(0, _s), complex(_c, 0)], 0)
+    def patch_coords(p):
+        z = p % grid_z; rest = p // grid_z
+        return rest // grid_y, rest % grid_y, z
 
-        vals0_y = {}
-        for _code in range(8):
-            if _code in (PX, PZ): continue
-            try: vals0_y[_code] = _probe_y.pauli_expectation([0], [_code])
-            except Exception: pass
-        _probe_y.z(0)
-        PY, SIGN_Y = None, None
-        for _code, v0 in vals0_y.items():
-            try: v1 = _probe_y.pauli_expectation([0], [_code])
-            except Exception: continue
-            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
-                PY = _code
-                SIGN_Y = 1.0 if v0 > 0 else -1.0
-                break
-        if PY is None:
-            raise RuntimeError("Fatal: could not autodetect PY code")
-        del _probe_y
-        gc.collect()
-        # ----------------------------
+    # --- Energy data (all columns) ---
+    energies = load_energy_data(num_steps, prefix)
 
-        # --- ANGLE CONVENTION AUTODETECT ---
-        _sim_mag = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
-        _sim_mag.r(PX, math.pi, 0)
-        mag_check = _sim_mag.pauli_expectation([0], [PZ])
-        _corrected = SIGN_Z * mag_check
-        if abs(_corrected + 1.0) < 0.1:
-            ANGLE_SCALE = 1.0
-        elif abs(_corrected - 1.0) < 0.1:
-            ANGLE_SCALE = 0.5
-        else:
-            raise RuntimeError(
-                "Fatal: r(PX,pi) returned ambiguous SIGN_Z*<Z> = " +
-                "{:.6f}".format(_corrected) +
-                "; expected ~+1.0 or ~-1.0"
-            )
-        del _sim_mag
-        gc.collect()
-        # -------------------------------------------------------
+    # --- Interfaces & coupling error ---
+    interfaces = build_interfaces(grid_x, grid_y, grid_z, branes_per_block,
+                                  qpp, periodic_x, periodic_y, periodic_z)
+    kinds_present = ["Z_INTRA", "Z_INTER", "XY"]
+    n_by_kind = {k: sum(1 for i in interfaces if i[4] == k) for k in kinds_present}
+    print(f"{prefix}Interfaces: {n_by_kind['Z_INTRA']} Z-intra, "
+          f"{n_by_kind['Z_INTER']} Z-inter, {n_by_kind['XY']} XY")
 
-        def apply_h(sim: QrackSimulator, q: int) -> None:
-            sim.h(q)
+    avg_disagreement = None
+    dis_by_kind = {}
+    if interfaces:
+        hist_arr = np.asarray(history)
+        n_ifaces = len(interfaces)
+        disagreements = np.zeros((num_steps, n_ifaces))
+        iface_kind = []
+        for i, (p1, p2, i1, i2, kind) in enumerate(interfaces):
+            diff = hist_arr[:, p1, i1, :] - hist_arr[:, p2, i2, :]
+            disagreements[:, i] = np.mean(np.linalg.norm(diff, axis=2), axis=1)
+            iface_kind.append(kind)
+        iface_kind = np.array(iface_kind)
+        avg_disagreement = np.mean(disagreements, axis=1)
+        for k in kinds_present:
+            mask = (iface_kind == k)
+            if np.any(mask):
+                dis_by_kind[k] = np.mean(disagreements[:, mask], axis=1)
 
-        def apply_rx(sim: QrackSimulator, theta: float, q: int) -> None:
-            sim.r(PX, float(theta) * ANGLE_SCALE, q)
+    # --- 3D coordinates ---
+    tile_pitch_x = TILE_LX - 1 + TILE_GAP_XY + 1
+    tile_pitch_y = TILE_LY - 1 + TILE_GAP_XY + 1
 
-        def apply_ry(sim: QrackSimulator, theta: float, q: int) -> None:
-            sim.r(PY, float(theta) * ANGLE_SCALE, q)
+    def z_pos(z):
+        return z * LAYER_SPACING + (z // branes_per_block) * BLOCK_GAP_Z
 
-        def apply_rz(sim: QrackSimulator, theta: float, q: int) -> None:
-            sim.r(PZ, float(theta) * ANGLE_SCALE, q)
+    global_X, global_Y, global_Z = [], [], []
+    for p in range(num_patches):
+        tx, ty, z = patch_coords(p)
+        zp = z_pos(z)
+        for q in range(qpp):
+            qx, qy = divmod(q, TILE_LY)
+            global_X.append(tx * tile_pitch_x + float(qx))
+            global_Y.append(ty * tile_pitch_y + float(qy))
+            global_Z.append(zp)
+    global_X = np.array(global_X)
+    global_Y = np.array(global_Y)
+    global_Z = np.array(global_Z)
 
-        def apply_zz(sim: QrackSimulator, theta: float, q1: int, q2: int) -> None:
-            # Bare CNOT-conjugation ZZ gate: mcx -> rz -> mcx.
-            # Intra-gate pauli_expectation drains were added in Rev 88-H to
-            # cap seq delta at 1, but caused 72x drain overhead per patch per
-            # step (3 drains/gate x 24 gates) which made Lat(Tomo)=250ms in
-            # the ring-reset regime. The ket checkpoint+resurrection in Rev 88-H
-            # already provides correct recovery from any seq-delta=3 hang:
-            # context loss -> resurrect from pre-step ket -> retry Trotter.
-            # Intra-gate drains are therefore redundant. Removed in Rev 88-I.
-            sim.mcx([q1], q2)
-            apply_rz(sim, 2.0 * theta, q2)
-            sim.mcx([q1], q2)
+    x_max = (grid_x - 1) * tile_pitch_x + TILE_LX - 1
+    y_max = (grid_y - 1) * tile_pitch_y + TILE_LY - 1
+    z_max = z_pos(grid_z - 1)
 
-        def trotter_step_body(sim: QrackSimulator, num_qubits: int,
-                              intra_edges: List[Tuple[int, int]],
-                              J: float, hx: float, hz: float,
-                              dt_local: float) -> None:
-            dt_half = dt_local / 2.0
+    stride   = max(1, int(QUIVER_STRIDE))
+    draw_idx = np.arange(0, num_patches * qpp, stride)
+    qX, qY, qZ = global_X[draw_idx], global_Y[draw_idx], global_Z[draw_idx]
 
-            theta_x  = -2.0 * hx * dt_half
-            theta_z  = -2.0 * hz * dt_local
-            theta_zz = -J * dt_local
+    # --- Figure layout ---
+    plt.style.use('dark_background')
+    fig = plt.figure(figsize=(20, 11), facecolor='#111111')
 
-            for q in range(num_qubits): apply_rx(sim, theta_x, q)
-            for q in range(num_qubits): apply_rz(sim, theta_z, q)
+    # Status bar at top
+    status_ax = fig.add_axes([0.03, 0.965, 0.94, 0.018])
+    status_ax.set_axis_off()
+    status_txt = status_ax.text(
+        0.0, 0.5, "", transform=status_ax.transAxes,
+        fontsize=8, color='#aaaaaa', va='center', family='monospace')
 
-            # CHUNK=8 restored (Rev 88-I): defence-in-depth against ring buffer
-            # overflow (original gfx1013 concern from Rev 88-B). With ket
-            # checkpoint+resurrection handling context loss, CHUNK no longer
-            # needs to be 1 for correctness. CHUNK=8 gives 3 drain points per
-            # 24 edges, avoiding 21 extra drain calls vs CHUNK=1.
-            CHUNK = 8
-            for i in range(0, len(intra_edges), CHUNK):
-                for q1, q2 in intra_edges[i:i + CHUNK]:
-                    apply_zz(sim, theta_zz, q1, q2)
-                _ = sim.pauli_expectation([0], [PZ])
+    gs_main = gridspec.GridSpec(1, 2, width_ratios=[2.5, 1],
+                                wspace=0.08, left=0.03, right=0.97,
+                                top=0.955, bottom=0.13)
+    ax3d = fig.add_subplot(gs_main[0], projection='3d')
 
-            for q in range(num_qubits): apply_rx(sim, theta_x, q)
+    # Right column: 7 rows
+    gs_right = gridspec.GridSpecFromSubplotSpec(
+        7, 1, subplot_spec=gs_main[1], hspace=0.90,
+        height_ratios=[1.1, 0.55, 0.85, 0.75, 0.75, 0.75, 0.75])
+    ax_energy  = fig.add_subplot(gs_right[0])
+    ax_rr      = fig.add_subplot(gs_right[1])
+    ax_dis     = fig.add_subplot(gs_right[2])
+    ax_anneal  = fig.add_subplot(gs_right[3])
+    ax_hmap_x  = fig.add_subplot(gs_right[4])
+    ax_hmap_y  = fig.add_subplot(gs_right[5])
+    ax_hmap_z  = fig.add_subplot(gs_right[6])
 
-        def z_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
-            return np.array([SIGN_Z * float(sim.pauli_expectation([q], [PZ]))
-                             for q in qubits])
+    # --- Colormaps ---
+    spin_norm = mcolors.Normalize(vmin=-1.0, vmax=1.0)
+    vector_colors = [
+        (0.15, 0.35, 0.85, 0.85),
+        (0.85, 0.85, 0.85, 0.45),
+        (0.85, 0.15, 0.25, 0.85),
+    ]
+    vector_cmap = mcolors.LinearSegmentedColormap.from_list(
+        "ghost_vectors", vector_colors)
+    heatmap_colors = [
+        (0.15, 0.35, 0.85, 1.0),
+        (0.10, 0.10, 0.10, 1.0),
+        (0.85, 0.15, 0.25, 1.0),
+    ]
+    heatmap_cmap = mcolors.LinearSegmentedColormap.from_list(
+        "heatmap_cmap", heatmap_colors)
 
-        def x_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
-            return np.array([SIGN_X * float(sim.pauli_expectation([q], [PX]))
-                             for q in qubits])
+    def _quiver_colors(w_flat):
+        return vector_cmap(spin_norm(w_flat))
 
-        def y_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
-            return np.array([SIGN_Y * float(sim.pauli_expectation([q], [PY]))
-                             for q in qubits])
-
-        def zz_means_meanfield(z_exp: np.ndarray,
-                               edges: List[Tuple[int, int]]) -> np.ndarray:
-            return np.array([z_exp[q1] * z_exp[q2] for q1, q2 in edges])
-
-        def apply_kicks(sim: QrackSimulator,
-                        kicks: Dict[int, Tuple[float, float, float]],
-                        dt_local: float) -> None:
-            if not kicks: return
-            coef = -2.0 * dt_local
-            items = list(kicks.items())
-
-            # KICK_CHUNK=8 restored (Rev 88-I): same rationale as CHUNK=8.
-            # Resurrection handles any context loss; KICK_CHUNK=8 avoids
-            # 8 extra drain calls per kick phase vs KICK_CHUNK=1.
-            KICK_CHUNK = 8
-            for i in range(0, len(items), KICK_CHUNK):
-                for raw_q, (kx, ky, kz) in items[i:i + KICK_CHUNK]:
-                    q = int(raw_q)
-                    theta_x = kx * coef
-                    theta_y = ky * coef
-                    theta_z = kz * coef
-                    # KICK_THETA_THRESHOLD=1e-6: suppress near-zero rotations
-                    # to reduce GART-mapped kernel buffer count (Rev 88-F).
-                    if abs(theta_x) > KICK_THETA_THRESHOLD: apply_rx(sim, theta_x, q)
-                    if abs(theta_y) > KICK_THETA_THRESHOLD: apply_ry(sim, theta_y, q)
-                    if abs(theta_z) > KICK_THETA_THRESHOLD: apply_rz(sim, theta_z, q)
-                _ = sim.pauli_expectation([0], [PZ])
-
-        # Strings that identify a use-after-reset context loss error in
-        # the RuntimeError message from the amdgpu/rusticl userspace layer.
-        _CONTEXT_LOST_STRINGS = (
-            "context is lost",
-            "CS has cancelled",
-            "CL_OUT_OF_RESOURCES",
-            "CL_INVALID_COMMAND_QUEUE",
+    def get_vector_data(step_idx):
+        return (
+            history[step_idx, :, :, 0].ravel()[draw_idx],
+            history[step_idx, :, :, 1].ravel()[draw_idx],
+            history[step_idx, :, :, 2].ravel()[draw_idx],
         )
 
-        def is_context_loss(exc: Exception) -> bool:
-            msg = str(exc).lower()
-            return any(s.lower() in msg for s in _CONTEXT_LOST_STRINGS)
+    U, V, W = get_vector_data(0)
+    quiver_obj = [ax3d.quiver(
+        qX, qY, qZ, U, V, W,
+        length=0.6, colors=_quiver_colors(W), arrow_length_ratio=0.3
+    )]
 
-        intra_edges, _brane_sites = generate_16q_brane_tile()
+    # Inter-block Z planes: draw only at Z_INTER seams (the weak-glue
+    # inter-block boundaries). Z_INTRA and XY seams are counted in the
+    # error metric but not drawn -- 624 sheets would be visual noise.
+    margin = 0.4
+    for zb in range(1, grid_z // branes_per_block):
+        z_lo  = z_pos(zb * branes_per_block - 1)
+        z_hi  = z_pos(zb * branes_per_block)
+        z_mid = 0.5 * (z_lo + z_hi)
+        verts = [[(-margin, -margin, z_mid),
+                  (x_max + margin, -margin, z_mid),
+                  (x_max + margin, y_max + margin, z_mid),
+                  (-margin, y_max + margin, z_mid)]]
+        plane = Poly3DCollection(verts, alpha=0.06, facecolor='#e64550',
+                                 edgecolor='#e64550', linewidths=0.5)
+        ax3d.add_collection3d(plane)
 
-        # Per-patch statevector checkpoint: updated before each Trotter step.
-        # 2^16 complex64 = 512 KB per patch; 128 MB total at 256 patches.
-        # Used to restore state after sim resurrection following a context loss.
-        ket_cache: Dict[int, np.ndarray] = {}
+    # Colorbar
+    ax_cbar = fig.add_axes([0.01, 0.25, 0.012, 0.50])
+    sm = plt.cm.ScalarMappable(cmap=vector_cmap, norm=spin_norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, cax=ax_cbar)
+    cbar.set_label('Bloch vector component', fontsize=8, color='#aaaaaa')
+    cbar.ax.tick_params(labelsize=6, colors='#aaaaaa')
 
-        def resurrect_sim(p: int) -> QrackSimulator:
-            """Delete stale sim, create fresh one, restore from ket_cache."""
-            if p in sims:
-                try:
-                    _old = sims.pop(p)
-                    del _old
-                except Exception:
-                    pass
-            gc.collect()
-            sim_new = QrackSimulator(
-                qubit_count=QUBITS_PER_PATCH,
-                is_binary_decision_tree=False,
-                is_stabilizer_hybrid=False,
-                is_gpu=True,
-            )
-            if p in ket_cache:
-                try:
-                    sim_new.in_ket(ket_cache[p].tolist())
-                    print("[Worker " + str(rank) + "] patch " + str(p) +
-                          " resurrected from ket checkpoint.", file=sys.stderr)
-                except Exception as restore_err:
-                    print("[Worker " + str(rank) + "] patch " + str(p) +
-                          " ket restore failed (" + str(restore_err) +
-                          "); reinitialising to |+>^16.", file=sys.stderr)
-                    for q in range(QUBITS_PER_PATCH):
-                        apply_h(sim_new, q)
-            else:
-                # No checkpoint yet (failure on step 0): start from |+>^16.
-                for q in range(QUBITS_PER_PATCH):
-                    apply_h(sim_new, q)
-                print("[Worker " + str(rank) + "] patch " + str(p) +
-                      " resurrected to |+>^16 (no ket checkpoint).",
-                      file=sys.stderr)
-            sims[p] = sim_new
-            return sim_new
+    energy_text = ax3d.text2D(
+        0.04, 0.96, "", transform=ax3d.transAxes,
+        color='lightgreen', fontsize=11, fontweight='bold')
 
-        for p in assigned_patches:
-            sim = QrackSimulator(
-                qubit_count=QUBITS_PER_PATCH,
-                is_binary_decision_tree=False,
-                is_stabilizer_hybrid=False,
-                is_gpu=True,
-            )
-            if resume_step > 0:
-                # RESPAWN PATH (Rev 88-J): restore ket from shared memory
-                # written by the dead worker's last pre-Trotter checkpoint.
-                try:
-                    ket_slot = _shm_arr[p, :].copy()
-                    sim.in_ket(ket_slot.tolist())
-                    print("[Worker " + str(rank) + "] patch " + str(p) +
-                          " restored from shm at resume_step=" +
-                          str(resume_step) + ".", file=sys.stderr)
-                except Exception as _re:
-                    print("[Worker " + str(rank) + "] patch " + str(p) +
-                          " shm restore failed (" + str(_re) +
-                          "); init |+>^16.", file=sys.stderr)
-                    for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
-            else:
-                # FRESH START: initialise to |+>^16.
-                for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
-            sims[p] = sim
+    bx, by, bz = (block_grid + [4, 4, 4])[:3] if isinstance(block_grid, list) else (4, 4, 4)
+    per_flags = ''.join(a for a, on in zip('XYZ', (periodic_x, periodic_y, periodic_z)) if on)
+    lattice_desc = (f"{bx}x{by}x{bz} blocks x {branes_per_block} branes"
+                    + (f" | periodic {per_flags}" if per_flags else ""))
 
-            try:
-                _ = sim.pauli_expectation([0], [PZ])
-            except Exception as e:
-                raise RuntimeError(
-                    "Fatal: GPU allocation failed on patch " + str(p) +
-                    ". Driver error: " + str(e)
-                )
-            # Seed shm slot with initial ket (|+>^16 or restored).
-            try:
-                ket_cache[p] = np.array(sim.out_ket(), dtype=np.complex64)
-                _flush_ket_to_shm(p, ket_cache[p])
-            except Exception:
-                pass
-
-        kick_payloads = {p: {} for p in assigned_patches}
-        _warned_fidelity = False
-
-        for t in range(total_steps):
-            s = t / max(1, (total_steps - 1))
-            current_hx = (1.0 - s) * initial_hx + s * target_hx
-            current_J  = s * target_J
-            current_hz = s * target_hz
-            is_measure = (t % measure_every == 0) or (t == total_steps - 1)
-
-            patch_data_to_master = {}
-
-            for p_idx, p in enumerate(assigned_patches):
-                sim = sims[p]
-
-                # KET CHECKPOINT (Rev 88-H/J): snapshot statevector BEFORE
-                # Trotter so that a mid-step context loss can be recovered.
-                # Rev 88-J: also flush to shared memory so the master can
-                # hand the ket to a respawned worker after a BACO crash.
-                try:
-                    ket_cache[p] = np.array(sim.out_ket(), dtype=np.complex64)
-                    _flush_ket_to_shm(p, ket_cache[p])
-                except Exception:
-                    pass  # Stale sim; resurrect_sim will use prior cache.
-
-                if kick_payloads[p]:
-                    try:
-                        apply_kicks(sim, kick_payloads[p], dt)
-                    except RuntimeError as _ke:
-                        if is_context_loss(_ke):
-                            print("[Worker " + str(rank) + "] step " + str(t) +
-                                  " patch " + str(p) +
-                                  " context lost in apply_kicks; resurrecting.",
-                                  file=sys.stderr)
-                            sim = resurrect_sim(p)
-                            # Retry kicks on fresh sim with restored ket.
-                            try:
-                                apply_kicks(sim, kick_payloads[p], dt)
-                            except Exception:
-                                pass  # Absorb; Trotter will proceed.
-                        else:
-                            raise
-
-                t_start_trotter = time.perf_counter()
-                try:
-                    trotter_step_body(sim, QUBITS_PER_PATCH, intra_edges,
-                                      current_J, current_hx, current_hz, dt)
-                except RuntimeError as _te:
-                    if is_context_loss(_te):
-                        print("[Worker " + str(rank) + "] step " + str(t) +
-                              " patch " + str(p) +
-                              " context lost in trotter; resurrecting.",
-                              file=sys.stderr)
-                        sim = resurrect_sim(p)
-                        # Retry Trotter from restored ket checkpoint.
-                        try:
-                            trotter_step_body(sim, QUBITS_PER_PATCH, intra_edges,
-                                              current_J, current_hx, current_hz, dt)
-                        except Exception:
-                            pass  # Absorb; tomo will measure recovered state.
-                    else:
-                        raise
-
-                # INTER-PATCH BARRIER (Rev 88-E): force compute ring to drain
-                # completely between patches.
-                try:
-                    _ = sim.pauli_expectation([0], [PZ])
-                except RuntimeError as _be:
-                    if is_context_loss(_be):
-                        sim = resurrect_sim(p)
-                    else:
-                        raise
-
-                # INTER-PATCH YIELD (Rev 88-E): OS scheduler yield every N patches.
-                if (p_idx + 1) % INTER_PATCH_YIELD_EVERY == 0:
-                    time.sleep(0)
-
-                t_lat_trotter = time.perf_counter() - t_start_trotter
-
-                t_lat_tomo = 0.0
-                if is_measure:
-                    t_start_tomo = time.perf_counter()
-                    all_q = list(range(QUBITS_PER_PATCH))
-                    try:
-                        state = {
-                            "Z": z_means(sim, all_q),
-                            "X": x_means(sim, all_q),
-                            "Y": y_means(sim, all_q),
-                        }
-                    except RuntimeError as _me:
-                        if is_context_loss(_me):
-                            print("[Worker " + str(rank) + "] step " + str(t) +
-                                  " patch " + str(p) +
-                                  " context lost in tomo; resurrecting.",
-                                  file=sys.stderr)
-                            sim = resurrect_sim(p)
-                            # Measure the resurrected (restored) state.
-                            state = {
-                                "Z": z_means(sim, all_q),
-                                "X": x_means(sim, all_q),
-                                "Y": y_means(sim, all_q),
-                            }
-                        else:
-                            raise
-                    zz_exp = zz_means_meanfield(state["Z"], intra_edges)
-                    bulk_e = (-current_hz * float(np.sum(state["Z"]))
-                              - current_J  * float(np.sum(zz_exp))
-                              - current_hx * float(np.sum(state["X"])))
-                    t_lat_tomo = time.perf_counter() - t_start_tomo
-
-                    try:
-                        fidelity = float(sim.get_unitary_fidelity())
-                    except (AttributeError, RuntimeError):
-                        # AttributeError: binding absent in this pyqrack build.
-                        # RuntimeError: C-layer pinvoke failure (v2.7.1 API).
-                        # Catch broadened from AttributeError-only in Rev 88-C.
-                        fidelity = 1.0
-                        if not _warned_fidelity:
-                            print(
-                                "[Worker " + str(rank) + "] Warning: "
-                                "get_unitary_fidelity() failed or not found. "
-                                "Upgrade PyQrack.",
-                                file=sys.stderr
-                            )
-                            _warned_fidelity = True
-
-                    patch_data_to_master[p] = {
-                        "state": state,
-                        "meanfield_bulk_energy": bulk_e,
-                        "lat_trotter_ms": t_lat_trotter * 1000.0,
-                        "lat_tomo_ms": t_lat_tomo * 1000.0,
-                        "unitary_fidelity": fidelity
-                    }
-
-            if is_measure:
-                conn.send(patch_data_to_master)
-                kick_payloads = conn.recv()
-
-            # Kick payloads intentionally retained across non-measure steps
-            # (continuous boundary field, Rev 87).
-
-    finally:
-        for p in list(sims.keys()):
-            _s = sims.pop(p)
-            del _s
-        sims.clear()
-        gc.collect()
+    ax3d.set_xlim(-0.5, x_max + 0.5)
+    ax3d.set_ylim(-0.5, y_max + 0.5)
+    ax3d.set_zlim(-0.5, z_max + 0.5)
+    try:
+        ax3d.set_box_aspect((x_max + 1.0, y_max + 1.0, max(1.0, z_max + 1.0)))
+    except AttributeError:
+        pass
+    for axis in (ax3d.xaxis, ax3d.yaxis, ax3d.zaxis):
         try:
-            del _shm_arr  # Close memmap handle.
-        except Exception:
-            pass
-        conn.close()
+            axis.pane.fill = False
+            axis.pane.set_edgecolor('none')
+        except AttributeError:
+            axis.set_pane_color((0.0, 0.0, 0.0, 0.0))
+        axis.line.set_linewidth(0)
+        axis.set_ticklabels([])
+        axis.set_ticks([])
+    ax3d.grid(False)
+    ax3d.set_axis_off()
+
+    # --- Heatmap tick setup ---
+    y_ticks, y_labels = [], []
+    for tx in range(grid_x):
+        for ty in range(grid_y):
+            base = (tx * grid_y + ty) * grid_z
+            y_ticks.append(base + (grid_z - 1) / 2.0)
+            y_labels.append(f"T({tx},{ty})")
+
+    def _init_heatmap(ax, data, cmap, norm, label,
+                      show_ylabel=False, show_xlabel=False):
+        img = ax.imshow(data, cmap=cmap, norm=norm,
+                        aspect='auto', interpolation='nearest')
+        _style_ax(ax)
+        ax.set_title(label, fontsize=8, color='#cccccc', pad=2)
+        if show_ylabel:
+            ax.set_yticks(y_ticks)
+            ax.set_yticklabels(y_labels, fontsize=3.5, color='#aaaaaa')
+        else:
+            ax.set_yticks([])
+        if show_xlabel:
+            ax.set_xlabel(f"Local qubit (0-{qpp - 1})", fontsize=6,
+                          color='#aaaaaa')
+            ax.tick_params(axis='x', labelsize=5, colors='#aaaaaa')
+        else:
+            ax.set_xticks([])
+        return img
+
+    hmap_x = _init_heatmap(ax_hmap_x, history[0, :, :, 0],
+                           heatmap_cmap, spin_norm, "Polarization <X>",
+                           show_ylabel=True)
+    hmap_y = _init_heatmap(ax_hmap_y, history[0, :, :, 1],
+                           heatmap_cmap, spin_norm, "Polarization <Y>",
+                           show_ylabel=True)
+    hmap_z = _init_heatmap(ax_hmap_z, history[0, :, :, 2],
+                           heatmap_cmap, spin_norm, "Polarization <Z>",
+                           show_ylabel=True, show_xlabel=True)
+
+    # --- Slider + Play/Pause ---
+    ax_slider = fig.add_axes([0.14, 0.045, 0.62, 0.018])
+    ax_slider.set_facecolor('none')
+    slider = Slider(ax=ax_slider, label='Trotter Step',
+                    valmin=0, valmax=num_steps - 1,
+                    valinit=0, valstep=1, color='#4a90e2')
+    slider.label.set_color('#cccccc')
+    slider.valtext.set_color(ANNEAL_COLOR)
+
+    ax_play = fig.add_axes([0.80, 0.032, 0.08, 0.038])
+    btn_play = Button(ax_play, '> Play', color='#333333', hovercolor='#555555')
+    btn_play.label.set_color('#cccccc')
+
+    is_playing = [False]
+    cur_frame  = [0]
+
+    # --- Scroll zoom on 3D ---
+    def on_scroll(event):
+        if event.inaxes != ax3d:
+            return
+        if not hasattr(ax3d, 'custom_zoom'):
+            ax3d.custom_zoom = 1.0
+        ax3d.custom_zoom *= 0.9 if event.button == 'down' else 1.1
+        try:
+            ca = ax3d.get_box_aspect()
+            if ca is None:
+                ca = (x_max + 1.0, y_max + 1.0, max(1.0, z_max + 1.0))
+            ax3d.set_box_aspect(ca, zoom=ax3d.custom_zoom)
+        except TypeError:
+            ax3d.dist *= 1.1 if event.button == 'down' else 0.9
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect('scroll_event', on_scroll)
+
+    # --- Space = screenshot ---
+    def on_key_press(event):
+        if event.key == ' ':
+            step = int(slider.val)
+            e_val = energies['Total'][step]
+            e_str = f"{e_val:.4f}" if not np.isnan(e_val) else "NaN"
+            fname = (f"dash_snapshot_blocks_{bx}x{by}x{bz}x{branes_per_block}"
+                     f"_step{step}_E{e_str}.png")
+            print(f"{prefix}Saving screenshot to {fname}...")
+            fig.savefig(fname, dpi=300, bbox_inches='tight',
+                        facecolor=fig.get_facecolor())
+            print(f"{prefix}Screenshot saved.")
+
+    fig.canvas.mpl_connect('key_press_event', on_key_press)
+
+    # --- Full redraw function ---
+    _from_animation = [False]
+
+    def update(frame):
+        frame = int(frame)
+        cur_frame[0] = frame
+
+        # 3D quiver
+        U, V, W = get_vector_data(frame)
+        quiver_obj[0].remove()
+        quiver_obj[0] = ax3d.quiver(
+            qX, qY, qZ, U, V, W,
+            length=0.6, colors=_quiver_colors(W), arrow_length_ratio=0.3)
+        ax3d.set_title(
+            f"Block-Lattice Annealing  ({lattice_desc})\n"
+            f"{num_patches} branes | {total_qubits} qubits | "
+            f"Step {frame}/{num_steps - 1}",
+            fontsize=12, pad=8, color='#f0f0f0')
+
+        e_val = energies['Total'][frame]
+        energy_text.set_text(
+            f"E = {e_val:.4f}" if not np.isnan(e_val) else "")
+        if _from_animation[0]:
+            ax3d.view_init(elev=ax3d.elev, azim=ax3d.azim + 0.3)
+
+        # Right panels (all clear+redraw)
+        draw_energy_panel(ax_energy, energies, frame, num_steps)
+        draw_ring_reset_panel(ax_rr, energies, frame, num_steps)
+        draw_coupling_error_panel(ax_dis, avg_disagreement, dis_by_kind,
+                                   energies, frame, num_steps)
+        draw_anneal_deriv_panel(ax_anneal, energies, avg_disagreement,
+                                frame, num_steps)
+
+        # Heatmaps
+        hmap_x.set_data(history[frame, :, :, 0])
+        hmap_y.set_data(history[frame, :, :, 1])
+        hmap_z.set_data(history[frame, :, :, 2])
+
+        # Status bar
+        fid_val = energies['Fidelity'][frame]
+        ann_val = energies['Anneal'][frame]
+        rr_total = int(np.nansum(energies['Ring_Reset'][:frame + 1]))
+        fid_str = f"{fid_val:.5f}" if not np.isnan(fid_val) else "N/A"
+        ann_str = f"{ann_val:.1f}%" if not np.isnan(ann_val) else "N/A"
+        status_txt.set_text(
+            f"Step {frame}/{num_steps - 1}  |  Anneal {ann_str}  |  "
+            f"E_total = {e_val:.4f}  |  Fidelity = {fid_str}  |  "
+            f"Ring resets so far: {rr_total}"
+            if not np.isnan(e_val) else
+            f"Step {frame}/{num_steps - 1}  |  Anneal {ann_str}  |  "
+            f"Fidelity = {fid_str}  |  Ring resets so far: {rr_total}")
+
+        slider.eventson = False
+        slider.set_val(frame)
+        slider.eventson = True
+
+        return (quiver_obj[0], energy_text, hmap_x, hmap_y, hmap_z)
+
+    def _animation_update(frame):
+        _from_animation[0] = True
+        result = update(frame)
+        _from_animation[0] = False
+        return result
+
+    def on_slider_update(val):
+        _from_animation[0] = False
+        update(val)
+        fig.canvas.draw_idle()
+
+    slider.on_changed(on_slider_update)
+
+    def toggle_play(event):
+        if is_playing[0]:
+            ani.event_source.stop()
+            btn_play.label.set_text('> Play')
+        else:
+            ani.event_source.start()
+            btn_play.label.set_text('|| Pause')
+        is_playing[0] = not is_playing[0]
+        fig.canvas.draw_idle()
+
+    btn_play.on_clicked(toggle_play)
+
+    ani = animation.FuncAnimation(
+        fig, _animation_update, frames=num_steps, interval=180, blit=False)
+
+    # Initial draw
+    update(0)
+
+    if mode == "save":
+        print(f"{prefix}Commencing 4K FFmpeg render to '{SAVE_FILE}'...")
+        try:
+            ani.save(SAVE_FILE, writer='ffmpeg', fps=10, dpi=216)
+            print(f"{prefix}Save complete.")
+        except Exception as e:
+            print(f"{prefix}Failed to save. ffmpeg installed? Error: {e}")
+    else:
+        print(f"{prefix}Opening GUI...  SPACEBAR = PNG snapshot.")
+        plt.show()
 
 
 # =====================================================================
-# MASTER ORCHESTRATOR
+# ENTRY POINT
 # =====================================================================
-class MultiGpuHadronEngine:
-    def __init__(self, master_seed: int = 1337) -> None:
-        self.master_seed = master_seed
-        self.intra_edges, self.brane_sites = generate_16q_brane_tile()
-        self.n_sites = len(self.brane_sites)  # 16
 
-        self.patch_coords = {p: patch_coords(p) for p in range(TOTAL_PATCHES)}
-        self.interfaces = build_interfaces()
+def main():
+    mp.set_start_method('spawn', force=True)
+    print("Forking 4K render to background process...")
+    render_process = mp.Process(target=run_dashboard, args=("save",))
+    render_process.start()
 
-        n_by_kind = {"Z_INTRA": 0, "Z_INTER": 0, "XY": 0}
-        for _, _, _, _, kind in self.interfaces:
-            n_by_kind[kind] += 1
-        self.n_by_kind = n_by_kind
+    run_dashboard(mode="interactive")
 
-        self.lattice_history  = []
-        self.energy_csv       = "meanfield_ground_state_energy_curve_multi.csv"
-        self.profiles_csv     = "boundary_profiles_multi.csv"
-        self.state_dump_file  = "macroscopic_lattice_states.npy"
-        self.config_file      = "lattice_config.json"
-
-        # File-backed memmap ket cache (Rev 88-K, replaces SharedMemory).
-        # Created on /tmp (overlay fs) to avoid Docker's 64MB /dev/shm limit.
-        # mode='w+' creates the file and zeros it. Workers open mode='r+'.
-        self.memmap_path = KET_MEMMAP_PATH
-        try:
-            self.ket_mm = np.memmap(
-                self.memmap_path,
-                dtype=np.complex64,
-                mode='w+',
-                shape=(TOTAL_PATCHES, KET_SLOT_ELEMS)
-            )
-            self.ket_mm[:] = 0.0
-            self.ket_mm.flush()
-            print("[Engine] Ket memmap: " + self.memmap_path +
-                  " (" + str(TOTAL_PATCHES * KET_SLOT_ELEMS * 8 // (1024*1024)) +
-                  " MB)")
-        except Exception as e:
-            raise RuntimeError(
-                "Fatal: could not create ket memmap at " +
-                self.memmap_path + ": " + str(e)
-            )
-
-        # Ring_Reset column added (Rev 88-D, from Rev 88-B).
-        self._energy_fields = [
-            "Step", "Anneal_Percent", "MeanField_Bulk_Energy",
-            "E_Z_Intra", "E_Z_Inter", "E_XY",
-            "MeanField_Boundary_Energy", "MeanField_Total_Energy",
-            "Min_Unitary_Fidelity", "Ring_Reset"
-        ]
-        self._profile_fields = [
-            "Step", "Patch", "Tx", "Ty", "Z", "Block_Z", "Layer",
-            "Face", "X_mean", "Y_mean", "Z_mean"
-        ]
-
-        self._init_files()
-
-        self.worker_assignments = [[] for _ in range(TOTAL_WORKERS)]
-        for i in range(TOTAL_PATCHES):
-            self.worker_assignments[i % TOTAL_WORKERS].append(i)
-
-    def _init_files(self) -> None:
-        try:
-            with open(self.config_file, 'w') as f:
-                json.dump({
-                    "grid_x": BLOCK_GRID_X, "grid_y": BLOCK_GRID_Y, "grid_z": GLOBAL_Z,
-                    "block_grid": [BLOCK_GRID_X, BLOCK_GRID_Y, BLOCK_GRID_Z],
-                    "branes_per_block": BRANES_PER_BLOCK,
-                    "num_patches": TOTAL_PATCHES,
-                    "qubits_per_patch": QUBITS_PER_PATCH,
-                    "total_qubits": TOTAL_QUBITS,
-                    "tile_geometry": "4x4_brane_block_lattice",
-                    "periodic": [PERIODIC_X, PERIODIC_Y, PERIODIC_Z],
-                    "interfaces_by_kind": self.n_by_kind,
-                    "patch_id_convention": "p = (tx * grid_y + ty) * grid_z + z",
-                    "state_dump_shape": ["n_steps", "patch", "qubit", "XYZ"]
-                }, f)
-            with open(self.energy_csv, mode='w', newline='') as f:
-                csv.DictWriter(f, fieldnames=self._energy_fields).writeheader()
-            with open(self.profiles_csv, mode='w', newline='') as f:
-                csv.DictWriter(f, fieldnames=self._profile_fields).writeheader()
-        except Exception as e:
-            print("[CSV] Warning: Setup configuration write failed: " + str(e),
-                  file=sys.stderr)
-
-    def _log_csvs(self, step: int, anneal: float, bulk: float,
-                  e_by_kind: Dict[str, float], bound: float, total: float,
-                  min_fidelity: float, patch_profiles: Dict[int, Any],
-                  ring_reset: bool) -> None:
-        try:
-            with open(self.energy_csv, mode='a', newline='') as f:
-                csv.DictWriter(f, fieldnames=self._energy_fields).writerow({
-                    "Step": step, "Anneal_Percent": anneal,
-                    "MeanField_Bulk_Energy": bulk,
-                    "E_Z_Intra": e_by_kind["Z_INTRA"],
-                    "E_Z_Inter": e_by_kind["Z_INTER"],
-                    "E_XY": e_by_kind["XY"],
-                    "MeanField_Boundary_Energy": bound,
-                    "MeanField_Total_Energy": total,
-                    "Min_Unitary_Fidelity": min_fidelity,
-                    "Ring_Reset": 1 if ring_reset else 0
-                })
-
-            with open(self.profiles_csv, mode='a', newline='') as f:
-                w = csv.DictWriter(f, fieldnames=self._profile_fields)
-                for p, prof in patch_profiles.items():
-                    tx, ty, z = self.patch_coords[p]
-                    w.writerow({
-                        "Step": step, "Patch": p,
-                        "Tx": tx, "Ty": ty, "Z": z,
-                        "Block_Z": z // BRANES_PER_BLOCK,
-                        "Layer": z % BRANES_PER_BLOCK,
-                        "Face": "BRANE",
-                        "X_mean": float(np.mean(prof["means"]["X"])),
-                        "Y_mean": float(np.mean(prof["means"]["Y"])),
-                        "Z_mean": float(np.mean(prof["means"]["Z"]))
-                    })
-        except Exception as e:
-            print("[CSV] Warning: Log write failed: " + str(e), file=sys.stderr)
-
-    def run(self, total_steps: int, dt: float, initial_hx: float,
-            target_g_intra_z: float, target_g_inter_z: float, target_g_xy: float,
-            target_J: float, target_hx: float, target_hz: float,
-            measure_every: int = 1, effective_shots: float = 512.0) -> None:
-
-        if total_steps < 1:
-            raise ValueError("total_steps must be at least 1")
-        if measure_every < 1:
-            raise ValueError("measure_every must be a positive integer")
-
-        print(
-            "[Engine] " + str(BLOCK_GRID_X) + "x" + str(BLOCK_GRID_Y) + "x" +
-            str(BLOCK_GRID_Z) + " block lattice x " + str(BRANES_PER_BLOCK) +
-            " branes/block = " + str(TOTAL_PATCHES) + " patches, " +
-            str(TOTAL_QUBITS) + " qubits | interfaces: " +
-            str(self.n_by_kind["Z_INTRA"]) + " Z-intra, " +
-            str(self.n_by_kind["Z_INTER"]) + " Z-inter, " +
-            str(self.n_by_kind["XY"]) + " XY | " +
-            str(GPUS_AVAILABLE) + " GPUs (" + str(WORKERS_PER_GPU) +
-            " workers/GPU), " + str(total_steps) + " steps"
-        )
-        print(
-            "[Engine] Rev 88-N: parallel respawn via connection.wait() "
-            "(O(max_worker_time) not O(N*worker_time)), "
-            "MAX_RESET_EVENTS=" + str(MAX_RESET_EVENTS) + ", "
-            "memmap ket cache, CHUNK=8."
-        )
-
-        active_ranks = [r for r in range(TOTAL_WORKERS)
-                        if self.worker_assignments[r]]
-
-        def _spawn_worker(rank: int, resume_step: int = 0):
-            """Spawn a single worker process. Returns (process, parent_conn)."""
-            parent_conn, child_conn = mp.Pipe()
-            p = mp.Process(
-                target=gpu_worker_process,
-                args=(rank, WORKERS_PER_GPU, self.worker_assignments[rank],
-                      child_conn, dt, total_steps, initial_hx,
-                      target_J, target_hx, target_hz, measure_every,
-                      self.memmap_path, resume_step)
-            )
-            p.start()
-            child_conn.close()
-            return p, parent_conn
-
-        workers = []
-        pipes   = []
-        rank_map = {}  # pipe index -> rank
-
-        for i, rank in enumerate(active_ranks):
-            proc, conn = _spawn_worker(rank, resume_step=0)
-            workers.append(proc)
-            pipes.append(conn)
-            rank_map[i] = rank
-
-        respawn_count = 0   # total individual worker respawns (for logging)
-        reset_event_count = 0  # GPU reset events (the limit that matters)
-
-        try:
-            for t in range(total_steps):
-                s = t / max(1, (total_steps - 1))
-                g_now = {
-                    "Z_INTRA": s * target_g_intra_z,
-                    "Z_INTER": s * target_g_inter_z,
-                    "XY":      s * target_g_xy,
-                }
-                is_measure = (t % measure_every == 0) or (t == total_steps - 1)
-
-                if not is_measure:
-                    continue
-
-                t0 = time.perf_counter()
-
-                # --- GATHER (parallel two-pass respawn) ---
-                # Rev 88-N: fully parallelised to handle large worker counts
-                # (e.g. 2 GPUs x 32 workers = 64 total) without serial respawn
-                # chains that caused ~19-minute "timeouts" at step 039.
-                #
-                # Mini-pass A: drain all live pipes; collect dead pipe indices.
-                #   Uses connection.wait() to avoid blocking on dead pipes.
-                # Mini-pass B: join+spawn all dead workers simultaneously.
-                # Pass 2:      collect from all respawned workers in parallel
-                #   using connection.wait() so all JIT builds run concurrently.
-                patch_full_states = {}
-                bulk_energy = 0.0
-                max_lat_trotter = 0.0
-                max_lat_tomo = 0.0
-                min_fidelity = 1.0
-                any_died = False
-                dead_indices = []   # pipe indices that raised EOFError
-                pending_recv = []   # pipe indices that need a pass-2 recv
-
-                # --- Mini-pass A: non-blocking drain of all pipes ---
-                # connection.wait() returns pipes with data ready (or closed).
-                # We iterate all pipes; if a pipe has data we recv immediately;
-                # if it is closed (worker died) we get EOFError on recv.
-                remaining = list(range(len(pipes)))
-                while remaining:
-                    ready = mp.connection.wait(
-                        [pipes[i] for i in remaining], timeout=120
-                    )
-                    if not ready:
-                        # Timeout: remaining workers haven't responded in 120s.
-                        # Treat them as dead for respawn purposes.
-                        for i in remaining:
-                            dead_indices.append(i)
-                            any_died = True
-                        break
-                    # Map ready connections back to their indices
-                    ready_set = set(id(c) for c in ready)
-                    still_waiting = []
-                    for i in remaining:
-                        if id(pipes[i]) in ready_set:
-                            try:
-                                data = pipes[i].recv()
-                                for p, payload in data.items():
-                                    patch_full_states[p] = payload["state"]
-                                    bulk_energy += payload["meanfield_bulk_energy"]
-                                    max_lat_trotter = max(max_lat_trotter, payload["lat_trotter_ms"])
-                                    max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
-                                    min_fidelity = min(min_fidelity, payload.get("unitary_fidelity", 1.0))
-                            except EOFError:
-                                dead_indices.append(i)
-                                any_died = True
-                        else:
-                            still_waiting.append(i)
-                    remaining = still_waiting
-
-                # --- Mini-pass B: join + spawn ALL dead workers together ---
-                if dead_indices:
-                    # Join dead processes (fast: os._exit(1) workers are already gone)
-                    for i in dead_indices:
-                        dead_proc = workers[i]
-                        dead_proc.join(timeout=1)
-                        if dead_proc.is_alive():
-                            dead_proc.terminate()
-                            dead_proc.join(timeout=2)
-                        try:
-                            pipes[i].close()
-                        except Exception:
-                            pass
-                    # Spawn all replacements simultaneously
-                    for i in dead_indices:
-                        new_proc, new_conn = _spawn_worker(rank_map[i], resume_step=t)
-                        workers[i] = new_proc
-                        pipes[i] = new_conn
-                        pending_recv.append(i)
-                        print(
-                            "[Master] Worker rank=" + str(rank_map[i]) +
-                            " died at step " + str(t) + "; respawned.",
-                            file=sys.stderr
-                        )
-
-                # Count this round as one reset event if any worker died.
-                if any_died:
-                    reset_event_count += 1
-                    print(
-                        "[Master] GPU reset event #" + str(reset_event_count) +
-                        " at step " + str(t) + ": " +
-                        str(len(dead_indices)) + " workers respawned in parallel.",
-                        file=sys.stderr
-                    )
-                    if reset_event_count > MAX_RESET_EVENTS:
-                        raise RuntimeError(
-                            "Exceeded MAX_RESET_EVENTS=" + str(MAX_RESET_EVENTS) +
-                            ". Hardware may be unrecoverable."
-                        )
-
-                # --- Pass 2: parallel collection from all respawned workers ---
-                # connection.wait() lets all JIT builds run concurrently.
-                # All N workers' ~12s startup overlaps -> completes in ~12s
-                # regardless of N, vs the old 88-M N*12s serial chain.
-                while pending_recv:
-                    ready = mp.connection.wait(
-                        [pipes[i] for i in pending_recv], timeout=120
-                    )
-                    if not ready:
-                        raise RuntimeError(
-                            "Respawned workers did not respond within 120s at step "
-                            + str(t) + ". Hardware may be unrecoverable."
-                        )
-                    ready_set = set(id(c) for c in ready)
-                    still_pending = []
-                    for i in pending_recv:
-                        if id(pipes[i]) in ready_set:
-                            try:
-                                data = pipes[i].recv()
-                                for p, payload in data.items():
-                                    patch_full_states[p] = payload["state"]
-                                    bulk_energy += payload["meanfield_bulk_energy"]
-                                    max_lat_trotter = max(max_lat_trotter, payload["lat_trotter_ms"])
-                                    max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
-                                    min_fidelity = min(min_fidelity, payload.get("unitary_fidelity", 1.0))
-                            except EOFError:
-                                raise RuntimeError(
-                                    "Respawned worker rank=" + str(rank_map[i]) +
-                                    " died immediately after respawn at step " +
-                                    str(t) + ". Hardware may be unrecoverable."
-                                )
-                        else:
-                            still_pending.append(i)
-                    pending_recv = still_pending
-
-                if len(patch_full_states) != TOTAL_PATCHES:
-                    raise RuntimeError(
-                        "Fatal: IPC gather incomplete. Expected " +
-                        str(TOTAL_PATCHES) + " patches, got " +
-                        str(len(patch_full_states)) + "."
-                    )
-
-                # --- BUILD PROFILES ---
-                step_state = np.zeros((TOTAL_PATCHES, QUBITS_PER_PATCH, 3))
-                patch_profiles = {}
-
-                for p, state in patch_full_states.items():
-                    step_state[p, :, 0] = state["X"]
-                    step_state[p, :, 1] = state["Y"]
-                    step_state[p, :, 2] = state["Z"]
-                    patch_profiles[p] = {
-                        "means": {
-                            "X": state["X"].copy(),
-                            "Y": state["Y"].copy(),
-                            "Z": state["Z"].copy(),
-                        },
-                        "vars": {
-                            "X": np.clip(1.0 - state["X"]**2, 0.0, 1.0),
-                            "Y": np.clip(1.0 - state["Y"]**2, 0.0, 1.0),
-                            "Z": np.clip(1.0 - state["Z"]**2, 0.0, 1.0),
-                        }
-                    }
-
-                self.lattice_history.append(step_state.copy())
-
-                if len(self.lattice_history) % 10 == 0:
-                    try:
-                        np.save(self.state_dump_file,
-                                np.array(self.lattice_history))
-                    except Exception as e:
-                        print("[Checkpoint] Warning: Failed to save: " + str(e),
-                              file=sys.stderr)
-
-                # --- RING RESET DETECTION ---
-                # A tomo latency spike above RING_RESET_LAT_THRESHOLD_MS
-                # indicates the amdgpu driver performed an in-place ring reset
-                # and recovered. The statevector is preserved; the step is
-                # valid but flagged for post-hoc correlation with energy
-                # discontinuities. Inherited from Rev 88-B.
-                ring_reset = max_lat_tomo > RING_RESET_LAT_THRESHOLD_MS
-
-                # --- COMPUTE KICKS & INTERFACE ENERGY (site-resolved) ---
-                scale = np.sqrt(dt / effective_shots)
-                n_s = self.n_sites
-                AXES = ("X", "Y", "Z")
-
-                noisy_field = {}
-                for p in range(TOTAL_PATCHES):
-                    prof = patch_profiles[p]
-                    rng_p = np.random.default_rng([self.master_seed, t, p])
-                    noisy_field[p] = {
-                        ax: prof["means"][ax]
-                            + rng_p.normal(0.0, 1.0, n_s)
-                            * np.sqrt(prof["vars"][ax]) * scale
-                        for ax in AXES
-                    }
-
-                kick_acc = {p: np.zeros((n_s, 3)) for p in range(TOTAL_PATCHES)}
-                e_by_kind = {"Z_INTRA": 0.0, "Z_INTER": 0.0, "XY": 0.0}
-
-                for p1, p2, i1, i2, kind in self.interfaces:
-                    g = g_now[kind]
-                    if g == 0.0:
-                        continue
-                    f1, f2 = noisy_field[p1], noisy_field[p2]
-                    m1 = patch_profiles[p1]["means"]
-                    m2 = patch_profiles[p2]["means"]
-
-                    dot = 0.0
-                    for a, ax in enumerate(AXES):
-                        dot += float(np.sum(m1[ax][i1] * m2[ax][i2]))
-                        kick_acc[p1][i1, a] += g * f2[ax][i2]
-                        kick_acc[p2][i2, a] += g * f1[ax][i1]
-                    e_by_kind[kind] += -g * dot
-
-                macroscopic_boundary_energy = sum(e_by_kind.values())
-
-                next_kick_payloads = {}
-                # KICK_THETA_THRESHOLD pre-filter (Rev 88-F): compute theta at
-                # master side and suppress entries that would be no-ops in the
-                # worker's apply_kicks anyway. Reduces IPC pickle size and
-                # eliminates near-zero kick entries from the worker's kick dict,
-                # preventing them from entering the KICK_CHUNK loop at all.
-                _coef = -2.0 * dt
-                _thresh = KICK_THETA_THRESHOLD
-                for p in range(TOTAL_PATCHES):
-                    acc = kick_acc[p]
-                    payload = {}
-                    for q in range(n_s):
-                        ax_vals = acc[q]
-                        if (abs(ax_vals[0] * _coef) > _thresh or
-                                abs(ax_vals[1] * _coef) > _thresh or
-                                abs(ax_vals[2] * _coef) > _thresh):
-                            payload[q] = (float(ax_vals[0]),
-                                          float(ax_vals[1]),
-                                          float(ax_vals[2]))
-                    next_kick_payloads[p] = payload
-
-                total_energy = bulk_energy + macroscopic_boundary_energy
-                reset_tag = "  RING_RESET" if ring_reset else ""
-                print(
-                    "Step {:03d} | E: {:+.4f} "
-                    "(Zi {:+.3f} / Ze {:+.3f} / XY {:+.3f}) "
-                    "| Lat(Trot/Tomo): {:5.1f}/{:5.1f}ms "
-                    "| Fid: {:.5f} | {:.2f}s{}".format(
-                        t, total_energy,
-                        e_by_kind["Z_INTRA"], e_by_kind["Z_INTER"],
-                        e_by_kind["XY"],
-                        max_lat_trotter, max_lat_tomo,
-                        min_fidelity,
-                        time.perf_counter() - t0,
-                        reset_tag
-                    )
-                )
-                self._log_csvs(
-                    t, s * 100, bulk_energy, e_by_kind,
-                    macroscopic_boundary_energy, total_energy,
-                    min_fidelity, patch_profiles, ring_reset
-                )
-
-                # --- SCATTER ---
-                for i, w_rank in enumerate(active_ranks):
-                    worker_payload = {
-                        p: next_kick_payloads[p]
-                        for p in self.worker_assignments[w_rank]
-                    }
-                    pipes[i].send(worker_payload)
-
-        finally:
-            for conn in pipes:
-                try: conn.close()
-                except Exception: pass
-
-            if self.lattice_history:
-                try:
-                    np.save(self.state_dump_file,
-                            np.array(self.lattice_history))
-                    print("\n[Master] Dumped history matrix to " +
-                          self.state_dump_file)
-                except Exception as e:
-                    print("\n[Master] Failed to save lattice history: " +
-                          str(e), file=sys.stderr)
-
-            for p in workers:
-                p.join(timeout=15)
-                if p.is_alive():
-                    p.terminate()
-                    p.join(timeout=3)
-                    if p.is_alive():
-                        try: p.kill()
-                        except Exception: pass
-
-            # Release memmap and delete the file (Rev 88-K).
-            try:
-                del self.ket_mm
-            except Exception:
-                pass
-            try:
-                os.unlink(self.memmap_path)
-            except Exception:
-                pass
+    if render_process.is_alive():
+        print("\nInteractive viewer closed. "
+              "Waiting for background 4K render to finish...")
+        render_process.join()
+    print("All processes terminated.")
 
 
 if __name__ == "__main__":
-    mp.set_start_method('spawn', force=True)
-
-    engine = MultiGpuHadronEngine(master_seed=1337)
-    try:
-        engine.run(
-            total_steps=100,
-            dt=0.04,
-            initial_hx=3.0,
-            target_g_intra_z=0.12,
-            target_g_inter_z=0.06,
-            target_g_xy=0.06,
-            target_J=1.0,
-            target_hx=0.5,
-            target_hz=0.2,
-            measure_every=1,
-            effective_shots=512.0
-        )
-    except KeyboardInterrupt:
-        pass
+    main()
