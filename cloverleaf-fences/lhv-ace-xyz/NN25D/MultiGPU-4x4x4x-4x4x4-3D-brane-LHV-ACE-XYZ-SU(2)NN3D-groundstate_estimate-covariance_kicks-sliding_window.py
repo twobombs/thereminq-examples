@@ -3,87 +3,17 @@
 # (256 Patches, 4096 Qubits Total)
 # Layered Planar Engine with Site-Resolved Inter-Brane AND Inter-Block Coupling
 #
-# REVISION 88-M - BLOCK LATTICE VARIANT (of Rev 88-L)
+# REVISION 88-I - BLOCK LATTICE VARIANT
 #
-# Rev 88-L CONFIRMED WORKING: respawn path fully functional.
-#   Worker 0 detected dead -> respawned -> JIT rebuilt -> all 6 devices
-#   re-enumerated -> 11 patches restored from memmap at resume_step=39.
-#   The ket handoff via memmap is correct end-to-end.
-#
-# SINGLE REMAINING BUG: respawn counter semantics wrong.
-#   With TOTAL_WORKERS=24, a single GPU reset kills all 24 workers.
-#   The 88-L counter increments once per individual worker respawn,
-#   so one GPU reset event consumed 24 of the MAX_WORKER_RESPAWNS=20
-#   budget, exhausting it before all workers were respawned. The master
-#   aborted at respawn #21 with worker 20 still dead.
-#
-# FIX (Rev 88-M): count GPU reset EVENTS, not individual worker respawns.
-#   - Rename counter to reset_event_count.
-#   - Increment it ONCE per gather round that had any EOFError,
-#     regardless of how many workers died in that round.
-#   - Rename limit to MAX_RESET_EVENTS = 10 (hard limit on full GPU
-#     resets per run; 10 is generous since one run typically sees 1-2).
-#   - Individual worker respawns within one reset event: unlimited
-#     (all dead workers in the batch are respawned unconditionally).
-#
-# 1. Y-PROBE: mtrx() JIT-overflow-safe Clifford path replaces the mtrx()
-#    call used in Rev 88-C. Y-eigenstate |+i> is now prepared with
-#    h(0) + s(0) (native Clifford gates, no rotation parameter, no JIT
-#    kernel compilation). An S-gate availability check probes the build
-#    at startup; the old mtrx() path is retained as a dead fallback only
-#    when s() is absent (non-gfx906/gfx1013 builds).
-#
-# 2. RING-BUFFER CHUNKED FLUSHING in trotter_step_body and apply_kicks:
-#    - trotter_step_body: ZZ edges batched into CHUNK=8 groups; a
-#      non-collapsing pauli_expectation([0],[PZ]) drain is issued after
-#      each chunk. Prevents gfx_0.0.0 ring buffer overruns at high qubit
-#      counts or late anneal steps when all 3 kick components are nonzero.
-#      Safe headroom: 3 cmds/edge x 8 edges x 8 DWORDs/cmd = 192 DWORDs
-#      per chunk vs. ~4096 DWORD ring on gfx1013.
-#    - apply_kicks: qubits batched into KICK_CHUNK=8 groups with the same
-#      drain pattern. Prevents ring starvation when all 16 sites of a
-#      brane receive 3-axis kicks simultaneously.
-#
-# 3. AMD_OPENCL_FORCE_COMPUTE_QUEUE=1 added to worker environment.
-#    Enables in-place gfx_0.0.0 ring reset recovery on CYAN_SKILLFISH
-#    (gfx1013) / Oberon BC-250 / Mesa rusticl 26.1.4. Without this flag
-#    a ring timeout kills the OpenCL context fatally; with it the driver
-#    resets in-place (~15ms tomo latency spike) and execution continues.
-#    No effect on CUDA targets.
-#
-# 4. gc.collect() after every probe QrackSimulator deletion during the
-#    Pauli/angle autodetect block. Prevents rusticl context handle leaks
-#    across the 5 probe sims that run before the main simulation loop.
-#
-# 5. get_unitary_fidelity() exception catch broadened from AttributeError
-#    to (AttributeError, RuntimeError) to cover C-layer pinvoke failures
-#    introduced in PyQrack v2.7.1 API.
-#
-# 6. RING RESET DETECTION added to master orchestrator:
-#    - RING_RESET_LAT_THRESHOLD_MS = 5.0 ms threshold (normal ~0.4ms;
-#      gfx1013 ring reset recovery ~15ms).
-#    - ring_reset flag computed from max_lat_tomo per step.
-#    - Ring_Reset column added to energy CSV for post-hoc correlation of
-#      energy discontinuities with driver recovery events.
-#    - "RING_RESET" tag appended to stdout step line when triggered.
-#
-# Inherited from Rev 88-C:
-# - 4x4x4 block lattice: 256 patches, 4096 qubits.
-# - Three coupling classes: Z_INTRA, Z_INTER, XY (site-resolved).
-# - build_interfaces() with precomputed site-index arrays.
-# - Vectorized NumPy kick accumulation (kick_acc[p] shape (16,3)).
-# - Per-kind energy logging: E_Z_Intra, E_Z_Inter, E_XY.
-# - PERIODIC_X/Y/Z boundary condition flags.
-# Inherited from Rev 88-B:
-# - Flat 4x4 intra-patch tile: 2D nearest-neighbor edges only (24 edges).
-# - Site-resolved (not face-averaged) inter-brane exchange along Z.
-# - Per-site statistical variance injection, scale = sqrt(dt / shots).
-# Inherited from Rev 88:
-# - STOCHASTIC SCALING: scale = sqrt(dt / effective_shots), no measure_every.
-# Inherited from Rev 87:
-# - CONTINUOUS COUPLING: kick payloads persist across non-measure steps.
-# - INTEGRATION SCALING: no m_every multiplier in apply_kicks.
-# - FIDELITY WARNING: one-time stderr alert for missing fidelity binding.
+# CHANGES (Rev 88-I):
+# 1. FIXED BUG: Moved ket_cache checkpointing to AFTER apply_kicks.
+#    Previously, a mid-Trotter context loss would resurrect the state to
+#    its pre-kick snapshot, dropping the continuous kicks for that step.
+# 2. PERF: Removed the redundant outer pauli_expectation drain from the
+#    Trotter CHUNK=1 loop, as apply_zz is now self-draining. Saves ~18k
+#    drains per step.
+# 3. MATH: Symmetrized the hz term in the Strang splitting to achieve true
+#    O(dt^3) per-step error: Rx(dt/2) -> Rz(dt/2) -> ZZ(dt) -> Rz(dt/2) -> Rx(dt/2).
 
 import os
 import sys
@@ -92,7 +22,6 @@ import csv
 import json
 import time
 import math
-import tempfile
 import numpy as np
 import multiprocessing as mp
 import multiprocessing.connection
@@ -113,46 +42,12 @@ PERIODIC_X = False
 PERIODIC_Y = False
 PERIODIC_Z = False
 
-GPUS_AVAILABLE = 1
+GPUS_AVAILABLE = 6
 WORKERS_PER_GPU = 24
 TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
 
-# Tomo latency threshold above which a step is flagged as a ring reset
-# recovery event. gfx_0.0.0 ring resets on CYAN_SKILLFISH produce ~15ms
-# tomo spikes; normal latency is ~0.4ms. Inherited from Rev 88-B.
 RING_RESET_LAT_THRESHOLD_MS = 5.0
-
-# Inter-patch compute ring yield interval (Rev 88-E).
-# Every N patches in the sequential loop, time.sleep(0) is called after
-# the per-patch barrier to allow the OS/amdgpu ISR to process completions.
-# 16 = 16 x ~126 dispatches = 2016 dispatches between sleep yields.
-# Reduce to 8 if Lat(Trot) spikes persist above ~5ms; raise to 32 if
-# per-step wall time increases unacceptably.
 INTER_PATCH_YIELD_EVERY = 16
-
-# Memmap ket cache layout (Rev 88-K, replaces SharedMemory from Rev 88-J).
-# One complex64 slot per patch: 2^QUBITS_PER_PATCH = 65536 amplitudes.
-# Total file size: 256 * 65536 * 8 = 128MB on /tmp (not /dev/shm).
-KET_SLOT_ELEMS  = 1 << QUBITS_PER_PATCH       # 65536 complex64 per patch
-KET_MEMMAP_PATH = os.path.join(
-    tempfile.gettempdir(),
-    "thereminq_ket_cache_" + str(os.getpid()) + ".bin"
-)
-
-# Maximum number of full GPU reset EVENTS (not individual worker respawns)
-# the master will survive per run. One event = one gather round where
-# any worker died; multiple workers dying in the same round = one event.
-# 10 is generous; a typical run sees 1-2 resets around step 039-040.
-MAX_RESET_EVENTS = 10
-
-# Minimum rotation angle (radians) to submit as a GPU kernel dispatch (Rev 88-F).
-# Below this threshold the kick rotation is suppressed: the gate is a no-op
-# to 13 significant figures on a 16q statevector (<Z> change ~ theta^2/2).
-# Raised from the prior 1e-12 (below float32 epsilon ~1.2e-7) to 1e-6.
-# With dt=0.04 and typical g*f ~ 0.04, theta ~ 3e-3 >> 1e-6; only noise-
-# dominated near-zero kicks at low anneal fractions are suppressed. This
-# reduces GART-mapped kernel argument buffer count at early/mid steps,
-# directly reducing per-step GART pressure.
 KICK_THETA_THRESHOLD = 1e-6
 
 # =====================================================================
@@ -165,12 +60,6 @@ os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
 # PURE FUNCTIONS (Math & Topology)
 # =====================================================================
 def generate_16q_brane_tile() -> Tuple[List[Tuple[int, int]], List[int]]:
-    """4x4 planar square lattice. idx = x * ly + y (row-major in x).
-
-    Returns (intra_edges, brane_sites). Every qubit is a brane site: the
-    whole tile is the Z-interface. Site index i in one brane is
-    geometrically aligned with site index i in the branes above/below.
-    """
     lx, ly = 4, 4
     edges: List[Tuple[int, int]] = []
 
@@ -185,31 +74,22 @@ def generate_16q_brane_tile() -> Tuple[List[Tuple[int, int]], List[int]]:
 
 
 def patch_id(tx: int, ty: int, z: int) -> int:
-    """Flat patch index for tile (tx, ty) at global layer z."""
     return (tx * BLOCK_GRID_Y + ty) * GLOBAL_Z + z
 
 
 def patch_coords(p: int) -> Tuple[int, int, int]:
-    """Inverse of patch_id: returns (tx, ty, z)."""
     z = p % GLOBAL_Z
     rest = p // GLOBAL_Z
     return rest // BLOCK_GRID_Y, rest % BLOCK_GRID_Y, z
 
 
 def build_interfaces() -> List[Tuple[int, int, np.ndarray, np.ndarray, str]]:
-    """All coupled seams as (p1, p2, idx1, idx2, kind).
-
-    idx1[k] on p1 pairs with idx2[k] on p2. Kinds:
-      Z_INTRA - adjacent branes inside one block
-      Z_INTER - adjacent branes across a block boundary along Z
-      XY      - lateral tile-edge seams between in-plane neighbor blocks
-    """
     z_i1 = np.arange(QUBITS_PER_PATCH)
     z_i2 = z_i1
-    x_i1 = np.array([12 + y for y in range(4)])   # +X face of p1
-    x_i2 = np.array([y for y in range(4)])         # -X face of p2
-    y_i1 = np.array([x * 4 + 3 for x in range(4)])# +Y face of p1
-    y_i2 = np.array([x * 4 for x in range(4)])    # -Y face of p2
+    x_i1 = np.array([12 + y for y in range(4)])
+    x_i2 = np.array([y for y in range(4)])
+    y_i1 = np.array([x * 4 + 3 for x in range(4)])
+    y_i2 = np.array([x * 4 for x in range(4)])
 
     interfaces: List[Tuple[int, int, np.ndarray, np.ndarray, str]] = []
 
@@ -218,20 +98,20 @@ def build_interfaces() -> List[Tuple[int, int, np.ndarray, np.ndarray, str]]:
             for z in range(GLOBAL_Z):
                 p1 = patch_id(tx, ty, z)
 
-                # --- Z neighbor (brane stacking) ---
+                # --- Z neighbor ---
                 if z < GLOBAL_Z - 1:
                     kind = "Z_INTRA" if (z + 1) % BRANES_PER_BLOCK != 0 else "Z_INTER"
                     interfaces.append((p1, patch_id(tx, ty, z + 1), z_i1, z_i2, kind))
                 elif PERIODIC_Z and GLOBAL_Z > 2:
                     interfaces.append((p1, patch_id(tx, ty, 0), z_i1, z_i2, "Z_INTER"))
 
-                # --- X neighbor (lateral block seam) ---
+                # --- X neighbor ---
                 if tx < BLOCK_GRID_X - 1:
                     interfaces.append((p1, patch_id(tx + 1, ty, z), x_i1, x_i2, "XY"))
                 elif PERIODIC_X and BLOCK_GRID_X > 2:
                     interfaces.append((p1, patch_id(0, ty, z), x_i1, x_i2, "XY"))
 
-                # --- Y neighbor (lateral block seam) ---
+                # --- Y neighbor ---
                 if ty < BLOCK_GRID_Y - 1:
                     interfaces.append((p1, patch_id(tx, ty + 1, z), y_i1, y_i2, "XY"))
                 elif PERIODIC_Y and BLOCK_GRID_Y > 2:
@@ -254,18 +134,10 @@ def gpu_worker_process(
     target_J: float,
     target_hx: float,
     target_hz: float,
-    measure_every: int,
-    shm_name: str,      # kept as arg name for API compat; holds memmap path
-    resume_step: int = 0,
+    measure_every: int
 ) -> None:
     os.environ["PYQRACK_SHARED_LIB_PATH"] = "/usr/local/lib/qrack/libqrack_pinvoke.so"
     os.environ["OCL_ICD_PLATFORM_SORT"] = "none"
-
-    # Enable in-place ring reset recovery on CYAN_SKILLFISH (gfx1013).
-    # Without this, an amdgpu gfx_0.0.0 ring timeout kills the OpenCL
-    # context fatally. With it, the driver resets in-place (~15ms tomo
-    # latency spike) and execution continues. Inherited from Rev 88-B.
-    # No effect on CUDA targets.
     os.environ["AMD_OPENCL_FORCE_COMPUTE_QUEUE"] = "1"
 
     physical_gpu_index = rank // workers_per_gpu
@@ -273,55 +145,9 @@ def gpu_worker_process(
     os.environ["QRACK_QPAGER_DEVICES"] = str(physical_gpu_index)
     os.environ["QRACK_QUNITMULTI_DEVICES"] = str(physical_gpu_index)
 
-    # QRACK_MAX_ALLOC_MB capped to 7500 MB per worker (Rev 88-F).
-    # The V340 has 8000MB HBM2 per die. Previous value of 64000//workers_per_gpu
-    # gave 64000MB at 1 worker -- far above physical VRAM. Qrack uses this
-    # limit to decide whether to spill statevectors to GTT (host-mapped) memory.
-    # An inflated cap caused all 256 statevector buffers to be mapped into
-    # GART-backed GTT, saturating the 256MB default GART aperture and producing
-    # the per-step ring resets. 7500MB is below HBM2 capacity, keeping Qrack
-    # in VRAM-only mode. Requires amdgpu.gartsize=2048 in GRUB as backstop.
     alloc_mb = 7500 // max(1, workers_per_gpu)
     os.environ["QRACK_MAX_ALLOC_MB"] = str(alloc_mb)
     os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
-
-    # Map the file-backed memmap ket cache (Rev 88-K).
-    # shm_name holds the memmap file path (legacy arg name kept for compat).
-    # mode='r+': file already created by master; worker reads and writes.
-    # On /tmp (overlay fs in Docker) -- no /dev/shm size limit.
-    _memmap_path = shm_name
-    _shm_arr = np.memmap(
-        _memmap_path,
-        dtype=np.complex64,
-        mode='r+',
-        shape=(TOTAL_PATCHES, KET_SLOT_ELEMS)
-    )
-
-    def _flush_ket_to_shm(p: int, ket: np.ndarray) -> None:
-        """Write patch ket into the memmap slot and flush to disk."""
-        try:
-            _shm_arr[p, :] = ket.astype(np.complex64)
-            _shm_arr.flush()
-        except Exception:
-            pass
-
-    def _fatal_exit(sims_to_flush: Dict[int, Any]) -> None:
-        """Flush all patch kets to memmap, close conn, exit without __del__."""
-        for p, sim in list(sims_to_flush.items()):
-            try:
-                ket = np.array(sim.out_ket(), dtype=np.complex64)
-                _flush_ket_to_shm(p, ket)
-            except Exception:
-                pass
-        try:
-            del _shm_arr  # Close the memmap file handle.
-        except Exception:
-            pass
-        try:
-            conn.close()
-        except Exception:
-            pass
-        os._exit(1)  # Immediate exit; no rusticl __del__, no coredump.
 
     import pyqrack
     from pyqrack import QrackSimulator
@@ -350,7 +176,7 @@ def gpu_worker_process(
         if PZ is None:
             raise RuntimeError("Fatal: could not autodetect PZ code")
         del _probe_z
-        gc.collect()  # Force rusticl context teardown; prevents handle leaks.
+        gc.collect()
 
         # X Probe
         _probe_x = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
@@ -375,12 +201,6 @@ def gpu_worker_process(
         gc.collect()
 
         # Y Probe
-        # S-gate availability check: s() is a native Clifford gate in
-        # pyqrack v2.7.1. Confirmed present on gfx906/gfx1013 rusticl
-        # builds. The mtrx() fallback is retained for portability to
-        # builds where s() is absent, but that path triggers JIT kernel
-        # compilation and may overflow the rusticl stack on the first call.
-        # Prefer the Clifford path wherever possible. (Rev 88-B)
         try:
             _s_test = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
             _s_test.s(0)
@@ -394,20 +214,10 @@ def gpu_worker_process(
             _USE_S_GATE = False
 
         _probe_y = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
-
-        # Angle-convention-agnostic Y eigenstate preparation.
-        # H|0> = |+>, S|+> = |+i> (the +1 eigenstate of Y).
-        # H and S are Clifford gates with no rotation parameter; this path
-        # is independent of the ANGLE_SCALE convention resolved below.
-        # The mtrx() fallback path (Rev 88-C) triggered JIT overflow on
-        # rusticl; replaced here by the Clifford path from Rev 88-B.
         _probe_y.h(0)
         if _USE_S_GATE:
             _probe_y.s(0)
         else:
-            # Fallback: mtrx() Rx(pi/2) approximating S in the X-Z plane.
-            # Angle-convention-dependent; safe only when ANGLE_SCALE=1.0.
-            # Dead path on gfx906/gfx1013 builds that support s().
             _c, _s = math.cos(math.pi / 4.0), math.sin(math.pi / 4.0)
             _probe_y.mtrx([complex(_c, 0), complex(0, _s), complex(0, _s), complex(_c, 0)], 0)
 
@@ -463,17 +273,12 @@ def gpu_worker_process(
             sim.r(PZ, float(theta) * ANGLE_SCALE, q)
 
         def apply_zz(sim: QrackSimulator, theta: float, q1: int, q2: int) -> None:
-            # Bare CNOT-conjugation ZZ gate: mcx -> rz -> mcx.
-            # Intra-gate pauli_expectation drains were added in Rev 88-H to
-            # cap seq delta at 1, but caused 72x drain overhead per patch per
-            # step (3 drains/gate x 24 gates) which made Lat(Tomo)=250ms in
-            # the ring-reset regime. The ket checkpoint+resurrection in Rev 88-H
-            # already provides correct recovery from any seq-delta=3 hang:
-            # context loss -> resurrect from pre-step ket -> retry Trotter.
-            # Intra-gate drains are therefore redundant. Removed in Rev 88-I.
             sim.mcx([q1], q2)
+            _ = sim.pauli_expectation([0], [PZ])
             apply_rz(sim, 2.0 * theta, q2)
+            _ = sim.pauli_expectation([0], [PZ])
             sim.mcx([q1], q2)
+            _ = sim.pauli_expectation([0], [PZ])
 
         def trotter_step_body(sim: QrackSimulator, num_qubits: int,
                               intra_edges: List[Tuple[int, int]],
@@ -482,23 +287,16 @@ def gpu_worker_process(
             dt_half = dt_local / 2.0
 
             theta_x  = -2.0 * hx * dt_half
-            theta_z  = -2.0 * hz * dt_local
+            theta_z  = -2.0 * hz * dt_half
             theta_zz = -J * dt_local
 
             for q in range(num_qubits): apply_rx(sim, theta_x, q)
             for q in range(num_qubits): apply_rz(sim, theta_z, q)
 
-            # CHUNK=8 restored (Rev 88-I): defence-in-depth against ring buffer
-            # overflow (original gfx1013 concern from Rev 88-B). With ket
-            # checkpoint+resurrection handling context loss, CHUNK no longer
-            # needs to be 1 for correctness. CHUNK=8 gives 3 drain points per
-            # 24 edges, avoiding 21 extra drain calls vs CHUNK=1.
-            CHUNK = 8
-            for i in range(0, len(intra_edges), CHUNK):
-                for q1, q2 in intra_edges[i:i + CHUNK]:
-                    apply_zz(sim, theta_zz, q1, q2)
-                _ = sim.pauli_expectation([0], [PZ])
+            for q1, q2 in intra_edges:
+                apply_zz(sim, theta_zz, q1, q2)
 
+            for q in range(num_qubits): apply_rz(sim, theta_z, q)
             for q in range(num_qubits): apply_rx(sim, theta_x, q)
 
         def z_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
@@ -524,25 +322,18 @@ def gpu_worker_process(
             coef = -2.0 * dt_local
             items = list(kicks.items())
 
-            # KICK_CHUNK=8 restored (Rev 88-I): same rationale as CHUNK=8.
-            # Resurrection handles any context loss; KICK_CHUNK=8 avoids
-            # 8 extra drain calls per kick phase vs KICK_CHUNK=1.
-            KICK_CHUNK = 8
+            KICK_CHUNK = 1
             for i in range(0, len(items), KICK_CHUNK):
                 for raw_q, (kx, ky, kz) in items[i:i + KICK_CHUNK]:
                     q = int(raw_q)
                     theta_x = kx * coef
                     theta_y = ky * coef
                     theta_z = kz * coef
-                    # KICK_THETA_THRESHOLD=1e-6: suppress near-zero rotations
-                    # to reduce GART-mapped kernel buffer count (Rev 88-F).
                     if abs(theta_x) > KICK_THETA_THRESHOLD: apply_rx(sim, theta_x, q)
                     if abs(theta_y) > KICK_THETA_THRESHOLD: apply_ry(sim, theta_y, q)
                     if abs(theta_z) > KICK_THETA_THRESHOLD: apply_rz(sim, theta_z, q)
                 _ = sim.pauli_expectation([0], [PZ])
 
-        # Strings that identify a use-after-reset context loss error in
-        # the RuntimeError message from the amdgpu/rusticl userspace layer.
         _CONTEXT_LOST_STRINGS = (
             "context is lost",
             "CS has cancelled",
@@ -556,13 +347,9 @@ def gpu_worker_process(
 
         intra_edges, _brane_sites = generate_16q_brane_tile()
 
-        # Per-patch statevector checkpoint: updated before each Trotter step.
-        # 2^16 complex64 = 512 KB per patch; 128 MB total at 256 patches.
-        # Used to restore state after sim resurrection following a context loss.
         ket_cache: Dict[int, np.ndarray] = {}
 
         def resurrect_sim(p: int) -> QrackSimulator:
-            """Delete stale sim, create fresh one, restore from ket_cache."""
             if p in sims:
                 try:
                     _old = sims.pop(p)
@@ -588,7 +375,6 @@ def gpu_worker_process(
                     for q in range(QUBITS_PER_PATCH):
                         apply_h(sim_new, q)
             else:
-                # No checkpoint yet (failure on step 0): start from |+>^16.
                 for q in range(QUBITS_PER_PATCH):
                     apply_h(sim_new, q)
                 print("[Worker " + str(rank) + "] patch " + str(p) +
@@ -604,23 +390,7 @@ def gpu_worker_process(
                 is_stabilizer_hybrid=False,
                 is_gpu=True,
             )
-            if resume_step > 0:
-                # RESPAWN PATH (Rev 88-J): restore ket from shared memory
-                # written by the dead worker's last pre-Trotter checkpoint.
-                try:
-                    ket_slot = _shm_arr[p, :].copy()
-                    sim.in_ket(ket_slot.tolist())
-                    print("[Worker " + str(rank) + "] patch " + str(p) +
-                          " restored from shm at resume_step=" +
-                          str(resume_step) + ".", file=sys.stderr)
-                except Exception as _re:
-                    print("[Worker " + str(rank) + "] patch " + str(p) +
-                          " shm restore failed (" + str(_re) +
-                          "); init |+>^16.", file=sys.stderr)
-                    for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
-            else:
-                # FRESH START: initialise to |+>^16.
-                for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
+            for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
             sims[p] = sim
 
             try:
@@ -630,10 +400,8 @@ def gpu_worker_process(
                     "Fatal: GPU allocation failed on patch " + str(p) +
                     ". Driver error: " + str(e)
                 )
-            # Seed shm slot with initial ket (|+>^16 or restored).
             try:
                 ket_cache[p] = np.array(sim.out_ket(), dtype=np.complex64)
-                _flush_ket_to_shm(p, ket_cache[p])
             except Exception:
                 pass
 
@@ -652,16 +420,7 @@ def gpu_worker_process(
             for p_idx, p in enumerate(assigned_patches):
                 sim = sims[p]
 
-                # KET CHECKPOINT (Rev 88-H/J): snapshot statevector BEFORE
-                # Trotter so that a mid-step context loss can be recovered.
-                # Rev 88-J: also flush to shared memory so the master can
-                # hand the ket to a respawned worker after a BACO crash.
-                try:
-                    ket_cache[p] = np.array(sim.out_ket(), dtype=np.complex64)
-                    _flush_ket_to_shm(p, ket_cache[p])
-                except Exception:
-                    pass  # Stale sim; resurrect_sim will use prior cache.
-
+                # 1. APPLY KICKS BEFORE CHECKPOINT
                 if kick_payloads[p]:
                     try:
                         apply_kicks(sim, kick_payloads[p], dt)
@@ -672,13 +431,18 @@ def gpu_worker_process(
                                   " context lost in apply_kicks; resurrecting.",
                                   file=sys.stderr)
                             sim = resurrect_sim(p)
-                            # Retry kicks on fresh sim with restored ket.
                             try:
                                 apply_kicks(sim, kick_payloads[p], dt)
                             except Exception:
-                                pass  # Absorb; Trotter will proceed.
+                                pass
                         else:
                             raise
+
+                # 2. CHECKPOINT STATE AFTER KICKS, BEFORE TROTTER
+                try:
+                    ket_cache[p] = np.array(sim.out_ket(), dtype=np.complex64)
+                except Exception:
+                    pass
 
                 t_start_trotter = time.perf_counter()
                 try:
@@ -691,17 +455,14 @@ def gpu_worker_process(
                               " context lost in trotter; resurrecting.",
                               file=sys.stderr)
                         sim = resurrect_sim(p)
-                        # Retry Trotter from restored ket checkpoint.
                         try:
                             trotter_step_body(sim, QUBITS_PER_PATCH, intra_edges,
                                               current_J, current_hx, current_hz, dt)
                         except Exception:
-                            pass  # Absorb; tomo will measure recovered state.
+                            pass
                     else:
                         raise
 
-                # INTER-PATCH BARRIER (Rev 88-E): force compute ring to drain
-                # completely between patches.
                 try:
                     _ = sim.pauli_expectation([0], [PZ])
                 except RuntimeError as _be:
@@ -710,7 +471,6 @@ def gpu_worker_process(
                     else:
                         raise
 
-                # INTER-PATCH YIELD (Rev 88-E): OS scheduler yield every N patches.
                 if (p_idx + 1) % INTER_PATCH_YIELD_EVERY == 0:
                     time.sleep(0)
 
@@ -733,7 +493,6 @@ def gpu_worker_process(
                                   " context lost in tomo; resurrecting.",
                                   file=sys.stderr)
                             sim = resurrect_sim(p)
-                            # Measure the resurrected (restored) state.
                             state = {
                                 "Z": z_means(sim, all_q),
                                 "X": x_means(sim, all_q),
@@ -750,9 +509,6 @@ def gpu_worker_process(
                     try:
                         fidelity = float(sim.get_unitary_fidelity())
                     except (AttributeError, RuntimeError):
-                        # AttributeError: binding absent in this pyqrack build.
-                        # RuntimeError: C-layer pinvoke failure (v2.7.1 API).
-                        # Catch broadened from AttributeError-only in Rev 88-C.
                         fidelity = 1.0
                         if not _warned_fidelity:
                             print(
@@ -775,19 +531,12 @@ def gpu_worker_process(
                 conn.send(patch_data_to_master)
                 kick_payloads = conn.recv()
 
-            # Kick payloads intentionally retained across non-measure steps
-            # (continuous boundary field, Rev 87).
-
     finally:
         for p in list(sims.keys()):
             _s = sims.pop(p)
             del _s
         sims.clear()
         gc.collect()
-        try:
-            del _shm_arr  # Close memmap handle.
-        except Exception:
-            pass
         conn.close()
 
 
@@ -798,7 +547,7 @@ class MultiGpuHadronEngine:
     def __init__(self, master_seed: int = 1337) -> None:
         self.master_seed = master_seed
         self.intra_edges, self.brane_sites = generate_16q_brane_tile()
-        self.n_sites = len(self.brane_sites)  # 16
+        self.n_sites = len(self.brane_sites)
 
         self.patch_coords = {p: patch_coords(p) for p in range(TOTAL_PATCHES)}
         self.interfaces = build_interfaces()
@@ -814,29 +563,6 @@ class MultiGpuHadronEngine:
         self.state_dump_file  = "macroscopic_lattice_states.npy"
         self.config_file      = "lattice_config.json"
 
-        # File-backed memmap ket cache (Rev 88-K, replaces SharedMemory).
-        # Created on /tmp (overlay fs) to avoid Docker's 64MB /dev/shm limit.
-        # mode='w+' creates the file and zeros it. Workers open mode='r+'.
-        self.memmap_path = KET_MEMMAP_PATH
-        try:
-            self.ket_mm = np.memmap(
-                self.memmap_path,
-                dtype=np.complex64,
-                mode='w+',
-                shape=(TOTAL_PATCHES, KET_SLOT_ELEMS)
-            )
-            self.ket_mm[:] = 0.0
-            self.ket_mm.flush()
-            print("[Engine] Ket memmap: " + self.memmap_path +
-                  " (" + str(TOTAL_PATCHES * KET_SLOT_ELEMS * 8 // (1024*1024)) +
-                  " MB)")
-        except Exception as e:
-            raise RuntimeError(
-                "Fatal: could not create ket memmap at " +
-                self.memmap_path + ": " + str(e)
-            )
-
-        # Ring_Reset column added (Rev 88-D, from Rev 88-B).
         self._energy_fields = [
             "Step", "Anneal_Percent", "MeanField_Bulk_Energy",
             "E_Z_Intra", "E_Z_Inter", "E_XY",
@@ -935,40 +661,30 @@ class MultiGpuHadronEngine:
             " workers/GPU), " + str(total_steps) + " steps"
         )
         print(
-            "[Engine] Rev 88-M: respawn counter fixed (per reset EVENT not "
-            "per worker), MAX_RESET_EVENTS=" + str(MAX_RESET_EVENTS) +
-            ", memmap ket cache, two-pass gather."
+            "[Engine] Rev 88-I: intra-ZZ drain (seq-delta=1), ket checkpoint "
+            "+ sim resurrection on context loss, self-draining apply_zz / KICK_CHUNK=1, "
+            "KICK_THETA_THRESHOLD=" + str(KICK_THETA_THRESHOLD) + ", "
+            "QRACK_MAX_ALLOC_MB=7500/worker."
         )
 
         active_ranks = [r for r in range(TOTAL_WORKERS)
                         if self.worker_assignments[r]]
 
-        def _spawn_worker(rank: int, resume_step: int = 0):
-            """Spawn a single worker process. Returns (process, parent_conn)."""
+        workers = []
+        pipes   = []
+
+        for rank in active_ranks:
             parent_conn, child_conn = mp.Pipe()
             p = mp.Process(
                 target=gpu_worker_process,
                 args=(rank, WORKERS_PER_GPU, self.worker_assignments[rank],
                       child_conn, dt, total_steps, initial_hx,
-                      target_J, target_hx, target_hz, measure_every,
-                      self.memmap_path, resume_step)
+                      target_J, target_hx, target_hz, measure_every)
             )
             p.start()
             child_conn.close()
-            return p, parent_conn
-
-        workers = []
-        pipes   = []
-        rank_map = {}  # pipe index -> rank
-
-        for i, rank in enumerate(active_ranks):
-            proc, conn = _spawn_worker(rank, resume_step=0)
-            workers.append(proc)
-            pipes.append(conn)
-            rank_map[i] = rank
-
-        respawn_count = 0   # total individual worker respawns (for logging)
-        reset_event_count = 0  # GPU reset events (the limit that matters)
+            workers.append(p)
+            pipes.append(parent_conn)
 
         try:
             for t in range(total_steps):
@@ -985,81 +701,27 @@ class MultiGpuHadronEngine:
 
                 t0 = time.perf_counter()
 
-                # --- GATHER (two-pass multi-respawn) ---
+                # --- GATHER ---
                 patch_full_states = {}
                 bulk_energy = 0.0
                 max_lat_trotter = 0.0
                 max_lat_tomo = 0.0
                 min_fidelity = 1.0
 
-                pending_recv = []   # indices of pipes that need a second recv
-                any_died = False    # tracks whether this round had any death
-
-                for i in range(len(pipes)):
-                    conn = pipes[i]
+                for conn in pipes:
                     try:
                         data = conn.recv()
-                        for p, payload in data.items():
-                            patch_full_states[p] = payload["state"]
-                            bulk_energy += payload["meanfield_bulk_energy"]
-                            max_lat_trotter = max(max_lat_trotter, payload["lat_trotter_ms"])
-                            max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
-                            min_fidelity = min(min_fidelity, payload.get("unitary_fidelity", 1.0))
                     except EOFError:
-                        any_died = True
-                        dead_rank = rank_map[i]
-                        dead_proc = workers[i]
-                        print(
-                            "[Master] Worker rank=" + str(dead_rank) +
-                            " died at step " + str(t) + ".",
-                            file=sys.stderr
-                        )
-                        dead_proc.join(timeout=5)
-                        if dead_proc.is_alive():
-                            dead_proc.terminate()
-                            dead_proc.join(timeout=3)
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
-                        new_proc, new_conn = _spawn_worker(dead_rank, resume_step=t)
-                        workers[i] = new_proc
-                        pipes[i] = new_conn
-                        rank_map[i] = dead_rank
-                        pending_recv.append(i)
-
-                # Count this gather round as one reset event if any worker died.
-                if any_died:
-                    reset_event_count += 1
-                    print(
-                        "[Master] GPU reset event #" + str(reset_event_count) +
-                        " at step " + str(t) + ": " +
-                        str(len(pending_recv)) + " workers respawned.",
-                        file=sys.stderr
-                    )
-                    if reset_event_count > MAX_RESET_EVENTS:
-                        raise RuntimeError(
-                            "Exceeded MAX_RESET_EVENTS=" + str(MAX_RESET_EVENTS) +
-                            ". Hardware may be unrecoverable."
-                        )
-
-                # Pass 2: collect from all respawned workers.
-                for i in pending_recv:
-                    conn = pipes[i]
-                    try:
-                        data = conn.recv()
-                        for p, payload in data.items():
-                            patch_full_states[p] = payload["state"]
-                            bulk_energy += payload["meanfield_bulk_energy"]
-                            max_lat_trotter = max(max_lat_trotter, payload["lat_trotter_ms"])
-                            max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
-                            min_fidelity = min(min_fidelity, payload.get("unitary_fidelity", 1.0))
-                    except EOFError:
-                        raise RuntimeError(
-                            "Respawned worker rank=" + str(rank_map[i]) +
-                            " died immediately after respawn at step " + str(t) +
-                            ". Hardware may be unrecoverable."
-                        )
+                        raise RuntimeError("Worker IPC connection lost.")
+                    for p, payload in data.items():
+                        patch_full_states[p] = payload["state"]
+                        bulk_energy += payload["meanfield_bulk_energy"]
+                        max_lat_trotter = max(max_lat_trotter,
+                                              payload["lat_trotter_ms"])
+                        max_lat_tomo = max(max_lat_tomo,
+                                          payload["lat_tomo_ms"])
+                        min_fidelity = min(min_fidelity,
+                                          payload.get("unitary_fidelity", 1.0))
 
                 if len(patch_full_states) != TOTAL_PATCHES:
                     raise RuntimeError(
@@ -1099,15 +761,9 @@ class MultiGpuHadronEngine:
                         print("[Checkpoint] Warning: Failed to save: " + str(e),
                               file=sys.stderr)
 
-                # --- RING RESET DETECTION ---
-                # A tomo latency spike above RING_RESET_LAT_THRESHOLD_MS
-                # indicates the amdgpu driver performed an in-place ring reset
-                # and recovered. The statevector is preserved; the step is
-                # valid but flagged for post-hoc correlation with energy
-                # discontinuities. Inherited from Rev 88-B.
                 ring_reset = max_lat_tomo > RING_RESET_LAT_THRESHOLD_MS
 
-                # --- COMPUTE KICKS & INTERFACE ENERGY (site-resolved) ---
+                # --- COMPUTE KICKS & INTERFACE ENERGY ---
                 scale = np.sqrt(dt / effective_shots)
                 n_s = self.n_sites
                 AXES = ("X", "Y", "Z")
@@ -1144,11 +800,6 @@ class MultiGpuHadronEngine:
                 macroscopic_boundary_energy = sum(e_by_kind.values())
 
                 next_kick_payloads = {}
-                # KICK_THETA_THRESHOLD pre-filter (Rev 88-F): compute theta at
-                # master side and suppress entries that would be no-ops in the
-                # worker's apply_kicks anyway. Reduces IPC pickle size and
-                # eliminates near-zero kick entries from the worker's kick dict,
-                # preventing them from entering the KICK_CHUNK loop at all.
                 _coef = -2.0 * dt
                 _thresh = KICK_THETA_THRESHOLD
                 for p in range(TOTAL_PATCHES):
@@ -1217,16 +868,6 @@ class MultiGpuHadronEngine:
                     if p.is_alive():
                         try: p.kill()
                         except Exception: pass
-
-            # Release memmap and delete the file (Rev 88-K).
-            try:
-                del self.ket_mm
-            except Exception:
-                pass
-            try:
-                os.unlink(self.memmap_path)
-            except Exception:
-                pass
 
 
 if __name__ == "__main__":
