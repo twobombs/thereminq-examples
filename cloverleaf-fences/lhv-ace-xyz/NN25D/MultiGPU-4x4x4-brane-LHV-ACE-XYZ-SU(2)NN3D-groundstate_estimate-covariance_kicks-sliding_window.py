@@ -41,21 +41,13 @@
 # - FIDELITY WARNING: one-time stderr alert for missing fidelity binding.
 #
 # FIXES IN THIS VERSION:
-# - Applied H-sandwich (H.RX.H) substitution in apply_zz to bypass deterministic
-#   ACO Z-rotation shader hang on gfx1013 at step 039.
 # - Guaranteed ring drain flush (pauli_expectation) in trotter_step_body and apply_kicks.
 # - Native h(0) + s(0) probe initialization to bypass mtrx JIT overflow on rusticl
 #   without introducing an angle convention race condition.
 # - Scaled back to 1 worker per GPU for baseline stability testing.
 # - Adjusted VRAM allocation ceiling to 7500MB to avoid GTT spillover on Oberon BC-250.
 # - Forced GC collection on all probe sim failure/success paths to prevent rusticl context leaks.
-# - Broadened get_unitary_fidelity catch to (AttributeError, RuntimeError) for C-layer pinvoke.
-# - AMD_OPENCL_FORCE_COMPUTE_QUEUE=1 set in worker env to enable in-place ring reset
-#   recovery on CYAN_SKILLFISH (gfx1013). Without this, gfx_0.0.0 ring timeout kills
-#   the OpenCL context; with it, the driver recovers in-place (~15ms tomo latency spike
-#   at step ~39) and execution continues. Validated on Oberon BC-250, Mesa 26.1.4.
-# - Ring reset events flagged in stdout as RING_RESET when tomo latency > 5ms.
-#   Allows post-hoc correlation of energy discontinuities with driver recovery events.
+# - Broadened get_unitary_fidelity catch to RuntimeError to handle C-layer pinvoke failures.
 
 import os
 import sys
@@ -76,12 +68,8 @@ PERIODIC_Z = False                         # True -> close the stack into a ring
 
 # Topography tuning for raw statevectors
 GPUS_AVAILABLE = 1
-WORKERS_PER_GPU = 1  # 4 branes -> all patches to 1 worker; prevent concurrent GFX ring saturation
+WORKERS_PER_GPU = 1  # 4 branes -> all patches to 1 worker to prevent concurrent GFX ring saturation
 TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
-
-# Tomo latency threshold above which a step is flagged as a ring reset recovery event.
-# gfx_0.0.0 ring resets on CYAN_SKILLFISH produce ~15ms tomo spikes; normal is ~0.4ms.
-RING_RESET_LAT_THRESHOLD_MS = 5.0
 
 # =====================================================================
 # ENVIRONMENT - set before pyqrack import
@@ -131,12 +119,6 @@ def gpu_worker_process(
 ) -> None:
     os.environ["PYQRACK_SHARED_LIB_PATH"] = "/usr/local/lib/qrack/libqrack_pinvoke.so"
     os.environ["OCL_ICD_PLATFORM_SORT"] = "none"
-
-    # Enable in-place ring reset recovery on CYAN_SKILLFISH (gfx1013).
-    # Without this, an amdgpu gfx_0.0.0 ring timeout at anneal step ~39 kills
-    # the OpenCL context fatally. With it, the driver resets and resumes in ~15ms.
-    # Validated on Oberon BC-250, Mesa rusticl 26.1.4. No effect on CUDA targets.
-    os.environ["AMD_OPENCL_FORCE_COMPUTE_QUEUE"] = "1"
 
     # Map multiple ranks to the same physical GPU device index
     physical_gpu_index = rank // workers_per_gpu
@@ -205,14 +187,11 @@ def gpu_worker_process(
         gc.collect()
 
         # Y Probe
-        # s() availability check: s() is a native Clifford gate in pyqrack v2.7.1.
-        # Confirmed present on gfx906/gfx1013 rusticl builds. Fallback retained for
-        # portability to builds where the gate is absent.
         try:
             _s_test = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
             _s_test.s(0)
             del _s_test
-            gc.collect()  # Force rusticl context teardown before next sim
+            gc.collect()  # Force rusticl context teardown
             _USE_S_GATE = True
         except Exception:
             try: del _s_test
@@ -221,16 +200,14 @@ def gpu_worker_process(
             _USE_S_GATE = False
 
         _probe_y = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
-
-        # Angle-convention-agnostic Y eigenstate preparation.
-        # H|0> = |+>, S|+> = |+i> (the +1 eigenstate of Y).
-        # H and S are Clifford gates with no rotation parameter, so this path
-        # is independent of the ANGLE_SCALE convention resolved below.
+        
+        # Angle-convention-agnostic initialization.
+        # H puts |0> -> |+>, S rotates to |+i> (Y eigenstate)
         _probe_y.h(0)
         if _USE_S_GATE:
             _probe_y.s(0)
         else:
-            # Fallback: r(PZ, pi/2) -- angle-convention-dependent.
+            # Fallback: r(PZ, pi/2) -- note: angle-convention-dependent.
             # Safe only when ANGLE_SCALE=1.0. Dead path on gfx906/gfx1013
             # builds that support s(); retained for portability only.
             _probe_y.r(PZ, math.pi / 2.0, 0)
@@ -266,9 +243,8 @@ def gpu_worker_process(
             ANGLE_SCALE = 0.5
         else:
             raise RuntimeError(
-                "Fatal: r(PX,pi) returned ambiguous SIGN_Z*<Z> = " +
-                "{:.6f}".format(_corrected) +
-                "; expected ~+1.0 or ~-1.0"
+                f"Fatal: r(PX,pi) returned ambiguous SIGN_Z*<Z> = {_corrected:.6f}; "
+                f"expected ~+1.0 or ~-1.0"
             )
         del _sim_mag
         gc.collect()
@@ -287,20 +263,12 @@ def gpu_worker_process(
             sim.r(PZ, float(theta) * ANGLE_SCALE, q)
 
         def apply_zz(sim: QrackSimulator, theta: float, q1: int, q2: int) -> None:
-            # ZZ(theta) = CNOT . RZ(2*theta) . CNOT
-            # RZ decomposed as H.RX.H to avoid the ACO shader path that hangs
-            # on gfx1013 at anneal fractions ~0.38 (step ~39 of 100).
-            # H.RX(phi).H == RZ(phi) exactly; uses the X-rotation shader instead.
             sim.mcx([q1], q2)
-            sim.h(q2)
-            apply_rx(sim, 2.0 * theta, q2)
-            sim.h(q2)
+            apply_rz(sim, 2.0 * theta, q2)
             sim.mcx([q1], q2)
 
-        def trotter_step_body(sim: QrackSimulator, num_qubits: int,
-                              intra_edges: List[Tuple[int, int]],
-                              J: float, hx: float, hz: float,
-                              dt_local: float) -> None:
+        def trotter_step_body(sim: QrackSimulator, num_qubits: int, intra_edges: List[Tuple[int, int]],
+                              J: float, hx: float, hz: float, dt_local: float) -> None:
             dt_half = dt_local / 2.0
 
             theta_x  = -2.0 * hx * dt_half
@@ -312,51 +280,48 @@ def gpu_worker_process(
 
             # CHUNK=8: 3 cmds/edge x 8 DWORDs/cmd x 8 edges = 192 DWORDs/chunk.
             # gfx1013 ring buffer ~4096 DWORDs. Safe headroom on CYAN_SKILLFISH.
-            # Flush after each chunk with a non-collapsing blocking sync:
-            # pauli_expectation does not project the statevector (QEngineCL).
             CHUNK = 8
             for i in range(0, len(intra_edges), CHUNK):
                 for q1, q2 in intra_edges[i:i + CHUNK]:
                     apply_zz(sim, theta_zz, q1, q2)
+                # Guaranteed blocking sync -- pauli_expectation is always bound.
+                # Non-collapsing expectation value -- safe mid-circuit sync point.
+                # QEngineCL pauli_expectation does not project the statevector.
                 _ = sim.pauli_expectation([0], [PZ])
 
             for q in range(num_qubits): apply_rx(sim, theta_x, q)
 
         def z_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
-            return np.array([SIGN_Z * float(sim.pauli_expectation([q], [PZ]))
-                             for q in qubits])
+            return np.array([SIGN_Z * float(sim.pauli_expectation([q], [PZ])) for q in qubits])
 
         def x_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
-            return np.array([SIGN_X * float(sim.pauli_expectation([q], [PX]))
-                             for q in qubits])
+            return np.array([SIGN_X * float(sim.pauli_expectation([q], [PX])) for q in qubits])
 
         def y_means(sim: QrackSimulator, qubits: List[int]) -> np.ndarray:
-            return np.array([SIGN_Y * float(sim.pauli_expectation([q], [PY]))
-                             for q in qubits])
+            return np.array([SIGN_Y * float(sim.pauli_expectation([q], [PY])) for q in qubits])
 
-        def zz_means_meanfield(z_exp: np.ndarray,
-                               edges: List[Tuple[int, int]]) -> np.ndarray:
+        def zz_means_meanfield(z_exp: np.ndarray, edges: List[Tuple[int, int]]) -> np.ndarray:
             return np.array([z_exp[q1] * z_exp[q2] for q1, q2 in edges])
 
-        def apply_kicks(sim: QrackSimulator,
-                        kicks: Dict[int, Tuple[float, float, float]],
-                        dt_local: float) -> None:
+        def apply_kicks(sim: QrackSimulator, kicks: Dict[int, Tuple[float, float, float]], dt_local: float) -> None:
             if not kicks: return
             coef = -2.0 * dt_local
             items = list(kicks.items())
-
-            # KICK_CHUNK=8: flush after every 8 qubits to prevent ring starvation
-            # at late anneal steps where all 3 kick components are nonzero.
+            
             KICK_CHUNK = 8
             for i in range(0, len(items), KICK_CHUNK):
                 for raw_q, (kx, ky, kz) in items[i:i + KICK_CHUNK]:
                     q = int(raw_q)
+
                     theta_x = kx * coef
                     theta_y = ky * coef
                     theta_z = kz * coef
+
                     if abs(theta_x) > 1e-12: apply_rx(sim, theta_x, q)
                     if abs(theta_y) > 1e-12: apply_ry(sim, theta_y, q)
                     if abs(theta_z) > 1e-12: apply_rz(sim, theta_z, q)
+                
+                # Guaranteed blocking sync to prevent ring starvation in apply_kicks
                 _ = sim.pauli_expectation([0], [PZ])
 
         intra_edges, _brane_sites = generate_16q_brane_tile()
@@ -371,14 +336,11 @@ def gpu_worker_process(
             for q in range(QUBITS_PER_PATCH): apply_h(sim, q)
             sims[p] = sim
 
-            # Allocation smoke test -- trivial at 16q but kept for parity
+            # --- ALLOCATION SMOKE TEST (kept for parity; trivial at 16q) ---
             try:
                 _ = sim.pauli_expectation([0], [PZ])
             except Exception as e:
-                raise RuntimeError(
-                    "Fatal: GPU allocation failed on patch " + str(p) +
-                    ". Driver error: " + str(e)
-                )
+                raise RuntimeError(f"Fatal: GPU allocation failed on patch {p}. Driver error: {e}")
 
         kick_payloads = {p: {} for p in assigned_patches}
         _warned_fidelity = False
@@ -420,16 +382,9 @@ def gpu_worker_process(
                     try:
                         fidelity = float(sim.get_unitary_fidelity())
                     except (AttributeError, RuntimeError):
-                        # AttributeError: binding absent in this pyqrack build.
-                        # RuntimeError: C-layer pinvoke failure (v2.7.1 API).
-                        fidelity = 1.0
+                        fidelity = 1.0  # Fallback if API lacks binding or pinvoke fails
                         if not _warned_fidelity:
-                            print(
-                                "[Worker " + str(rank) + "] Warning: "
-                                "get_unitary_fidelity() failed or not found. "
-                                "Upgrade PyQrack.",
-                                file=sys.stderr
-                            )
+                            print(f"[Worker {rank}] Warning: sim.get_unitary_fidelity() failed or not found. Upgrade PyQrack.", file=sys.stderr)
                             _warned_fidelity = True
 
                     patch_data_to_master[p] = {
@@ -444,8 +399,8 @@ def gpu_worker_process(
                 conn.send(patch_data_to_master)
                 kick_payloads = conn.recv()
 
-            # Kick payloads intentionally retained across non-measure steps
-            # (continuous boundary field, Rev 87).
+            # Kick payloads are intentionally retained across non-measure
+            # intermediate steps (continuous boundary field, Rev 87).
 
     finally:
         for p in list(sims.keys()):
@@ -469,13 +424,11 @@ class MultiGpuHadronEngine:
         self.patch_coords = {p: (0, 0, p) for p in range(TOTAL_PATCHES)}
 
         # Ordered list of coupled interfaces (p_lower, p_upper)
-        self.interfaces: List[Tuple[int, int]] = [
-            (z, z + 1) for z in range(GRID_Z - 1)
-        ]
-
-        # Guard: For GRID_Z=2, a periodic wrap causes topological collapse.
-        # The top-to-bottom interface is identical to bottom-to-top; skip to
-        # avoid double-counting interface coupling strength.
+        self.interfaces: List[Tuple[int, int]] = [(z, z + 1) for z in range(GRID_Z - 1)]
+        
+        # Guard: For GRID_Z=2, a periodic wrap causes a topological collapse. The "top" 
+        # to "bottom" interface is the exact same physical boundary as "bottom" to "top".
+        # We skip appending it to avoid double-counting the interface coupling strength.
         if PERIODIC_Z and GRID_Z > 2:
             self.interfaces.append((GRID_Z - 1, 0))
 
@@ -500,62 +453,51 @@ class MultiGpuHadronEngine:
                     "qubits_per_patch": QUBITS_PER_PATCH,
                     "tile_geometry": "4x4_brane_stack",
                     "periodic_z": PERIODIC_Z,
-                    "state_dump_shape": ["n_steps", "patch", "qubit", "XYZ"]
+                    "state_dump_shape": ["n_steps", "patch", "qubit", "XYZ"]  # Added schema hint for the dashboard
                 }, f)
             with open(self.energy_csv, mode='w', newline='') as f:
                 csv.DictWriter(f, fieldnames=[
                     "Step", "Anneal_Percent", "MeanField_Bulk_Energy",
                     "MeanField_Boundary_Energy", "MeanField_Total_Energy",
-                    "Min_Unitary_Fidelity", "Ring_Reset"
+                    "Min_Unitary_Fidelity"
                 ]).writeheader()
             with open(self.profiles_csv, mode='w', newline='') as f:
                 csv.DictWriter(f, fieldnames=[
                     "Step", "Patch", "Face", "X_mean", "Y_mean", "Z_mean"
                 ]).writeheader()
         except Exception as e:
-            print("[CSV] Warning: Setup configuration write failed: " + str(e),
-                  file=sys.stderr)
+            print(f"[CSV] Warning: Setup configuration write failed: {e}", file=sys.stderr)
 
-    def _log_csvs(self, step: int, anneal: float, bulk: float, bound: float,
-                  total: float, min_fidelity: float,
-                  patch_profiles: Dict[int, Any],
-                  ring_reset: bool) -> None:
+    def _log_csvs(self, step: int, anneal: float, bulk: float, bound: float, total: float, min_fidelity: float, patch_profiles: Dict[int, Any]) -> None:
         try:
             with open(self.energy_csv, mode='a', newline='') as f:
                 csv.DictWriter(f, fieldnames=[
                     "Step", "Anneal_Percent", "MeanField_Bulk_Energy",
                     "MeanField_Boundary_Energy", "MeanField_Total_Energy",
-                    "Min_Unitary_Fidelity", "Ring_Reset"
-                ]).writerow({
-                    "Step": step,
-                    "Anneal_Percent": anneal,
-                    "MeanField_Bulk_Energy": bulk,
-                    "MeanField_Boundary_Energy": bound,
-                    "MeanField_Total_Energy": total,
-                    "Min_Unitary_Fidelity": min_fidelity,
-                    "Ring_Reset": 1 if ring_reset else 0
-                })
+                    "Min_Unitary_Fidelity"
+                ]).writerow({"Step": step, "Anneal_Percent": anneal,
+                             "MeanField_Bulk_Energy": bulk, "MeanField_Boundary_Energy": bound,
+                             "MeanField_Total_Energy": total,
+                             "Min_Unitary_Fidelity": min_fidelity})
 
-            # One row per brane: the whole tile is the face. Face tagged "BRANE"
-            # (schema note: +X/-X/+Y/-Y face rows of Rev 88-F no longer exist).
+            # One row per brane: the whole tile is the face. Face is tagged
+            # "BRANE" (schema note for macroscopic_lattice_dash: the +X/-X/
+            # +Y/-Y face rows of Rev 88-F no longer exist).
             with open(self.profiles_csv, mode='a', newline='') as f:
                 w = csv.DictWriter(f, fieldnames=[
                     "Step", "Patch", "Face", "X_mean", "Y_mean", "Z_mean"
                 ])
                 for p, prof in patch_profiles.items():
-                    w.writerow({
-                        "Step": step, "Patch": p, "Face": "BRANE",
-                        "X_mean": float(np.mean(prof["means"]["X"])),
-                        "Y_mean": float(np.mean(prof["means"]["Y"])),
-                        "Z_mean": float(np.mean(prof["means"]["Z"]))
-                    })
+                    w.writerow({"Step": step, "Patch": p, "Face": "BRANE",
+                                "X_mean": float(np.mean(prof["means"]["X"])),
+                                "Y_mean": float(np.mean(prof["means"]["Y"])),
+                                "Z_mean": float(np.mean(prof["means"]["Z"]))})
         except Exception as e:
-            print("[CSV] Warning: Log write failed: " + str(e), file=sys.stderr)
+            print(f"[CSV] Warning: Log write failed: {e}", file=sys.stderr)
 
-    def run(self, total_steps: int, dt: float, initial_hx: float,
-            target_g_face: float, target_J: float, target_hx: float,
-            target_hz: float, measure_every: int = 1,
-            effective_shots: float = 512.0) -> None:
+    def run(self, total_steps: int, dt: float, initial_hx: float, target_g_face: float,
+            target_J: float, target_hx: float, target_hz: float,
+            measure_every: int = 1, effective_shots: float = 512.0) -> None:
 
         if total_steps < 1:
             raise ValueError("total_steps must be at least 1")
@@ -563,18 +505,11 @@ class MultiGpuHadronEngine:
             raise ValueError("measure_every must be a positive integer")
 
         total_qubits = TOTAL_PATCHES * QUBITS_PER_PATCH
-        print(
-            "[Engine] " + str(TOTAL_PATCHES) +
-            " stacked branes (1x1x" + str(GRID_Z) +
-            (", periodic" if PERIODIC_Z else ", open ends") +
-            "), " + str(total_qubits) + " qubits, " +
-            str(GPUS_AVAILABLE) + " GPUs (" +
-            str(WORKERS_PER_GPU) + " workers/GPU), " +
-            str(total_steps) + " steps"
-        )
+        print(f"[Engine] {TOTAL_PATCHES} stacked branes (1x1x{GRID_Z}"
+              f"{', periodic' if PERIODIC_Z else ', open ends'}), {total_qubits} qubits, "
+              f"{GPUS_AVAILABLE} GPUs ({WORKERS_PER_GPU} workers/GPU), {total_steps} steps")
 
-        active_ranks = [r for r in range(TOTAL_WORKERS)
-                        if self.worker_assignments[r]]
+        active_ranks = [r for r in range(TOTAL_WORKERS) if self.worker_assignments[r]]
 
         workers = []
         pipes   = []
@@ -583,9 +518,8 @@ class MultiGpuHadronEngine:
             parent_conn, child_conn = mp.Pipe()
             p = mp.Process(
                 target=gpu_worker_process,
-                args=(rank, WORKERS_PER_GPU, self.worker_assignments[rank],
-                      child_conn, dt, total_steps, initial_hx,
-                      target_J, target_hx, target_hz, measure_every)
+                args=(rank, WORKERS_PER_GPU, self.worker_assignments[rank], child_conn,
+                      dt, total_steps, initial_hx, target_J, target_hx, target_hz, measure_every)
             )
             p.start()
             child_conn.close()
@@ -618,21 +552,19 @@ class MultiGpuHadronEngine:
                     for p, payload in data.items():
                         patch_full_states[p] = payload["state"]
                         bulk_energy += payload["meanfield_bulk_energy"]
-                        max_lat_trotter = max(max_lat_trotter,
-                                              payload["lat_trotter_ms"])
-                        max_lat_tomo = max(max_lat_tomo,
-                                          payload["lat_tomo_ms"])
-                        min_fidelity = min(min_fidelity,
-                                          payload.get("unitary_fidelity", 1.0))
+                        max_lat_trotter = max(max_lat_trotter, payload["lat_trotter_ms"])
+                        max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
+                        min_fidelity = min(min_fidelity, payload.get("unitary_fidelity", 1.0))
 
                 if len(patch_full_states) != TOTAL_PATCHES:
                     raise RuntimeError(
-                        "Fatal: IPC gather incomplete. Expected " +
-                        str(TOTAL_PATCHES) + " patches, got " +
-                        str(len(patch_full_states)) + "."
+                        f"Fatal: IPC gather incomplete. "
+                        f"Expected {TOTAL_PATCHES} patches, got {len(patch_full_states)}."
                     )
 
                 # --- BUILD PROFILES ---
+                # The whole tile is the brane face, so profiles carry the full
+                # per-site arrays (index i == lattice site i).
                 step_state = np.zeros((TOTAL_PATCHES, QUBITS_PER_PATCH, 3))
                 patch_profiles = {}
 
@@ -657,18 +589,9 @@ class MultiGpuHadronEngine:
 
                 if len(self.lattice_history) % 10 == 0:
                     try:
-                        np.save(self.state_dump_file,
-                                np.array(self.lattice_history))
+                        np.save(self.state_dump_file, np.array(self.lattice_history))
                     except Exception as e:
-                        print("[Checkpoint] Warning: Failed to save: " + str(e),
-                              file=sys.stderr)
-
-                # --- RING RESET DETECTION ---
-                # A tomo latency spike above RING_RESET_LAT_THRESHOLD_MS indicates
-                # the amdgpu driver performed an in-place gfx_0.0.0 ring reset
-                # and recovered. The statevector is preserved; the step is valid
-                # but flagged for post-hoc correlation with energy discontinuities.
-                ring_reset = max_lat_tomo > RING_RESET_LAT_THRESHOLD_MS
+                        print(f"[Checkpoint] Warning: Failed to save: {e}", file=sys.stderr)
 
                 # --- COMPUTE KICKS & INTER-BRANE ENERGY (site-resolved) ---
                 next_kick_payloads = {p: {} for p in range(TOTAL_PATCHES)}
@@ -684,30 +607,25 @@ class MultiGpuHadronEngine:
                     rng_p = np.random.default_rng([self.master_seed, t, p])
                     noisy_field[p] = {
                         ax: prof["means"][ax]
-                            + rng_p.normal(0.0, 1.0, n_s)
-                            * np.sqrt(prof["vars"][ax]) * scale
+                            + rng_p.normal(0.0, 1.0, n_s) * np.sqrt(prof["vars"][ax]) * scale
                         for ax in ("X", "Y", "Z")
                     }
 
                 for p1, p2 in self.interfaces:
                     f1, f2 = noisy_field[p1], noisy_field[p2]
-                    f1_mean = patch_profiles[p1]["means"]
-                    f2_mean = patch_profiles[p2]["means"]
+                    f1_mean, f2_mean = patch_profiles[p1]["means"], patch_profiles[p2]["means"]
 
-                    # macroscopic_boundary_energy is a noiseless monitoring quantity.
-                    # Dynamics are driven by noisy_field kicks (Langevin exploration).
-                    # These are intentionally decoupled: logged energy tracks the
-                    # mean-field potential; trajectory follows the stochastic update.
-                    dot = float(np.sum(
-                        f1_mean["X"] * f2_mean["X"]
-                        + f1_mean["Y"] * f2_mean["Y"]
-                        + f1_mean["Z"] * f2_mean["Z"]
-                    ))
+                    # NOTE: macroscopic_boundary_energy is a noiseless monitoring quantity.
+                    # The dynamics are driven by noisy_field kicks (Langevin exploration).
+                    # These are intentionally decoupled: logged energy tracks the mean-field
+                    # potential; actual trajectory follows the stochastic update.
+                    dot = float(np.sum(f1_mean["X"] * f2_mean["X"]
+                                       + f1_mean["Y"] * f2_mean["Y"]
+                                       + f1_mean["Z"] * f2_mean["Z"]))
                     macroscopic_boundary_energy += -current_g_face * dot
 
-                    # Per-site mean-field kicks: each qubit sees only its aligned
-                    # partner in the adjacent brane. Uses noisy_field for Langevin
-                    # variance injection.
+                    # Per-site mean-field kicks: each qubit sees only its
+                    # aligned partner in the adjacent brane. Uses noisy_field for Langevin variance.
                     for q in range(n_s):
                         k = next_kick_payloads[p1].get(q, (0., 0., 0.))
                         next_kick_payloads[p1][q] = (
@@ -723,30 +641,14 @@ class MultiGpuHadronEngine:
                         )
 
                 total_energy = bulk_energy + macroscopic_boundary_energy
-                reset_tag = "  RING_RESET" if ring_reset else ""
-                print(
-                    "Step {:03d} | E: {:+.4f} | "
-                    "Lat(Trot/Tomo): {:5.1f}/{:5.1f}ms | "
-                    "Fid: {:.5f} | {:.2f}s{}".format(
-                        t, total_energy,
-                        max_lat_trotter, max_lat_tomo,
-                        min_fidelity,
-                        time.perf_counter() - t0,
-                        reset_tag
-                    )
-                )
-                self._log_csvs(
-                    t, s * 100, bulk_energy,
-                    macroscopic_boundary_energy, total_energy,
-                    min_fidelity, patch_profiles, ring_reset
-                )
+                print(f"Step {t:03d} | E: {total_energy:+.4f} | Lat(Trot/Tomo): {max_lat_trotter:5.1f}/{max_lat_tomo:5.1f}ms | Fid: {min_fidelity:.5f} | {time.perf_counter() - t0:.2f}s")
+                self._log_csvs(t, s * 100, bulk_energy,
+                               macroscopic_boundary_energy, total_energy, min_fidelity, patch_profiles)
 
                 # --- SCATTER ---
                 for i, w_rank in enumerate(active_ranks):
-                    worker_payload = {
-                        p: next_kick_payloads[p]
-                        for p in self.worker_assignments[w_rank]
-                    }
+                    worker_payload = {p: next_kick_payloads[p]
+                                      for p in self.worker_assignments[w_rank]}
                     pipes[i].send(worker_payload)
 
         finally:
@@ -756,13 +658,10 @@ class MultiGpuHadronEngine:
 
             if self.lattice_history:
                 try:
-                    np.save(self.state_dump_file,
-                            np.array(self.lattice_history))
-                    print("\n[Master] Dumped history matrix to " +
-                          self.state_dump_file)
+                    np.save(self.state_dump_file, np.array(self.lattice_history))
+                    print(f"\n[Master] Dumped history matrix to {self.state_dump_file}")
                 except Exception as e:
-                    print("\n[Master] Failed to save lattice history: " +
-                          str(e), file=sys.stderr)
+                    print(f"\n[Master] Failed to save lattice history: {e}", file=sys.stderr)
 
             for p in workers:
                 p.join(timeout=15)
