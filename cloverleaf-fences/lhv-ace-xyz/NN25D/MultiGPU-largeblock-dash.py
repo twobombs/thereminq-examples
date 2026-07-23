@@ -55,7 +55,7 @@ TILE_LX, TILE_LY = 4, 4
 LAYER_SPACING    = 1.6
 BLOCK_GAP_Z      = 1.2
 TILE_GAP_XY      = 1.5
-QUIVER_STRIDE    = 1        # set >1 to speed up interactive 3D
+QUIVER_STRIDE    = 2        # Set >1 to speed up interactive 3D, 1 for final render.
 
 KIND_COLORS = {"Z_INTRA": "#e6b422", "Z_INTER": "#e64550", "XY": "#45b0e6"}
 
@@ -78,11 +78,13 @@ def load_energy_data(num_steps, log_prefix=""):
         'Fidelity': [], 'Anneal': [], 'Ring_Reset': [],
     }
     kind_cols = {'Z_INTRA': "E_Z_Intra", 'Z_INTER': "E_Z_Inter", 'XY': "E_XY"}
-
+    
+    rows_loaded = 0
     try:
         with open(ENERGY_FILE, mode='r') as f:
             reader = csv.DictReader(f)
             for row in reader:
+                rows_loaded += 1
                 def _get(col, default=np.nan):
                     try:
                         return float(row[col])
@@ -97,6 +99,15 @@ def load_energy_data(num_steps, log_prefix=""):
                 energies['Ring_Reset'].append(_get("Ring_Reset", 0.0))
                 for kind, col in kind_cols.items():
                     energies[kind].append(_get(col))
+                    
+        # H3 Fix: Diagnostic tracking of loaded data rows compared to num_steps
+        if rows_loaded < num_steps:
+            print(f"{log_prefix}Energy CSV: Loaded {rows_loaded} rows (padding {num_steps - rows_loaded} NaN rows to match history length).")
+        elif rows_loaded > num_steps:
+            print(f"{log_prefix}Energy CSV: Loaded {rows_loaded} rows (truncating to {num_steps} to match history length).")
+        else:
+            print(f"{log_prefix}Energy CSV: Loaded {rows_loaded} rows matching history length.")
+            
     except Exception as e:
         print(f"{log_prefix}Warning: Could not parse {ENERGY_FILE}: {e}")
 
@@ -110,6 +121,11 @@ def load_energy_data(num_steps, log_prefix=""):
 
 
 def _safe_gradient(arr_with_nans):
+    """
+    Computes gradient on valid points only.
+    Uses valid_indices as the coordinate array to properly handle 
+    non-uniform spacing caused by NaN gaps. Gaps remain NaN in the output.
+    """
     arr = np.asarray(arr_with_nans, dtype=float)
     out = np.full_like(arr, np.nan)
     valid_mask = ~np.isnan(arr)
@@ -178,10 +194,11 @@ def _ring_reset_vlines(ax, ring_reset_arr, alpha=0.18):
                        alpha=alpha, linewidth=0)
 
 
-def draw_energy_panel(ax, energies, step_cursor, num_steps):
+def draw_energy_panel(ax, ax_twin, energies, step_cursor, num_steps):
     ax.cla(); _style_ax(ax)
+    ax_twin.cla(); _style_ax(ax_twin)
+    
     xs = np.arange(num_steps)
-
     _ring_reset_vlines(ax, energies['Ring_Reset'])
 
     def _plot(col, color, lw, label, ls='-'):
@@ -201,15 +218,11 @@ def draw_energy_panel(ax, energies, step_cursor, num_steps):
     # Fidelity on twin axis
     fid = energies['Fidelity']
     if not np.all(np.isnan(fid)):
-        ax2 = ax.twinx()
-        ax2.plot(xs, fid, color=FIDELITY_COLOR, linewidth=0.8,
-                 linestyle=':', label='Fidelity')
-        ax2.set_ylim(0, 1.05)
-        ax2.set_ylabel("Fidelity", fontsize=6, color=FIDELITY_COLOR)
-        ax2.tick_params(colors=FIDELITY_COLOR, labelsize=5)
-        ax2.set_facecolor('#1a1a1a')
-        for sp in ax2.spines.values():
-            sp.set_edgecolor('#333333')
+        ax_twin.plot(xs, fid, color=FIDELITY_COLOR, linewidth=0.8,
+                     linestyle=':', label='Fidelity')
+        ax_twin.set_ylim(0, 1.05)
+        ax_twin.set_ylabel("Fidelity", fontsize=6, color=FIDELITY_COLOR)
+        ax_twin.tick_params(colors=FIDELITY_COLOR, labelsize=5)
 
     ax.axvline(step_cursor, color='white', linewidth=0.8, linestyle='--', alpha=0.7)
     ax.set_title("Energy components + fidelity", fontsize=9, color='#cccccc', pad=3)
@@ -219,23 +232,22 @@ def draw_energy_panel(ax, energies, step_cursor, num_steps):
     ax.grid(True, alpha=0.15)
 
 
-def draw_ring_reset_panel(ax, energies, step_cursor, num_steps):
+def draw_ring_reset_panel(ax, ax_twin, energies, step_cursor, num_steps):
     ax.cla(); _style_ax(ax)
+    ax_twin.cla(); _style_ax(ax_twin)
+    
     xs = np.arange(num_steps)
     rr = energies['Ring_Reset']
 
     # Bar chart: 1 = reset, 0 = clean
     ax.bar(xs, rr, color=RING_RESET_COLOR, width=1.0, alpha=0.75)
+    
     # Cumulative count on twin axis
     cumsum = np.nancumsum(np.where(np.isnan(rr), 0, rr))
-    ax2 = ax.twinx()
-    ax2.plot(xs, cumsum, color='#ffaa44', linewidth=0.9,
-             linestyle='-', label='Cumulative resets')
-    ax2.set_ylabel("Cumul. resets", fontsize=6, color='#ffaa44')
-    ax2.tick_params(colors='#ffaa44', labelsize=5)
-    ax2.set_facecolor('#1a1a1a')
-    for sp in ax2.spines.values():
-        sp.set_edgecolor('#333333')
+    ax_twin.plot(xs, cumsum, color='#ffaa44', linewidth=0.9,
+                 linestyle='-', label='Cumulative resets')
+    ax_twin.set_ylabel("Cumul. resets", fontsize=6, color='#ffaa44')
+    ax_twin.tick_params(colors='#ffaa44', labelsize=5)
 
     ax.axvline(step_cursor, color='white', linewidth=0.8, linestyle='--', alpha=0.7)
     total_rr = int(np.nansum(rr))
@@ -277,12 +289,13 @@ def draw_coupling_error_panel(ax, avg_disagreement, dis_by_kind,
     ax.grid(True, alpha=0.15)
 
 
-def draw_anneal_deriv_panel(ax, energies, avg_disagreement,
+def draw_anneal_deriv_panel(ax, ax_twin, energies, avg_disagreement,
                              step_cursor, num_steps):
     """Anneal schedule (left) + dE/dt and d||ds||/dt (right twin)."""
     ax.cla(); _style_ax(ax)
+    ax_twin.cla(); _style_ax(ax_twin)
+    
     xs = np.arange(num_steps)
-
     _ring_reset_vlines(ax, energies['Ring_Reset'])
 
     # Anneal % on left axis
@@ -294,23 +307,19 @@ def draw_anneal_deriv_panel(ax, energies, avg_disagreement,
     ax.tick_params(axis='y', colors=ANNEAL_COLOR, labelsize=5)
 
     # dE/dt and d||ds||/dt on right twin axis
-    ax2 = ax.twinx()
     dE = _safe_gradient(energies['Total'])
-    ax2.plot(xs, dE, color='lightgreen', linewidth=0.85,
-             linestyle='-', label='dE/dt')
+    ax_twin.plot(xs, dE, color='lightgreen', linewidth=0.85,
+                 linestyle='-', label='dE/dt')
     if avg_disagreement is not None:
         dR = _safe_gradient(avg_disagreement)
-        ax2.plot(xs, dR, color='crimson', linewidth=0.85,
-                 linestyle='--', label='d||ds||/dt')
-    ax2.set_ylabel("Rate (per step)", fontsize=6, color='#aaaaaa')
-    ax2.tick_params(colors='#aaaaaa', labelsize=5)
-    ax2.set_facecolor('#1a1a1a')
-    for sp in ax2.spines.values():
-        sp.set_edgecolor('#333333')
+        ax_twin.plot(xs, dR, color='crimson', linewidth=0.85,
+                     linestyle='--', label='d||ds||/dt')
+    ax_twin.set_ylabel("Rate (per step)", fontsize=6, color='#aaaaaa')
+    ax_twin.tick_params(colors='#aaaaaa', labelsize=5)
 
     # Combined legend
     h1, l1 = ax.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
+    h2, l2 = ax_twin.get_legend_handles_labels()
     ax.legend(h1 + h2, l1 + l2, fontsize=5, loc='upper left',
               facecolor='#1a1a1a', labelcolor='#cccccc', framealpha=0.5)
 
@@ -338,11 +347,22 @@ def run_dashboard(mode="interactive"):
     grid_x           = config.get("grid_x", 4)
     grid_y           = config.get("grid_y", 4)
     grid_z           = config.get("grid_z", 16)
-    block_grid       = config.get("block_grid", [4, 4, 4])
     branes_per_block = config.get("branes_per_block", 4)
     cfg_qpp          = config.get("qubits_per_patch", TILE_LX * TILE_LY)
     tile_geometry    = config.get("tile_geometry", "4x4_brane_block_lattice")
     periodic         = config.get("periodic", [False, False, False])
+    
+    # Safely parse block_grid regardless of dict or list structure
+    block_grid_raw = config.get("block_grid", [4, 4, 4])
+    if isinstance(block_grid_raw, dict):
+        bx = block_grid_raw.get("x", 4)
+        by = block_grid_raw.get("y", 4)
+        bz = block_grid_raw.get("z", 4)
+    elif isinstance(block_grid_raw, list):
+        bx, by, bz = (block_grid_raw + [4, 4, 4])[:3]
+    else:
+        bx, by, bz = 4, 4, 4
+
     if not isinstance(periodic, (list, tuple)):
         periodic = [bool(periodic)] * 3
     periodic_x, periodic_y, periodic_z = (bool(v) for v in periodic)
@@ -381,20 +401,25 @@ def run_dashboard(mode="interactive"):
     avg_disagreement = None
     dis_by_kind = {}
     if interfaces:
-        hist_arr = np.asarray(history)
         n_ifaces = len(interfaces)
         disagreements = np.zeros((num_steps, n_ifaces))
-        iface_kind = []
-        for i, (p1, p2, i1, i2, kind) in enumerate(interfaces):
-            diff = hist_arr[:, p1, i1, :] - hist_arr[:, p2, i2, :]
-            disagreements[:, i] = np.mean(np.linalg.norm(diff, axis=2), axis=1)
-            iface_kind.append(kind)
-        iface_kind = np.array(iface_kind)
+        iface_kind = np.array([i[4] for i in interfaces])
+
+        # Calculate step-by-step to prevent np.asarray() from blowing up RAM
+        for step in range(num_steps):
+            hist_step = history[step]
+            for i, (p1, p2, i1, i2, kind) in enumerate(interfaces):
+                diff = hist_step[p1, i1, :] - hist_step[p2, i2, :]
+                disagreements[step, i] = np.mean(np.linalg.norm(diff, axis=1))
+
         avg_disagreement = np.mean(disagreements, axis=1)
         for k in kinds_present:
             mask = (iface_kind == k)
             if np.any(mask):
                 dis_by_kind[k] = np.mean(disagreements[:, mask], axis=1)
+
+        # N2 Fix: Release intermediate matrix to minimize memory footprint on long annealing runs
+        del disagreements
 
     # --- 3D coordinates ---
     tile_pitch_x = TILE_LX - 1 + TILE_GAP_XY + 1
@@ -444,10 +469,18 @@ def run_dashboard(mode="interactive"):
     gs_right = gridspec.GridSpecFromSubplotSpec(
         7, 1, subplot_spec=gs_main[1], hspace=0.90,
         height_ratios=[1.1, 0.55, 0.85, 0.75, 0.75, 0.75, 0.75])
+        
     ax_energy  = fig.add_subplot(gs_right[0])
+    ax_energy_twin = ax_energy.twinx()
+    
     ax_rr      = fig.add_subplot(gs_right[1])
+    ax_rr_twin = ax_rr.twinx()
+    
     ax_dis     = fig.add_subplot(gs_right[2])
+    
     ax_anneal  = fig.add_subplot(gs_right[3])
+    ax_anneal_twin = ax_anneal.twinx()
+    
     ax_hmap_x  = fig.add_subplot(gs_right[4])
     ax_hmap_y  = fig.add_subplot(gs_right[5])
     ax_hmap_z  = fig.add_subplot(gs_right[6])
@@ -485,9 +518,7 @@ def run_dashboard(mode="interactive"):
         length=0.6, colors=_quiver_colors(W), arrow_length_ratio=0.3
     )]
 
-    # Inter-block Z planes: draw only at Z_INTER seams (the weak-glue
-    # inter-block boundaries). Z_INTRA and XY seams are counted in the
-    # error metric but not drawn -- 624 sheets would be visual noise.
+    # Inter-block Z planes: draw only at Z_INTER seams
     margin = 0.4
     for zb in range(1, grid_z // branes_per_block):
         z_lo  = z_pos(zb * branes_per_block - 1)
@@ -509,11 +540,11 @@ def run_dashboard(mode="interactive"):
     cbar.set_label('Bloch vector component', fontsize=8, color='#aaaaaa')
     cbar.ax.tick_params(labelsize=6, colors='#aaaaaa')
 
+    # text2D used intentionally here for a fixed HUD overlay mapped to 2D screen space
     energy_text = ax3d.text2D(
         0.04, 0.96, "", transform=ax3d.transAxes,
         color='lightgreen', fontsize=11, fontweight='bold')
 
-    bx, by, bz = (block_grid + [4, 4, 4])[:3] if isinstance(block_grid, list) else (4, 4, 4)
     per_flags = ''.join(a for a, on in zip('XYZ', (periodic_x, periodic_y, periodic_z)) if on)
     lattice_desc = (f"{bx}x{by}x{bz} blocks x {branes_per_block} branes"
                     + (f" | periodic {per_flags}" if per_flags else ""))
@@ -551,6 +582,14 @@ def run_dashboard(mode="interactive"):
                         aspect='auto', interpolation='nearest')
         _style_ax(ax)
         ax.set_title(label, fontsize=8, color='#cccccc', pad=2)
+
+        # Ported Block and Tile separator rendering
+        for i in range(1, grid_x * grid_y):
+            ax.axhline(i * grid_z - 0.5, color='#444444', linewidth=0.8)
+
+        for i in range(1, TILE_LX):
+            ax.axvline(i * TILE_LY - 0.5, color='#444444', linewidth=0.5, linestyle=':')
+
         if show_ylabel:
             ax.set_yticks(y_ticks)
             ax.set_yticklabels(y_labels, fontsize=3.5, color='#aaaaaa')
@@ -594,16 +633,14 @@ def run_dashboard(mode="interactive"):
     def on_scroll(event):
         if event.inaxes != ax3d:
             return
-        if not hasattr(ax3d, 'custom_zoom'):
-            ax3d.custom_zoom = 1.0
-        ax3d.custom_zoom *= 0.9 if event.button == 'down' else 1.1
-        try:
-            ca = ax3d.get_box_aspect()
-            if ca is None:
-                ca = (x_max + 1.0, y_max + 1.0, max(1.0, z_max + 1.0))
-            ax3d.set_box_aspect(ca, zoom=ax3d.custom_zoom)
-        except TypeError:
-            ax3d.dist *= 1.1 if event.button == 'down' else 0.9
+        # Universal and robust limit scaling, supports Matplotlib 3.6+ without crashing.
+        scale = 0.9 if event.button == 'down' else 1.1
+        for set_lim, get_lim in [(ax3d.set_xlim, ax3d.get_xlim), 
+                                 (ax3d.set_ylim, ax3d.get_ylim), 
+                                 (ax3d.set_zlim, ax3d.get_zlim)]:
+            lim = get_lim()
+            mid = np.mean(lim)
+            set_lim([mid + (val - mid) * scale for val in lim])
         fig.canvas.draw_idle()
 
     fig.canvas.mpl_connect('scroll_event', on_scroll)
@@ -649,11 +686,11 @@ def run_dashboard(mode="interactive"):
             ax3d.view_init(elev=ax3d.elev, azim=ax3d.azim + 0.3)
 
         # Right panels (all clear+redraw)
-        draw_energy_panel(ax_energy, energies, frame, num_steps)
-        draw_ring_reset_panel(ax_rr, energies, frame, num_steps)
+        draw_energy_panel(ax_energy, ax_energy_twin, energies, frame, num_steps)
+        draw_ring_reset_panel(ax_rr, ax_rr_twin, energies, frame, num_steps)
         draw_coupling_error_panel(ax_dis, avg_disagreement, dis_by_kind,
                                    energies, frame, num_steps)
-        draw_anneal_deriv_panel(ax_anneal, energies, avg_disagreement,
+        draw_anneal_deriv_panel(ax_anneal, ax_anneal_twin, energies, avg_disagreement,
                                 frame, num_steps)
 
         # Heatmaps
@@ -679,13 +716,10 @@ def run_dashboard(mode="interactive"):
         slider.set_val(frame)
         slider.eventson = True
 
-        return (quiver_obj[0], energy_text, hmap_x, hmap_y, hmap_z)
-
     def _animation_update(frame):
         _from_animation[0] = True
-        result = update(frame)
+        update(frame)
         _from_animation[0] = False
-        return result
 
     def on_slider_update(val):
         _from_animation[0] = False
@@ -719,6 +753,8 @@ def run_dashboard(mode="interactive"):
             print(f"{prefix}Save complete.")
         except Exception as e:
             print(f"{prefix}Failed to save. ffmpeg installed? Error: {e}")
+        finally:
+            plt.close(fig)
     else:
         print(f"{prefix}Opening GUI...  SPACEBAR = PNG snapshot.")
         plt.show()
