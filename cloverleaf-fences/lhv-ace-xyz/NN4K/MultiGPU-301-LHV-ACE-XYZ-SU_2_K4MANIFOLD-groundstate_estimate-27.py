@@ -1,0 +1,885 @@
+# -*- coding: us-ascii -*-
+# K4 All-Boundary Manifold Cluster Annealing
+# (4 Tri-Hole Manifolds x 27 Qubits, 6 Junctions, 54 Unique Qubits)
+# High-Throughput Volumetric Engine with Statistical Variance Injection
+#
+# REVISION 303 - K4 MANIFOLD TOPOLOGY (Patched)
+# (forked from Rev 88/300 NN3D 3x3x3 macroscopic grid)
+#
+# TOPOLOGY CHANGE (Rev 301):
+# - PATCH GEOMETRY: The 3x3x3 cubic sub-volume is replaced by a tri-hole
+#   manifold: 3 portal rims of 18 qubits each, C=3 corner + E=6 mid-edge
+#   qubits per intra-manifold edge, U=0 unique qubits. 27 qubits total,
+#   30 intra-manifold rim edges, every qubit belongs to exactly 2 portals.
+#   There is no bulk: the manifold is 100 percent boundary.
+# - CLUSTER: 4 manifolds wired as the complete graph K4. Each manifold has
+#   exactly 3 local edges and K4 requires degree 3, so the fit is exact and
+#   K5 is impossible. Every manifold reaches every other in one hop.
+#   6 junctions x 9 qubits = 54 unique qubits (4*27 - 6*9). In K4 every
+#   qubit of every manifold is a junction qubit shared with exactly one
+#   other manifold.
+# - COUPLING: Rev 88 averaged each of the 6 cube faces into a single
+#   mean-field vector. Here the junction channel is BOND-RESOLVED: each of
+#   the 9 qubit pairs across a junction exchanges its own Bloch vector.
+#   Face-averaging would discard the loop structure the racetrack measures.
+# - GLUING: junction pairing is either identity (trivial) or order-reversing
+#   (TWIST_GLUING=True), the discrete analogue of the Moebius half-twist.
+#   Running both and differencing the loop-mode spectrum is the direct
+#   measurement of the holonomy.
+#
+# DIAGNOSTICS ADDED (Rev 301):
+# - RACETRACK LOOP DFT: the Hamiltonian cycle 0-1-2-3-0 defines a 4-junction
+#   loop coordinate. Each measure step the per-junction mean Bloch vector is
+#   DFT'd over that coordinate, giving loop-momentum amplitudes k=0..3.
+#   Ideal ringing sits on a dispersion curve; off-curve weight is error.
+#   The remaining 2 junctions (0,2) and (1,3) are logged as chords.
+# - KICK PROBE: an optional localized kick injected at one junction at a
+#   chosen step, so the loop-momentum time series can be FFT'd offline for
+#   the mode spectrum and the roundtrip decay envelope F(n).
+# - SWAP ASYMMETRY: with Moebius pairs (0,1) and (2,3), the ideal dynamics
+#   commutes with exchanging the two halves, so the residual asymmetry
+#   between paired manifolds is pure error signal. This is a live parity
+#   check where no exact ground truth exists; it is NOT an echo and does
+#   not cancel reversible error the way a temporal mirror does.
+# - RNG SEEDING: stochastic noise is seeded on the twist-invariant junction
+#   label, not the manifold index, so relabeling or twisting the gluing
+#   cannot manufacture asymmetry that would read as error.
+#
+# INHERITED FROM Rev 88 (unchanged):
+# - Stochastic scaling np.sqrt(dt / effective_shots), no measure_every
+#   inflation (Rev 88 fix).
+# - Continuous coupling: kick payloads persist across non-measure steps and
+#   apply_kicks carries no m_every multiplier (Rev 87 fixes).
+# - Pauli code + angle convention autodetect per worker process.
+# - One-time stderr alert for missing PyQrack fidelity bindings.
+
+import os
+import sys
+import gc
+import csv
+import json
+import time
+import math
+import numpy as np
+import multiprocessing as mp
+from typing import List, Tuple, Dict, Any
+
+# --- GLOBAL CONFIGURATION ---
+C_CORNER = 3                     # corner qubits per intra-manifold edge
+E_MIDEDGE = 6                    # mid-edge qubits per intra-manifold edge
+QUBITS_PER_EDGE = C_CORNER + E_MIDEDGE          # 9
+LOCAL_EDGES = 3                                  # 3 portals -> 3 intra edges
+QUBITS_PER_MANIFOLD = LOCAL_EDGES * QUBITS_PER_EDGE   # 27
+N_RIM = 2 * QUBITS_PER_EDGE                      # 18 slots per portal ring
+
+N_MANIFOLDS = 4                                  # K4
+NEIGHBOURS = [[j for j in range(N_MANIFOLDS) if j != i]
+              for i in range(N_MANIFOLDS)]
+JUNCTION_PAIRS = [(i, j) for i in range(N_MANIFOLDS)
+                  for j in range(i + 1, N_MANIFOLDS)]     # 6 junctions
+N_JUNCTIONS = len(JUNCTION_PAIRS)
+
+# Racetrack: Hamiltonian cycle 0-1-2-3-0 gives the loop coordinate
+LOOP_CYCLE = [0, 1, 2, 3]
+LOOP_JUNCTIONS = [tuple(sorted((LOOP_CYCLE[i], LOOP_CYCLE[(i + 1) % 4])))
+                  for i in range(4)]
+CHORD_JUNCTIONS = [jp for jp in JUNCTION_PAIRS if jp not in LOOP_JUNCTIONS]
+
+# Moebius pairs for the swap-asymmetry parity check
+MOEBIUS_PAIRS = [(0, 1), (2, 3)]
+
+# Gluing: True = order-reversing (Moebius half-twist), False = identity
+TWIST_GLUING = True
+
+# Topography tuning for raw statevectors
+GPUS_AVAILABLE = 4
+WORKERS_PER_GPU = 1              # one manifold per worker, one worker per GPU
+TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
+MANIFOLD_VRAM_MB = 2048          # 2^27 * 8B = 1 GB fp32; 2 GB cap for QUnit
+
+UNIQUE_QUBITS = N_MANIFOLDS * QUBITS_PER_MANIFOLD - N_JUNCTIONS * QUBITS_PER_EDGE
+
+assert QUBITS_PER_MANIFOLD <= 28, "28-qubit fp32 ceiling for a 2GB statevector"
+assert N_MANIFOLDS - 1 <= LOCAL_EDGES, "K_N needs degree N-1 <= 3 local edges"
+assert TOTAL_WORKERS >= N_MANIFOLDS, "need at least one worker per manifold"
+
+# =====================================================================
+# ENVIRONMENT - set before pyqrack import
+# =====================================================================
+os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
+
+# =====================================================================
+# PURE FUNCTIONS (Math & Topology)
+# =====================================================================
+def edge_local_qubits(k: int) -> List[int]:
+    """Local qubit indices of intra-manifold edge k (corners then mid-edge)."""
+    base = k * QUBITS_PER_EDGE
+    return list(range(base, base + QUBITS_PER_EDGE))
+
+
+def portal_ring(p: int) -> List[int]:
+    """The 18 local qubits of portal p, in ring order.
+    Portal p is bounded by intra-manifold edges (p-1)%3 and p."""
+    return edge_local_qubits((p - 1) % LOCAL_EDGES) + edge_local_qubits(p)
+
+
+def generate_manifold_topology() -> Tuple[List[Tuple[int, int]],
+                                          Dict[int, List[int]]]:
+    """Tri-hole manifold: 3 portal rings of 18 qubits, 27 qubits total.
+    Returns (intra_edges, edge_groups) where edge_groups[k] is the list of
+    9 local qubits carrying junction k. Validated at import time."""
+    edges = set()
+    for p in range(LOCAL_EDGES):
+        ring = portal_ring(p)
+        for s in range(len(ring)):
+            a, b = ring[s], ring[(s + 1) % len(ring)]
+            edges.add((min(a, b), max(a, b)))
+    intra_edges = sorted(edges)
+
+    # invariants
+    if len(intra_edges) != 30:
+        raise RuntimeError(
+            f"Fatal: expected 30 intra-manifold rim edges, got {len(intra_edges)}")
+    seen_q = set()
+    for a, b in intra_edges:
+        seen_q.add(a); seen_q.add(b)
+    if len(seen_q) != QUBITS_PER_MANIFOLD:
+        raise RuntimeError(
+            f"Fatal: rim edges cover {len(seen_q)} qubits, "
+            f"expected {QUBITS_PER_MANIFOLD}")
+    # every qubit must belong to exactly 2 portals (all-boundary property)
+    in_portals: Dict[int, int] = {q: 0 for q in range(QUBITS_PER_MANIFOLD)}
+    for p in range(LOCAL_EDGES):
+        for q in portal_ring(p):
+            in_portals[q] += 1
+    if any(v != 2 for v in in_portals.values()):
+        raise RuntimeError("Fatal: all-boundary property violated "
+                           "(qubit not in exactly 2 portals)")
+    # connectivity
+    adj: Dict[int, set] = {q: set() for q in range(QUBITS_PER_MANIFOLD)}
+    for a, b in intra_edges:
+        adj[a].add(b); adj[b].add(a)
+    seen = {0}
+    stack = [0]
+    while stack:
+        u = stack.pop()
+        for v in adj[u]:
+            if v not in seen:
+                seen.add(v); stack.append(v)
+    if len(seen) != QUBITS_PER_MANIFOLD:
+        raise RuntimeError("Fatal: manifold coupling graph is disconnected")
+
+    edge_groups = {k: edge_local_qubits(k) for k in range(LOCAL_EDGES)}
+    return intra_edges, edge_groups
+
+
+def junction_slot(manifold: int, neighbour: int) -> int:
+    """Which local edge index of `manifold` carries the junction to
+    `neighbour`. Each manifold uses each of its 3 local edges exactly once."""
+    return NEIGHBOURS[manifold].index(neighbour)
+
+
+def junction_pairing(twist: bool) -> List[int]:
+    """Map slot index on side A to slot index on side B within a junction.
+    Identity = trivial gluing; order-reversing within the corner block and
+    within the mid-edge block = the discrete Moebius half-twist."""
+    if not twist:
+        return list(range(QUBITS_PER_EDGE))
+    corners = list(range(C_CORNER))[::-1]
+    midedge = [C_CORNER + i for i in range(E_MIDEDGE)][::-1]
+    return corners + midedge
+
+
+def build_junction_table(twist: bool) -> List[Dict[str, Any]]:
+    """One record per junction: the two manifolds, the local qubit list on
+    each side, and the paired (qa, qb) bonds carrying the mean-field kick."""
+    pairing = junction_pairing(twist)
+    table = []
+    for ji, (ma, mb) in enumerate(JUNCTION_PAIRS):
+        ka = junction_slot(ma, mb)
+        kb = junction_slot(mb, ma)
+        qa_list = edge_local_qubits(ka)
+        qb_list = edge_local_qubits(kb)
+        bonds = [(qa_list[i], qb_list[pairing[i]])
+                 for i in range(QUBITS_PER_EDGE)]
+        table.append({
+            "index": ji,
+            "ma": ma, "mb": mb,
+            "slot_a": ka, "slot_b": kb,
+            "qubits_a": qa_list, "qubits_b": qb_list,
+            "bonds": bonds,
+            "label": f"J{ma}{mb}",
+        })
+    # each manifold must use each local edge exactly once
+    used: Dict[int, List[int]] = {m: [] for m in range(N_MANIFOLDS)}
+    for rec in table:
+        used[rec["ma"]].append(rec["slot_a"])
+        used[rec["mb"]].append(rec["slot_b"])
+    for m, slots in used.items():
+        if sorted(slots) != list(range(LOCAL_EDGES)):
+            raise RuntimeError(
+                f"Fatal: manifold {m} local edge usage {sorted(slots)} "
+                f"!= {list(range(LOCAL_EDGES))}")
+    return table
+
+
+def compute_kicks_and_junction_energy(
+        profiles: Dict[int, Dict[str, np.ndarray]],
+        noise: Dict[int, Dict[int, Tuple[float, float, float]]],
+        junctions: List[Dict[str, Any]],
+        g_junction: float
+        ) -> Tuple[Dict[int, Dict[int, Tuple[float, float, float]]],
+                   float, Dict[int, np.ndarray]]:
+    """Bond-resolved mean-field exchange across all 6 junctions.
+
+    For each paired bond (qa on manifold ma, qb on manifold mb), each side
+    receives a Bloch-frame kick g * (a_other + noise_other), and the pair
+    contributes -g * (a_a . a_b) to the junction energy. Returns
+    (kicks per manifold keyed by local qubit, total junction energy,
+    per-junction mean Bloch vector used for the loop DFT)."""
+    kicks: Dict[int, Dict[int, Tuple[float, float, float]]] = {
+        m: {} for m in range(N_MANIFOLDS)}
+
+    def site_vec(m, q):
+        prof = profiles[m]
+        nx, ny, nz = noise[m].get(q, (0.0, 0.0, 0.0))
+        return (float(prof["X"][q]) + nx,
+                float(prof["Y"][q]) + ny,
+                float(prof["Z"][q]) + nz)
+
+    def add_kick(m, q, g, vec):
+        k = kicks[m].get(q, (0.0, 0.0, 0.0))
+        kicks[m][q] = (k[0] + g * vec[0],
+                       k[1] + g * vec[1],
+                       k[2] + g * vec[2])
+
+    energy = 0.0
+    junction_vectors: Dict[int, np.ndarray] = {}
+
+    for rec in junctions:
+        ma, mb = rec["ma"], rec["mb"]
+        acc = np.zeros(3)
+        n_sites = 0
+        for (qa, qb) in rec["bonds"]:
+            va = site_vec(ma, qa)
+            vb = site_vec(mb, qb)
+            energy += -g_junction * (va[0] * vb[0] + va[1] * vb[1]
+                                     + va[2] * vb[2])
+            add_kick(ma, qa, g_junction, vb)
+            add_kick(mb, qb, g_junction, va)
+            acc += np.array(va) + np.array(vb)
+            n_sites += 2
+        junction_vectors[rec["index"]] = acc / max(1, n_sites)
+
+    return kicks, energy, junction_vectors
+
+
+def loop_momentum_amplitudes(junction_vectors: Dict[int, np.ndarray],
+                             loop_indices: List[int]) -> np.ndarray:
+    """DFT of the per-junction mean Bloch vector over the racetrack loop
+    coordinate. Returns |amplitude| with shape (n_loop, 3): rows are loop
+    momenta k=0..n_loop-1, columns are X,Y,Z. k=0 is the uniform mode;
+    higher k are the ringing overtones whose degeneracy the Moebius
+    holonomy splits."""
+    n = len(loop_indices)
+    data = np.array([junction_vectors[ji] for ji in loop_indices])  # (n,3)
+    amps = np.zeros((n, 3))
+    for k in range(n):
+        phase = np.exp(-2j * math.pi * k * np.arange(n) / n)
+        for c in range(3):
+            amps[k, c] = abs(np.dot(phase, data[:, c])) / n
+    return amps
+
+
+def swap_asymmetry(profiles: Dict[int, Dict[str, np.ndarray]],
+                   junctions: List[Dict[str, Any]],
+                   pairs: List[Tuple[int, int]]) -> Dict[str, float]:
+    """RMS mismatch between paired manifolds, compared through the junction
+    bonds that connect them. Under symmetric drive the ideal dynamics is
+    invariant under the swap, so this residual is pure error signal."""
+    out: Dict[str, float] = {}
+    by_pair = {(r["ma"], r["mb"]): r for r in junctions}
+    for (ma, mb) in pairs:
+        rec = by_pair.get((min(ma, mb), max(ma, mb)))
+        if rec is None:
+            continue
+        diffs = []
+        for (qa, qb) in rec["bonds"]:
+            if rec["ma"] == ma:
+                pa, pb, ia, ib = profiles[ma], profiles[mb], qa, qb
+            else:
+                pa, pb, ia, ib = profiles[mb], profiles[ma], qa, qb
+            for comp in ("X", "Y", "Z"):
+                diffs.append(float(pa[comp][ia]) - float(pb[comp][ib]))
+        arr = np.array(diffs)
+        out[f"M{ma}M{mb}"] = float(np.sqrt(np.mean(arr ** 2)))
+    return out
+
+
+# =====================================================================
+# WORKER PROCESS LOGIC
+# =====================================================================
+def gpu_worker_process(
+    rank: int,
+    workers_per_gpu: int,
+    assigned_manifolds: List[int],
+    conn,
+    dt: float,
+    total_steps: int,
+    initial_hx: float,
+    target_J: float,
+    target_hx: float,
+    target_hz: float,
+    measure_every: int,
+    probe_step: int
+):
+    os.environ["PYQRACK_SHARED_LIB_PATH"] = "/usr/local/lib/qrack/libqrack_pinvoke.so"
+    os.environ["OCL_ICD_PLATFORM_SORT"] = "none"
+
+    physical_gpu_index = rank // workers_per_gpu
+    os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(physical_gpu_index)
+    os.environ["QRACK_QPAGER_DEVICES"] = str(physical_gpu_index)
+    os.environ["QRACK_QUNITMULTI_DEVICES"] = str(physical_gpu_index)
+
+    # 27 qubits fp32 = 1 GB of amplitudes; cap at 2 GB per manifold for QUnit
+    alloc_mb = (MANIFOLD_VRAM_MB * max(1, len(assigned_manifolds)))
+    os.environ["QRACK_MAX_ALLOC_MB"] = str(alloc_mb)
+    os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
+
+    import pyqrack
+    from pyqrack import QrackSimulator
+
+    sims = {}
+
+    try:
+        # --- PAULI CODE AUTODETECT ---
+        _THRESH = 0.5
+
+        # Z Probe
+        _probe_z = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+        vals0_z = {}
+        for _code in range(8):
+            try: vals0_z[_code] = _probe_z.pauli_expectation([0], [_code])
+            except Exception: pass
+        _probe_z.x(0)
+        PZ, SIGN_Z = None, None
+        for _code, v0 in vals0_z.items():
+            try: v1 = _probe_z.pauli_expectation([0], [_code])
+            except Exception: continue
+            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
+                PZ = _code
+                SIGN_Z = 1.0 if v0 > 0 else -1.0
+                break
+        if PZ is None:
+            raise RuntimeError("Fatal: could not autodetect PZ code")
+        del _probe_z
+
+        # X Probe
+        _probe_x = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+        _probe_x.h(0)
+        vals0_x = {}
+        for _code in range(8):
+            if _code == PZ: continue
+            try: vals0_x[_code] = _probe_x.pauli_expectation([0], [_code])
+            except Exception: pass
+        _probe_x.z(0)
+        PX, SIGN_X = None, None
+        for _code, v0 in vals0_x.items():
+            try: v1 = _probe_x.pauli_expectation([0], [_code])
+            except Exception: continue
+            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
+                PX = _code
+                SIGN_X = 1.0 if v0 > 0 else -1.0
+                break
+        if PX is None:
+            raise RuntimeError("Fatal: could not autodetect PX code")
+        del _probe_x
+
+        # Y Probe
+        _probe_y = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+        _c, _s = math.cos(math.pi / 4.0), math.sin(math.pi / 4.0)
+        _probe_y.mtrx([complex(_c, 0), complex(0, _s),
+                       complex(0, _s), complex(_c, 0)], 0)
+        vals0_y = {}
+        for _code in range(8):
+            if _code in (PX, PZ): continue
+            try: vals0_y[_code] = _probe_y.pauli_expectation([0], [_code])
+            except Exception: pass
+        _probe_y.z(0)
+        PY, SIGN_Y = None, None
+        for _code, v0 in vals0_y.items():
+            try: v1 = _probe_y.pauli_expectation([0], [_code])
+            except Exception: continue
+            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
+                PY = _code
+                SIGN_Y = 1.0 if v0 > 0 else -1.0
+                break
+        if PY is None:
+            raise RuntimeError("Fatal: could not autodetect PY code")
+        del _probe_y
+        # ----------------------------
+
+        # --- ANGLE CONVENTION AUTODETECT ---
+        _sim_mag = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+        _sim_mag.r(PX, math.pi, 0)
+        mag_check = _sim_mag.pauli_expectation([0], [PZ])
+        _corrected = SIGN_Z * mag_check
+        if abs(_corrected + 1.0) < 0.1:
+            ANGLE_SCALE = 1.0
+        elif abs(_corrected - 1.0) < 0.1:
+            ANGLE_SCALE = 0.5
+        else:
+            raise RuntimeError(
+                f"Fatal: r(PX,pi) returned ambiguous SIGN_Z*<Z> = {_corrected:.6f}; "
+                f"expected ~+1.0 or ~-1.0"
+            )
+        del _sim_mag
+        # -------------------------------------------------------
+
+        def apply_h(sim, q): sim.h(q)
+
+        def apply_rx(sim, theta, q):
+            sim.r(PX, float(theta) * ANGLE_SCALE, q)
+
+        def apply_ry(sim, theta, q):
+            sim.r(PY, float(theta) * ANGLE_SCALE, q)
+
+        def apply_rz(sim, theta, q):
+            sim.r(PZ, float(theta) * ANGLE_SCALE, q)
+
+        def apply_zz(sim, theta, q1, q2):
+            sim.mcx([q1], q2); apply_rz(sim, 2.0 * theta, q2); sim.mcx([q1], q2)
+
+        def trotter_step_body(sim, num_qubits, intra_edges, J, hx, hz, dt_local):
+            dt_half = dt_local / 2.0
+
+            theta_x  = -2.0 * hx * dt_half
+            theta_z  = -2.0 * hz * dt_local
+            theta_zz = -J * dt_local
+
+            for q in range(num_qubits): apply_rx(sim, theta_x, q)
+            for q in range(num_qubits): apply_rz(sim, theta_z, q)
+            for q1, q2 in intra_edges: apply_zz(sim, theta_zz, q1, q2)
+            for q in range(num_qubits): apply_rx(sim, theta_x, q)
+
+        def z_means(sim, qubits):
+            return np.array([SIGN_Z * float(sim.pauli_expectation([q], [PZ])) for q in qubits])
+
+        def x_means(sim, qubits):
+            return np.array([SIGN_X * float(sim.pauli_expectation([q], [PX])) for q in qubits])
+
+        def y_means(sim, qubits):
+            return np.array([SIGN_Y * float(sim.pauli_expectation([q], [PY])) for q in qubits])
+
+        def zz_exact(sim, edges):
+            return np.array([float(sim.pauli_expectation([q1, q2], [PZ, PZ])) for q1, q2 in edges])
+
+        def apply_kicks(sim, kicks, dt_local):
+            if not kicks: return
+            for raw_q, (kx, ky, kz) in kicks.items():
+                q = int(raw_q)
+                coef = -2.0 * dt_local
+                theta_x = kx * coef
+                theta_y = ky * coef
+                theta_z = kz * coef
+
+                if abs(theta_x) > 1e-12: apply_rx(sim, theta_x, q)
+                if abs(theta_y) > 1e-12: apply_ry(sim, theta_y, q)
+                if abs(theta_z) > 1e-12: apply_rz(sim, theta_z, q)
+
+        intra_edges, _edge_groups = generate_manifold_topology()
+
+        for m in assigned_manifolds:
+            sim = QrackSimulator(
+                qubit_count=QUBITS_PER_MANIFOLD,
+                is_binary_decision_tree=False,
+                is_stabilizer_hybrid=False,
+                is_gpu=True,
+            )
+            for q in range(QUBITS_PER_MANIFOLD): apply_h(sim, q)
+            sims[m] = sim
+
+            try:
+                _ = sim.pauli_expectation([0], [PZ])
+            except Exception as e:
+                raise RuntimeError(
+                    f"Fatal: VRAM/PCIe paging allocation failed on manifold {m} "
+                    f"(rank {rank}, gpu {physical_gpu_index}). Driver error: {e}")
+
+        kick_payloads = {m: {} for m in assigned_manifolds}
+        _warned_fidelity = False
+
+        for t in range(total_steps):
+            s = t / max(1, (total_steps - 1))
+            current_hx = (1.0 - s) * initial_hx + s * target_hx
+            current_J  = s * target_J
+            current_hz = s * target_hz
+            
+            is_measure = (t % measure_every == 0) or (t == total_steps - 1) or (t == probe_step)
+
+            manifold_data_to_master = {}
+
+            for m in assigned_manifolds:
+                sim = sims[m]
+                if kick_payloads[m]:
+                    apply_kicks(sim, kick_payloads[m], dt)
+
+                t_start_trotter = time.perf_counter()
+                trotter_step_body(sim, QUBITS_PER_MANIFOLD, intra_edges,
+                                  current_J, current_hx, current_hz, dt)
+                t_lat_trotter = time.perf_counter() - t_start_trotter
+
+                t_lat_tomo = 0.0
+                if is_measure:
+                    t_start_tomo = time.perf_counter()
+                    all_q = list(range(QUBITS_PER_MANIFOLD))
+                    state = {
+                        "Z": z_means(sim, all_q),
+                        "X": x_means(sim, all_q),
+                        "Y": y_means(sim, all_q),
+                    }
+                    zz_exp = zz_exact(sim, intra_edges)
+                    bulk_e = (-current_hz * float(np.sum(state["Z"]))
+                              - current_J  * float(np.sum(zz_exp))
+                              - current_hx * float(np.sum(state["X"])))
+                    t_lat_tomo = time.perf_counter() - t_start_tomo
+
+                    try:
+                        fidelity = float(sim.get_unitary_fidelity())
+                    except AttributeError:
+                        fidelity = 1.0  
+                        if not _warned_fidelity:
+                            print(f"[Worker {rank}] Warning: sim.get_unitary_fidelity() "
+                                  f"not found. Upgrade PyQrack for true fidelity tracking.",
+                                  file=sys.stderr)
+                            _warned_fidelity = True
+
+                    manifold_data_to_master[m] = {
+                        "state": state,
+                        "exact_bulk_energy": bulk_e,
+                        "lat_trotter_ms": t_lat_trotter * 1000.0,
+                        "lat_tomo_ms": t_lat_tomo * 1000.0,
+                        "unitary_fidelity": fidelity
+                    }
+
+            if is_measure:
+                conn.send(manifold_data_to_master)
+                kick_payloads = conn.recv()
+
+    finally:
+        for m in list(sims.keys()):
+            _s = sims.pop(m)
+            del _s
+        sims.clear()
+        gc.collect()
+        conn.close()
+
+
+# =====================================================================
+# MASTER ORCHESTRATOR
+# =====================================================================
+class K4ManifoldEngine:
+    def __init__(self, master_seed: int = 1337, twist: bool = TWIST_GLUING):
+        self.master_seed = master_seed
+        self.twist = twist
+        self.intra_edges, self.edge_groups = generate_manifold_topology()
+        self.junctions = build_junction_table(twist)
+        self.junction_by_pair = {(r["ma"], r["mb"]): r for r in self.junctions}
+        self.loop_indices = [self.junction_by_pair[jp]["index"]
+                             for jp in LOOP_JUNCTIONS]
+        self.chord_indices = [self.junction_by_pair[jp]["index"]
+                              for jp in CHORD_JUNCTIONS]
+
+        self.lattice_history  = []
+        self.energy_csv       = "k4_exact_ground_state_energy_curve.csv"
+        self.profiles_csv     = "k4_junction_profiles.csv"
+        self.loop_csv         = "k4_loop_momentum_spectrum.csv"
+        self.state_dump_file  = "k4_manifold_states.npy"
+        self.config_file      = "k4_manifold_config.json"
+
+        self._init_files()
+
+        self.worker_assignments = [[] for _ in range(TOTAL_WORKERS)]
+        for m in range(N_MANIFOLDS):
+            self.worker_assignments[m % TOTAL_WORKERS].append(m)
+
+    def _init_files(self):
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump({
+                    "topology": "K4_trihole_manifold_cluster",
+                    "n_manifolds": N_MANIFOLDS,
+                    "qubits_per_manifold": QUBITS_PER_MANIFOLD,
+                    "corner_per_edge": C_CORNER,
+                    "midedge_per_edge": E_MIDEDGE,
+                    "qubits_per_junction": QUBITS_PER_EDGE,
+                    "n_junctions": N_JUNCTIONS,
+                    "unique_qubits": UNIQUE_QUBITS,
+                    "intra_edges": len(self.intra_edges),
+                    "twist_gluing": self.twist,
+                    "loop_junctions": [f"J{a}{b}" for a, b in LOOP_JUNCTIONS],
+                    "chord_junctions": [f"J{a}{b}" for a, b in CHORD_JUNCTIONS],
+                    "moebius_pairs": [f"M{a}M{b}" for a, b in MOEBIUS_PAIRS],
+                    "gpus": GPUS_AVAILABLE,
+                    "manifold_vram_mb": MANIFOLD_VRAM_MB,
+                }, f)
+            with open(self.energy_csv, mode='w', newline='') as f:
+                csv.DictWriter(f, fieldnames=[
+                    "Step", "Anneal_Percent", "Exact_Bulk_Energy",
+                    "Junction_Energy", "Total_Energy",
+                    "Min_Unitary_Fidelity", "Swap_Asym_M0M1", "Swap_Asym_M2M3"
+                ]).writeheader()
+            with open(self.profiles_csv, mode='w', newline='') as f:
+                csv.DictWriter(f, fieldnames=[
+                    "Step", "Junction", "Kind", "X_mean", "Y_mean", "Z_mean"
+                ]).writeheader()
+            with open(self.loop_csv, mode='w', newline='') as f:
+                csv.DictWriter(f, fieldnames=[
+                    "Step", "Loop_Momentum", "Amp_X", "Amp_Y", "Amp_Z"
+                ]).writeheader()
+        except Exception as e:
+            print(f"[CSV] Warning: Setup configuration write failed: {e}",
+                  file=sys.stderr)
+
+    def _log_csvs(self, step, anneal, bulk, junction_e, total, min_fidelity,
+                  junction_vectors, loop_amps, asym):
+        try:
+            with open(self.energy_csv, mode='a', newline='') as f:
+                csv.DictWriter(f, fieldnames=[
+                    "Step", "Anneal_Percent", "Exact_Bulk_Energy",
+                    "Junction_Energy", "Total_Energy",
+                    "Min_Unitary_Fidelity", "Swap_Asym_M0M1", "Swap_Asym_M2M3"
+                ]).writerow({
+                    "Step": step, "Anneal_Percent": anneal,
+                    "Exact_Bulk_Energy": bulk,
+                    "Junction_Energy": junction_e,
+                    "Total_Energy": total,
+                    "Min_Unitary_Fidelity": min_fidelity,
+                    "Swap_Asym_M0M1": asym.get("M0M1", float('nan')),
+                    "Swap_Asym_M2M3": asym.get("M2M3", float('nan'))})
+
+            with open(self.profiles_csv, mode='a', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=[
+                    "Step", "Junction", "Kind", "X_mean", "Y_mean", "Z_mean"])
+                for rec in self.junctions:
+                    v = junction_vectors[rec["index"]]
+                    kind = "loop" if rec["index"] in self.loop_indices else "chord"
+                    w.writerow({"Step": step, "Junction": rec["label"],
+                                "Kind": kind,
+                                "X_mean": float(v[0]),
+                                "Y_mean": float(v[1]),
+                                "Z_mean": float(v[2])})
+
+            with open(self.loop_csv, mode='a', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=[
+                    "Step", "Loop_Momentum", "Amp_X", "Amp_Y", "Amp_Z"])
+                for k in range(loop_amps.shape[0]):
+                    w.writerow({"Step": step, "Loop_Momentum": k,
+                                "Amp_X": float(loop_amps[k, 0]),
+                                "Amp_Y": float(loop_amps[k, 1]),
+                                "Amp_Z": float(loop_amps[k, 2])})
+        except Exception as e:
+            print(f"[CSV] Warning: Log write failed: {e}", file=sys.stderr)
+
+    def run(self, total_steps: int, dt: float, initial_hx: float,
+            target_g_junction: float, target_J: float, target_hx: float,
+            target_hz: float, measure_every: int = 1,
+            effective_shots: float = 512.0,
+            probe_step: int = -1, probe_amplitude: float = 0.0,
+            probe_junction: int = 0):
+
+        if total_steps < 1:
+            raise ValueError("total_steps must be at least 1")
+        if measure_every < 1:
+            raise ValueError("measure_every must be a positive integer")
+        if not (0 <= probe_junction < N_JUNCTIONS):
+            raise ValueError("probe_junction out of range")
+        if probe_step >= 0 and probe_step >= total_steps:
+            raise ValueError(f"probe_step {probe_step} >= total_steps {total_steps}")
+
+        print(f"[Engine] K4: {N_MANIFOLDS} manifolds x {QUBITS_PER_MANIFOLD} qubits "
+              f"(all boundary), {N_JUNCTIONS} junctions x {QUBITS_PER_EDGE} qubits, "
+              f"{UNIQUE_QUBITS} unique qubits | "
+              f"gluing={'MOEBIUS' if self.twist else 'TRIVIAL'} | "
+              f"loop={[f'J{a}{b}' for a, b in LOOP_JUNCTIONS]} | "
+              f"{GPUS_AVAILABLE} GPUs | {total_steps} steps")
+
+        active_ranks = [r for r in range(TOTAL_WORKERS)
+                        if self.worker_assignments[r]]
+
+        workers = []
+        pipes   = []
+
+        for rank in active_ranks:
+            parent_conn, child_conn = mp.Pipe()
+            p = mp.Process(
+                target=gpu_worker_process,
+                args=(rank, WORKERS_PER_GPU, self.worker_assignments[rank],
+                      child_conn, dt, total_steps, initial_hx, target_J,
+                      target_hx, target_hz, measure_every, probe_step)
+            )
+            p.start()
+            child_conn.close()
+            workers.append(p)
+            pipes.append(parent_conn)
+
+        try:
+            for t in range(total_steps):
+                s = t / max(1, (total_steps - 1))
+                current_g_junction = s * target_g_junction
+                
+                is_measure = (t % measure_every == 0) or (t == total_steps - 1) or (t == probe_step)
+
+                if not is_measure:
+                    continue
+
+                t0 = time.perf_counter()
+
+                # --- GATHER ---
+                manifold_states = {}
+                bulk_energy = 0.0
+                max_lat_trotter = 0.0
+                max_lat_tomo = 0.0
+                min_fidelity = 1.0
+
+                for conn in pipes:
+                    try:
+                        data = conn.recv()
+                    except EOFError:
+                        raise RuntimeError("Worker IPC connection lost.")
+                    for m, payload in data.items():
+                        manifold_states[m] = payload["state"]
+                        bulk_energy += payload["exact_bulk_energy"]
+                        max_lat_trotter = max(max_lat_trotter,
+                                              payload["lat_trotter_ms"])
+                        max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
+                        min_fidelity = min(min_fidelity,
+                                           payload.get("unitary_fidelity", 1.0))
+
+                if len(manifold_states) != N_MANIFOLDS:
+                    raise RuntimeError(
+                        f"Fatal: IPC gather incomplete. Expected {N_MANIFOLDS} "
+                        f"manifolds, got {len(manifold_states)}.")
+
+                # --- HISTORY ---
+                step_state = np.zeros((N_MANIFOLDS, QUBITS_PER_MANIFOLD, 3))
+                for m, state in manifold_states.items():
+                    step_state[m, :, 0] = state["X"]
+                    step_state[m, :, 1] = state["Y"]
+                    step_state[m, :, 2] = state["Z"]
+                self.lattice_history.append(step_state.copy())
+
+                if len(self.lattice_history) % 10 == 0:
+                    try:
+                        np.save(self.state_dump_file,
+                                np.array(self.lattice_history))
+                    except Exception as e:
+                        print(f"[Checkpoint] Warning: Failed to save: {e}",
+                              file=sys.stderr)
+
+                # --- STOCHASTIC NOISE (Rev 88 scaling) ---
+                scale = np.sqrt(dt / effective_shots)
+                noise = {m: {} for m in range(N_MANIFOLDS)}
+                for rec in self.junctions:
+                    rng_j = np.random.default_rng(
+                        [self.master_seed, t, rec["index"]])
+                    for side, mm, qlist in (("a", rec["ma"], rec["qubits_a"]),
+                                            ("b", rec["mb"], rec["qubits_b"])):
+                        prof = manifold_states[mm]
+                        idx = np.array(qlist, dtype=np.intp)
+                        vx = np.clip(1.0 - prof["X"][idx] ** 2, 0.0, 1.0)
+                        vy = np.clip(1.0 - prof["Y"][idx] ** 2, 0.0, 1.0)
+                        vz = np.clip(1.0 - prof["Z"][idx] ** 2, 0.0, 1.0)
+                        n = len(qlist)
+                        xn = rng_j.normal(0.0, 1.0, n) * np.sqrt(vx) * scale
+                        yn = rng_j.normal(0.0, 1.0, n) * np.sqrt(vy) * scale
+                        zn = rng_j.normal(0.0, 1.0, n) * np.sqrt(vz) * scale
+                        for i, q in enumerate(qlist):
+                            noise[mm][q] = (xn[i], yn[i], zn[i])
+
+                # --- KICKS & JUNCTION ENERGY (bond-resolved) ---
+                kicks, junction_energy, junction_vectors = \
+                    compute_kicks_and_junction_energy(
+                        manifold_states, noise, self.junctions,
+                        current_g_junction)
+
+                # --- OPTIONAL LOCALIZED PROBE (rings the bell) ---
+                if probe_step >= 0 and t == probe_step and probe_amplitude != 0.0:
+                    rec = self.junctions[probe_junction]
+                    qa, qb = rec["bonds"][0]
+                    for (mm, qq) in ((rec["ma"], qa), (rec["mb"], qb)):
+                        k = kicks[mm].get(qq, (0.0, 0.0, 0.0))
+                        kicks[mm][qq] = (k[0] + probe_amplitude, k[1], k[2])
+                    print(f"[Probe] step {t}: injected amplitude "
+                          f"{probe_amplitude:+.4f} at {rec['label']} bond 0")
+
+                # --- RACETRACK DIAGNOSTICS ---
+                loop_amps = loop_momentum_amplitudes(junction_vectors,
+                                                     self.loop_indices)
+                asym = swap_asymmetry(manifold_states, self.junctions,
+                                      MOEBIUS_PAIRS)
+
+                total_energy = bulk_energy + junction_energy
+                asym_str = " ".join(f"{k}:{v:.4f}" for k, v in sorted(asym.items()))
+                print(f"Step {t:03d} | E: {total_energy:+.4f} "
+                      f"(bulk {bulk_energy:+.3f} / junc {junction_energy:+.3f}) | "
+                      f"Loop k1: {np.linalg.norm(loop_amps[1]):.4f} | "
+                      f"Asym {asym_str} | "
+                      f"Lat(Trot/Tomo): {max_lat_trotter:5.1f}/{max_lat_tomo:5.1f}ms | "
+                      f"Fid: {min_fidelity:.5f} | {time.perf_counter() - t0:.2f}s")
+                self._log_csvs(t, s * 100, bulk_energy, junction_energy,
+                               total_energy, min_fidelity, junction_vectors,
+                               loop_amps, asym)
+
+                # --- SCATTER ---
+                for i, w_rank in enumerate(active_ranks):
+                    worker_payload = {m: kicks[m]
+                                      for m in self.worker_assignments[w_rank]}
+                    pipes[i].send(worker_payload)
+
+        finally:
+            for conn in pipes:
+                try: conn.close()
+                except Exception: pass
+
+            if self.lattice_history:
+                try:
+                    np.save(self.state_dump_file,
+                            np.array(self.lattice_history))
+                    print(f"\n[Master] Dumped history matrix to "
+                          f"{self.state_dump_file}")
+                except Exception as e:
+                    print(f"\n[Master] Failed to save lattice history: {e}",
+                          file=sys.stderr)
+
+            for p in workers:
+                p.join(timeout=15)
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=3)
+                    if p.is_alive():
+                        try: p.kill()
+                        except Exception: pass
+
+
+if __name__ == "__main__":
+    mp.set_start_method('spawn', force=True)
+
+    engine = K4ManifoldEngine(master_seed=1337, twist=TWIST_GLUING)
+    try:
+        engine.run(
+            total_steps=100,
+            dt=0.04,
+            initial_hx=3.0,
+            target_g_junction=0.15,
+            target_J=1.0,
+            target_hx=0.5,
+            target_hz=0.2,
+            measure_every=1,
+            effective_shots=512.0,
+            probe_step=-1,          # set >= 0 to ring the bell
+            probe_amplitude=0.5,
+            probe_junction=0
+        )
+    except KeyboardInterrupt:
+        pass
