@@ -3,55 +3,39 @@
 # (4 Tri-Hole Manifolds x 27 Qubits, 6 Junctions, 54 Unique Qubits)
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 303 - K4 MANIFOLD TOPOLOGY (Patched)
-# (forked from Rev 88/300 NN3D 3x3x3 macroscopic grid)
+# REVISION 311 - HANG PREVENTION REFINEMENTS (backport from Rev 310 fp16)
+# (forked from Rev 303 27-qubit manifold)
 #
-# TOPOLOGY CHANGE (Rev 301):
-# - PATCH GEOMETRY: The 3x3x3 cubic sub-volume is replaced by a tri-hole
-#   manifold: 3 portal rims of 18 qubits each, C=3 corner + E=6 mid-edge
-#   qubits per intra-manifold edge, U=0 unique qubits. 27 qubits total,
-#   30 intra-manifold rim edges, every qubit belongs to exactly 2 portals.
-#   There is no bulk: the manifold is 100 percent boundary.
-# - CLUSTER: 4 manifolds wired as the complete graph K4. Each manifold has
-#   exactly 3 local edges and K4 requires degree 3, so the fit is exact and
-#   K5 is impossible. Every manifold reaches every other in one hop.
-#   6 junctions x 9 qubits = 54 unique qubits (4*27 - 6*9). In K4 every
-#   qubit of every manifold is a junction qubit shared with exactly one
-#   other manifold.
-# - COUPLING: Rev 88 averaged each of the 6 cube faces into a single
-#   mean-field vector. Here the junction channel is BOND-RESOLVED: each of
-#   the 9 qubit pairs across a junction exchanges its own Bloch vector.
-#   Face-averaging would discard the loop structure the racetrack measures.
-# - GLUING: junction pairing is either identity (trivial) or order-reversing
-#   (TWIST_GLUING=True), the discrete analogue of the Moebius half-twist.
-#   Running both and differencing the loop-mode spectrum is the direct
-#   measurement of the holonomy.
+# CHANGES vs Rev 303 (runtime robustness backport from Rev 310):
+# - Import: added multiprocessing.connection as mpc.
+# - Worker tomo: Guarded zz_exact call; only called when Z_arr is finite,
+#   preventing hang on known-broken GPU.
+# - Worker tomo: NaN detection on Z/X/Y arrays + sim reinit to |+>^27 with
+#   exponential-backoff cooldown (NAN_COOLDOWN_BASE_S * nan_streak).
+# - Worker tomo: Fast single-qubit sanity check after reinit; if still broken
+#   replaces sim with dummy and returns NaN arrays rather than hanging.
+# - Worker apply_kicks: isfinite guard on kx/ky/kz before rotation.
+# - Worker reinit: sim deletion + gc.collect() BEFORE cooldown sleep.
+# - Master gather: replaced blocking conn.recv() with mpc.wait() + deadline
+#   (GATHER_TIMEOUT_S=30s); timed-out workers substitute last-good state.
+# - Master gather: NaN detection on received state arrays; substitutes
+#   last-good state on any non-finite manifold payload.
+# - Master gather: non-finite bulk_energy contributions skipped (guarded by
+#   math.isfinite check) rather than accumulating NaN into total energy.
+# - Master: added _get_last_good() helper returning last snapshot or zeros/ones.
+# - Noise injection: np.where NaN guard on variance (replaces bare np.clip).
+# - Config JSON: added revision and rim_edges fields.
+# - Added GATHER_TIMEOUT_S and NAN_COOLDOWN_BASE_S constants.
+# - Added _EXPECTED_RIM_EDGES = 3 * (QUBITS_PER_EDGE + 1) = 30 constant;
+#   generate_manifold_topology() uses it (replaces hardcoded 30).
 #
-# DIAGNOSTICS ADDED (Rev 301):
-# - RACETRACK LOOP DFT: the Hamiltonian cycle 0-1-2-3-0 defines a 4-junction
-#   loop coordinate. Each measure step the per-junction mean Bloch vector is
-#   DFT'd over that coordinate, giving loop-momentum amplitudes k=0..3.
-#   Ideal ringing sits on a dispersion curve; off-curve weight is error.
-#   The remaining 2 junctions (0,2) and (1,3) are logged as chords.
-# - KICK PROBE: an optional localized kick injected at one junction at a
-#   chosen step, so the loop-momentum time series can be FFT'd offline for
-#   the mode spectrum and the roundtrip decay envelope F(n).
-# - SWAP ASYMMETRY: with Moebius pairs (0,1) and (2,3), the ideal dynamics
-#   commutes with exchanging the two halves, so the residual asymmetry
-#   between paired manifolds is pure error signal. This is a live parity
-#   check where no exact ground truth exists; it is NOT an echo and does
-#   not cancel reversible error the way a temporal mirror does.
-# - RNG SEEDING: stochastic noise is seeded on the twist-invariant junction
-#   label, not the manifold index, so relabeling or twisting the gluing
-#   cannot manufacture asymmetry that would read as error.
-#
-# INHERITED FROM Rev 88 (unchanged):
-# - Stochastic scaling np.sqrt(dt / effective_shots), no measure_every
-#   inflation (Rev 88 fix).
-# - Continuous coupling: kick payloads persist across non-measure steps and
-#   apply_kicks carries no m_every multiplier (Rev 87 fixes).
-# - Pauli code + angle convention autodetect per worker process.
-# - One-time stderr alert for missing PyQrack fidelity bindings.
+# TOPOLOGY UNCHANGED FROM Rev 303:
+# - Tri-hole manifold: 3 portal rims of 18 qubits each, C=3 corner + E=6
+#   mid-edge qubits per intra-manifold edge. 27 qubits total.
+#   30 intra-manifold rim edges; every qubit belongs to exactly 2 portals.
+# - K4 cluster: 6 junctions x 9 qubits = 54 unique qubits.
+# - TWIST_GLUING, racetrack DFT, swap asymmetry, bond-resolved kicks,
+#   stochastic scaling, Pauli autodetect: all unchanged.
 
 import os
 import sys
@@ -62,42 +46,45 @@ import time
 import math
 import numpy as np
 import multiprocessing as mp
+import multiprocessing.connection as mpc
 from typing import List, Tuple, Dict, Any
 
 # --- GLOBAL CONFIGURATION ---
-C_CORNER = 3                     # corner qubits per intra-manifold edge
-E_MIDEDGE = 6                    # mid-edge qubits per intra-manifold edge
-QUBITS_PER_EDGE = C_CORNER + E_MIDEDGE          # 9
-LOCAL_EDGES = 3                                  # 3 portals -> 3 intra edges
+C_CORNER  = 3                                    # corner qubits per intra-manifold edge
+E_MIDEDGE = 6                                    # mid-edge qubits per intra-manifold edge
+QUBITS_PER_EDGE     = C_CORNER + E_MIDEDGE       # 9
+LOCAL_EDGES         = 3                           # 3 portals -> 3 intra edges
 QUBITS_PER_MANIFOLD = LOCAL_EDGES * QUBITS_PER_EDGE   # 27
 N_RIM = 2 * QUBITS_PER_EDGE                      # 18 slots per portal ring
 
-N_MANIFOLDS = 4                                  # K4
-NEIGHBOURS = [[j for j in range(N_MANIFOLDS) if j != i]
-              for i in range(N_MANIFOLDS)]
+N_MANIFOLDS    = 4                               # K4
+NEIGHBOURS     = [[j for j in range(N_MANIFOLDS) if j != i]
+                  for i in range(N_MANIFOLDS)]
 JUNCTION_PAIRS = [(i, j) for i in range(N_MANIFOLDS)
-                  for j in range(i + 1, N_MANIFOLDS)]     # 6 junctions
-N_JUNCTIONS = len(JUNCTION_PAIRS)
+                  for j in range(i + 1, N_MANIFOLDS)]   # 6 junctions
+N_JUNCTIONS    = len(JUNCTION_PAIRS)
 
-# Racetrack: Hamiltonian cycle 0-1-2-3-0 gives the loop coordinate
-LOOP_CYCLE = [0, 1, 2, 3]
+LOOP_CYCLE     = [0, 1, 2, 3]
 LOOP_JUNCTIONS = [tuple(sorted((LOOP_CYCLE[i], LOOP_CYCLE[(i + 1) % 4])))
                   for i in range(4)]
 CHORD_JUNCTIONS = [jp for jp in JUNCTION_PAIRS if jp not in LOOP_JUNCTIONS]
 
-# Moebius pairs for the swap-asymmetry parity check
 MOEBIUS_PAIRS = [(0, 1), (2, 3)]
+TWIST_GLUING  = True
 
-# Gluing: True = order-reversing (Moebius half-twist), False = identity
-TWIST_GLUING = True
-
-# Topography tuning for raw statevectors
-GPUS_AVAILABLE = 4
-WORKERS_PER_GPU = 1              # one manifold per worker, one worker per GPU
-TOTAL_WORKERS = GPUS_AVAILABLE * WORKERS_PER_GPU
+GPUS_AVAILABLE   = 4
+WORKERS_PER_GPU  = 1
+TOTAL_WORKERS    = GPUS_AVAILABLE * WORKERS_PER_GPU
 MANIFOLD_VRAM_MB = 2048          # 2^27 * 8B = 1 GB fp32; 2 GB cap for QUnit
 
-UNIQUE_QUBITS = N_MANIFOLDS * QUBITS_PER_MANIFOLD - N_JUNCTIONS * QUBITS_PER_EDGE
+UNIQUE_QUBITS = (N_MANIFOLDS * QUBITS_PER_MANIFOLD
+                 - N_JUNCTIONS * QUBITS_PER_EDGE)   # 54
+
+# Expected intra-manifold rim edge count: 3 * (QUBITS_PER_EDGE + 1)
+_EXPECTED_RIM_EDGES = 3 * (QUBITS_PER_EDGE + 1)     # 30
+
+GATHER_TIMEOUT_S    = 30.0
+NAN_COOLDOWN_BASE_S = 1.5
 
 assert QUBITS_PER_MANIFOLD <= 28, "28-qubit fp32 ceiling for a 2GB statevector"
 assert N_MANIFOLDS - 1 <= LOCAL_EDGES, "K_N needs degree N-1 <= 3 local edges"
@@ -126,8 +113,7 @@ def portal_ring(p: int) -> List[int]:
 def generate_manifold_topology() -> Tuple[List[Tuple[int, int]],
                                           Dict[int, List[int]]]:
     """Tri-hole manifold: 3 portal rings of 18 qubits, 27 qubits total.
-    Returns (intra_edges, edge_groups) where edge_groups[k] is the list of
-    9 local qubits carrying junction k. Validated at import time."""
+    Intra-manifold rim edge count: 3*(QUBITS_PER_EDGE+1) = 30."""
     edges = set()
     for p in range(LOCAL_EDGES):
         ring = portal_ring(p)
@@ -136,10 +122,10 @@ def generate_manifold_topology() -> Tuple[List[Tuple[int, int]],
             edges.add((min(a, b), max(a, b)))
     intra_edges = sorted(edges)
 
-    # invariants
-    if len(intra_edges) != 30:
+    if len(intra_edges) != _EXPECTED_RIM_EDGES:
         raise RuntimeError(
-            f"Fatal: expected 30 intra-manifold rim edges, got {len(intra_edges)}")
+            f"Fatal: expected {_EXPECTED_RIM_EDGES} intra-manifold rim edges, "
+            f"got {len(intra_edges)}")
     seen_q = set()
     for a, b in intra_edges:
         seen_q.add(a); seen_q.add(b)
@@ -147,7 +133,6 @@ def generate_manifold_topology() -> Tuple[List[Tuple[int, int]],
         raise RuntimeError(
             f"Fatal: rim edges cover {len(seen_q)} qubits, "
             f"expected {QUBITS_PER_MANIFOLD}")
-    # every qubit must belong to exactly 2 portals (all-boundary property)
     in_portals: Dict[int, int] = {q: 0 for q in range(QUBITS_PER_MANIFOLD)}
     for p in range(LOCAL_EDGES):
         for q in portal_ring(p):
@@ -155,7 +140,6 @@ def generate_manifold_topology() -> Tuple[List[Tuple[int, int]],
     if any(v != 2 for v in in_portals.values()):
         raise RuntimeError("Fatal: all-boundary property violated "
                            "(qubit not in exactly 2 portals)")
-    # connectivity
     adj: Dict[int, set] = {q: set() for q in range(QUBITS_PER_MANIFOLD)}
     for a, b in intra_edges:
         adj[a].add(b); adj[b].add(a)
@@ -174,8 +158,7 @@ def generate_manifold_topology() -> Tuple[List[Tuple[int, int]],
 
 
 def junction_slot(manifold: int, neighbour: int) -> int:
-    """Which local edge index of `manifold` carries the junction to
-    `neighbour`. Each manifold uses each of its 3 local edges exactly once."""
+    """Which local edge index of `manifold` carries the junction to `neighbour`."""
     return NEIGHBOURS[manifold].index(neighbour)
 
 
@@ -191,8 +174,6 @@ def junction_pairing(twist: bool) -> List[int]:
 
 
 def build_junction_table(twist: bool) -> List[Dict[str, Any]]:
-    """One record per junction: the two manifolds, the local qubit list on
-    each side, and the paired (qa, qb) bonds carrying the mean-field kick."""
     pairing = junction_pairing(twist)
     table = []
     for ji, (ma, mb) in enumerate(JUNCTION_PAIRS):
@@ -210,7 +191,6 @@ def build_junction_table(twist: bool) -> List[Dict[str, Any]]:
             "bonds": bonds,
             "label": f"J{ma}{mb}",
         })
-    # each manifold must use each local edge exactly once
     used: Dict[int, List[int]] = {m: [] for m in range(N_MANIFOLDS)}
     for rec in table:
         used[rec["ma"]].append(rec["slot_a"])
@@ -230,13 +210,6 @@ def compute_kicks_and_junction_energy(
         g_junction: float
         ) -> Tuple[Dict[int, Dict[int, Tuple[float, float, float]]],
                    float, Dict[int, np.ndarray]]:
-    """Bond-resolved mean-field exchange across all 6 junctions.
-
-    For each paired bond (qa on manifold ma, qb on manifold mb), each side
-    receives a Bloch-frame kick g * (a_other + noise_other), and the pair
-    contributes -g * (a_a . a_b) to the junction energy. Returns
-    (kicks per manifold keyed by local qubit, total junction energy,
-    per-junction mean Bloch vector used for the loop DFT)."""
     kicks: Dict[int, Dict[int, Tuple[float, float, float]]] = {
         m: {} for m in range(N_MANIFOLDS)}
 
@@ -258,12 +231,13 @@ def compute_kicks_and_junction_energy(
 
     for rec in junctions:
         ma, mb = rec["ma"], rec["mb"]
-        acc = np.zeros(3)
+        acc    = np.zeros(3)
         n_sites = 0
         for (qa, qb) in rec["bonds"]:
             va = site_vec(ma, qa)
             vb = site_vec(mb, qb)
-            energy += -g_junction * (va[0] * vb[0] + va[1] * vb[1]
+            energy += -g_junction * (va[0] * vb[0]
+                                     + va[1] * vb[1]
                                      + va[2] * vb[2])
             add_kick(ma, qa, g_junction, vb)
             add_kick(mb, qb, g_junction, va)
@@ -276,12 +250,7 @@ def compute_kicks_and_junction_energy(
 
 def loop_momentum_amplitudes(junction_vectors: Dict[int, np.ndarray],
                              loop_indices: List[int]) -> np.ndarray:
-    """DFT of the per-junction mean Bloch vector over the racetrack loop
-    coordinate. Returns |amplitude| with shape (n_loop, 3): rows are loop
-    momenta k=0..n_loop-1, columns are X,Y,Z. k=0 is the uniform mode;
-    higher k are the ringing overtones whose degeneracy the Moebius
-    holonomy splits."""
-    n = len(loop_indices)
+    n    = len(loop_indices)
     data = np.array([junction_vectors[ji] for ji in loop_indices])  # (n,3)
     amps = np.zeros((n, 3))
     for k in range(n):
@@ -294,10 +263,7 @@ def loop_momentum_amplitudes(junction_vectors: Dict[int, np.ndarray],
 def swap_asymmetry(profiles: Dict[int, Dict[str, np.ndarray]],
                    junctions: List[Dict[str, Any]],
                    pairs: List[Tuple[int, int]]) -> Dict[str, float]:
-    """RMS mismatch between paired manifolds, compared through the junction
-    bonds that connect them. Under symmetric drive the ideal dynamics is
-    invariant under the swap, so this residual is pure error signal."""
-    out: Dict[str, float] = {}
+    out     = {}
     by_pair = {(r["ma"], r["mb"]): r for r in junctions}
     for (ma, mb) in pairs:
         rec = by_pair.get((min(ma, mb), max(ma, mb)))
@@ -333,17 +299,17 @@ def gpu_worker_process(
     measure_every: int,
     probe_step: int
 ):
-    os.environ["PYQRACK_SHARED_LIB_PATH"] = "/usr/local/lib/qrack/libqrack_pinvoke.so"
-    os.environ["OCL_ICD_PLATFORM_SORT"] = "none"
+    os.environ["PYQRACK_SHARED_LIB_PATH"]         = "/usr/local/lib/qrack/libqrack_pinvoke.so"
+    os.environ["OCL_ICD_PLATFORM_SORT"]           = "none"
 
     physical_gpu_index = rank // workers_per_gpu
-    os.environ["QRACK_OCL_DEFAULT_DEVICE"] = str(physical_gpu_index)
-    os.environ["QRACK_QPAGER_DEVICES"] = str(physical_gpu_index)
-    os.environ["QRACK_QUNITMULTI_DEVICES"] = str(physical_gpu_index)
+    os.environ["QRACK_OCL_DEFAULT_DEVICE"]        = str(physical_gpu_index)
+    os.environ["QRACK_QPAGER_DEVICES"]            = str(physical_gpu_index)
+    os.environ["QRACK_QUNITMULTI_DEVICES"]        = str(physical_gpu_index)
 
     # 27 qubits fp32 = 1 GB of amplitudes; cap at 2 GB per manifold for QUnit
-    alloc_mb = (MANIFOLD_VRAM_MB * max(1, len(assigned_manifolds)))
-    os.environ["QRACK_MAX_ALLOC_MB"] = str(alloc_mb)
+    alloc_mb = MANIFOLD_VRAM_MB * max(1, len(assigned_manifolds))
+    os.environ["QRACK_MAX_ALLOC_MB"]              = str(alloc_mb)
     os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
 
     import pyqrack
@@ -355,9 +321,8 @@ def gpu_worker_process(
         # --- PAULI CODE AUTODETECT ---
         _THRESH = 0.5
 
-        # Z Probe
         _probe_z = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
-        vals0_z = {}
+        vals0_z  = {}
         for _code in range(8):
             try: vals0_z[_code] = _probe_z.pauli_expectation([0], [_code])
             except Exception: pass
@@ -367,17 +332,16 @@ def gpu_worker_process(
             try: v1 = _probe_z.pauli_expectation([0], [_code])
             except Exception: continue
             if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
-                PZ = _code
+                PZ    = _code
                 SIGN_Z = 1.0 if v0 > 0 else -1.0
                 break
         if PZ is None:
             raise RuntimeError("Fatal: could not autodetect PZ code")
         del _probe_z
 
-        # X Probe
         _probe_x = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
         _probe_x.h(0)
-        vals0_x = {}
+        vals0_x  = {}
         for _code in range(8):
             if _code == PZ: continue
             try: vals0_x[_code] = _probe_x.pauli_expectation([0], [_code])
@@ -388,19 +352,18 @@ def gpu_worker_process(
             try: v1 = _probe_x.pauli_expectation([0], [_code])
             except Exception: continue
             if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
-                PX = _code
+                PX    = _code
                 SIGN_X = 1.0 if v0 > 0 else -1.0
                 break
         if PX is None:
             raise RuntimeError("Fatal: could not autodetect PX code")
         del _probe_x
 
-        # Y Probe
         _probe_y = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
-        _c, _s = math.cos(math.pi / 4.0), math.sin(math.pi / 4.0)
+        _c, _s   = math.cos(math.pi / 4.0), math.sin(math.pi / 4.0)
         _probe_y.mtrx([complex(_c, 0), complex(0, _s),
                        complex(0, _s), complex(_c, 0)], 0)
-        vals0_y = {}
+        vals0_y  = {}
         for _code in range(8):
             if _code in (PX, PZ): continue
             try: vals0_y[_code] = _probe_y.pauli_expectation([0], [_code])
@@ -411,19 +374,17 @@ def gpu_worker_process(
             try: v1 = _probe_y.pauli_expectation([0], [_code])
             except Exception: continue
             if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
-                PY = _code
+                PY    = _code
                 SIGN_Y = 1.0 if v0 > 0 else -1.0
                 break
         if PY is None:
             raise RuntimeError("Fatal: could not autodetect PY code")
         del _probe_y
-        # ----------------------------
 
         # --- ANGLE CONVENTION AUTODETECT ---
-        _sim_mag = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+        _sim_mag   = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
         _sim_mag.r(PX, math.pi, 0)
-        mag_check = _sim_mag.pauli_expectation([0], [PZ])
-        _corrected = SIGN_Z * mag_check
+        _corrected = SIGN_Z * _sim_mag.pauli_expectation([0], [PZ])
         if abs(_corrected + 1.0) < 0.1:
             ANGLE_SCALE = 1.0
         elif abs(_corrected - 1.0) < 0.1:
@@ -431,10 +392,8 @@ def gpu_worker_process(
         else:
             raise RuntimeError(
                 f"Fatal: r(PX,pi) returned ambiguous SIGN_Z*<Z> = {_corrected:.6f}; "
-                f"expected ~+1.0 or ~-1.0"
-            )
+                f"expected ~+1.0 or ~-1.0")
         del _sim_mag
-        # -------------------------------------------------------
 
         def apply_h(sim, q): sim.h(q)
 
@@ -451,41 +410,42 @@ def gpu_worker_process(
             sim.mcx([q1], q2); apply_rz(sim, 2.0 * theta, q2); sim.mcx([q1], q2)
 
         def trotter_step_body(sim, num_qubits, intra_edges, J, hx, hz, dt_local):
-            dt_half = dt_local / 2.0
-
+            dt_half  = dt_local / 2.0
             theta_x  = -2.0 * hx * dt_half
             theta_z  = -2.0 * hz * dt_local
             theta_zz = -J * dt_local
-
-            for q in range(num_qubits): apply_rx(sim, theta_x, q)
-            for q in range(num_qubits): apply_rz(sim, theta_z, q)
-            for q1, q2 in intra_edges: apply_zz(sim, theta_zz, q1, q2)
-            for q in range(num_qubits): apply_rx(sim, theta_x, q)
+            for q in range(num_qubits):    apply_rx(sim, theta_x, q)
+            for q in range(num_qubits):    apply_rz(sim, theta_z, q)
+            for q1, q2 in intra_edges:     apply_zz(sim, theta_zz, q1, q2)
+            for q in range(num_qubits):    apply_rx(sim, theta_x, q)
 
         def z_means(sim, qubits):
-            return np.array([SIGN_Z * float(sim.pauli_expectation([q], [PZ])) for q in qubits])
+            return np.array([SIGN_Z * float(sim.pauli_expectation([q], [PZ]))
+                             for q in qubits])
 
         def x_means(sim, qubits):
-            return np.array([SIGN_X * float(sim.pauli_expectation([q], [PX])) for q in qubits])
+            return np.array([SIGN_X * float(sim.pauli_expectation([q], [PX]))
+                             for q in qubits])
 
         def y_means(sim, qubits):
-            return np.array([SIGN_Y * float(sim.pauli_expectation([q], [PY])) for q in qubits])
+            return np.array([SIGN_Y * float(sim.pauli_expectation([q], [PY]))
+                             for q in qubits])
 
         def zz_exact(sim, edges):
-            return np.array([float(sim.pauli_expectation([q1, q2], [PZ, PZ])) for q1, q2 in edges])
+            return np.array([float(sim.pauli_expectation([q1, q2], [PZ, PZ]))
+                             for q1, q2 in edges])
 
         def apply_kicks(sim, kicks, dt_local):
             if not kicks: return
             for raw_q, (kx, ky, kz) in kicks.items():
-                q = int(raw_q)
+                q    = int(raw_q)
                 coef = -2.0 * dt_local
-                theta_x = kx * coef
-                theta_y = ky * coef
-                theta_z = kz * coef
-
-                if abs(theta_x) > 1e-12: apply_rx(sim, theta_x, q)
-                if abs(theta_y) > 1e-12: apply_ry(sim, theta_y, q)
-                if abs(theta_z) > 1e-12: apply_rz(sim, theta_z, q)
+                if not math.isfinite(kx): kx = 0.0   # NaN guard
+                if not math.isfinite(ky): ky = 0.0
+                if not math.isfinite(kz): kz = 0.0
+                if abs(kx * coef) > 1e-12: apply_rx(sim, kx * coef, q)
+                if abs(ky * coef) > 1e-12: apply_ry(sim, ky * coef, q)
+                if abs(kz * coef) > 1e-12: apply_rz(sim, kz * coef, q)
 
         intra_edges, _edge_groups = generate_manifold_topology()
 
@@ -498,7 +458,6 @@ def gpu_worker_process(
             )
             for q in range(QUBITS_PER_MANIFOLD): apply_h(sim, q)
             sims[m] = sim
-
             try:
                 _ = sim.pauli_expectation([0], [PZ])
             except Exception as e:
@@ -506,16 +465,19 @@ def gpu_worker_process(
                     f"Fatal: VRAM/PCIe paging allocation failed on manifold {m} "
                     f"(rank {rank}, gpu {physical_gpu_index}). Driver error: {e}")
 
-        kick_payloads = {m: {} for m in assigned_manifolds}
+        kick_payloads    = {m: {} for m in assigned_manifolds}
         _warned_fidelity = False
 
+        nan_streak = {m: 0 for m in assigned_manifolds}
+
         for t in range(total_steps):
-            s = t / max(1, (total_steps - 1))
+            s          = t / max(1, (total_steps - 1))
             current_hx = (1.0 - s) * initial_hx + s * target_hx
             current_J  = s * target_J
             current_hz = s * target_hz
-            
-            is_measure = (t % measure_every == 0) or (t == total_steps - 1) or (t == probe_step)
+            is_measure = ((t % measure_every == 0)
+                          or (t == total_steps - 1)
+                          or (t == probe_step))
 
             manifold_data_to_master = {}
 
@@ -532,13 +494,77 @@ def gpu_worker_process(
                 t_lat_tomo = 0.0
                 if is_measure:
                     t_start_tomo = time.perf_counter()
-                    all_q = list(range(QUBITS_PER_MANIFOLD))
-                    state = {
-                        "Z": z_means(sim, all_q),
-                        "X": x_means(sim, all_q),
-                        "Y": y_means(sim, all_q),
-                    }
-                    zz_exp = zz_exact(sim, intra_edges)
+                    all_q  = list(range(QUBITS_PER_MANIFOLD))
+
+                    Z_arr = z_means(sim, all_q)
+                    X_arr = x_means(sim, all_q)
+                    Y_arr = y_means(sim, all_q)
+
+                    if not (np.all(np.isfinite(Z_arr))
+                            and np.all(np.isfinite(X_arr))
+                            and np.all(np.isfinite(Y_arr))):
+                        nan_streak[m] += 1
+                        print(f"[Worker {rank}] NaN tomo on M{m} at t={t}; "
+                              f"reinit to |+>^{QUBITS_PER_MANIFOLD}",
+                              file=sys.stderr)
+
+                        try:
+                            del sims[m]
+                        except KeyError:
+                            pass
+                        gc.collect()
+
+                        if nan_streak[m] > 1:
+                            sleep_s = NAN_COOLDOWN_BASE_S * nan_streak[m]
+                            print(f"[Worker {rank}] NaN streak {nan_streak[m]} "
+                                  f"on M{m}; cooldown {sleep_s:.1f}s",
+                                  file=sys.stderr)
+                            time.sleep(sleep_s)
+
+                        sim = QrackSimulator(
+                            qubit_count=QUBITS_PER_MANIFOLD,
+                            is_binary_decision_tree=False,
+                            is_stabilizer_hybrid=False, is_gpu=True)
+                        for q in range(QUBITS_PER_MANIFOLD):
+                            apply_h(sim, q)
+                        sims[m] = sim
+
+                        _sanity = float(sim.pauli_expectation([0], [PX]))
+                        if not math.isfinite(_sanity) or abs(_sanity - SIGN_X) > 0.5:
+                            print(f"[Worker {rank}] GPU still broken after reinit "
+                                  f"M{m} t={t}; sleeping 5s and returning NaN",
+                                  file=sys.stderr)
+                            time.sleep(5.0)
+
+                            try:
+                                del sims[m]
+                            except KeyError:
+                                pass
+                            gc.collect()
+
+                            sim = QrackSimulator(
+                                qubit_count=QUBITS_PER_MANIFOLD,
+                                is_binary_decision_tree=False,
+                                is_stabilizer_hybrid=False, is_gpu=True)
+                            sims[m] = sim
+
+                            Z_arr = np.full(QUBITS_PER_MANIFOLD, float('nan'))
+                            X_arr = np.full(QUBITS_PER_MANIFOLD, float('nan'))
+                            Y_arr = np.full(QUBITS_PER_MANIFOLD, float('nan'))
+                        else:
+                            Z_arr = z_means(sim, all_q)
+                            X_arr = x_means(sim, all_q)
+                            Y_arr = y_means(sim, all_q)
+                    else:
+                        nan_streak[m] = 0
+
+                    state = {"Z": Z_arr, "X": X_arr, "Y": Y_arr}
+
+                    if np.all(np.isfinite(Z_arr)):
+                        zz_exp = zz_exact(sim, intra_edges)
+                    else:
+                        zz_exp = np.zeros(len(intra_edges))
+
                     bulk_e = (-current_hz * float(np.sum(state["Z"]))
                               - current_J  * float(np.sum(zz_exp))
                               - current_hx * float(np.sum(state["X"])))
@@ -547,19 +573,20 @@ def gpu_worker_process(
                     try:
                         fidelity = float(sim.get_unitary_fidelity())
                     except AttributeError:
-                        fidelity = 1.0  
+                        fidelity = 1.0
                         if not _warned_fidelity:
-                            print(f"[Worker {rank}] Warning: sim.get_unitary_fidelity() "
-                                  f"not found. Upgrade PyQrack for true fidelity tracking.",
+                            print(f"[Worker {rank}] Warning: "
+                                  f"sim.get_unitary_fidelity() not found. "
+                                  f"Upgrade PyQrack for true fidelity tracking.",
                                   file=sys.stderr)
                             _warned_fidelity = True
 
                     manifold_data_to_master[m] = {
-                        "state": state,
+                        "state":             state,
                         "exact_bulk_energy": bulk_e,
-                        "lat_trotter_ms": t_lat_trotter * 1000.0,
-                        "lat_tomo_ms": t_lat_tomo * 1000.0,
-                        "unitary_fidelity": fidelity
+                        "lat_trotter_ms":    t_lat_trotter * 1000.0,
+                        "lat_tomo_ms":       t_lat_tomo    * 1000.0,
+                        "unitary_fidelity":  fidelity,
                     }
 
             if is_measure:
@@ -581,14 +608,14 @@ def gpu_worker_process(
 class K4ManifoldEngine:
     def __init__(self, master_seed: int = 1337, twist: bool = TWIST_GLUING):
         self.master_seed = master_seed
-        self.twist = twist
+        self.twist       = twist
         self.intra_edges, self.edge_groups = generate_manifold_topology()
-        self.junctions = build_junction_table(twist)
+        self.junctions        = build_junction_table(twist)
         self.junction_by_pair = {(r["ma"], r["mb"]): r for r in self.junctions}
-        self.loop_indices = [self.junction_by_pair[jp]["index"]
-                             for jp in LOOP_JUNCTIONS]
-        self.chord_indices = [self.junction_by_pair[jp]["index"]
-                              for jp in CHORD_JUNCTIONS]
+        self.loop_indices     = [self.junction_by_pair[jp]["index"]
+                                 for jp in LOOP_JUNCTIONS]
+        self.chord_indices    = [self.junction_by_pair[jp]["index"]
+                                 for jp in CHORD_JUNCTIONS]
 
         self.lattice_history  = []
         self.energy_csv       = "k4_exact_ground_state_energy_curve.csv"
@@ -603,25 +630,37 @@ class K4ManifoldEngine:
         for m in range(N_MANIFOLDS):
             self.worker_assignments[m % TOTAL_WORKERS].append(m)
 
+    def _get_last_good(self, m):
+        if self.lattice_history:
+            last = self.lattice_history[-1]
+            return {"X": last[m, :, 0].copy(),
+                    "Y": last[m, :, 1].copy(),
+                    "Z": last[m, :, 2].copy()}
+        return {"X": np.zeros(QUBITS_PER_MANIFOLD),
+                "Y": np.zeros(QUBITS_PER_MANIFOLD),
+                "Z": np.ones(QUBITS_PER_MANIFOLD)}
+
     def _init_files(self):
         try:
             with open(self.config_file, 'w') as f:
                 json.dump({
-                    "topology": "K4_trihole_manifold_cluster",
-                    "n_manifolds": N_MANIFOLDS,
+                    "topology":            "K4_trihole_manifold_cluster",
+                    "revision":            311,
+                    "n_manifolds":         N_MANIFOLDS,
                     "qubits_per_manifold": QUBITS_PER_MANIFOLD,
-                    "corner_per_edge": C_CORNER,
-                    "midedge_per_edge": E_MIDEDGE,
+                    "corner_per_edge":     C_CORNER,
+                    "midedge_per_edge":    E_MIDEDGE,
                     "qubits_per_junction": QUBITS_PER_EDGE,
-                    "n_junctions": N_JUNCTIONS,
-                    "unique_qubits": UNIQUE_QUBITS,
-                    "intra_edges": len(self.intra_edges),
-                    "twist_gluing": self.twist,
-                    "loop_junctions": [f"J{a}{b}" for a, b in LOOP_JUNCTIONS],
-                    "chord_junctions": [f"J{a}{b}" for a, b in CHORD_JUNCTIONS],
-                    "moebius_pairs": [f"M{a}M{b}" for a, b in MOEBIUS_PAIRS],
-                    "gpus": GPUS_AVAILABLE,
-                    "manifold_vram_mb": MANIFOLD_VRAM_MB,
+                    "n_junctions":         N_JUNCTIONS,
+                    "unique_qubits":       UNIQUE_QUBITS,
+                    "intra_edges":         len(self.intra_edges),
+                    "rim_edges_expected":  _EXPECTED_RIM_EDGES,
+                    "twist_gluing":        self.twist,
+                    "loop_junctions":      [f"J{a}{b}" for a, b in LOOP_JUNCTIONS],
+                    "chord_junctions":     [f"J{a}{b}" for a, b in CHORD_JUNCTIONS],
+                    "moebius_pairs":       [f"M{a}M{b}" for a, b in MOEBIUS_PAIRS],
+                    "gpus":                GPUS_AVAILABLE,
+                    "manifold_vram_mb":    MANIFOLD_VRAM_MB,
                 }, f)
             with open(self.energy_csv, mode='w', newline='') as f:
                 csv.DictWriter(f, fieldnames=[
@@ -638,8 +677,7 @@ class K4ManifoldEngine:
                     "Step", "Loop_Momentum", "Amp_X", "Amp_Y", "Amp_Z"
                 ]).writeheader()
         except Exception as e:
-            print(f"[CSV] Warning: Setup configuration write failed: {e}",
-                  file=sys.stderr)
+            print(f"[CSV] Warning: setup write failed: {e}", file=sys.stderr)
 
     def _log_csvs(self, step, anneal, bulk, junction_e, total, min_fidelity,
                   junction_vectors, loop_amps, asym):
@@ -652,8 +690,8 @@ class K4ManifoldEngine:
                 ]).writerow({
                     "Step": step, "Anneal_Percent": anneal,
                     "Exact_Bulk_Energy": bulk,
-                    "Junction_Energy": junction_e,
-                    "Total_Energy": total,
+                    "Junction_Energy":   junction_e,
+                    "Total_Energy":      total,
                     "Min_Unitary_Fidelity": min_fidelity,
                     "Swap_Asym_M0M1": asym.get("M0M1", float('nan')),
                     "Swap_Asym_M2M3": asym.get("M2M3", float('nan'))})
@@ -662,7 +700,7 @@ class K4ManifoldEngine:
                 w = csv.DictWriter(f, fieldnames=[
                     "Step", "Junction", "Kind", "X_mean", "Y_mean", "Z_mean"])
                 for rec in self.junctions:
-                    v = junction_vectors[rec["index"]]
+                    v    = junction_vectors[rec["index"]]
                     kind = "loop" if rec["index"] in self.loop_indices else "chord"
                     w.writerow({"Step": step, "Junction": rec["label"],
                                 "Kind": kind,
@@ -679,7 +717,7 @@ class K4ManifoldEngine:
                                 "Amp_Y": float(loop_amps[k, 1]),
                                 "Amp_Z": float(loop_amps[k, 2])})
         except Exception as e:
-            print(f"[CSV] Warning: Log write failed: {e}", file=sys.stderr)
+            print(f"[CSV] Warning: log write failed: {e}", file=sys.stderr)
 
     def run(self, total_steps: int, dt: float, initial_hx: float,
             target_g_junction: float, target_J: float, target_hx: float,
@@ -695,18 +733,20 @@ class K4ManifoldEngine:
         if not (0 <= probe_junction < N_JUNCTIONS):
             raise ValueError("probe_junction out of range")
         if probe_step >= 0 and probe_step >= total_steps:
-            raise ValueError(f"probe_step {probe_step} >= total_steps {total_steps}")
+            raise ValueError(
+                f"probe_step {probe_step} >= total_steps {total_steps}")
 
-        print(f"[Engine] K4: {N_MANIFOLDS} manifolds x {QUBITS_PER_MANIFOLD} qubits "
-              f"(all boundary), {N_JUNCTIONS} junctions x {QUBITS_PER_EDGE} qubits, "
+        print(f"[Engine] K4 Rev311 27q | "
+              f"{N_MANIFOLDS} manifolds x {QUBITS_PER_MANIFOLD} qubits (all boundary) | "
+              f"{N_JUNCTIONS} junctions x {QUBITS_PER_EDGE} qubits | "
               f"{UNIQUE_QUBITS} unique qubits | "
+              f"rim_edges={_EXPECTED_RIM_EDGES} | "
               f"gluing={'MOEBIUS' if self.twist else 'TRIVIAL'} | "
               f"loop={[f'J{a}{b}' for a, b in LOOP_JUNCTIONS]} | "
               f"{GPUS_AVAILABLE} GPUs | {total_steps} steps")
 
         active_ranks = [r for r in range(TOTAL_WORKERS)
                         if self.worker_assignments[r]]
-
         workers = []
         pipes   = []
 
@@ -727,8 +767,9 @@ class K4ManifoldEngine:
             for t in range(total_steps):
                 s = t / max(1, (total_steps - 1))
                 current_g_junction = s * target_g_junction
-                
-                is_measure = (t % measure_every == 0) or (t == total_steps - 1) or (t == probe_step)
+                is_measure = ((t % measure_every == 0)
+                              or (t == total_steps - 1)
+                              or (t == probe_step))
 
                 if not is_measure:
                     continue
@@ -737,29 +778,63 @@ class K4ManifoldEngine:
 
                 # --- GATHER ---
                 manifold_states = {}
-                bulk_energy = 0.0
+                bulk_energy     = 0.0
                 max_lat_trotter = 0.0
-                max_lat_tomo = 0.0
-                min_fidelity = 1.0
+                max_lat_tomo    = 0.0
+                min_fidelity    = 1.0
 
-                for conn in pipes:
-                    try:
-                        data = conn.recv()
-                    except EOFError:
-                        raise RuntimeError("Worker IPC connection lost.")
-                    for m, payload in data.items():
-                        manifold_states[m] = payload["state"]
-                        bulk_energy += payload["exact_bulk_energy"]
-                        max_lat_trotter = max(max_lat_trotter,
-                                              payload["lat_trotter_ms"])
-                        max_lat_tomo = max(max_lat_tomo, payload["lat_tomo_ms"])
-                        min_fidelity = min(min_fidelity,
-                                           payload.get("unitary_fidelity", 1.0))
+                pending  = list(zip(pipes, active_ranks))
+                deadline = time.perf_counter() + GATHER_TIMEOUT_S
 
-                if len(manifold_states) != N_MANIFOLDS:
-                    raise RuntimeError(
-                        f"Fatal: IPC gather incomplete. Expected {N_MANIFOLDS} "
-                        f"manifolds, got {len(manifold_states)}.")
+                while pending:
+                    remaining = deadline - time.perf_counter()
+                    if remaining <= 0:
+                        for conn, w_rank in pending:
+                            print(f"[Master] TIMEOUT rank {w_rank}; substituting last-good",
+                                  file=sys.stderr)
+                            for m in self.worker_assignments[w_rank]:
+                                manifold_states[m] = self._get_last_good(m)
+                        break
+
+                    ready = mpc.wait([c for c, _ in pending],
+                                     timeout=min(remaining, 5.0))
+
+                    for conn in ready:
+                        w_rank = next(r for c, r in pending if c is conn)
+                        try:
+                            data = conn.recv()
+                            for m, payload in data.items():
+                                state = payload["state"]
+                                if any(np.any(~np.isfinite(state[c]))
+                                       for c in ("X", "Y", "Z")):
+                                    print(f"[Master] NaN M{m} step {t}; "
+                                          f"substituting last-good",
+                                          file=sys.stderr)
+                                    state = self._get_last_good(m)
+
+                                manifold_states[m] = state
+                                bulk_energy += (
+                                    payload["exact_bulk_energy"]
+                                    if math.isfinite(payload["exact_bulk_energy"])
+                                    else 0.0)
+                                max_lat_trotter = max(max_lat_trotter,
+                                                      payload["lat_trotter_ms"])
+                                max_lat_tomo    = max(max_lat_tomo,
+                                                      payload["lat_tomo_ms"])
+                                min_fidelity    = min(min_fidelity,
+                                                      payload.get("unitary_fidelity", 1.0))
+
+                        except EOFError:
+                            print(f"[Master] EOF rank {w_rank}; substituting last-good",
+                                  file=sys.stderr)
+                            for m in self.worker_assignments[w_rank]:
+                                manifold_states[m] = self._get_last_good(m)
+
+                        pending = [(c, r) for c, r in pending if c is not conn]
+
+                for m in range(N_MANIFOLDS):
+                    if m not in manifold_states:
+                        manifold_states[m] = self._get_last_good(m)
 
                 # --- HISTORY ---
                 step_state = np.zeros((N_MANIFOLDS, QUBITS_PER_MANIFOLD, 3))
@@ -774,8 +849,7 @@ class K4ManifoldEngine:
                         np.save(self.state_dump_file,
                                 np.array(self.lattice_history))
                     except Exception as e:
-                        print(f"[Checkpoint] Warning: Failed to save: {e}",
-                              file=sys.stderr)
+                        print(f"[Checkpoint] Warning: {e}", file=sys.stderr)
 
                 # --- STOCHASTIC NOISE (Rev 88 scaling) ---
                 scale = np.sqrt(dt / effective_shots)
@@ -786,14 +860,18 @@ class K4ManifoldEngine:
                     for side, mm, qlist in (("a", rec["ma"], rec["qubits_a"]),
                                             ("b", rec["mb"], rec["qubits_b"])):
                         prof = manifold_states[mm]
-                        idx = np.array(qlist, dtype=np.intp)
-                        vx = np.clip(1.0 - prof["X"][idx] ** 2, 0.0, 1.0)
-                        vy = np.clip(1.0 - prof["Y"][idx] ** 2, 0.0, 1.0)
-                        vz = np.clip(1.0 - prof["Z"][idx] ** 2, 0.0, 1.0)
-                        n = len(qlist)
-                        xn = rng_j.normal(0.0, 1.0, n) * np.sqrt(vx) * scale
-                        yn = rng_j.normal(0.0, 1.0, n) * np.sqrt(vy) * scale
-                        zn = rng_j.normal(0.0, 1.0, n) * np.sqrt(vz) * scale
+                        idx  = np.array(qlist, dtype=np.intp)
+                        px = prof["X"][idx]; py = prof["Y"][idx]; pz = prof["Z"][idx]
+                        vx = np.where(np.isfinite(px),
+                                      np.clip(1.0 - px ** 2, 0.0, 1.0), 1.0)
+                        vy = np.where(np.isfinite(py),
+                                      np.clip(1.0 - py ** 2, 0.0, 1.0), 1.0)
+                        vz = np.where(np.isfinite(pz),
+                                      np.clip(1.0 - pz ** 2, 0.0, 1.0), 1.0)
+                        n    = len(qlist)
+                        xn   = rng_j.normal(0.0, 1.0, n) * np.sqrt(vx) * scale
+                        yn   = rng_j.normal(0.0, 1.0, n) * np.sqrt(vy) * scale
+                        zn   = rng_j.normal(0.0, 1.0, n) * np.sqrt(vz) * scale
                         for i, q in enumerate(qlist):
                             noise[mm][q] = (xn[i], yn[i], zn[i])
 
@@ -805,22 +883,23 @@ class K4ManifoldEngine:
 
                 # --- OPTIONAL LOCALIZED PROBE (rings the bell) ---
                 if probe_step >= 0 and t == probe_step and probe_amplitude != 0.0:
-                    rec = self.junctions[probe_junction]
+                    rec    = self.junctions[probe_junction]
                     qa, qb = rec["bonds"][0]
                     for (mm, qq) in ((rec["ma"], qa), (rec["mb"], qb)):
                         k = kicks[mm].get(qq, (0.0, 0.0, 0.0))
                         kicks[mm][qq] = (k[0] + probe_amplitude, k[1], k[2])
-                    print(f"[Probe] step {t}: injected amplitude "
-                          f"{probe_amplitude:+.4f} at {rec['label']} bond 0")
+                    print(f"[Probe] step {t}: injected {probe_amplitude:+.4f} "
+                          f"at {rec['label']} bond 0")
 
                 # --- RACETRACK DIAGNOSTICS ---
                 loop_amps = loop_momentum_amplitudes(junction_vectors,
                                                      self.loop_indices)
-                asym = swap_asymmetry(manifold_states, self.junctions,
-                                      MOEBIUS_PAIRS)
+                asym      = swap_asymmetry(manifold_states, self.junctions,
+                                           MOEBIUS_PAIRS)
 
                 total_energy = bulk_energy + junction_energy
-                asym_str = " ".join(f"{k}:{v:.4f}" for k, v in sorted(asym.items()))
+                asym_str = " ".join(
+                    f"{k}:{v:.4f}" for k, v in sorted(asym.items()))
                 print(f"Step {t:03d} | E: {total_energy:+.4f} "
                       f"(bulk {bulk_energy:+.3f} / junc {junction_energy:+.3f}) | "
                       f"Loop k1: {np.linalg.norm(loop_amps[1]):.4f} | "
@@ -833,9 +912,8 @@ class K4ManifoldEngine:
 
                 # --- SCATTER ---
                 for i, w_rank in enumerate(active_ranks):
-                    worker_payload = {m: kicks[m]
-                                      for m in self.worker_assignments[w_rank]}
-                    pipes[i].send(worker_payload)
+                    pipes[i].send({m: kicks[m]
+                                   for m in self.worker_assignments[w_rank]})
 
         finally:
             for conn in pipes:
@@ -846,10 +924,9 @@ class K4ManifoldEngine:
                 try:
                     np.save(self.state_dump_file,
                             np.array(self.lattice_history))
-                    print(f"\n[Master] Dumped history matrix to "
-                          f"{self.state_dump_file}")
+                    print(f"\n[Master] Dumped history to {self.state_dump_file}")
                 except Exception as e:
-                    print(f"\n[Master] Failed to save lattice history: {e}",
+                    print(f"\n[Master] Failed to save history: {e}",
                           file=sys.stderr)
 
             for p in workers:
@@ -877,7 +954,7 @@ if __name__ == "__main__":
             target_hz=0.2,
             measure_every=1,
             effective_shots=512.0,
-            probe_step=-1,          # set >= 0 to ring the bell
+            probe_step=-1,
             probe_amplitude=0.5,
             probe_junction=0
         )
