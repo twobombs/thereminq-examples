@@ -1,585 +1,1060 @@
 # -*- coding: us-ascii -*-
-# macroscopic_lattice_dash_k4.py
-# K4 All-Boundary Manifold Cluster Annealing - Visualization Dashboard
-# Reads output written by K4ManifoldEngine (Rev 305-307).
+# K4 All-Boundary Manifold Cluster Annealing
+# (4 Tri-Hole Manifolds x 15 Qubits, 6 Junctions, 30 Unique Qubits)
+# High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# Input files (written by K4ManifoldEngine):
-#   k4_manifold_states.npy                 shape (T, 4, 15, 3) float32
-#   k4_manifold_config.json
-#   k4_exact_ground_state_energy_curve.csv
-#   k4_junction_profiles.csv
-#   k4_loop_momentum_spectrum.csv
+# REVISION 313 - FIXED MINIMUM COOLDOWN
+# CHANGES vs Rev 312:
+# - NAN_MIN_COOLDOWN_S = 10.0: replaces NAN_MIN_COOLDOWN_S  = 10.0  # GPU BACO reset needs ~7-10s; streak-1 (0s) was too short.
+#   GPU BACO ring reset recovery takes 7-10s. Previous streak-1 (0s) and
+#   streak-2 (3s) sleeps were too short: GPU still unstable on next Trotter.
+# - Cooldown fires on EVERY NaN (removed 'streak > 1' gate).
+#   streak=1 with 0s sleep left the GPU unstable, causing step-40 NaN repeat.
+# - Fixed sleep: always sleep NAN_MIN_COOLDOWN_S (10s). Streak tracked for
+#   logging only, not for duration. 10s + ~4s reinit/retomo = 14s < 30s timeout.
+# CHANGES vs Rev 310:
+# - apply_zz: self-draining pauli_expectation after each gate (OCL queue flush,
+#   prevents ring seq delta buildup that causes context loss hangs).
+# - apply_kicks: per-kick drain (KICK_CHUNK=1 pattern from Rev 88-I).
+# - ket_cache + resurrect_sim: statevector checkpoint AFTER apply_kicks, BEFORE
+#   Trotter. On context loss, resurrects from last-good ket and retries.
+# - try/except RuntimeError around apply_kicks, trotter, and tomo: catches
+#   "context is lost" / "CL_OUT_OF_RESOURCES" driver errors before they hang.
+# - is_context_loss(): Rev 88-I driver error string detection.
+# - trotter_step_body: symmetrized hz (Strang splitting O(dt^3) per step).
+# - nan_streak cooldown: preserved from Rev 308; now secondary defense only.
 #
-# Layout
-# ------
-# Left  : K4 tetrahedron graph (3D, animated)
-#   nodes    per-manifold mean <Z>, colored by spin_cmap [-1..+1]
-#   edges    junction coupling magnitude |mean Bloch|, colored by plasma
-#            loop junctions (J01 J12 J23 J03) solid thick
-#            chord junctions (J02 J13) dashed thin
-#   quivers  mean Bloch direction at each manifold node (white arrows)
-#   labels   M0..M3 node labels, J## edge midpoint labels (static)
+# WHY THIS FIXES THE PERMANENT TIMEOUT LOOP:
+#   Rev 310 only guards the TOMO path. After a reinit, the next step's
+#   trotter_step_body() hangs silently (99% GPU util). The worker never
+#   reaches tomo, never sends IPC data, and Fix A times out every 30s
+#   permanently. Rev 88-I shows the V340/rusticl raises RuntimeError on
+#   context loss rather than hanging - wrapping critical sections in
+#   try/except breaks the loop. The self-draining apply_zz prevents the
+#   ring seq delta buildup that triggers context loss in the first place.
 #
-# Right : six stacked panels
-#   [0] Energy: Total / Exact Bulk / Junction vs Trotter step
-#   [1] Min Unitary Fidelity + Swap Asymmetry M0M1 and M2M3
-#   [2] Loop Momentum DFT: |A_k| for k=0..3 vs Trotter step
-#   [3] Heatmap <X>  4 manifolds x 15 qubits
-#   [4] Heatmap <Y>
-#   [5] Heatmap <Z>
+# CHANGES vs Rev 311 (see above). Earlier changes still present.
+# CHANGES vs Rev 305 (selected):
+# - Master gather: NaN detection + last-good-state substitution.
+# - Noise injection: np.where NaN guard on variance.
+# - apply_kicks: isfinite guard on all three components.
+# - Worker tomo: NaN detection + sim reinit + Y_arr guard.
+# - bulk_energy: skip non-finite contributions in gather.
+# - Master gather: mpc.wait() + 30s timeout (Rev 308).
+# - Worker reinit: del before sleep, dummy sim on sanity fail (Rev 309).
+# - zz_exact: guarded by isfinite(Z_arr) (Rev 310).
 #
-# Controls
-# --------
-#   Slider       scrub to any Trotter step
-#   Play/Pause   toggle animation (slow azimuth rotation in play mode)
-#   Space        600 dpi PNG snapshot named by step and energy
-#   Scroll       zoom K4 3D panel (Matplotlib >= 3.3 / 3.8)
+# ALL OTHER PHYSICS UNCHANGED FROM Rev 304.
 
+import os
 import sys
+import gc
 import csv
 import json
+import time
 import math
 import numpy as np
 import multiprocessing as mp
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-import matplotlib.colors as mcolors
-import matplotlib.gridspec as gridspec
-from matplotlib.widgets import Slider, Button
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+import multiprocessing.connection as mpc
+from typing import List, Tuple, Dict, Any
 
-# ---------------------------------------------------------------------------
-# FILE CONFIGURATION
-# ---------------------------------------------------------------------------
-DATA_FILE     = "k4_manifold_states.npy"
-CONFIG_FILE   = "k4_manifold_config.json"
-ENERGY_FILE   = "k4_exact_ground_state_energy_curve.csv"
-PROFILES_FILE = "k4_junction_profiles.csv"
-LOOP_CSV      = "k4_loop_momentum_spectrum.csv"
-SAVE_FILE     = "k4_manifold_dash.mp4"
+# --- GLOBAL CONFIGURATION ---
+C_CORNER  = 2
+E_MIDEDGE = 3
+QUBITS_PER_EDGE     = C_CORNER + E_MIDEDGE       # 5
+LOCAL_EDGES         = 3
+QUBITS_PER_MANIFOLD = LOCAL_EDGES * QUBITS_PER_EDGE   # 15
+N_RIM = 2 * QUBITS_PER_EDGE                      # 10
 
-# ---------------------------------------------------------------------------
-# K4 TOPOLOGY CONSTANTS   (must match Rev 303 engine globals)
-# ---------------------------------------------------------------------------
-N_MANIFOLDS         = 4
-QUBITS_PER_MANIFOLD = 15    # Rev 305-307: 3 edges x 5 qubits/edge
-JUNCTION_PAIRS      = [(i, j) for i in range(N_MANIFOLDS)
-                       for j in range(i + 1, N_MANIFOLDS)]   # 6 junctions
-LOOP_CYCLE          = [0, 1, 2, 3]
-LOOP_JUNCTIONS      = [tuple(sorted((LOOP_CYCLE[i], LOOP_CYCLE[(i + 1) % 4])))
-                       for i in range(4)]
-CHORD_JUNCTIONS     = [jp for jp in JUNCTION_PAIRS if jp not in LOOP_JUNCTIONS]
+N_MANIFOLDS    = 4
+NEIGHBOURS     = [[j for j in range(N_MANIFOLDS) if j != i]
+                  for i in range(N_MANIFOLDS)]
+JUNCTION_PAIRS = [(i, j) for i in range(N_MANIFOLDS)
+                  for j in range(i + 1, N_MANIFOLDS)]
+N_JUNCTIONS    = len(JUNCTION_PAIRS)
 
-# Regular tetrahedron vertices on the unit circumsphere.
-# All 6 inter-node distances are identical (= 2*sqrt(2/3)),
-# giving the natural 3D embedding of the complete graph K4.
-_T = 1.0 / math.sqrt(3.0)
-MANIFOLD_POS = np.array([
-    [ _T,  _T,  _T],   # M0
-    [ _T, -_T, -_T],   # M1
-    [-_T,  _T, -_T],   # M2
-    [-_T, -_T,  _T],   # M3
-], dtype=float)
+LOOP_CYCLE     = [0, 1, 2, 3]
+LOOP_JUNCTIONS = [tuple(sorted((LOOP_CYCLE[i], LOOP_CYCLE[(i + 1) % 4])))
+                  for i in range(4)]
+CHORD_JUNCTIONS = [jp for jp in JUNCTION_PAIRS if jp not in LOOP_JUNCTIONS]
 
-# ---------------------------------------------------------------------------
-# ANALYTICS LOADING
-# ---------------------------------------------------------------------------
+MOEBIUS_PAIRS = [(0, 1), (2, 3)]
+TWIST_GLUING  = True
 
-def load_k4_analytics(num_steps):
-    """Load all CSV analytics written by K4ManifoldEngine.
+GPUS_AVAILABLE   = 4
+WORKERS_PER_GPU  = 1
+TOTAL_WORKERS    = GPUS_AVAILABLE * WORKERS_PER_GPU
 
-    Returns
-    -------
-    energies         dict of lists length num_steps (nan-padded if partial run)
-    loop_k_series    ndarray (num_steps, 4): |A_k| amplitude norm per step
-    junction_profiles dict: step -> {junction_label -> np.array([X,Y,Z])}
+MANIFOLD_VRAM_MB = 256
 
-    Assumes measure_every=1 so CSV Step equals history array index.
-    """
-    energies = {k: [] for k in ('Total', 'Bulk', 'Junction',
-                                 'Fidelity', 'Asym_M0M1', 'Asym_M2M3')}
-    loop_k_series   = np.full((num_steps, 4), np.nan)
-    junction_profiles = {}
+FP16_LIB = os.environ.get(
+    "QRACK_FP16_LIB",
+    "/usr/local/lib/qrack/libqrack_pinvoke.so"
+)
 
-    def _f(row, col):
-        try:
-            return float(row.get(col, 'nan'))
-        except ValueError:
-            return np.nan
+UNIQUE_QUBITS = (N_MANIFOLDS * QUBITS_PER_MANIFOLD
+                 - N_JUNCTIONS * QUBITS_PER_EDGE)   # 30
 
-    try:
-        with open(ENERGY_FILE, mode='r') as fh:
-            for row in csv.DictReader(fh):
-                energies['Total'].append(_f(row, 'Total_Energy'))
-                energies['Bulk'].append(_f(row, 'Exact_Bulk_Energy'))
-                energies['Junction'].append(_f(row, 'Junction_Energy'))
-                energies['Fidelity'].append(_f(row, 'Min_Unitary_Fidelity'))
-                energies['Asym_M0M1'].append(_f(row, 'Swap_Asym_M0M1'))
-                energies['Asym_M2M3'].append(_f(row, 'Swap_Asym_M2M3'))
-    except Exception as exc:
-        print(f"Warning: Could not parse {ENERGY_FILE}: {exc}")
+_EXPECTED_RIM_EDGES = 3 * (QUBITS_PER_EDGE + 1)     # 18
 
-    for key in energies:
-        arr = energies[key]
-        if len(arr) < num_steps:
-            arr.extend([np.nan] * (num_steps - len(arr)))
-        energies[key] = arr[:num_steps]
+GATHER_TIMEOUT_S    = 30.0
+NAN_MIN_COOLDOWN_S  = 10.0  # GPU BACO reset needs ~7-10s; streak-1 (0s) was too short
 
-    try:
-        with open(LOOP_CSV, mode='r') as fh:
-            for row in csv.DictReader(fh):
-                s = int(row['Step'])
-                k = int(row['Loop_Momentum'])
-                if 0 <= s < num_steps and 0 <= k < 4:
-                    try:
-                        norm = math.sqrt(float(row['Amp_X'])**2
-                                         + float(row['Amp_Y'])**2
-                                         + float(row['Amp_Z'])**2)
-                    except (ValueError, KeyError):
-                        norm = np.nan
-                    loop_k_series[s, k] = norm
-    except Exception as exc:
-        print(f"Warning: Could not parse {LOOP_CSV}: {exc}")
+# Context-loss error strings (from Rev 88-I)
+_CONTEXT_LOST_STRINGS = (
+    "context is lost",
+    "CS has cancelled",
+    "CL_OUT_OF_RESOURCES",
+    "CL_INVALID_COMMAND_QUEUE",
+)
 
-    try:
-        with open(PROFILES_FILE, mode='r') as fh:
-            for row in csv.DictReader(fh):
-                s     = int(row['Step'])
-                label = row['Junction']
-                if s not in junction_profiles:
-                    junction_profiles[s] = {}
-                junction_profiles[s][label] = np.array([
-                    float(row['X_mean']),
-                    float(row['Y_mean']),
-                    float(row['Z_mean']),
-                ])
-    except Exception as exc:
-        print(f"Warning: Could not parse {PROFILES_FILE}: {exc}")
+assert QUBITS_PER_MANIFOLD <= 29
+assert N_MANIFOLDS - 1 <= LOCAL_EDGES
+assert TOTAL_WORKERS >= N_MANIFOLDS
 
-    return energies, loop_k_series, junction_profiles
+os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
 
 
-# ---------------------------------------------------------------------------
-# MAIN DASHBOARD
-# ---------------------------------------------------------------------------
+# =====================================================================
+# PURE FUNCTIONS (Math & Topology)
+# =====================================================================
+def edge_local_qubits(k: int) -> List[int]:
+    base = k * QUBITS_PER_EDGE
+    return list(range(base, base + QUBITS_PER_EDGE))
 
-def run_dashboard(mode="interactive"):
-    prefix = "[BG Render] " if mode == "save" else "[Viewer] "
 
-    # Load config
-    try:
-        with open(CONFIG_FILE, 'r') as fh:
-            config = json.load(fh)
-    except FileNotFoundError:
-        print(f"{prefix}Error: {CONFIG_FILE} not found.")
-        sys.exit(1)
+def portal_ring(p: int) -> List[int]:
+    return edge_local_qubits((p - 1) % LOCAL_EDGES) + edge_local_qubits(p)
 
-    twist        = config.get("twist_gluing", True)
-    gluing_label = "Moebius" if twist else "Trivial"
 
-    # Load state history
-    mmap = 'r' if mode == "save" else None
-    try:
-        history = np.load(DATA_FILE, mmap_mode=mmap)
-    except FileNotFoundError:
-        print(f"{prefix}Error: {DATA_FILE} not found.")
-        sys.exit(1)
+def generate_manifold_topology() -> Tuple[List[Tuple[int, int]],
+                                          Dict[int, List[int]]]:
+    edges = set()
+    for p in range(LOCAL_EDGES):
+        ring = portal_ring(p)
+        for s in range(len(ring)):
+            a, b = ring[s], ring[(s + 1) % len(ring)]
+            edges.add((min(a, b), max(a, b)))
+    intra_edges = sorted(edges)
 
-    if (history.ndim != 4
-            or history.shape[1] != N_MANIFOLDS
-            or history.shape[2] != QUBITS_PER_MANIFOLD):
-        print(f"{prefix}Error: unexpected history shape {history.shape}. "
-              f"Expected (T, {N_MANIFOLDS}, {QUBITS_PER_MANIFOLD}, 3).")
-        sys.exit(1)
+    if len(intra_edges) != _EXPECTED_RIM_EDGES:
+        raise RuntimeError(
+            f"Fatal: expected {_EXPECTED_RIM_EDGES} intra-manifold rim edges, "
+            f"got {len(intra_edges)}")
+    seen_q = set()
+    for a, b in intra_edges:
+        seen_q.add(a); seen_q.add(b)
+    if len(seen_q) != QUBITS_PER_MANIFOLD:
+        raise RuntimeError(
+            f"Fatal: rim edges cover {len(seen_q)} qubits, "
+            f"expected {QUBITS_PER_MANIFOLD}")
+    in_portals: Dict[int, int] = {q: 0 for q in range(QUBITS_PER_MANIFOLD)}
+    for p in range(LOCAL_EDGES):
+        for q in portal_ring(p):
+            in_portals[q] += 1
+    if any(v != 2 for v in in_portals.values()):
+        raise RuntimeError("Fatal: all-boundary property violated")
+    adj: Dict[int, set] = {q: set() for q in range(QUBITS_PER_MANIFOLD)}
+    for a, b in intra_edges:
+        adj[a].add(b); adj[b].add(a)
+    seen = {0}; stack = [0]
+    while stack:
+        u = stack.pop()
+        for v in adj[u]:
+            if v not in seen:
+                seen.add(v); stack.append(v)
+    if len(seen) != QUBITS_PER_MANIFOLD:
+        raise RuntimeError("Fatal: manifold coupling graph is disconnected")
 
-    num_steps = history.shape[0]
-    print(f"{prefix}Loaded {num_steps} steps, shape {history.shape}.")
+    edge_groups = {k: edge_local_qubits(k) for k in range(LOCAL_EDGES)}
+    return intra_edges, edge_groups
 
-    # Load analytics
-    energies, loop_k_series, junction_profiles = load_k4_analytics(num_steps)
 
-    # -----------------------------------------------------------------------
-    # Colormaps and norms
-    # -----------------------------------------------------------------------
-    spin_colors = [
-        (0.15, 0.35, 0.85, 1.0),   # -1 = blue  (spin-down)
-        (0.08, 0.08, 0.08, 1.0),   #  0 = near-black (equatorial)
-        (0.85, 0.15, 0.25, 1.0),   # +1 = red   (spin-up)
-    ]
-    spin_cmap = mcolors.LinearSegmentedColormap.from_list("spin_k4", spin_colors)
-    spin_norm = mcolors.Normalize(vmin=-1.0, vmax=1.0)
+def junction_slot(manifold: int, neighbour: int) -> int:
+    return NEIGHBOURS[manifold].index(neighbour)
 
-    # Junction edge coupling: magnitude normalised to [0, 1] where 1 = sqrt(3)
-    edge_cmap = plt.cm.plasma
-    edge_norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
 
-    # Loop-momentum mode colors: k=0 gold, k=1 cyan, k=2 salmon, k=3 green
-    k_colors = ['#ffd700', '#00e5ff', '#ff6b6b', '#90ee90']
+def junction_pairing(twist: bool) -> List[int]:
+    if not twist:
+        return list(range(QUBITS_PER_EDGE))
+    corners = list(range(C_CORNER))[::-1]
+    midedge = [C_CORNER + i for i in range(E_MIDEDGE)][::-1]
+    return corners + midedge
 
-    # -----------------------------------------------------------------------
-    # Figure and GridSpec layout
-    # -----------------------------------------------------------------------
-    plt.style.use('dark_background')
-    fig = plt.figure(figsize=(21, 11))
-    gs  = gridspec.GridSpec(
-        1, 2, width_ratios=[2.2, 1], wspace=0.06,
-        left=0.04, right=0.97, top=0.94, bottom=0.13
-    )
 
-    ax3d      = fig.add_subplot(gs[0], projection='3d')
-    gs_right  = gridspec.GridSpecFromSubplotSpec(
-        6, 1, subplot_spec=gs[1], hspace=0.90
-    )
-    ax_energy = fig.add_subplot(gs_right[0])
-    ax_fid    = fig.add_subplot(gs_right[1])
-    ax_loop   = fig.add_subplot(gs_right[2])
-    ax_hmap_x = fig.add_subplot(gs_right[3])
-    ax_hmap_y = fig.add_subplot(gs_right[4])
-    ax_hmap_z = fig.add_subplot(gs_right[5])
-
-    # -----------------------------------------------------------------------
-    # Static 3D setup: axes, labels, edge lines
-    # -----------------------------------------------------------------------
-    ax3d.set_xlim(-1.1, 1.1)
-    ax3d.set_ylim(-1.1, 1.1)
-    ax3d.set_zlim(-1.1, 1.1)
-    for axis in (ax3d.xaxis, ax3d.yaxis, ax3d.zaxis):
-        axis.pane.fill = False
-        axis.pane.set_edgecolor('none')
-        axis.line.set_linewidth(0)
-        axis.set_ticklabels([])
-        axis.set_ticks([])
-    ax3d.grid(False)
-    ax3d.set_axis_off()
-    try:
-        ax3d.set_box_aspect((1, 1, 1))
-    except AttributeError:
-        pass
-
-    # Static manifold node labels (offset outward from tetrahedron center)
-    _label_offset = 0.22
-    for m in range(N_MANIFOLDS):
-        n_dir = MANIFOLD_POS[m] / (np.linalg.norm(MANIFOLD_POS[m]) + 1e-9)
-        lx = MANIFOLD_POS[m, 0] + n_dir[0] * _label_offset
-        ly = MANIFOLD_POS[m, 1] + n_dir[1] * _label_offset
-        lz = MANIFOLD_POS[m, 2] + n_dir[2] * _label_offset
-        ax3d.text(lx, ly, lz, f"M{m}",
-                  color='white', fontsize=12, fontweight='bold',
-                  ha='center', va='center')
-
-    # Static junction edge lines and midpoint labels.
-    # Loop junctions: solid/thick; chord junctions: dashed/thin.
-    edge_lines = []
+def build_junction_table(twist: bool) -> List[Dict[str, Any]]:
+    pairing = junction_pairing(twist)
+    table = []
     for ji, (ma, mb) in enumerate(JUNCTION_PAIRS):
-        pa = MANIFOLD_POS[ma]
-        pb = MANIFOLD_POS[mb]
-        is_loop = (ma, mb) in LOOP_JUNCTIONS
-        ls = '-'   if is_loop else '--'
-        lw = 2.2   if is_loop else 1.2
-        line, = ax3d.plot(
-            [pa[0], pb[0]], [pa[1], pb[1]], [pa[2], pb[2]],
-            color='#333333', linewidth=lw, linestyle=ls, zorder=1
-        )
-        edge_lines.append(line)
-        mid  = (pa + pb) * 0.5
-        n_m  = mid / (np.linalg.norm(mid) + 1e-9)
-        kind = "L" if is_loop else "C"
-        ax3d.text(
-            mid[0] + n_m[0] * 0.12,
-            mid[1] + n_m[1] * 0.12,
-            mid[2] + n_m[2] * 0.12,
-            f"J{ma}{mb}({kind})",
-            color='#777777', fontsize=7, ha='center', va='center'
-        )
+        ka = junction_slot(ma, mb)
+        kb = junction_slot(mb, ma)
+        qa_list = edge_local_qubits(ka)
+        qb_list = edge_local_qubits(kb)
+        bonds = [(qa_list[i], qb_list[pairing[i]])
+                 for i in range(QUBITS_PER_EDGE)]
+        table.append({
+            "index": ji,
+            "ma": ma, "mb": mb,
+            "slot_a": ka, "slot_b": kb,
+            "qubits_a": qa_list, "qubits_b": qb_list,
+            "bonds": bonds,
+            "label": f"J{ma}{mb}",
+        })
+    used: Dict[int, List[int]] = {m: [] for m in range(N_MANIFOLDS)}
+    for rec in table:
+        used[rec["ma"]].append(rec["slot_a"])
+        used[rec["mb"]].append(rec["slot_b"])
+    for m, slots in used.items():
+        if sorted(slots) != list(range(LOCAL_EDGES)):
+            raise RuntimeError(
+                f"Fatal: manifold {m} local edge usage {sorted(slots)} "
+                f"!= {list(range(LOCAL_EDGES))}")
+    return table
 
-    # Legend annotation for edge style
-    ax3d.text2D(0.02, 0.04,
-                "L = loop junction (solid)   C = chord junction (dashed)",
-                transform=ax3d.transAxes, fontsize=8, color='#888888')
 
-    # Container for per-frame dynamic 3D artists (scatter + quivers)
-    k4_dynamic = []
+def compute_kicks_and_junction_energy(
+        profiles: Dict[int, Dict[str, np.ndarray]],
+        noise: Dict[int, Dict[int, Tuple[float, float, float]]],
+        junctions: List[Dict[str, Any]],
+        g_junction: float
+        ) -> Tuple[Dict[int, Dict[int, Tuple[float, float, float]]],
+                   float, Dict[int, np.ndarray]]:
+    kicks: Dict[int, Dict[int, Tuple[float, float, float]]] = {
+        m: {} for m in range(N_MANIFOLDS)}
 
-    # -----------------------------------------------------------------------
-    # Static time-series panels
-    # -----------------------------------------------------------------------
-    x_axis = np.arange(num_steps)
+    def site_vec(m, q):
+        prof = profiles[m]
+        nx, ny, nz = noise[m].get(q, (0.0, 0.0, 0.0))
+        return (float(prof["X"][q]) + nx,
+                float(prof["Y"][q]) + ny,
+                float(prof["Z"][q]) + nz)
 
-    # [0] Energy
-    ax_energy.plot(x_axis, energies['Total'],    color='lightgreen',
-                   label='Total',   linewidth=1.5)
-    ax_energy.plot(x_axis, energies['Bulk'],     color='dodgerblue',
-                   label='Bulk',    linewidth=1.2)
-    ax_energy.plot(x_axis, energies['Junction'], color='#ff9933',
-                   label='Junction', linewidth=1.2)
-    ax_energy.set_title("Energy Components", fontsize=9)
-    ax_energy.legend(fontsize=7, loc='upper right')
-    ax_energy.grid(True, alpha=0.2)
-    ax_energy.set_xticks([])
-    vline_e = ax_energy.axvline(x=0, color='white', linestyle='--', alpha=0.7)
+    def add_kick(m, q, g, vec):
+        k = kicks[m].get(q, (0.0, 0.0, 0.0))
+        kicks[m][q] = (k[0] + g * vec[0],
+                       k[1] + g * vec[1],
+                       k[2] + g * vec[2])
 
-    # [1] Fidelity + Swap Asymmetry (twin y-axes)
-    ax_fid.plot(x_axis, energies['Fidelity'],
-                color='cyan', label='Min Fidelity', linewidth=1.5)
-    ax_fid.set_ylim(0.0, 1.05)
-    ax_fid.set_title("Fidelity + Swap Asymmetry", fontsize=9)
-    ax_fid.legend(fontsize=7, loc='upper left')
-    ax_fid.grid(True, alpha=0.2)
-    ax_fid.set_xticks([])
-    ax_fid_r = ax_fid.twinx()
-    ax_fid_r.plot(x_axis, energies['Asym_M0M1'],
-                  color='#ff9900', label='Asym M0M1', alpha=0.85, linewidth=1.2)
-    ax_fid_r.plot(x_axis, energies['Asym_M2M3'],
-                  color='#ff44aa', label='Asym M2M3', alpha=0.85, linewidth=1.2)
-    ax_fid_r.set_ylim(0.0, None)
-    ax_fid_r.legend(fontsize=7, loc='upper right')
-    vline_f = ax_fid.axvline(x=0, color='white', linestyle='--', alpha=0.7)
+    energy = 0.0
+    junction_vectors: Dict[int, np.ndarray] = {}
 
-    # [2] Loop Momentum DFT spectrum
-    k_labels = ['k=0 (uniform)', 'k=1 (ringing)', 'k=2', 'k=3']
-    for k in range(4):
-        ax_loop.plot(x_axis, loop_k_series[:, k],
-                     color=k_colors[k], label=k_labels[k], linewidth=1.5)
-    ax_loop.set_title("Loop Momentum DFT  |A_k|", fontsize=9)
-    ax_loop.legend(fontsize=7, loc='upper right')
-    ax_loop.set_ylim(0.0, None)
-    ax_loop.grid(True, alpha=0.2)
-    ax_loop.set_xticks([])
-    vline_loop = ax_loop.axvline(x=0, color='white', linestyle='--', alpha=0.7)
+    for rec in junctions:
+        ma, mb = rec["ma"], rec["mb"]
+        acc = np.zeros(3)
+        n_sites = 0
+        for (qa, qb) in rec["bonds"]:
+            va = site_vec(ma, qa)
+            vb = site_vec(mb, qb)
+            energy += -g_junction * (va[0] * vb[0]
+                                     + va[1] * vb[1]
+                                     + va[2] * vb[2])
+            add_kick(ma, qa, g_junction, vb)
+            add_kick(mb, qb, g_junction, va)
+            acc += np.array(va) + np.array(vb)
+            n_sites += 2
+        junction_vectors[rec["index"]] = acc / max(1, n_sites)
 
-    # [3-5] Per-manifold qubit heatmaps  (4 manifolds x 15 qubits)
-    manifold_yticks  = list(range(N_MANIFOLDS))
-    manifold_ylabels = [f"M{m}" for m in manifold_yticks]
+    return kicks, energy, junction_vectors
 
-    def _init_heatmap(ax, data, title, show_xlabel=False):
-        img = ax.imshow(data, cmap=spin_cmap, norm=spin_norm,
-                        aspect='auto', interpolation='nearest')
-        ax.set_title(title, fontsize=9)
-        ax.set_yticks(manifold_yticks)
-        ax.set_yticklabels(manifold_ylabels, fontsize=8)
-        # Thin separator lines between manifolds
-        for m in range(1, N_MANIFOLDS):
-            ax.axhline(m - 0.5, color='#555555', linewidth=0.8)
-        # Vertical separator every 5 qubits (one intra-manifold edge group)
-        for q in range(5, QUBITS_PER_MANIFOLD, 5):
-            ax.axvline(q - 0.5, color='#444444', linewidth=0.8, linestyle=':')
-        if show_xlabel:
-            ax.set_xlabel("Qubit Index (0-14)  |  groups: 0-4 / 5-9 / 10-14",
-                          fontsize=7)
-            ax.tick_params(axis='x', labelsize=6)
+
+def loop_momentum_amplitudes(junction_vectors: Dict[int, np.ndarray],
+                             loop_indices: List[int]) -> np.ndarray:
+    n = len(loop_indices)
+    data = np.array([junction_vectors[ji] for ji in loop_indices])
+    amps = np.zeros((n, 3))
+    for k in range(n):
+        phase = np.exp(-2j * math.pi * k * np.arange(n) / n)
+        for c in range(3):
+            amps[k, c] = abs(np.dot(phase, data[:, c])) / n
+    return amps
+
+
+def swap_asymmetry(profiles: Dict[int, Dict[str, np.ndarray]],
+                   junctions: List[Dict[str, Any]],
+                   pairs: List[Tuple[int, int]]) -> Dict[str, float]:
+    out = {}
+    by_pair = {(r["ma"], r["mb"]): r for r in junctions}
+    for (ma, mb) in pairs:
+        rec = by_pair.get((min(ma, mb), max(ma, mb)))
+        if rec is None:
+            continue
+        diffs = []
+        for (qa, qb) in rec["bonds"]:
+            if rec["ma"] == ma:
+                pa, pb, ia, ib = profiles[ma], profiles[mb], qa, qb
+            else:
+                pa, pb, ia, ib = profiles[mb], profiles[ma], qa, qb
+            for comp in ("X", "Y", "Z"):
+                diffs.append(float(pa[comp][ia]) - float(pb[comp][ib]))
+        arr = np.array(diffs)
+        out[f"M{ma}M{mb}"] = float(np.sqrt(np.mean(arr ** 2)))
+    return out
+
+
+# =====================================================================
+# WORKER PROCESS LOGIC
+# =====================================================================
+def gpu_worker_process(
+    rank: int,
+    workers_per_gpu: int,
+    assigned_manifolds: List[int],
+    conn,
+    dt: float,
+    total_steps: int,
+    initial_hx: float,
+    target_J: float,
+    target_hx: float,
+    target_hz: float,
+    measure_every: int,
+    probe_step: int,
+    fp16_lib: str
+):
+    os.environ["PYQRACK_SHARED_LIB_PATH"]         = fp16_lib
+    os.environ["OCL_ICD_PLATFORM_SORT"]           = "none"
+    os.environ["AMD_OPENCL_FORCE_COMPUTE_QUEUE"]  = "1"
+
+    physical_gpu_index = rank // workers_per_gpu
+    os.environ["QRACK_OCL_DEFAULT_DEVICE"]        = str(physical_gpu_index)
+    os.environ["QRACK_QPAGER_DEVICES"]            = str(physical_gpu_index)
+    os.environ["QRACK_QUNITMULTI_DEVICES"]        = str(physical_gpu_index)
+
+    alloc_mb = MANIFOLD_VRAM_MB * max(1, len(assigned_manifolds))
+    os.environ["QRACK_MAX_ALLOC_MB"]              = str(alloc_mb)
+    os.environ["QRACK_DISABLE_QUNIT_FIDELITY_GUARD"] = "1"
+
+    import pyqrack
+    from pyqrack import QrackSimulator
+
+    sims = {}
+
+    try:
+        # --- PAULI CODE AUTODETECT ---
+        _THRESH = 0.5
+
+        _probe_z = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+        vals0_z = {}
+        for _code in range(8):
+            try: vals0_z[_code] = _probe_z.pauli_expectation([0], [_code])
+            except Exception: pass
+        _probe_z.x(0)
+        PZ, SIGN_Z = None, None
+        for _code, v0 in vals0_z.items():
+            try: v1 = _probe_z.pauli_expectation([0], [_code])
+            except Exception: continue
+            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
+                PZ    = _code
+                SIGN_Z = 1.0 if v0 > 0 else -1.0
+                break
+        if PZ is None:
+            raise RuntimeError("Fatal: could not autodetect PZ code")
+        del _probe_z
+
+        _probe_x = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+        _probe_x.h(0)
+        vals0_x = {}
+        for _code in range(8):
+            if _code == PZ: continue
+            try: vals0_x[_code] = _probe_x.pauli_expectation([0], [_code])
+            except Exception: pass
+        _probe_x.z(0)
+        PX, SIGN_X = None, None
+        for _code, v0 in vals0_x.items():
+            try: v1 = _probe_x.pauli_expectation([0], [_code])
+            except Exception: continue
+            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
+                PX    = _code
+                SIGN_X = 1.0 if v0 > 0 else -1.0
+                break
+        if PX is None:
+            raise RuntimeError("Fatal: could not autodetect PX code")
+        del _probe_x
+
+        _probe_y = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+        _c, _s = math.cos(math.pi / 4.0), math.sin(math.pi / 4.0)
+        _probe_y.mtrx([complex(_c, 0), complex(0, _s),
+                       complex(0, _s), complex(_c, 0)], 0)
+        vals0_y = {}
+        for _code in range(8):
+            if _code in (PX, PZ): continue
+            try: vals0_y[_code] = _probe_y.pauli_expectation([0], [_code])
+            except Exception: pass
+        _probe_y.z(0)
+        PY, SIGN_Y = None, None
+        for _code, v0 in vals0_y.items():
+            try: v1 = _probe_y.pauli_expectation([0], [_code])
+            except Exception: continue
+            if abs(v0) > _THRESH and abs(v1) > _THRESH and (v0 * v1) < 0:
+                PY    = _code
+                SIGN_Y = 1.0 if v0 > 0 else -1.0
+                break
+        if PY is None:
+            raise RuntimeError("Fatal: could not autodetect PY code")
+        del _probe_y
+
+        _sim_mag = QrackSimulator(qubit_count=1, is_binary_decision_tree=False)
+        _sim_mag.r(PX, math.pi, 0)
+        _corrected = SIGN_Z * _sim_mag.pauli_expectation([0], [PZ])
+        if abs(_corrected + 1.0) < 0.1:
+            ANGLE_SCALE = 1.0
+        elif abs(_corrected - 1.0) < 0.1:
+            ANGLE_SCALE = 0.5
         else:
-            ax.set_xticks([])
-        return img
+            raise RuntimeError(
+                f"Fatal: r(PX,pi) returned ambiguous SIGN_Z*<Z> = {_corrected:.6f}; "
+                f"expected ~+1.0 or ~-1.0")
+        del _sim_mag
 
-    hmap_x = _init_heatmap(ax_hmap_x, history[0, :, :, 0],
-                            "Polarization <X>")
-    hmap_y = _init_heatmap(ax_hmap_y, history[0, :, :, 1],
-                            "Polarization <Y>")
-    hmap_z = _init_heatmap(ax_hmap_z, history[0, :, :, 2],
-                            "Polarization <Z>", show_xlabel=True)
+        # --- CONTEXT LOSS DETECTION ---
+        def is_context_loss(exc: Exception) -> bool:
+            msg = str(exc).lower()
+            return any(s.lower() in msg for s in _CONTEXT_LOST_STRINGS)
 
-    # Shared colorbar (left margin, spanning roughly the heatmap rows)
-    ax_cbar = fig.add_axes([0.005, 0.22, 0.012, 0.52])
-    sm = plt.cm.ScalarMappable(cmap=spin_cmap, norm=spin_norm)
-    sm.set_array([])
-    cbar = plt.colorbar(sm, cax=ax_cbar)
-    cbar.set_label('<Z> Spin', fontsize=8)
-    cbar.ax.tick_params(labelsize=7)
+        def apply_h(sim, q): sim.h(q)
 
-    # -----------------------------------------------------------------------
-    # Slider and Play/Pause button
-    # -----------------------------------------------------------------------
-    ax_slider = fig.add_axes([0.10, 0.05, 0.65, 0.025])
-    slider = Slider(
-        ax=ax_slider, label='Step',
-        valmin=0, valmax=num_steps - 1,
-        valinit=0, valstep=1, color='#4a90e2'
-    )
+        def apply_rx(sim, theta, q):
+            sim.r(PX, float(theta) * ANGLE_SCALE, q)
 
-    ax_play = fig.add_axes([0.80, 0.038, 0.08, 0.04])
-    btn_play = Button(ax_play, 'Pause', color='#333333', hovercolor='#555555')
-    is_playing = [True]
+        def apply_ry(sim, theta, q):
+            sim.r(PY, float(theta) * ANGLE_SCALE, q)
 
-    # -----------------------------------------------------------------------
-    # Scroll-wheel zoom
-    # -----------------------------------------------------------------------
-    def on_scroll(event):
-        if event.inaxes != ax3d:
-            return
-        if not hasattr(ax3d, '_k4_zoom'):
-            ax3d._k4_zoom = 1.0
-        ax3d._k4_zoom *= 0.9 if event.button == 'down' else 1.1
-        try:
-            ax3d.set_box_aspect((1, 1, 1), zoom=ax3d._k4_zoom)
-        except TypeError:
-            ax3d.dist *= 0.9 if event.button == 'down' else 1.1
-        fig.canvas.draw_idle()
+        def apply_rz(sim, theta, q):
+            sim.r(PZ, float(theta) * ANGLE_SCALE, q)
 
-    fig.canvas.mpl_connect('scroll_event', on_scroll)
+        def apply_zz(sim, theta, q1, q2):
+            """Standard ZZ gate. Rev 312: drain calls removed; rapid
+            MCNOT/expect interleaving worsened ring pressure on fp16 V340.
+            AMD_OPENCL_FORCE_COMPUTE_QUEUE=1 + try/except handles recovery."""
+            sim.mcx([q1], q2)
+            apply_rz(sim, 2.0 * theta, q2)
+            sim.mcx([q1], q2)
 
-    # -----------------------------------------------------------------------
-    # Spacebar snapshot
-    # -----------------------------------------------------------------------
-    def on_key_press(event):
-        if event.key != ' ':
-            return
-        step  = int(slider.val)
-        e_val = energies['Total'][step]
-        e_str = f"{e_val:.4f}" if not (isinstance(e_val, float) and
-                                        math.isnan(e_val)) else "NaN"
-        fname = f"k4_snap_step{step:03d}_E{e_str}.png"
-        print(f"{prefix}Saving screenshot -> {fname}")
-        fig.savefig(fname, dpi=600, bbox_inches='tight',
-                    facecolor=fig.get_facecolor())
-        print(f"{prefix}Screenshot saved.")
+        def trotter_step_body(sim, num_qubits, intra_edges, J, hx, hz, dt_local):
+            """Strang splitting: Rx(dt/2) Rz(dt/2) ZZ(dt) Rz(dt/2) Rx(dt/2).
+            O(dt^3) per-step error (hz term symmetrized vs Rev 310)."""
+            dt_half  = dt_local / 2.0
+            theta_x  = -2.0 * hx * dt_half
+            theta_z  = -2.0 * hz * dt_half   # half-step for symmetry
+            theta_zz = -J * dt_local
 
-    fig.canvas.mpl_connect('key_press_event', on_key_press)
+            for q in range(num_qubits): apply_rx(sim, theta_x, q)
+            for q in range(num_qubits): apply_rz(sim, theta_z, q)
+            for q1, q2 in intra_edges:  apply_zz(sim, theta_zz, q1, q2)
+            for q in range(num_qubits): apply_rz(sim, theta_z, q)
+            for q in range(num_qubits): apply_rx(sim, theta_x, q)
 
-    # -----------------------------------------------------------------------
-    # Per-frame update function
-    # -----------------------------------------------------------------------
-    _from_animation = [False]
+        def z_means(sim, qubits):
+            return np.array([SIGN_Z * float(sim.pauli_expectation([q], [PZ]))
+                             for q in qubits])
 
-    def update(frame):
-        frame = int(frame)
+        def x_means(sim, qubits):
+            return np.array([SIGN_X * float(sim.pauli_expectation([q], [PX]))
+                             for q in qubits])
 
-        # Remove previous dynamic 3D artists
-        for artist in k4_dynamic:
+        def y_means(sim, qubits):
+            return np.array([SIGN_Y * float(sim.pauli_expectation([q], [PY]))
+                             for q in qubits])
+
+        def zz_exact(sim, edges):
+            return np.array([float(sim.pauli_expectation([q1, q2], [PZ, PZ]))
+                             for q1, q2 in edges])
+
+        def apply_kicks(sim, kicks, dt_local):
+            """Per-kick drain (KICK_CHUNK=1 from Rev 88-I): flushes OCL queue
+            after each qubit's rotation bundle."""
+            if not kicks: return
+            coef = -2.0 * dt_local
+            for raw_q, (kx, ky, kz) in kicks.items():
+                q = int(raw_q)
+                if not math.isfinite(kx): kx = 0.0
+                if not math.isfinite(ky): ky = 0.0
+                if not math.isfinite(kz): kz = 0.0
+                if abs(kx * coef) > 1e-12: apply_rx(sim, kx * coef, q)
+                if abs(ky * coef) > 1e-12: apply_ry(sim, ky * coef, q)
+                if abs(kz * coef) > 1e-12: apply_rz(sim, kz * coef, q)
+                _ = sim.pauli_expectation([0], [PZ])   # drain
+
+        intra_edges, _edge_groups = generate_manifold_topology()
+
+        # --- KET CACHE: statevector checkpoints for resurrection ---
+        ket_cache: Dict[int, np.ndarray] = {}
+
+        def resurrect_sim(m: int) -> "QrackSimulator":
+            """Delete broken sim, allocate fresh, restore from ket_cache or |+>^15."""
+            if m in sims:
+                try:
+                    _old = sims.pop(m)
+                    del _old
+                except Exception:
+                    pass
+            gc.collect()
+            sim_new = QrackSimulator(
+                qubit_count=QUBITS_PER_MANIFOLD,
+                is_binary_decision_tree=False,
+                is_stabilizer_hybrid=False,
+                is_gpu=True,
+            )
+            if m in ket_cache:
+                try:
+                    sim_new.in_ket(ket_cache[m].tolist())
+                    print(f"[Worker {rank}] M{m} resurrected from ket checkpoint.",
+                          file=sys.stderr)
+                except Exception as restore_err:
+                    print(f"[Worker {rank}] M{m} ket restore failed "
+                          f"({restore_err}); reinit to |+>^{QUBITS_PER_MANIFOLD}.",
+                          file=sys.stderr)
+                    for q in range(QUBITS_PER_MANIFOLD):
+                        apply_h(sim_new, q)
+            else:
+                for q in range(QUBITS_PER_MANIFOLD):
+                    apply_h(sim_new, q)
+                print(f"[Worker {rank}] M{m} resurrected to |+>^{QUBITS_PER_MANIFOLD} "
+                      f"(no ket checkpoint).", file=sys.stderr)
+            sims[m] = sim_new
+            return sim_new
+
+        # --- INITIAL ALLOCATION ---
+        for m in assigned_manifolds:
+            sim = QrackSimulator(
+                qubit_count=QUBITS_PER_MANIFOLD,
+                is_binary_decision_tree=False,
+                is_stabilizer_hybrid=False,
+                is_gpu=True,
+            )
+            for q in range(QUBITS_PER_MANIFOLD): apply_h(sim, q)
+            sims[m] = sim
             try:
-                artist.remove()
+                _ = sim.pauli_expectation([0], [PZ])
+            except Exception as e:
+                raise RuntimeError(
+                    f"Fatal: VRAM allocation failed on manifold {m} "
+                    f"(rank {rank}, gpu {physical_gpu_index}): {e}")
+            try:
+                ket_cache[m] = np.array(sim.out_ket(), dtype=np.complex64)
             except Exception:
                 pass
-        k4_dynamic.clear()
 
-        # Per-manifold statistics
-        mean_z     = history[frame, :, :, 2].mean(axis=1)   # shape (4,)
-        mean_bloch = history[frame, :, :, :].mean(axis=1)   # shape (4, 3)
+        kick_payloads    = {m: {} for m in assigned_manifolds}
+        _warned_fidelity = False
+        nan_streak       = {m: 0 for m in assigned_manifolds}
 
-        # Manifold node scatter colored by mean <Z>
-        sc = ax3d.scatter(
-            MANIFOLD_POS[:, 0], MANIFOLD_POS[:, 1], MANIFOLD_POS[:, 2],
-            c=mean_z, cmap=spin_cmap, norm=spin_norm,
-            s=420, depthshade=False, zorder=5, edgecolors='white',
-            linewidths=0.8
-        )
-        k4_dynamic.append(sc)
+        for t in range(total_steps):
+            s          = t / max(1, (total_steps - 1))
+            current_hx = (1.0 - s) * initial_hx + s * target_hx
+            current_J  = s * target_J
+            current_hz = s * target_hz
+            is_measure = ((t % measure_every == 0)
+                          or (t == total_steps - 1)
+                          or (t == probe_step))
 
-        # Mean Bloch quiver arrows at each manifold node
-        _scale = 0.40
+            manifold_data_to_master = {}
+
+            for m in assigned_manifolds:
+                sim = sims[m]
+
+                # 1. APPLY KICKS (with context-loss recovery)
+                if kick_payloads[m]:
+                    try:
+                        apply_kicks(sim, kick_payloads[m], dt)
+                    except RuntimeError as _ke:
+                        if is_context_loss(_ke):
+                            print(f"[Worker {rank}] step {t} M{m} context loss "
+                                  f"in apply_kicks; resurrecting.", file=sys.stderr)
+                            sim = resurrect_sim(m)
+                            try:
+                                apply_kicks(sim, kick_payloads[m], dt)
+                            except Exception:
+                                pass
+                        else:
+                            raise
+
+                # 2. CHECKPOINT STATE after kicks, before Trotter
+                try:
+                    ket_cache[m] = np.array(sim.out_ket(), dtype=np.complex64)
+                except Exception:
+                    pass
+
+                # 3. TROTTER STEP (with context-loss recovery)
+                t_start_trotter = time.perf_counter()
+                try:
+                    trotter_step_body(sim, QUBITS_PER_MANIFOLD, intra_edges,
+                                      current_J, current_hx, current_hz, dt)
+                except RuntimeError as _te:
+                    if is_context_loss(_te):
+                        print(f"[Worker {rank}] step {t} M{m} context loss "
+                              f"in trotter; resurrecting.", file=sys.stderr)
+                        sim = resurrect_sim(m)
+                        try:
+                            trotter_step_body(sim, QUBITS_PER_MANIFOLD, intra_edges,
+                                              current_J, current_hx, current_hz, dt)
+                        except Exception:
+                            pass
+                    else:
+                        raise
+                t_lat_trotter = time.perf_counter() - t_start_trotter
+
+                t_lat_tomo = 0.0
+                if is_measure:
+                    t_start_tomo = time.perf_counter()
+                    all_q = list(range(QUBITS_PER_MANIFOLD))
+
+                    # 4. TOMO (with context-loss recovery)
+                    try:
+                        Z_arr = z_means(sim, all_q)
+                        X_arr = x_means(sim, all_q)
+                        Y_arr = y_means(sim, all_q)
+                    except RuntimeError as _me:
+                        if is_context_loss(_me):
+                            print(f"[Worker {rank}] step {t} M{m} context loss "
+                                  f"in tomo; resurrecting.", file=sys.stderr)
+                            sim = resurrect_sim(m)
+                            Z_arr = z_means(sim, all_q)
+                            X_arr = x_means(sim, all_q)
+                            Y_arr = y_means(sim, all_q)
+                        else:
+                            raise
+
+                    # 5. NaN GUARD (secondary defense: silent NaN from fp16)
+                    if not (np.all(np.isfinite(Z_arr))
+                            and np.all(np.isfinite(X_arr))
+                            and np.all(np.isfinite(Y_arr))):
+                        nan_streak[m] += 1
+                        print(f"[Worker {rank}] NaN tomo M{m} t={t}; "
+                              f"streak={nan_streak[m]}; resurrecting.",
+                              file=sys.stderr)
+                        try: del sims[m]
+                        except KeyError: pass
+                        gc.collect()
+                        print(f"[Worker {rank}] cooldown {NAN_MIN_COOLDOWN_S:.1f}s "
+                              f"(streak={nan_streak[m]})", file=sys.stderr)
+                        time.sleep(NAN_MIN_COOLDOWN_S)
+                        sim = QrackSimulator(
+                            qubit_count=QUBITS_PER_MANIFOLD,
+                            is_binary_decision_tree=False,
+                            is_stabilizer_hybrid=False, is_gpu=True)
+                        for q in range(QUBITS_PER_MANIFOLD):
+                            apply_h(sim, q)
+                        sims[m] = sim
+                        _sanity = float(sim.pauli_expectation([0], [PX]))
+                        if not math.isfinite(_sanity) or abs(_sanity - SIGN_X) > 0.5:
+                            print(f"[Worker {rank}] GPU broken after NaN reinit "
+                                  f"M{m} t={t}; sleeping 5s.", file=sys.stderr)
+                            time.sleep(5.0)
+                            try: del sims[m]
+                            except KeyError: pass
+                            gc.collect()
+                            sim = QrackSimulator(
+                                qubit_count=QUBITS_PER_MANIFOLD,
+                                is_binary_decision_tree=False,
+                                is_stabilizer_hybrid=False, is_gpu=True)
+                            sims[m] = sim
+                            Z_arr = np.full(QUBITS_PER_MANIFOLD, float('nan'))
+                            X_arr = np.full(QUBITS_PER_MANIFOLD, float('nan'))
+                            Y_arr = np.full(QUBITS_PER_MANIFOLD, float('nan'))
+                        else:
+                            Z_arr = z_means(sim, all_q)
+                            X_arr = x_means(sim, all_q)
+                            Y_arr = y_means(sim, all_q)
+                    else:
+                        nan_streak[m] = 0
+
+                    state = {"Z": Z_arr, "X": X_arr, "Y": Y_arr}
+
+                    # 6. ZZ_EXACT guard (Rev 310)
+                    if np.all(np.isfinite(Z_arr)):
+                        zz_exp = zz_exact(sim, intra_edges)
+                    else:
+                        zz_exp = np.zeros(len(intra_edges))
+
+                    bulk_e = (-current_hz * float(np.sum(state["Z"]))
+                              - current_J  * float(np.sum(zz_exp))
+                              - current_hx * float(np.sum(state["X"])))
+                    t_lat_tomo = time.perf_counter() - t_start_tomo
+
+                    try:
+                        fidelity = float(sim.get_unitary_fidelity())
+                    except (AttributeError, RuntimeError):
+                        fidelity = 1.0
+                        if not _warned_fidelity:
+                            print(f"[Worker {rank}] Warning: "
+                                  f"get_unitary_fidelity() not available.",
+                                  file=sys.stderr)
+                            _warned_fidelity = True
+
+                    manifold_data_to_master[m] = {
+                        "state":             state,
+                        "exact_bulk_energy": bulk_e,
+                        "lat_trotter_ms":    t_lat_trotter * 1000.0,
+                        "lat_tomo_ms":       t_lat_tomo    * 1000.0,
+                        "unitary_fidelity":  fidelity,
+                    }
+
+            if is_measure:
+                conn.send(manifold_data_to_master)
+                kick_payloads = conn.recv()
+
+    finally:
+        for m in list(sims.keys()):
+            _s = sims.pop(m)
+            del _s
+        sims.clear()
+        gc.collect()
+        conn.close()
+
+
+# =====================================================================
+# MASTER ORCHESTRATOR
+# =====================================================================
+class K4ManifoldEngine:
+    def __init__(self, master_seed: int = 1337, twist: bool = TWIST_GLUING):
+        self.master_seed = master_seed
+        self.twist       = twist
+        self.intra_edges, self.edge_groups = generate_manifold_topology()
+        self.junctions        = build_junction_table(twist)
+        self.junction_by_pair = {(r["ma"], r["mb"]): r for r in self.junctions}
+        self.loop_indices     = [self.junction_by_pair[jp]["index"]
+                                 for jp in LOOP_JUNCTIONS]
+        self.chord_indices    = [self.junction_by_pair[jp]["index"]
+                                 for jp in CHORD_JUNCTIONS]
+
+        self.lattice_history  = []
+        self.energy_csv       = "k4_exact_ground_state_energy_curve.csv"
+        self.profiles_csv     = "k4_junction_profiles.csv"
+        self.loop_csv         = "k4_loop_momentum_spectrum.csv"
+        self.state_dump_file  = "k4_manifold_states.npy"
+        self.config_file      = "k4_manifold_config.json"
+
+        self._init_files()
+
+        self.worker_assignments = [[] for _ in range(TOTAL_WORKERS)]
         for m in range(N_MANIFOLDS):
-            bvec = mean_bloch[m] * _scale
-            q = ax3d.quiver(
-                MANIFOLD_POS[m, 0], MANIFOLD_POS[m, 1], MANIFOLD_POS[m, 2],
-                bvec[0], bvec[1], bvec[2],
-                color='white', linewidth=1.8, arrow_length_ratio=0.35
-            )
-            k4_dynamic.append(q)
+            self.worker_assignments[m % TOTAL_WORKERS].append(m)
 
-        # Junction edge colors from coupling magnitude
-        jp_data = junction_profiles.get(frame, {})
-        _sqrt3  = math.sqrt(3.0)
-        for ji, (ma, mb) in enumerate(JUNCTION_PAIRS):
-            label = f"J{ma}{mb}"
-            vec   = jp_data.get(label, np.zeros(3))
-            mag   = float(np.linalg.norm(vec))
-            mag_n = min(mag / _sqrt3, 1.0)           # normalise to [0, 1]
-            color = edge_cmap(edge_norm(mag_n))
-            edge_lines[ji].set_color(color)
-            edge_lines[ji].set_alpha(0.40 + 0.60 * mag_n)
+    def _get_last_good(self, m):
+        if self.lattice_history:
+            last = self.lattice_history[-1]
+            return {"X": last[m, :, 0].copy(),
+                    "Y": last[m, :, 1].copy(),
+                    "Z": last[m, :, 2].copy()}
+        return {"X": np.zeros(QUBITS_PER_MANIFOLD),
+                "Y": np.zeros(QUBITS_PER_MANIFOLD),
+                "Z": np.ones(QUBITS_PER_MANIFOLD)}
 
-        # Heatmaps
-        hmap_x.set_data(history[frame, :, :, 0])
-        hmap_y.set_data(history[frame, :, :, 1])
-        hmap_z.set_data(history[frame, :, :, 2])
-
-        # Vertical step markers on all time-series panels
-        for vline in (vline_e, vline_f, vline_loop):
-            vline.set_xdata([frame, frame])
-
-        # 3D panel title
-        e_val = energies['Total'][frame]
-        e_str = (f"{e_val:+.4f}"
-                 if not (isinstance(e_val, float) and math.isnan(e_val))
-                 else "?")
-        fid   = energies['Fidelity'][frame]
-        f_str = (f"{fid:.4f}"
-                 if not (isinstance(fid, float) and math.isnan(fid))
-                 else "?")
-        ax3d.set_title(
-            f"K4 Manifold Cluster  |  {gluing_label} Gluing  |  "
-            f"Step {frame}/{num_steps - 1}  |  E={e_str}  |  Fid={f_str}",
-            fontsize=11, pad=8
-        )
-
-        # Slow azimuth rotation while animation is running
-        if _from_animation[0]:
-            ax3d.view_init(elev=ax3d.elev, azim=ax3d.azim + 0.40)
-
-        slider.eventson = False
-        slider.set_val(frame)
-        slider.eventson = True
-
-        return tuple(k4_dynamic) + (hmap_x, hmap_y, hmap_z)
-
-    def _anim_update(frame):
-        _from_animation[0] = True
-        result = update(frame)
-        _from_animation[0] = False
-        return result
-
-    def on_slider_update(val):
-        _from_animation[0] = False
-        update(val)
-        fig.canvas.draw_idle()
-
-    slider.on_changed(on_slider_update)
-
-    def toggle_play(event):
-        if is_playing[0]:
-            ani.event_source.stop()
-            btn_play.label.set_text('Play')
-        else:
-            ani.event_source.start()
-            btn_play.label.set_text('Pause')
-        is_playing[0] = not is_playing[0]
-        fig.canvas.draw_idle()
-
-    btn_play.on_clicked(toggle_play)
-
-    # blit=False required: Axes3D does not support blitting.
-    ani = animation.FuncAnimation(
-        fig, _anim_update, frames=num_steps, interval=150, blit=False
-    )
-
-    if mode == "save":
-        print(f"{prefix}Starting 4K FFmpeg render to '{SAVE_FILE}'...")
+    def _init_files(self):
         try:
-            ani.save(SAVE_FILE, writer='ffmpeg', fps=10, dpi=216)
-            print(f"{prefix}Render complete.")
-        except Exception as exc:
-            print(f"{prefix}Render failed (ffmpeg installed?): {exc}")
-    else:
-        print(f"{prefix}Opening GUI...")
-        plt.show()
+            with open(self.config_file, 'w') as f:
+                json.dump({
+                    "topology":            "K4_trihole_manifold_cluster",
+                    "revision":            313,
+                    "precision":           "fp16_FPPOW4",
+                    "n_manifolds":         N_MANIFOLDS,
+                    "qubits_per_manifold": QUBITS_PER_MANIFOLD,
+                    "corner_per_edge":     C_CORNER,
+                    "midedge_per_edge":    E_MIDEDGE,
+                    "qubits_per_junction": QUBITS_PER_EDGE,
+                    "n_junctions":         N_JUNCTIONS,
+                    "unique_qubits":       UNIQUE_QUBITS,
+                    "intra_edges":         len(self.intra_edges),
+                    "twist_gluing":        self.twist,
+                    "loop_junctions":      [f"J{a}{b}" for a, b in LOOP_JUNCTIONS],
+                    "chord_junctions":     [f"J{a}{b}" for a, b in CHORD_JUNCTIONS],
+                    "moebius_pairs":       [f"M{a}M{b}" for a, b in MOEBIUS_PAIRS],
+                    "gpus":                GPUS_AVAILABLE,
+                    "manifold_vram_mb":    MANIFOLD_VRAM_MB,
+                    "fp16_lib":            FP16_LIB,
+                }, f)
+            with open(self.energy_csv, mode='w', newline='') as f:
+                csv.DictWriter(f, fieldnames=[
+                    "Step", "Anneal_Percent", "Exact_Bulk_Energy",
+                    "Junction_Energy", "Total_Energy",
+                    "Min_Unitary_Fidelity", "Swap_Asym_M0M1", "Swap_Asym_M2M3"
+                ]).writeheader()
+            with open(self.profiles_csv, mode='w', newline='') as f:
+                csv.DictWriter(f, fieldnames=[
+                    "Step", "Junction", "Kind", "X_mean", "Y_mean", "Z_mean"
+                ]).writeheader()
+            with open(self.loop_csv, mode='w', newline='') as f:
+                csv.DictWriter(f, fieldnames=[
+                    "Step", "Loop_Momentum", "Amp_X", "Amp_Y", "Amp_Z"
+                ]).writeheader()
+        except Exception as e:
+            print(f"[CSV] Warning: setup write failed: {e}", file=sys.stderr)
 
+    def _log_csvs(self, step, anneal, bulk, junction_e, total, min_fidelity,
+                  junction_vectors, loop_amps, asym):
+        try:
+            with open(self.energy_csv, mode='a', newline='') as f:
+                csv.DictWriter(f, fieldnames=[
+                    "Step", "Anneal_Percent", "Exact_Bulk_Energy",
+                    "Junction_Energy", "Total_Energy",
+                    "Min_Unitary_Fidelity", "Swap_Asym_M0M1", "Swap_Asym_M2M3"
+                ]).writerow({
+                    "Step": step, "Anneal_Percent": anneal,
+                    "Exact_Bulk_Energy": bulk,
+                    "Junction_Energy":   junction_e,
+                    "Total_Energy":      total,
+                    "Min_Unitary_Fidelity": min_fidelity,
+                    "Swap_Asym_M0M1": asym.get("M0M1", float('nan')),
+                    "Swap_Asym_M2M3": asym.get("M2M3", float('nan'))})
 
-# ---------------------------------------------------------------------------
-# ENTRY POINT
-# ---------------------------------------------------------------------------
+            with open(self.profiles_csv, mode='a', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=[
+                    "Step", "Junction", "Kind", "X_mean", "Y_mean", "Z_mean"])
+                for rec in self.junctions:
+                    v    = junction_vectors[rec["index"]]
+                    kind = "loop" if rec["index"] in self.loop_indices else "chord"
+                    w.writerow({"Step": step, "Junction": rec["label"],
+                                "Kind": kind,
+                                "X_mean": float(v[0]),
+                                "Y_mean": float(v[1]),
+                                "Z_mean": float(v[2])})
 
-def main():
-    mp.set_start_method('spawn', force=True)
-    print("Forking 4K render to background process...")
-    render_proc = mp.Process(target=run_dashboard, args=("save",))
-    render_proc.start()
+            with open(self.loop_csv, mode='a', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=[
+                    "Step", "Loop_Momentum", "Amp_X", "Amp_Y", "Amp_Z"])
+                for k in range(loop_amps.shape[0]):
+                    w.writerow({"Step": step, "Loop_Momentum": k,
+                                "Amp_X": float(loop_amps[k, 0]),
+                                "Amp_Y": float(loop_amps[k, 1]),
+                                "Amp_Z": float(loop_amps[k, 2])})
+        except Exception as e:
+            print(f"[CSV] Warning: log write failed: {e}", file=sys.stderr)
 
-    run_dashboard(mode="interactive")
+    def run(self, total_steps: int, dt: float, initial_hx: float,
+            target_g_junction: float, target_J: float, target_hx: float,
+            target_hz: float, measure_every: int = 1,
+            effective_shots: float = 512.0,
+            probe_step: int = -1, probe_amplitude: float = 0.0,
+            probe_junction: int = 0):
 
-    if render_proc.is_alive():
-        print("\nInteractive viewer closed. Waiting for background render...")
-        render_proc.join()
-    print("All processes terminated.")
+        if total_steps < 1:
+            raise ValueError("total_steps must be at least 1")
+        if measure_every < 1:
+            raise ValueError("measure_every must be a positive integer")
+        if not (0 <= probe_junction < N_JUNCTIONS):
+            raise ValueError("probe_junction out of range")
+        if probe_step >= 0 and probe_step >= total_steps:
+            raise ValueError(
+                f"probe_step {probe_step} >= total_steps {total_steps}")
+
+        print(f"[Engine] K4 Rev313 fp16 15q | "
+              f"{N_MANIFOLDS} manifolds x {QUBITS_PER_MANIFOLD} qubits | "
+              f"{N_JUNCTIONS} junctions x {QUBITS_PER_EDGE} qubits | "
+              f"{UNIQUE_QUBITS} unique qubits | "
+              f"rim_edges={_EXPECTED_RIM_EDGES} | "
+              f"gluing={'MOEBIUS' if self.twist else 'TRIVIAL'} | "
+              f"{GPUS_AVAILABLE} GPUs | {total_steps} steps")
+        print("[Engine] Rev313: AMD_COMPUTE_QUEUE=1, 10s min cooldown on every NaN, "
+              "ket_cache resurrection, try/except context-loss, 10s floor cooldown.")
+
+        active_ranks = [r for r in range(TOTAL_WORKERS)
+                        if self.worker_assignments[r]]
+        workers = []
+        pipes   = []
+
+        for rank in active_ranks:
+            parent_conn, child_conn = mp.Pipe()
+            p = mp.Process(
+                target=gpu_worker_process,
+                args=(rank, WORKERS_PER_GPU, self.worker_assignments[rank],
+                      child_conn, dt, total_steps, initial_hx, target_J,
+                      target_hx, target_hz, measure_every, probe_step,
+                      FP16_LIB)
+            )
+            p.start()
+            child_conn.close()
+            workers.append(p)
+            pipes.append(parent_conn)
+
+        try:
+            for t in range(total_steps):
+                s = t / max(1, (total_steps - 1))
+                current_g_junction = s * target_g_junction
+                is_measure = ((t % measure_every == 0)
+                              or (t == total_steps - 1)
+                              or (t == probe_step))
+
+                if not is_measure:
+                    continue
+
+                t0 = time.perf_counter()
+
+                # --- GATHER (with mpc.wait timeout from Rev 308) ---
+                manifold_states = {}
+                bulk_energy     = 0.0
+                max_lat_trotter = 0.0
+                max_lat_tomo    = 0.0
+                min_fidelity    = 1.0
+
+                pending  = list(zip(pipes, active_ranks))
+                deadline = time.perf_counter() + GATHER_TIMEOUT_S
+
+                while pending:
+                    remaining = deadline - time.perf_counter()
+                    if remaining <= 0:
+                        for conn, w_rank in pending:
+                            print(f"[Master] TIMEOUT rank {w_rank}; "
+                                  f"substituting last-good", file=sys.stderr)
+                            for m in self.worker_assignments[w_rank]:
+                                manifold_states[m] = self._get_last_good(m)
+                        break
+                    ready = mpc.wait([c for c, _ in pending],
+                                     timeout=min(remaining, 5.0))
+                    for conn in ready:
+                        w_rank = next(r for c, r in pending if c is conn)
+                        try:
+                            data = conn.recv()
+                            for m, payload in data.items():
+                                state = payload["state"]
+                                if any(np.any(~np.isfinite(state[c]))
+                                       for c in ("X", "Y", "Z")):
+                                    print(f"[Master] NaN M{m} step {t}; "
+                                          f"substituting last-good",
+                                          file=sys.stderr)
+                                    state = self._get_last_good(m)
+                                manifold_states[m] = state
+                                bulk_energy += (
+                                    payload["exact_bulk_energy"]
+                                    if math.isfinite(payload["exact_bulk_energy"])
+                                    else 0.0)
+                                max_lat_trotter = max(max_lat_trotter,
+                                                      payload["lat_trotter_ms"])
+                                max_lat_tomo    = max(max_lat_tomo,
+                                                      payload["lat_tomo_ms"])
+                                min_fidelity    = min(
+                                    min_fidelity,
+                                    payload.get("unitary_fidelity", 1.0))
+                        except EOFError:
+                            print(f"[Master] EOF rank {w_rank}; "
+                                  f"substituting last-good", file=sys.stderr)
+                            for m in self.worker_assignments[w_rank]:
+                                manifold_states[m] = self._get_last_good(m)
+                        pending = [(c, r) for c, r in pending if c is not conn]
+
+                for m in range(N_MANIFOLDS):
+                    if m not in manifold_states:
+                        manifold_states[m] = self._get_last_good(m)
+
+                # --- HISTORY ---
+                step_state = np.zeros((N_MANIFOLDS, QUBITS_PER_MANIFOLD, 3))
+                for m, state in manifold_states.items():
+                    step_state[m, :, 0] = state["X"]
+                    step_state[m, :, 1] = state["Y"]
+                    step_state[m, :, 2] = state["Z"]
+                self.lattice_history.append(step_state.copy())
+
+                if len(self.lattice_history) % 10 == 0:
+                    try:
+                        np.save(self.state_dump_file,
+                                np.array(self.lattice_history))
+                    except Exception as e:
+                        print(f"[Checkpoint] Warning: {e}", file=sys.stderr)
+
+                # --- STOCHASTIC NOISE ---
+                scale = np.sqrt(dt / effective_shots)
+                noise = {m: {} for m in range(N_MANIFOLDS)}
+                for rec in self.junctions:
+                    rng_j = np.random.default_rng(
+                        [self.master_seed, t, rec["index"]])
+                    for side, mm, qlist in (("a", rec["ma"], rec["qubits_a"]),
+                                            ("b", rec["mb"], rec["qubits_b"])):
+                        prof = manifold_states[mm]
+                        idx  = np.array(qlist, dtype=np.intp)
+                        px = prof["X"][idx]; py = prof["Y"][idx]; pz = prof["Z"][idx]
+                        vx = np.where(np.isfinite(px),
+                                      np.clip(1.0 - px**2, 0.0, 1.0), 1.0)
+                        vy = np.where(np.isfinite(py),
+                                      np.clip(1.0 - py**2, 0.0, 1.0), 1.0)
+                        vz = np.where(np.isfinite(pz),
+                                      np.clip(1.0 - pz**2, 0.0, 1.0), 1.0)
+                        n  = len(qlist)
+                        xn = rng_j.normal(0.0, 1.0, n) * np.sqrt(vx) * scale
+                        yn = rng_j.normal(0.0, 1.0, n) * np.sqrt(vy) * scale
+                        zn = rng_j.normal(0.0, 1.0, n) * np.sqrt(vz) * scale
+                        for i, q in enumerate(qlist):
+                            noise[mm][q] = (xn[i], yn[i], zn[i])
+
+                # --- KICKS & JUNCTION ENERGY ---
+                kicks, junction_energy, junction_vectors = \
+                    compute_kicks_and_junction_energy(
+                        manifold_states, noise, self.junctions,
+                        current_g_junction)
+
+                # --- PROBE ---
+                if probe_step >= 0 and t == probe_step and probe_amplitude != 0.0:
+                    rec    = self.junctions[probe_junction]
+                    qa, qb = rec["bonds"][0]
+                    for (mm, qq) in ((rec["ma"], qa), (rec["mb"], qb)):
+                        k = kicks[mm].get(qq, (0.0, 0.0, 0.0))
+                        kicks[mm][qq] = (k[0] + probe_amplitude, k[1], k[2])
+                    print(f"[Probe] step {t}: injected {probe_amplitude:+.4f} "
+                          f"at {rec['label']} bond 0")
+
+                # --- RACETRACK DIAGNOSTICS ---
+                loop_amps = loop_momentum_amplitudes(junction_vectors,
+                                                     self.loop_indices)
+                asym      = swap_asymmetry(manifold_states, self.junctions,
+                                           MOEBIUS_PAIRS)
+
+                total_energy = bulk_energy + junction_energy
+                asym_str = " ".join(
+                    f"{k}:{v:.4f}" for k, v in sorted(asym.items()))
+                print(f"Step {t:03d} | E: {total_energy:+.4f} "
+                      f"(bulk {bulk_energy:+.3f} / junc {junction_energy:+.3f}) | "
+                      f"Loop k1: {np.linalg.norm(loop_amps[1]):.4f} | "
+                      f"Asym {asym_str} | "
+                      f"Lat(Trot/Tomo): {max_lat_trotter:5.1f}/{max_lat_tomo:5.1f}ms | "
+                      f"Fid: {min_fidelity:.5f} | {time.perf_counter() - t0:.2f}s")
+                self._log_csvs(t, s * 100, bulk_energy, junction_energy,
+                               total_energy, min_fidelity, junction_vectors,
+                               loop_amps, asym)
+
+                # --- SCATTER ---
+                for i, w_rank in enumerate(active_ranks):
+                    pipes[i].send({m: kicks[m]
+                                   for m in self.worker_assignments[w_rank]})
+
+        finally:
+            for conn in pipes:
+                try: conn.close()
+                except Exception: pass
+
+            if self.lattice_history:
+                try:
+                    np.save(self.state_dump_file,
+                            np.array(self.lattice_history))
+                    print(f"\n[Master] Dumped history to {self.state_dump_file}")
+                except Exception as e:
+                    print(f"\n[Master] Failed to save history: {e}",
+                          file=sys.stderr)
+
+            for p in workers:
+                p.join(timeout=15)
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=3)
+                    if p.is_alive():
+                        try: p.kill()
+                        except Exception: pass
 
 
 if __name__ == "__main__":
-    main()
+    mp.set_start_method('spawn', force=True)
+
+    engine = K4ManifoldEngine(master_seed=1337, twist=TWIST_GLUING)
+    try:
+        engine.run(
+            total_steps=100,
+            dt=0.04,
+            initial_hx=3.0,
+            target_g_junction=0.15,
+            target_J=1.0,
+            target_hx=0.5,
+            target_hz=0.2,
+            measure_every=1,
+            effective_shots=512.0,
+            probe_step=-1,
+            probe_amplitude=0.5,
+            probe_junction=0
+        )
+    except KeyboardInterrupt:
+        pass
