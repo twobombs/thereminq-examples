@@ -3,24 +3,28 @@
 # (4 Tri-Hole Manifolds x 15 Qubits, 6 Junctions, 30 Unique Qubits)
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 315 - RESET COMMAND + 120s GATHER TIMEOUT
-# CHANGES vs Rev 314:
-# - GATHER_TIMEOUT_S = 120s (was 30s). Covers JIT recompilation time (~28s
-#   per worker on first respawn) so a single re-init attempt always succeeds.
-# - Master timeout: removed process respawn (caused JIT storm: 4 simultaneous
-#   respawns each triggering 28s OCL JIT on all 6 devices, exceeding 30s timeout
-#   every step). Now sends '__reset__' sentinel as the kick payload instead.
-# - Worker: handles '__reset__' in the kicks recv block. Deletes all sims,
-#   sleeps NAN_DRIVER_SLEEP_S, reinits to |+>^15, sends fresh tomo for the
-#   reset step, recvs actual kicks. No JIT (process stays alive). ~10s total.
-# - Removed start_step param (no longer needed, no process respawn).
-# - _spawn_worker / _respawn_worker helpers removed.
+# REVISION 316 - PLAIN 120s TIMEOUT (NO RESET COMMAND)
+# CHANGES vs Rev 315:
+# - Removed '__reset__' IPC command and COLLECT RESET RESPONSES block.
+#   Root cause: the RESET protocol causes IPC desync when a Trotter-stuck
+#   worker self-recovers via the NaN handler before reading the RESET command.
+#   That generates 2 IPC sends (NaN tomo + reset_data) vs master's 1 recv.
+#   Additionally, the COLLECT block delayed scatter by 25s, consuming the
+#   budget workers 0/1/2 needed to complete step-41 tomo.
+# - GATHER_TIMEOUT_S = 120s kept. A Trotter-stuck worker unsticks within ~28s
+#   (GPU ring reset), then NaN handler fires (5s sleep + reinit) -> sends data.
+#   Total: ~37s << 120s. All workers recover within a single gather window.
+#   No timeout fires, no desync, no IPC complexity. Clean.
+# - Worker NaN handler: unchanged (5s sleep + reinit + re-tomo).
+# - Master timeout branch: substitute last-good only (no RESET command sent).
+#   The stuck worker is still running and will self-recover and send its data
+#   for the NEXT step (it's now 1 step behind). The 120s window absorbs this.
 #
-# WHY NOT RESPAWN:
-#   Each new worker process triggers OCL JIT on all 6 visible devices (~28s).
-#   With 4 workers respawning simultaneously at step 39, all 4 exceed the
-#   30s gather timeout before JIT completes -> respawn again -> JIT storm.
-#   RESET command reuses the live process (JIT already cached) -> ~10s reset.
+# WHY 120s IS SUFFICIENT WITHOUT RESET:
+#   Failure mode A (NaN in tomo): 5s sleep + 4s reinit + 1s retomo = 10s < 120s.
+#   Failure mode B (Trotter hang): 28s GPU reset + 10s NaN handler = 38s < 120s.
+#   Both modes self-recover within 120s WITH IPC REMAINING SYNCED (the worker
+#   sends exactly one message per is_measure step in both cases).
 #
 # RETAINED FROM REV 312/313:
 #   AMD_OPENCL_FORCE_COMPUTE_QUEUE=1 (compute ring for catchable errors).
@@ -535,38 +539,7 @@ def gpu_worker_process(
             if is_measure:
                 conn.send(manifold_data_to_master)
                 kick_payloads = conn.recv()
-                # RESET command: master declared us hung at this step.
-                # Reinit all sims without restarting the process (preserves JIT cache).
-                if isinstance(kick_payloads, dict) and kick_payloads.get("__reset__"):
-                    print(f"[Worker {rank}] RESET at t={t}; deleting sims, "
-                          f"sleeping {NAN_DRIVER_SLEEP_S:.0f}s, reinit.",
-                          file=sys.stderr)
-                    for m in assigned_manifolds:
-                        try: del sims[m]
-                        except KeyError: pass
-                    gc.collect()
-                    time.sleep(NAN_DRIVER_SLEEP_S)
-                    reset_data = {}
-                    all_q_r = list(range(QUBITS_PER_MANIFOLD))
-                    for m in assigned_manifolds:
-                        sim_r = QrackSimulator(qubit_count=QUBITS_PER_MANIFOLD,
-                                               is_binary_decision_tree=False,
-                                               is_stabilizer_hybrid=False, is_gpu=True)
-                        for q in range(QUBITS_PER_MANIFOLD): apply_h(sim_r, q)
-                        sims[m] = sim_r
-                        try: ket_cache[m] = np.array(sim_r.out_ket(), dtype=np.complex64)
-                        except Exception: pass
-                        Z_r = z_means(sim_r, all_q_r)
-                        X_r = x_means(sim_r, all_q_r)
-                        Y_r = y_means(sim_r, all_q_r)
-                        reset_data[m] = {
-                            "state": {"Z": Z_r, "X": X_r, "Y": Y_r},
-                            "exact_bulk_energy": -current_hx * float(np.sum(X_r)),
-                            "lat_trotter_ms": 0.0, "lat_tomo_ms": 0.0,
-                            "unitary_fidelity": 1.0,
-                        }
-                    conn.send(reset_data)          # send fresh tomo for this step
-                    kick_payloads = conn.recv()    # get real kicks for this step
+
 
     finally:
         for m in list(sims.keys()):
@@ -608,7 +581,7 @@ class K4ManifoldEngine:
     def _init_files(self):
         try:
             with open(self.config_file, 'w') as f:
-                json.dump({"topology": "K4_trihole_manifold_cluster", "revision": 315,
+                json.dump({"topology": "K4_trihole_manifold_cluster", "revision": 316,
                            "precision": "fp16_FPPOW4", "n_manifolds": N_MANIFOLDS,
                            "qubits_per_manifold": QUBITS_PER_MANIFOLD,
                            "corner_per_edge": C_CORNER, "midedge_per_edge": E_MIDEDGE,
@@ -675,11 +648,11 @@ class K4ManifoldEngine:
         if probe_step >= 0 and probe_step >= total_steps:
             raise ValueError(f"probe_step {probe_step} >= total_steps {total_steps}")
 
-        print(f"[Engine] K4 Rev315 fp16 15q | {N_MANIFOLDS}x{QUBITS_PER_MANIFOLD}q | "
+        print(f"[Engine] K4 Rev316 fp16 15q | {N_MANIFOLDS}x{QUBITS_PER_MANIFOLD}q | "
               f"{N_JUNCTIONS} junctions | {UNIQUE_QUBITS} unique | "
               f"gluing={'MOEBIUS' if self.twist else 'TRIVIAL'} | "
               f"{GPUS_AVAILABLE} GPUs | {total_steps} steps")
-        print("[Engine] Rev315: __reset__ IPC command, 120s gather timeout, AMD_COMPUTE_QUEUE=1, "
+        print("[Engine] Rev316: 120s gather timeout, self-recovery on Trotter hang, AMD_COMPUTE_QUEUE=1, "
               "5s NaN sleep, ket_cache, context-loss try/except.")
 
         active_ranks = [r for r in range(TOTAL_WORKERS) if self.worker_assignments[r]]
@@ -725,13 +698,10 @@ class K4ManifoldEngine:
                     if remaining <= 0:
                         for conn, w_rank in pending:
                             print(f"[Master] TIMEOUT rank {w_rank} step {t}; "
-                                  f"sending RESET.", file=sys.stderr)
+                                  f"using last-good. Worker will self-recover.",
+                                  file=sys.stderr)
                             for m in self.worker_assignments[w_rank]:
                                 manifold_states[m] = self._get_last_good(m)
-                            # Send RESET sentinel (instead of kicks) so worker
-                            # reinits its sims without restarting (no JIT storm)
-                            try: conn.send({"__reset__": True})
-                            except Exception: pass
                         break
 
                     ready = mpc.wait([c for c, _ in pending], timeout=min(remaining, 5.0))
@@ -820,30 +790,6 @@ class K4ManifoldEngine:
                       f"Fid: {min_fidelity:.5f} | {time.perf_counter() - t0:.2f}s")
                 self._log_csvs(t, s * 100, bulk_energy, junction_energy,
                                total_energy, min_fidelity, junction_vectors, loop_amps, asym)
-
-                # --- COLLECT RESET RESPONSES ---
-                # Workers that received __reset__ send fresh tomo, then wait for kicks.
-                # Gather their fresh data to update manifold_states before scatter.
-                reset_pending = [(pipes[active_ranks.index(r)], r)
-                                 for r in active_ranks
-                                 if pipes[active_ranks.index(r)] in
-                                    [c for c, _ in list(zip(pipes, active_ranks))]]
-                # Simpler: try non-blocking poll on all pipes for reset responses
-                _reset_ready = mpc.wait(pipes, timeout=min(25.0,
-                                        GATHER_TIMEOUT_S - (time.perf_counter() - t0)))
-                for _conn in _reset_ready:
-                    _w_rank = active_ranks[pipes.index(_conn)]
-                    try:
-                        _data = _conn.recv()
-                        # Could be reset response or stale data; check and use if valid
-                        if isinstance(_data, dict) and "__reset__" not in _data:
-                            for _m, _payload in _data.items():
-                                _state = _payload.get("state", {})
-                                if _state and all(np.all(np.isfinite(_state.get(c, [float('nan')])))
-                                                  for c in ("X", "Y", "Z")):
-                                    manifold_states[_m] = _state
-                    except Exception:
-                        pass
 
                 # --- SCATTER ---
                 for i, w_rank in enumerate(active_ranks):
