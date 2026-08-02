@@ -1,6 +1,6 @@
 # Probing Topological Holonomy in K4-Connected Tri-Hole Manifolds via Multi-GPU Classical Quantum Simulation
 
-#### this document is generated; it went overboard hypetrain on this one even - agent almost opened up a spac vehicle - its that bad
+#### this document is generated; it went overboard hypetrain on this one - agent almost opened up a spac vehicle - its that bad
 
 ## Abstract
 
