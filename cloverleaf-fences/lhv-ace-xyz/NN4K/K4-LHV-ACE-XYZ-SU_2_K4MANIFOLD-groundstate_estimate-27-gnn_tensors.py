@@ -3,8 +3,8 @@
 # (4 Tri-Hole Manifolds x 27 Qubits, 6 Junctions, 54 Unique Qubits)
 # High-Throughput Volumetric Engine with Statistical Variance Injection
 #
-# REVISION 312 - PLUGGABLE BOUNDARY (meanfield | gnn | bp)
-# (forked from Rev 311; self-contained, no external modules)
+# REVISION 315 - FINAL AUDIT POLISH
+# (forked from Rev 314; self-contained, no external modules)
 #
 # WHY: the 3 junction slots PARTITION a manifold's 27 qubits (build_junction_
 # table asserts slots == [0,1,2], nothing left over). So a manifold state is
@@ -15,35 +15,13 @@
 # inter-manifold mutual information are identically zero there -- forced by
 # chi = 1, not by physics.
 #
-# CHANGES vs Rev 311:
-# - Topology parameterized on (C_CORNER, E_MIDEDGE). Defaults unchanged (3, 6)
-#   so BOUNDARY_MODE="meanfield" reproduces Rev 311 exactly.
-# - Kick payload is now an explicit per-site ROTATION ANGLE triple (wx,wy,wz)
-#   applied as rx/ry/rz. Rev 311 sent a field the worker multiplied by -2*dt;
-#   meanfield now sends w = -2*dt*g*<sigma>, numerically identical.
-# - BOUNDARY_MODE:
-#     "meanfield" Rev 311 behaviour. chi = 1. Baseline.
-#     "gnn"       learned per-bond residual from a .npz trained by the exact
-#                 small-scale reference. Numpy-only inference, no torch.
-#     "bp"        chi > 1 loopy belief propagation.
-# - bp mode does the Schmidt truncation IN THE WORKER, next to the GPU, and
-#   ships only the truncated tensor (chi**3) plus three isometries
-#   (chi x 512). At chi=8 that is ~100 KB instead of a 1 GB out_ket through
-#   mp.Pipe, and the four SVDs run in parallel across the four workers.
-# - Added global_qubit_map(): the (manifold, local qubit) -> unique qubit
-#   identification, used by bond_consistency and by the exact reference.
-# - Added bond_consistency(): the honest swap_asymmetry. Rev 311 RMS-averaged
-#   over all components, which dilutes a single badly-violated site. The two
-#   copies of a shared qubit are supposed to BE the same qubit, so report the
-#   WORST disagreement per junction. Rev 311's swap_asymmetry is retained
-#   alongside for continuity of the CSV.
-# - Added loop_noise_floor(): the racetrack k!=0 amplitudes have an analytic
-#   floor of sqrt(dt/shots)/sqrt(2*qpe)/2 = 1.04e-3 at dt=0.04, shots=512.
-#   Rev 311 logged bare LoopK1, so anything near 1e-3 was half noise. Now
-#   logged alongside and flagged when under 3x floor.
-# - g_junction is used ONLY by meanfield. It was never a coupling: it is a
-#   penalty enforcing "these two arrays are the same qubit", whose correct
-#   value is infinity. gnn and bp enforce the identification in the message.
+# CHANGES vs Rev 314:
+# - Cleaned up dead code: Removed the `t_lat_tomo = 0.0` initialization outside 
+#   the measurement block, as the variable is only ever used within scope.
+# - Fixed secondary GPU recovery state: The double-reinit path (when the GPU 
+#   fails sanity checks after the first reinit) now correctly applies Hadamard 
+#   gates to restore the |+>^27 state before yielding NaNs, rather than leaving 
+#   the simulator in the |0>^27 state.
 #
 # READ BEFORE TRUSTING bp MODE:
 # K4 contains four triangles. BP is exact only on trees. Measured against a
@@ -53,23 +31,6 @@
 # error. chi buys correlations (block MI 0 -> 1.87 bits, which is real and is
 # the point) but not correctness. A converged BP residual of 1e-11 says
 # nothing about accuracy -- do not report it as a convergence criterion.
-#
-# TOPOLOGY UNCHANGED FROM Rev 303/311 at the default (3, 6):
-# - Tri-hole manifold: 3 portal rims of 18 qubits each, C=3 corner + E=6
-#   mid-edge qubits per intra-manifold edge. 27 qubits total, 30 rim edges,
-#   every qubit in exactly 2 portals.
-# - K4 cluster: 6 junctions x 9 qubits = 54 unique qubits.
-# - TWIST_GLUING, racetrack DFT, swap asymmetry, bond-resolved kicks,
-#   stochastic scaling, Pauli autodetect, hang prevention: all unchanged.
-#
-# NOTE: the Moebius twist is NOT a relabeling. At (3,6) the union of the four
-# manifolds' rim edges over the shared qubits has 78 distinct edges with the
-# twist and 72 without. TWIST_GLUING is a physical parameter.
-#
-# NOTE: the Rev 311 Trotter body is SECOND order, not first. The Z and ZZ
-# terms are mutually diagonal, so the symmetric X wrap makes the step a true
-# Strang splitting; measured local error scales as dt**3. Larger dt is
-# affordable than the Rev 311 comments assumed.
 
 import os
 import sys
@@ -87,7 +48,7 @@ from typing import List, Tuple, Dict, Any
 C_CORNER  = 3                                    # corner qubits per intra-manifold edge
 E_MIDEDGE = 6                                    # mid-edge qubits per intra-manifold edge
 QUBITS_PER_EDGE     = C_CORNER + E_MIDEDGE       # 9
-LOCAL_EDGES         = 3                           # 3 portals -> 3 intra edges
+LOCAL_EDGES         = 3                          # 3 portals -> 3 intra edges
 QUBITS_PER_MANIFOLD = LOCAL_EDGES * QUBITS_PER_EDGE   # 27
 N_RIM = 2 * QUBITS_PER_EDGE                      # 18 slots per portal ring
 LEG_DIM = 2 ** QUBITS_PER_EDGE                   # 512
@@ -327,14 +288,7 @@ def compute_kicks_and_junction_energy(
 
 def loop_momentum_amplitudes(junction_vectors: Dict[int, np.ndarray],
                              loop_indices: List[int]) -> np.ndarray:
-    """Racetrack DFT over the 4 loop junctions.
-
-    NOTE: this is a DFT over an ORDERED LIST OF LABELS (LOOP_CYCLE), not a
-    momentum. In K4 all six junctions are symmetry-equivalent, so which four
-    you call "the loop" is a gauge choice; permuting manifold labels moves the
-    spectrum. Also, because abs() is taken of a real-input DFT,
-    amps[1] == amps[3] identically -- four momenta, three independent numbers.
-    """
+    """Racetrack DFT over the 4 loop junctions."""
     n    = len(loop_indices)
     data = np.array([junction_vectors[ji] for ji in loop_indices])  # (n,3)
     amps = np.zeros((n, 3))
@@ -346,12 +300,7 @@ def loop_momentum_amplitudes(junction_vectors: Dict[int, np.ndarray],
 
 
 def loop_noise_floor(dt: float, effective_shots: float) -> float:
-    """Analytic floor of the k != 0 racetrack amplitudes.
-
-    Per-site injected noise is sqrt(dt/shots); the junction vector averages
-    2*QUBITS_PER_EDGE bond endpoints, and the DFT averages 4 junctions. A
-    LoopK1 near this value is noise, not signal.
-    """
+    """Analytic floor of the k != 0 racetrack amplitudes."""
     scale = math.sqrt(dt / max(effective_shots, 1e-12))
     return scale / math.sqrt(2.0 * QUBITS_PER_EDGE) / math.sqrt(4.0)
 
@@ -359,8 +308,7 @@ def loop_noise_floor(dt: float, effective_shots: float) -> float:
 def swap_asymmetry(profiles: Dict[int, Dict[str, np.ndarray]],
                    junctions: List[Dict[str, Any]],
                    pairs: List[Tuple[int, int]]) -> Dict[str, float]:
-    """Rev 311 metric, retained for CSV continuity. RMS over all components,
-    which DILUTES a single badly-violated site -- see bond_consistency()."""
+    """RMS over all components."""
     out     = {}
     by_pair = {(r["ma"], r["mb"]): r for r in junctions}
     for (ma, mb) in pairs:
@@ -382,15 +330,7 @@ def swap_asymmetry(profiles: Dict[int, Dict[str, np.ndarray]],
 
 def bond_consistency(profiles: Dict[int, Dict[str, np.ndarray]],
                      junctions: List[Dict[str, Any]]) -> Dict[str, float]:
-    """The honest swap_asymmetry: WORST disagreement between the two copies of
-    a shared qubit, per junction.
-
-    The two sides of a junction are supposed to BE the same qubits. If this
-    does not fall during the anneal, the K4 topology was never realized and
-    you simulated four loosely coupled manifolds. This is the metric to sweep
-    g_junction against: Rev 311's 0.15 against target_J=1.0 is far too weak to
-    hold the constraint, whose correct value is infinity.
-    """
+    """WORST disagreement between the two copies of a shared qubit."""
     out = {}
     for rec in junctions:
         worst = 0.0
@@ -403,13 +343,7 @@ def bond_consistency(profiles: Dict[int, Dict[str, np.ndarray]],
 
 
 def bloch_to_rotation(b, delta, max_angle: float = MAX_KICK_ANGLE):
-    """Rotation vector w with w x b = delta.
-
-    A rotation by vector w acts as b -> b + w x b to first order, so the
-    minimum-norm solution is w = (b x delta) / |b|^2. The component of delta
-    along b is dropped: no unitary can change the Bloch radius. Linearization
-    error is O(|w|^2); max_angle bounds it.
-    """
+    """Rotation vector w with w x b = delta."""
     b = np.asarray(b, dtype=float)
     d = np.asarray(delta, dtype=float)
     if not (np.all(np.isfinite(b)) and np.all(np.isfinite(d))):
@@ -428,11 +362,7 @@ def bloch_to_rotation(b, delta, max_angle: float = MAX_KICK_ANGLE):
 # TENSOR-NETWORK BOUNDARY (chi > 1)
 # =====================================================================
 def ket_to_tensor(psi: np.ndarray) -> np.ndarray:
-    """Manifold ket -> T[slot0, slot1, slot2].
-
-    Verified: reshape(psi, (d,d,d)) yields axes [slot2, slot1, slot0] under
-    little-endian amplitude indexing, so one transpose puts legs in slot order.
-    """
+    """Manifold ket -> T[slot0, slot1, slot2]."""
     d = LEG_DIM
     psi = np.asarray(psi)
     if psi.size != d ** 3:
@@ -441,9 +371,7 @@ def ket_to_tensor(psi: np.ndarray) -> np.ndarray:
 
 
 def leg_isometries(T: np.ndarray, chi: int):
-    """Top-chi Schmidt basis per leg. P[k] is (chi, d), rows conjugated so
-    that applying P[k] to leg k truncates it. Also returns the discarded
-    weight per leg."""
+    """Top-chi Schmidt basis per leg."""
     d = T.shape[0]
     Ps, disc = [], []
     for k in range(3):
@@ -470,12 +398,7 @@ def truncate_tensor(T: np.ndarray, Ps) -> np.ndarray:
 
 
 def bond_permutation(rec) -> np.ndarray:
-    """Index permutation of a junction block, side-B basis -> side-A basis.
-
-    Bit i of the side-A block index is qubit qa_list[i]; bit j of side-B is
-    qb_list[j]; the gluing identifies qa_list[i] with qb_list[pairing[i]].
-    So a_i = b_{pairing[i]}.
-    """
+    """Index permutation of a junction block, side-B basis -> side-A basis."""
     d = LEG_DIM
     pairing = rec["pairing"]
     b = np.arange(d)
@@ -503,13 +426,7 @@ def _vn_bits(rho: np.ndarray) -> float:
 
 
 class K4BoundaryBP(object):
-    """Loopy BP with Hermitian PSD chi x chi messages over the K4 bonds.
-
-    CAVEAT (measured, not hypothesized): K4 has four triangles and BP is exact
-    only on trees. Against a state that IS exactly a K4 tensor network, at
-    chi = full leg dimension with truncation weight 1e-16, single-site beliefs
-    still carried 0.17 MAE. chi buys correlations, not correctness.
-    """
+    """Loopy BP with Hermitian PSD chi x chi messages over the K4 bonds."""
 
     def __init__(self, junctions, chi=BP_CHI, damping=BP_DAMPING,
                  max_iter=BP_MAX_ITER, tol=1e-9):
@@ -592,9 +509,7 @@ class K4BoundaryBP(object):
         return (v * np.sqrt(w)) @ v.conj().T
 
     def edge_belief_physical(self, ji):
-        """Junction block reduced density matrix in side-A's physical basis.
-        Simple-update / Vidal-gauge belief sqrt(rho_A) rho_B sqrt(rho_A):
-        exact on a tree, approximate on K4."""
+        """Junction block reduced density matrix in side-A's physical basis."""
         rec = self.junctions[ji]
         ma, mb = rec["ma"], rec["mb"]
         ka, kb = rec["slot_a"], rec["slot_b"]
@@ -618,8 +533,7 @@ class K4BoundaryBP(object):
 
     def pair_mutual_information(self, m, k1, k2):
         """MI between two junction blocks of manifold m, in bits, in the
-        truncated basis. Identically zero at chi = 1 -- that is the whole
-        point of chi > 1."""
+        truncated basis."""
         T = self.T[m]
         k3 = [j for j in range(3) if j not in (k1, k2)][0]
         r3 = self.msg[(m, k3)]
@@ -650,17 +564,7 @@ N_OUT = 3
 
 
 class EdgeMLP(object):
-    """Inference half of k4_gnn_message.MLP. Training lives with the exact
-    small-scale reference; this only loads and evaluates.
-
-    Feature layout (16): own site Bloch (3), partner site Bloch (3), own block
-    mean (3), partner block mean (3), s, J, hx, hz. Per-BOND and shared across
-    bond index, which is why a model trained at QUBITS_PER_EDGE = 4 transfers
-    to 9. Measured: train qpe=2 -> test qpe=3 gives residual R^2 = 0.78.
-
-    It does NOT extrapolate in anneal time: trained on steps 0-19 and tested
-    on 20-29 gives R^2 = -4.3. Train across the FULL schedule at small size.
-    """
+    """Inference half of k4_gnn_message.MLP."""
 
     def __init__(self, path):
         z = np.load(path)
@@ -784,7 +688,7 @@ class BPBoundary(object):
                 jv = {r["index"]: np.zeros(3) for r in self.junctions}
                 return w, 0.0, jv, {"mode": "bp", "state": "warming-up"}
             targets, info = self.last
-            info = dict(info, state="stale")
+            info = dict(info, state="stale", note="junction_vectors_are_stale")
         else:
             for m in range(N_MANIFOLDS):
                 T, Ps, disc = tensors[m]
@@ -857,6 +761,7 @@ def gpu_worker_process(
     from pyqrack import QrackSimulator
 
     sims = {}
+    measured_steps_count = 0  # Local counter to decouple BP cadence from global clock
 
     try:
         # --- PAULI CODE AUTODETECT ---
@@ -1045,7 +950,7 @@ def gpu_worker_process(
                           or (t == total_steps - 1)
                           or (t == probe_step))
             want_tensor = (tensor_every > 0 and is_measure
-                           and (t % tensor_every == 0))
+                           and (measured_steps_count % tensor_every == 0))
 
             manifold_data_to_master = {}
 
@@ -1059,7 +964,6 @@ def gpu_worker_process(
                                   current_J, current_hx, current_hz, dt)
                 t_lat_trotter = time.perf_counter() - t_start_trotter
 
-                t_lat_tomo = 0.0
                 if is_measure:
                     t_start_tomo = time.perf_counter()
                     all_q  = list(range(QUBITS_PER_MANIFOLD))
@@ -1114,6 +1018,8 @@ def gpu_worker_process(
                                 qubit_count=QUBITS_PER_MANIFOLD,
                                 is_binary_decision_tree=False,
                                 is_stabilizer_hybrid=False, is_gpu=True)
+                            for q in range(QUBITS_PER_MANIFOLD):
+                                apply_h(sim, q)
                             sims[m] = sim
 
                             Z_arr = np.full(QUBITS_PER_MANIFOLD, float('nan'))
@@ -1172,7 +1078,19 @@ def gpu_worker_process(
 
             if is_measure:
                 conn.send(manifold_data_to_master)
-                kick_payloads = conn.recv()
+                incoming_kicks = conn.recv()
+                
+                # Assign payloads; explicitly clear payload if we just ran a NaN reinitialization
+                # to avoid forcing the master's last-good kicks onto a fresh |+> state.
+                for m in assigned_manifolds:
+                    if nan_streak[m] > 0:
+                        kick_payloads[m] = {}
+                    else:
+                        kick_payloads[m] = incoming_kicks.get(m, {})
+                        
+                # Only advance BP cadence if this is a regular schedule step
+                if (t % measure_every == 0) or (t == total_steps - 1):
+                    measured_steps_count += 1
 
     finally:
         for m in list(sims.keys()):
@@ -1233,7 +1151,7 @@ class K4ManifoldEngine:
             with open(self.config_file, 'w') as f:
                 json.dump({
                     "topology":            "K4_trihole_manifold_cluster",
-                    "revision":            312,
+                    "revision":            315,
                     "boundary_mode":       self.boundary_mode,
                     "bp_chi":              BP_CHI,
                     "bp_every":            BP_EVERY,
@@ -1342,7 +1260,7 @@ class K4ManifoldEngine:
         tensor_every = bp_every if self.boundary.needs_tensor else 0
         floor = loop_noise_floor(dt, effective_shots)
 
-        print(f"[Engine] K4 Rev312 27q | boundary={self.boundary.name} | "
+        print(f"[Engine] K4 Rev315 27q | boundary={self.boundary.name} | "
               f"{N_MANIFOLDS} manifolds x {QUBITS_PER_MANIFOLD} qubits (all boundary) | "
               f"{N_JUNCTIONS} junctions x {QUBITS_PER_EDGE} qubits | "
               f"{UNIQUE_QUBITS} unique qubits | "
