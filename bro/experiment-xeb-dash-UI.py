@@ -470,7 +470,7 @@ class Viewer:
         n = c.shape[0]
         
         if n == 1:
-            ax.set_title("connected ZZ correlations: 1 qubit — nothing to show", fontsize=11)
+            ax.set_title("connected ZZ correlations: 1 qubit -- nothing to show", fontsize=11)
             ax.set_axis_off()
             return None, None
             
@@ -556,12 +556,12 @@ class Viewer:
         lx = np.log10(np.clip(d.x, 1e-6, None))
 
         if lx.min() == lx.max():
-            ax.set_title("landscape: all D*p identical — nothing to show", fontsize=11)
+            ax.set_title("landscape: all D*p identical -- nothing to show", fontsize=11)
             ax.set_axis_off()
             return None, None
 
         if w.min() == w.max():
-            ax.set_title("landscape: all shots have identical Hamming weight — nothing to show", fontsize=11)
+            ax.set_title("landscape: all shots have identical Hamming weight -- nothing to show", fontsize=11)
             ax.set_axis_off()
             return None, None
 
