@@ -58,7 +58,7 @@ Usage
   python xeb3d.py view --save-all out/                 # headless PNG dump
   python xeb3d.py stats result.json
   python xeb3d.py tcount circuit.qasm
-  python xeb3d.py probs circuit.qasm result.json --limit 1
+  python xeb3d.py probs circuit.qasm result.json --limit 1 --workers 32
 
 The subcommand may be omitted; a bare path is treated as `view`.
 
@@ -220,6 +220,10 @@ def load_json(json_path: str, amps_path: str | None = None) -> XEBData:
     raw = np.asarray(blob[key])
     if raw.size == 0:
         raise ValueError(f"{json_path}: {key!r} is empty -- zero accepted shots")
+        
+    if raw.ndim == 2 and raw.shape[0] < raw.shape[1]:
+        print("warning: JSON array has more columns than rows, assuming transposed (N, S) -> (S, N)", file=sys.stderr)
+        raw = raw.T
 
     n_shots = raw.shape[0]
     bits = _normalise_bits(raw, n_shots)
@@ -270,6 +274,17 @@ def autodiscover(directory: str = ".") -> tuple[str, str]:
             "could not auto-discover *amplitude*.npy / *bitstring*.npy in "
             f"{os.path.abspath(directory)!r}; pass --amps and --bits explicitly"
         )
+        
+    def prefix(p): 
+        return re.sub(r'(amplitude|bitstring).*', '', os.path.basename(p))
+        
+    for a in amps:
+        pa = prefix(a)
+        match = [b for b in bits if prefix(b) == pa]
+        if match:
+            return a, match[0]
+            
+    print("warning: falling back to alphabetical pairing in autodiscover", file=sys.stderr)
     return amps[0], bits[0]
 
 
@@ -408,20 +423,40 @@ def lattice_positions(n: int, dims: tuple[int, int, int]) -> np.ndarray:
     return np.column_stack([xs, ys, zs]).astype(float)
 
 
-def pca3(bits: np.ndarray) -> np.ndarray:
+def pca3(bits: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     m = bits.astype(np.float64)
     m -= m.mean(axis=0, keepdims=True)
-    # economy SVD; S x N with S ~ 1e3-1e5 is cheap
-    _, s, vt = np.linalg.svd(m, full_matrices=False)
-    k = min(3, vt.shape[0])
+    
+    n_shots, n_qubits = m.shape
+    
+    # Accelerated PCA computation: Use covariance matrix when S >> N to drop
+    # quadratic complexity. Avoids hanging on high shot volumes.
+    if n_shots > n_qubits:
+        cov = (m.T @ m)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        
+        # eigh returns ascending order; reverse to get primary components
+        idx = np.argsort(eigvals)[::-1]
+        eigvals = eigvals[idx]
+        eigvecs = eigvecs[:, idx]
+        
+        k = min(3, n_qubits)
+        vt = eigvecs[:, :k].T
+        s = np.sqrt(np.maximum(eigvals, 0))
+    else:
+        # economy SVD fallback for edge cases
+        _, s, vt = np.linalg.svd(m, full_matrices=False)
+        k = min(3, vt.shape[0])
+
     coords = m @ vt[:k].T
     if k < 3:
         coords = np.column_stack([coords, np.zeros((coords.shape[0], 3 - k))])
-    var = (s ** 2) / max(1, m.shape[0] - 1)
+        
+    var = (s ** 2) / max(1, n_shots - 1)
     total = var.sum()
     explained = var[:3] / total if total > 0 else np.zeros(3)
-    pca3.explained = explained  # type: ignore[attr-defined]
-    return coords
+    
+    return coords, explained
 
 
 def zz_correlation(bits: np.ndarray) -> np.ndarray:
@@ -455,6 +490,7 @@ class Viewer:
         self.pos = lattice_positions(data.n_qubits, self.dims)
         self.marg = data.bits.mean(axis=0)
         self._cloud = None
+        self._cloud_explained = None
         self._corr = None
 
         self.fig = None
@@ -467,7 +503,7 @@ class Viewer:
     @property
     def cloud(self) -> np.ndarray:
         if self._cloud is None:
-            self._cloud = pca3(self.d.bits)
+            self._cloud, self._cloud_explained = pca3(self.d.bits)
         return self._cloud
 
     @property
@@ -538,7 +574,7 @@ class Viewer:
         ax.scatter(*sel, s=200, facecolors="none", edgecolors="crimson",
                    linewidths=1.8, depthshade=False, zorder=5)
 
-        expl = getattr(pca3, "explained", np.zeros(3))
+        expl = self._cloud_explained if self._cloud_explained is not None else np.zeros(3)
         # for structureless bits every PC carries 1/N of the variance, so the
         # printed fractions only mean something against that baseline
         ax.set_title(
@@ -731,6 +767,10 @@ class Viewer:
         ax.set_box_aspect([d / span for d in dims])
 
     def render(self, ax, cax=None):
+        global plt_colors, plt_cm
+        if plt_colors is None:
+            _install_mpl_shims()
+            
         ax.clear()
         if cax is not None:
             cax.clear()
@@ -760,8 +800,11 @@ class Viewer:
         from matplotlib.widgets import Button, CheckButtons, RadioButtons, Slider
 
         self.fig = plt.figure(figsize=(14, 8.5))
+        
+        # fix: allow bare bitstring sets without throwing a NoneType error
+        title_source = self.d.amps_path or self.d.bits_path
         self.fig.canvas.manager.set_window_title(
-            f"xeb3d  --  {os.path.basename(self.d.amps_path)}"
+            f"xeb3d  --  {os.path.basename(title_source)}"
         )
 
         self.ax = self.fig.add_axes([0.28, 0.10, 0.60, 0.84], projection="3d")
@@ -865,7 +908,7 @@ class Viewer:
 # --------------------------------------------------------------------------- #
 
 _CLIFFORD_ANGLES = re.compile(
-    r"\s*-?\s*(pi\s*/\s*2|pi|0|2\s*\*?\s*pi)\s*", re.IGNORECASE
+    r"\s*-?\s*(pi\s*/\s*2|pi|0(?:\.0*)?|2\s*\*?\s*pi|3\s*\*?\s*pi\s*/\s*2)\s*", re.IGNORECASE
 )
 _PARAMETRIC = ("rz", "rx", "ry", "p", "u1", "u2", "u3", "u", "crz", "cp", "cu1")
 
@@ -926,17 +969,15 @@ def tcount_report(qasm_path: str) -> str:
 # --------------------------------------------------------------------------- #
 
 def _collapse(sim, q, bit):
-    """Force qubit q to `bit`, using whichever API this pyqrack exposes."""
+    """Force qubit q to `bit`. Requires pyqrack's force_m for the chain rule."""
     fn = getattr(sim, "force_m", None)
     if fn is not None:
         return fn(q, bool(bit))
-    got = sim.m(q)
-    if bool(got) != bool(bit):
-        raise RuntimeError(
-            "this pyqrack has no force_m and m() collapsed the wrong way; "
-            "forced measurement is required for the chain rule"
-        )
-    return got
+        
+    raise RuntimeError(
+        "Modern pyqrack with force_m is required for the chain rule. "
+        "m() is probabilistic and cannot guarantee the required post-selection path."
+    )
 
 
 def log_prob_of(sim_factory, bits, n_data, n_ancilla):
@@ -980,7 +1021,7 @@ def log_prob_of(sim_factory, bits, n_data, n_ancilla):
 
 
 def compute_ideal_probs(qasm_path, result_json, n_data, n_ancilla,
-                        out_path, limit=None, use_clone=True, force=False):
+                        out_path, limit=None, use_clone=True, force=False, workers=1):
     """Strong-simulate p_ideal for each accepted sample and save magnitudes.
 
     Only tractable while the T-count keeps the state near-Clifford;
@@ -1062,13 +1103,58 @@ def compute_ideal_probs(qasm_path, result_json, n_data, n_ancilla,
     log_ps = np.empty(len(samples))
     log_syn = np.empty(len(samples))
     t0 = time.perf_counter()
-    for k, row in enumerate(samples):
-        log_ps[k], log_syn[k] = log_prob_of(factory, row, n_data, n_ancilla)
-        if k % 10 == 9 or k == len(samples) - 1:
-            el = time.perf_counter() - t0
-            print(f"  {k + 1}/{len(samples)}  {el / (k + 1):.2f}s per sample, "
-                  f"eta {(len(samples) - k - 1) * el / (k + 1) / 60:.1f} min",
-                  file=sys.stderr, flush=True)
+
+    if workers > 1 and base is not None:
+        import concurrent.futures
+        import queue
+        
+        actual_workers = min(workers, len(samples))
+        print(f"  running PyQrack concurrent worker pool with {actual_workers} threads", file=sys.stderr)
+        
+        # Pre-clone serially to avoid C++ concurrent read tearing on the base object
+        worker_bases = queue.Queue()
+        for _ in range(actual_workers):
+            worker_bases.put(base.clone())
+            
+        def safe_factory():
+            wb = worker_bases.get()
+            try:
+                return wb.clone()
+            finally:
+                worker_bases.put(wb)
+        
+        def _sim_task(args_tuple):
+            k, row = args_tuple
+            lp, ls = log_prob_of(safe_factory, row, n_data, n_ancilla)
+            return k, lp, ls
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=actual_workers) as pool:
+            futures = {pool.submit(_sim_task, (k, row)): k for k, row in enumerate(samples)}
+            completed = 0
+            for fut in concurrent.futures.as_completed(futures):
+                k, lp, ls = fut.result()
+                log_ps[k] = lp
+                log_syn[k] = ls
+                completed += 1
+                if completed % 10 == 0 or completed == len(samples):
+                    el = time.perf_counter() - t0
+                    print(f"  {completed}/{len(samples)}  {el / completed:.2f}s per sample, "
+                          f"eta {(len(samples) - completed) * el / completed / 60:.1f} min",
+                          file=sys.stderr, flush=True)
+
+        # Proactively release VRAM backings without waiting on GC
+        while not worker_bases.empty():
+            wb = worker_bases.get_nowait()
+            del wb
+
+    else:
+        for k, row in enumerate(samples):
+            log_ps[k], log_syn[k] = log_prob_of(factory, row, n_data, n_ancilla)
+            if k % 10 == 9 or k == len(samples) - 1:
+                el = time.perf_counter() - t0
+                print(f"  {k + 1}/{len(samples)}  {el / (k + 1):.2f}s per sample, "
+                      f"eta {(len(samples) - k - 1) * el / (k + 1) / 60:.1f} min",
+                      file=sys.stderr, flush=True)
 
     log_post = log_ps - log_syn
     amps = np.exp(0.5 * log_post)      # xeb3d reads magnitudes
@@ -1180,6 +1266,9 @@ def main(argv=None):
                     help="re-run the circuit per sample instead of cloning")
     pp.add_argument("--force", action="store_true",
                     help="run even when the T-count says it cannot finish")
+    pp.add_argument("--workers", type=int, default=1,
+                    help="Number of concurrent workers for strong simulation. "
+                         "Scales well on multi-core systems when cloning is supported.")
 
     args = ap.parse_args(argv)
 
@@ -1190,7 +1279,7 @@ def main(argv=None):
     if args.cmd == "probs":
         compute_ideal_probs(args.qasm_path, args.result_json, args.n_data,
                             args.n_ancilla, args.out, args.limit,
-                            args.use_clone, args.force)
+                            args.use_clone, args.force, args.workers)
         return 0
 
     data = _build_data(args)
@@ -1204,7 +1293,6 @@ def main(argv=None):
     if args.save_all:
         import matplotlib
         matplotlib.use("Agg")
-        _install_mpl_shims()
         viewer = Viewer(data, dims, args.cmap)
         for path in viewer.save_all(args.save_all, args.dpi):
             print(f"wrote {path}")
@@ -1212,7 +1300,6 @@ def main(argv=None):
         print(stats_text(data, viewer.stats))
         return 0
 
-    _install_mpl_shims()
     Viewer(data, dims, args.cmap).show()
     return 0
 
