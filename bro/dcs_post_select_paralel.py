@@ -2,7 +2,7 @@
 #
 # this is a modded and paralellized version of https://github.com/vm6502q/pyqrack-examples/blob/main/ibm/dcs_post_select.py
 # copyrights, license, ownership remains effective in this file pertaining everything but the paralellization part for Dan Strano
-# down ask Dan about this script; ask me
+# dont ask Dan about this script; ask me
 ################################
 
 # Post-selected weak simulation of a doped-Clifford-sampling (DCS) circuit
