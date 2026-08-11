@@ -1254,7 +1254,8 @@ def _snap_angle(ang: float) -> float:
     return round(ang / (math.pi / 2)) * (math.pi / 2)
 
 
-def dedope(qasm_path: str, keep: int, out_path: str) -> dict:
+def dedope(qasm_path: str, keep: int, out_path: str,
+           keep_from: str | None = None, seed: int | None = None) -> dict:
     """Emit a copy of the circuit with only `keep` non-Clifford gates left.
 
     Every other doped gate has its angle snapped to the nearest multiple of
@@ -1296,8 +1297,44 @@ def dedope(qasm_path: str, keep: int, out_path: str) -> dict:
         raise SystemExit(f"circuit has only {total} non-Clifford gates, "
                          f"cannot keep {keep}")
 
-    # evenly spaced keep-set
-    if keep <= 0:
+    # map line index -> (gate ordinal, qubit), so a keep-set lifted from
+    # another file can be matched positionally rather than by line number
+    fp = circuit_fingerprint(qasm_path)
+    pos_of_line = {}
+    ordinal_iter = iter(fp["doped"])
+    for (i, _g) in doped:
+        pos_of_line[i] = next(ordinal_iter, None)
+
+    if keep_from:
+        anchor = set(circuit_fingerprint(keep_from)["doped"])
+        keep_idx = {i for i in pos_of_line if pos_of_line[i] in anchor}
+        matched = len(keep_idx)
+        if matched != len(anchor):
+            print(f"warning: only {matched}/{len(anchor)} of the reference's "
+                  f"doped positions exist in this circuit; the two files may "
+                  f"not share a skeleton", file=sys.stderr)
+        if keep and keep < matched:
+            raise SystemExit(
+                f"--keep {keep} is below the {matched} positions carried by "
+                f"--keep-from; a nested ladder cannot drop reference gates"
+            )
+        if keep and keep > matched:
+            # extend the reference set evenly through the gates it left out,
+            # so higher rungs are supersets of the vendor's file
+            rest = [i for i in pos_of_line if i not in keep_idx]
+            extra = keep - matched
+            step = len(rest) / extra if extra else 1
+            keep_idx |= {rest[min(len(rest) - 1, int(j * step))]
+                         for j in range(extra)}
+        keep = len(keep_idx)          # report what was actually kept
+    elif seed is not None:
+        # independent random draw -- the construction the vendor appears to
+        # have used, since their own doping levels share no positions
+        import random
+        rng = random.Random(seed)
+        keep_idx = {doped[i][0]
+                    for i in rng.sample(range(total), min(keep, total))}
+    elif keep <= 0:
         keep_idx = set()
     else:
         step = total / keep
@@ -1329,8 +1366,87 @@ def dedope(qasm_path: str, keep: int, out_path: str) -> dict:
             "t_requested": keep, "t_actual": got}
 
 
-def dedope_report(qasm_path, keep, out_path, verify_against=None) -> str:
-    r = dedope(qasm_path, keep, out_path)
+def circuit_fingerprint(qasm_path: str) -> dict:
+    """Structural fingerprint: the actual edge multiset and the positions of
+    the doped gates, not just their counts.
+
+    Counting two-qubit gates cannot distinguish two different wirings, and is
+    useless for validating dedope specifically, since dedope only rewrites
+    single-qubit gates and therefore inherits the source's edge count no
+    matter what. What has to be compared is which qubits are coupled and where
+    the surviving non-Clifford gates sit.
+    """
+    from collections import Counter
+
+    edges = Counter()
+    doped = []
+    ordinal = 0
+
+    with open(qasm_path) as f:
+        for raw in f:
+            line = raw.split("//")[0].strip()
+            if not line or line.startswith(
+                    ("OPENQASM", "include", "gate ", "qreg", "creg", "}")):
+                continue
+            m = re.match(r"([a-zA-Z_][a-zA-Z0-9_]*)", line)
+            if not m:
+                continue
+            g = m.group(1).lower()
+            if g in ("barrier", "measure", "reset"):
+                continue
+            qs = [int(x) for x in _QARG.findall(line)]
+            if not qs:
+                continue
+            ordinal += 1
+
+            if g in _TWO_QUBIT and len(qs) >= 2:
+                for q in qs[1:]:
+                    edges[(min(qs[0], q), max(qs[0], q))] += 1
+            elif len(qs) == 1:
+                nc = (g in ("t", "tdg")) or (
+                    g in _PARAMETRIC
+                    and (lambda a: a and not _angles_are_clifford(a.group(1)))(
+                        re.search(r"\(([^)]*)\)", line)))
+                if nc:
+                    doped.append((ordinal, qs[0]))
+
+    return {"edges": edges, "doped": doped, "n_gates": ordinal}
+
+
+def compare_circuits(a_path: str, b_path: str) -> str:
+    fa, fb = circuit_fingerprint(a_path), circuit_fingerprint(b_path)
+
+    same_edges = fa["edges"] == fb["edges"]
+    same_doping = fa["doped"] == fb["doped"]
+    overlap = len(set(fa["doped"]) & set(fb["doped"]))
+    n_a, n_b = len(fa["doped"]), len(fb["doped"])
+
+    lines = [
+        f"    skeleton: {len(fa['edges'])} vs {len(fb['edges'])} distinct "
+        f"coupled pairs, edge multiset "
+        f"{'IDENTICAL' if same_edges else 'DIFFERENT'}",
+        f"    doped positions: {overlap}/{max(n_a, n_b, 1)} shared "
+        f"({'identical' if same_doping else 'differ'})",
+    ]
+
+    if same_edges and same_doping:
+        lines.append("    -> reconstruction reproduces the reference file")
+    elif same_edges:
+        lines += [
+            "    -> same skeleton, different choice of which gates stay doped.",
+            "       A valid ladder over the same topology and doping level,",
+            "       but NOT the vendor's circuits -- say so in any writeup.",
+            "       Placement varying across rungs arguably tests a certificate",
+            "       harder than holding it fixed.",
+        ]
+    else:
+        lines.append("    -> different topology; not the same circuit family")
+    return "\n".join(lines)
+
+
+def dedope_report(qasm_path, keep, out_path, verify_against=None,
+                  keep_from=None, seed=None) -> str:
+    r = dedope(qasm_path, keep, out_path, keep_from, seed)
     chi = 0.23 * r["t_actual"]
     lines = [
         f"{r['source']}  (t = {r['t_source']})",
@@ -1343,24 +1459,13 @@ def dedope_report(qasm_path, keep, out_path, verify_against=None) -> str:
 
     if verify_against:
         ref_t, _ = count_nonclifford(verify_against)
-        st_a = circuit_structure(out_path)
-        st_b = circuit_structure(verify_against)
-        same_graph = (st_a["n_qubits"] == st_b["n_qubits"]
-                      and st_a["n_two_qubit_gates"] == st_b["n_two_qubit_gates"])
         lines += [
             "",
             f"  verify against {verify_against}:",
-            f"    t          {r['t_actual']} vs {ref_t}"
+            f"    t: {r['t_actual']} vs {ref_t}"
             f"  {'match' if r['t_actual'] == ref_t else 'DIFFER'}",
-            f"    qubits     {st_a['n_qubits']} vs {st_b['n_qubits']}",
-            f"    2q gates   {st_a['n_two_qubit_gates']} vs "
-            f"{st_b['n_two_qubit_gates']}",
-            f"    interaction graph {'matches' if same_graph else 'DIFFERS'}",
+            compare_circuits(out_path, verify_against),
         ]
-        if not same_graph:
-            lines.append("    -> the vendor did not generate their reduced "
-                         "files this way; treat dedoped rungs as a related "
-                         "family, not as their circuits")
     return "\n".join(lines)
 
 
@@ -1626,8 +1731,118 @@ def run_noisy_postselect(qasm_path, n_data, n_ancilla, shots, noise,
 
 
 # --------------------------------------------------------------------------- #
+# ladder driver -- sweep circuits, tabulate fidelity before/after post-selection
+# --------------------------------------------------------------------------- #
 
-SUBCOMMANDS = ("view", "stats", "tcount", "probs", "noisy", "structure", "dedope")
+_LADDER_COLUMNS = ("circuit", "t", "chi", "shots", "accepted", "accept_rate",
+                   "F_raw", "F_post", "lift", "note")
+
+
+def _ladder_row(circuit, t, chi, **kw):
+    row = {c: "" for c in _LADDER_COLUMNS}
+    row.update(circuit=os.path.basename(circuit), t=t, chi=f"2^{chi:.1f}")
+    row.update({k: v for k, v in kw.items() if k in row})
+    return row
+
+
+def format_ladder(rows) -> str:
+    widths = {c: max(len(c), *(len(str(r[c])) for r in rows)) if rows else len(c)
+              for c in _LADDER_COLUMNS}
+    out = ["  ".join(c.ljust(widths[c]) for c in _LADDER_COLUMNS),
+           "  ".join("-" * widths[c] for c in _LADDER_COLUMNS)]
+    for r in rows:
+        out.append("  ".join(str(r[c]).ljust(widths[c])
+                             for c in _LADDER_COLUMNS))
+    return "\n".join(out)
+
+
+def run_ladder(patterns, n_data, n_ancilla, shots, noise, outdir,
+               dry_run=False, resume=True, chi_limit=45.0, **ace_kw):
+    """Sweep a set of circuits: noisy sample -> exact amplitudes -> XEB, both
+    before and after post-selection.
+
+    The quantity of interest is the last column. F_raw is the fidelity of the
+    noisy sampler against the exact ideal distribution; F_post is the same
+    after discarding non-zero-syndrome shots. Their difference is what the
+    checks bought, and it is the number a syndrome certificate has to predict.
+    Running this across a doping ladder shows whether that prediction holds as
+    t climbs toward the regime where no exact reference exists.
+
+    Each circuit is independent: one failure records a note and the sweep
+    continues. With resume=True, stages whose outputs already exist are
+    skipped, so a long sweep can be restarted without redoing finished work.
+    """
+    import csv
+    import glob as _glob
+
+    circuits = sorted({c for pat in patterns for c in _glob.glob(pat)})
+    if not circuits:
+        raise SystemExit(f"no circuits matched {patterns}")
+    os.makedirs(outdir, exist_ok=True)
+
+    rows = []
+    for circuit in circuits:
+        stem = os.path.join(outdir, os.path.splitext(os.path.basename(circuit))[0])
+        t, _ = count_nonclifford(circuit)
+        chi = 0.23 * t
+
+        if chi >= chi_limit:
+            rows.append(_ladder_row(circuit, t, chi,
+                                    note="skipped: no exact reference possible"))
+            continue
+        if dry_run:
+            rows.append(_ladder_row(circuit, t, chi, shots=shots,
+                                    note=f"would write {stem}.json"))
+            continue
+
+        try:
+            acc_json = f"{stem}.json"
+            raw_json = f"{stem}.raw.json"
+            if not (resume and os.path.exists(acc_json)
+                    and os.path.exists(raw_json)):
+                run_noisy_postselect(circuit, n_data, n_ancilla, shots, noise,
+                                     acc_json, **ace_kw)
+
+            results = {}
+            for tag, path in (("post", acc_json), ("raw", raw_json)):
+                amps = f"{stem}.{tag}.npy"
+                if not (resume and os.path.exists(amps)):
+                    compute_ideal_probs(circuit, path, n_data, n_ancilla, amps)
+                data = load_json(path, amps)
+                results[tag] = (fidelity_table(data), data)
+
+            f_raw = results["raw"][0]["F_linear"]
+            f_post = results["post"][0]["F_linear"]
+            meta = results["post"][1].meta or {}
+            n_acc = meta.get("accepted", results["post"][1].n_shots)
+
+            rows.append(_ladder_row(
+                circuit, t, chi, shots=shots, accepted=n_acc,
+                accept_rate=f"{n_acc / shots:.4f}",
+                F_raw=f"{f_raw:.4f}", F_post=f"{f_post:.4f}",
+                lift=f"{f_post - f_raw:+.4f}"))
+
+        except SystemExit as e:
+            rows.append(_ladder_row(circuit, t, chi, note=f"failed: {e}"))
+        except Exception as e:  # keep the sweep alive
+            rows.append(_ladder_row(circuit, t, chi,
+                                    note=f"failed: {type(e).__name__}: {e}"))
+
+        print(format_ladder(rows), file=sys.stderr)
+        print(file=sys.stderr)
+
+    csv_path = os.path.join(outdir, "ladder.csv")
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=_LADDER_COLUMNS)
+        w.writeheader()
+        w.writerows(rows)
+
+    return rows, csv_path
+
+
+# --------------------------------------------------------------------------- #
+
+SUBCOMMANDS = ("view", "stats", "tcount", "probs", "noisy", "structure", "dedope", "compare", "ladder")
 
 
 def _build_data(args) -> XEBData:
@@ -1721,18 +1936,43 @@ def main(argv=None):
     pn.add_argument("--long-range-rows", type=int, default=4)
     pn.add_argument("--out", default="dcs_ace_result.json")
 
+    pl = sub.add_parser("ladder", help="sweep circuits and tabulate fidelity")
+    pl.add_argument("circuits", nargs="+", help="QASM paths or globs")
+    pl.add_argument("--n-data", type=int, default=70)
+    pl.add_argument("--n-ancilla", type=int, default=27)
+    pl.add_argument("--shots", type=int, default=500)
+    pl.add_argument("--noise", type=float, default=0.0)
+    pl.add_argument("--outdir", default="ladder_runs")
+    pl.add_argument("--chi-limit", type=float, default=45.0,
+                    help="skip circuits whose stabilizer rank exceeds 2^this")
+    pl.add_argument("--dry-run", action="store_true",
+                    help="show the plan and the per-circuit cost, run nothing")
+    pl.add_argument("--no-resume", dest="resume", action="store_false",
+                    help="recompute stages whose outputs already exist")
+
     pt = sub.add_parser("tcount", help="count non-Clifford gates in a QASM")
     pt.add_argument("qasm_path")
 
     pd = sub.add_parser("dedope",
                         help="reduce doping to build intermediate ladder rungs")
     pd.add_argument("qasm_path")
-    pd.add_argument("--keep", type=int, required=True,
+    pd.add_argument("--keep-from", default=None,
+                    help="lift the keep-set from this QASM, reproducing its "
+                         "doping exactly; with --keep, extend it to a superset")
+    pd.add_argument("--keep", type=int, default=0,
                     help="how many non-Clifford gates to leave in place")
     pd.add_argument("--out", required=True)
+    pd.add_argument("--seed", type=int, default=None,
+                    help="draw the keep-set at random from this seed, matching "
+                         "the vendor's apparent construction; use several "
+                         "seeds at one t to measure placement sensitivity")
     pd.add_argument("--verify-against", default=None,
                     help="a vendor file at the same doping level, to check "
                          "this reconstruction is faithful")
+
+    pc = sub.add_parser("compare", help="structural comparison of two QASMs")
+    pc.add_argument("qasm_a")
+    pc.add_argument("qasm_b")
 
     pst = sub.add_parser("structure",
                          help="component decomposition of the interaction graph")
@@ -1767,13 +2007,31 @@ def main(argv=None):
                              args.pad_to)
         return 0
 
+    if args.cmd == "ladder":
+        rows, csv_path = run_ladder(args.circuits, args.n_data, args.n_ancilla,
+                                    args.shots, args.noise, args.outdir,
+                                    args.dry_run, args.resume, args.chi_limit)
+        print(format_ladder(rows))
+        print(f"\nwrote {csv_path}")
+        return 0
+
     if args.cmd == "tcount":
         print(tcount_report(args.qasm_path))
         return 0
 
     if args.cmd == "dedope":
+        if not args.keep and not args.keep_from:
+            raise SystemExit("dedope needs --keep or --keep-from")
+        if args.keep_from and args.seed is not None:
+            raise SystemExit("--keep-from and --seed are alternative ways to "
+                             "choose the keep-set; pick one")
         print(dedope_report(args.qasm_path, args.keep, args.out,
-                            args.verify_against))
+                            args.verify_against, args.keep_from, args.seed))
+        return 0
+
+    if args.cmd == "compare":
+        print(f"{args.qasm_a}\n{args.qasm_b}")
+        print(compare_circuits(args.qasm_a, args.qasm_b))
         return 0
 
     if args.cmd == "structure":
