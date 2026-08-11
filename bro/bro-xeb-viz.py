@@ -1054,7 +1054,8 @@ def log_prob_of(sim_factory, bits, n_data, n_ancilla):
 
 
 def compute_ideal_probs(qasm_path, result_json, n_data, n_ancilla,
-                        out_path, limit=None, use_clone=True, force=False):
+                        out_path, limit=None, use_clone=True, force=False,
+                        workers=1, allow_circuit_mismatch=False):
     """Strong-simulate p_ideal for each accepted sample and save magnitudes.
 
     Only tractable while the T-count keeps the state near-Clifford;
@@ -1083,6 +1084,25 @@ def compute_ideal_probs(qasm_path, result_json, n_data, n_ancilla,
 
     with open(result_json) as f:
         blob = json.load(f)
+
+    # The samples were drawn from one specific circuit. Computing p_ideal from
+    # a different one yields mean D*p ~ 1 and F ~ 0 with no error raised
+    # anywhere -- and a near-zero XEB is exactly what a genuinely bad run looks
+    # like, so the mistake is invisible in the result.
+    recorded = blob.get("qasm_path")
+    if recorded and os.path.basename(recorded) != os.path.basename(qasm_path):
+        msg = (f"circuit mismatch:\n"
+               f"  samples were drawn from : {os.path.basename(recorded)}\n"
+               f"  amplitudes requested from: {os.path.basename(qasm_path)}\n"
+               f"Amplitudes from a different circuit give F ~ 0 and look like a\n"
+               f"failed run rather than an error.")
+        if allow_circuit_mismatch:
+            print(f"warning: {msg}", file=sys.stderr)
+        else:
+            raise SystemExit(
+                msg + "\nPass --allow-circuit-mismatch if this is deliberate "
+                      "(e.g. the file was renamed)."
+            )
 
     key = next((k for k in _BIT_KEYS if k in blob), None)
     if key is None:
@@ -1136,17 +1156,83 @@ def compute_ideal_probs(qasm_path, result_json, n_data, n_ancilla,
     log_ps = np.empty(len(samples))
     log_syn = np.empty(len(samples))
     t0 = time.perf_counter()
-    for k, row in enumerate(samples):
-        log_ps[k], log_syn[k] = log_prob_of(factory, row, n_data, n_ancilla)
-        if k % 10 == 9 or k == len(samples) - 1:
-            el = time.perf_counter() - t0
-            print(f"  {k + 1}/{len(samples)}  {el / (k + 1):.2f}s per sample, "
-                  f"eta {(len(samples) - k - 1) * el / (k + 1) / 60:.1f} min",
-                  file=sys.stderr, flush=True)
+
+    if workers > 1 and base is None:
+        print("  warning: --workers needs clone(); running serially",
+              file=sys.stderr)
+
+    if workers > 1 and base is not None:
+        # NOTE: this shares one Qrack library instance across threads. Verify
+        # against a serial run on a few samples before trusting a long one --
+        # dcs_post_select_paralel.py deliberately uses processes for this
+        # reason, and these sims are far heavier than a stabilizer tableau.
+        import concurrent.futures
+        import queue
+
+        actual_workers = min(workers, len(samples))
+        print(f"  thread pool with {actual_workers} workers", file=sys.stderr)
+
+        # pre-clone serially: concurrent reads of one base object are not
+        # known to be safe on the C++ side
+        worker_bases = queue.Queue()
+        for _ in range(actual_workers):
+            worker_bases.put(base.clone())
+
+        def safe_factory():
+            wb = worker_bases.get()
+            try:
+                return wb.clone()
+            finally:
+                worker_bases.put(wb)
+
+        def _sim_task(args_tuple):
+            k, row = args_tuple
+            lp, ls = log_prob_of(safe_factory, row, n_data, n_ancilla)
+            return k, lp, ls
+
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=actual_workers) as pool:
+            futures = [pool.submit(_sim_task, (k, row))
+                       for k, row in enumerate(samples)]
+            completed = 0
+            for fut in concurrent.futures.as_completed(futures):
+                k, lp, ls = fut.result()
+                log_ps[k] = lp
+                log_syn[k] = ls
+                completed += 1
+                if completed % 10 == 0 or completed == len(samples):
+                    el = time.perf_counter() - t0
+                    print(f"  {completed}/{len(samples)}  "
+                          f"{el / completed:.2f}s per sample, "
+                          f"eta {(len(samples) - completed) * el / completed / 60:.1f} min",
+                          file=sys.stderr, flush=True)
+
+        while not worker_bases.empty():
+            wb = worker_bases.get_nowait()
+            del wb
+    else:
+        for k, row in enumerate(samples):
+            log_ps[k], log_syn[k] = log_prob_of(factory, row, n_data, n_ancilla)
+            if k % 10 == 9 or k == len(samples) - 1:
+                el = time.perf_counter() - t0
+                print(f"  {k + 1}/{len(samples)}  {el / (k + 1):.2f}s per sample, "
+                      f"eta {(len(samples) - k - 1) * el / (k + 1) / 60:.1f} min",
+                      file=sys.stderr, flush=True)
 
     log_post = log_ps - log_syn
     amps = np.exp(0.5 * log_post)      # xeb3d reads magnitudes
     np.save(out_path, amps)
+
+    # provenance sidecar: which circuit and which sample set these belong to
+    side = os.path.splitext(out_path)[0] + ".meta.json"
+    with open(side, "w") as f:
+        json.dump({"qasm_path": qasm_path,
+                   "qasm_basename": os.path.basename(qasm_path),
+                   "t_count": t_gates,
+                   "result_json": result_json,
+                   "n_samples": int(len(amps)),
+                   "n_data": n_data,
+                   "n_ancilla": n_ancilla}, f, indent=2)
 
     x = np.exp(log_post + n_data * math.log(2.0))
     print()
@@ -1154,13 +1240,394 @@ def compute_ideal_probs(qasm_path, result_json, n_data, n_ancilla,
           f"(mean over samples; 1.0 means code-preserving doping held)")
     print(f"mean D*p = {x.mean():.4f}   ->  linear XEB F = {x.mean() - 1:.4f}")
     print(f"wrote {out_path}  ({len(amps)} magnitudes)")
+    print(f"wrote {side}  (provenance)")
     print(f"\nnow: python xeb3d.py view {result_json} --amps {out_path}")
     return amps
 
 
 # --------------------------------------------------------------------------- #
+# de-doping -- build intermediate rungs of a validation ladder
+# --------------------------------------------------------------------------- #
 
-SUBCOMMANDS = ("view", "stats", "tcount", "probs")
+def _snap_angle(ang: float) -> float:
+    """Nearest multiple of pi/2."""
+    return round(ang / (math.pi / 2)) * (math.pi / 2)
+
+
+def dedope(qasm_path: str, keep: int, out_path: str) -> dict:
+    """Emit a copy of the circuit with only `keep` non-Clifford gates left.
+
+    Every other doped gate has its angle snapped to the nearest multiple of
+    pi/2, which makes it Clifford while preserving the gate, its position and
+    the entire interaction graph. The result is a circuit of the same family
+    and connectivity at lower doping -- the rungs between the tractable
+    calibration point and the intractable claim.
+
+    The kept gates are spread evenly through the circuit rather than taken
+    from the front, so the doping stays distributed the way the original is.
+
+    This is NOT bit-identical to how the vendor generated their own reduced
+    files; they may re-randomise rather than snap. Check before relying on it:
+    dedope the full circuit down to the vendor's doping level and compare
+    against their file (see `--verify-against`).
+    """
+    lines = open(qasm_path).read().splitlines(keepends=True)
+
+    # locate every non-Clifford gate: (line index, kind)
+    doped = []
+    for i, raw in enumerate(lines):
+        line = raw.split("//")[0].strip()
+        if not line or line.startswith(
+                ("OPENQASM", "include", "gate ", "qreg", "creg", "}")):
+            continue
+        m = re.match(r"([a-zA-Z_][a-zA-Z0-9_]*)", line)
+        if not m:
+            continue
+        g = m.group(1).lower()
+        if g in ("t", "tdg"):
+            doped.append((i, g))
+        elif g in _PARAMETRIC:
+            ang = re.search(r"\(([^)]*)\)", line)
+            if ang and not _angles_are_clifford(ang.group(1)):
+                doped.append((i, g))
+
+    total = len(doped)
+    if keep > total:
+        raise SystemExit(f"circuit has only {total} non-Clifford gates, "
+                         f"cannot keep {keep}")
+
+    # evenly spaced keep-set
+    if keep <= 0:
+        keep_idx = set()
+    else:
+        step = total / keep
+        keep_idx = {doped[min(total - 1, int(j * step))][0] for j in range(keep)}
+
+    out = list(lines)
+    for i, g in doped:
+        if i in keep_idx:
+            continue
+        raw = out[i]
+        if g in ("t", "tdg"):
+            # T is rz(pi/4); pi/4 is equidistant from 0 and pi/2, so snap up
+            # to S/Sdg, preserving the gate rather than deleting it
+            out[i] = re.sub(r"\b" + g + r"\b",
+                            "s" if g == "t" else "sdg", raw, count=1)
+        else:
+            ang = re.search(r"\(([^)]*)\)", raw)
+            snapped = []
+            for tok in ang.group(1).split(","):
+                v = _eval_angle(tok)
+                snapped.append(repr(_snap_angle(v)) if v is not None else tok)
+            out[i] = raw[:ang.start(1)] + ",".join(snapped) + raw[ang.end(1):]
+
+    with open(out_path, "w") as f:
+        f.writelines(out)
+
+    got, _ = count_nonclifford(out_path)
+    return {"source": qasm_path, "out": out_path, "t_source": total,
+            "t_requested": keep, "t_actual": got}
+
+
+def dedope_report(qasm_path, keep, out_path, verify_against=None) -> str:
+    r = dedope(qasm_path, keep, out_path)
+    chi = 0.23 * r["t_actual"]
+    lines = [
+        f"{r['source']}  (t = {r['t_source']})",
+        f"  -> {r['out']}  t = {r['t_actual']}  chi ~ 2^{chi:.1f}",
+    ]
+    if r["t_actual"] != r["t_requested"]:
+        lines.append(f"  WARNING: asked for t = {r['t_requested']}, got "
+                     f"{r['t_actual']}; snapping may have altered a gate the "
+                     f"counter classifies differently")
+
+    if verify_against:
+        ref_t, _ = count_nonclifford(verify_against)
+        st_a = circuit_structure(out_path)
+        st_b = circuit_structure(verify_against)
+        same_graph = (st_a["n_qubits"] == st_b["n_qubits"]
+                      and st_a["n_two_qubit_gates"] == st_b["n_two_qubit_gates"])
+        lines += [
+            "",
+            f"  verify against {verify_against}:",
+            f"    t          {r['t_actual']} vs {ref_t}"
+            f"  {'match' if r['t_actual'] == ref_t else 'DIFFER'}",
+            f"    qubits     {st_a['n_qubits']} vs {st_b['n_qubits']}",
+            f"    2q gates   {st_a['n_two_qubit_gates']} vs "
+            f"{st_b['n_two_qubit_gates']}",
+            f"    interaction graph {'matches' if same_graph else 'DIFFERS'}",
+        ]
+        if not same_graph:
+            lines.append("    -> the vendor did not generate their reduced "
+                         "files this way; treat dedoped rungs as a related "
+                         "family, not as their circuits")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# circuit structure -- does the T-count factor into independent patches?
+# --------------------------------------------------------------------------- #
+
+_TWO_QUBIT = ("cz", "cx", "cy", "ch", "swap", "iswap", "crz", "cp", "cu1",
+              "cu3", "cu", "rzz", "rxx", "ryy", "czz", "ecr", "dcx")
+_QARG = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*\s*\[\s*(\d+)\s*\]")
+
+
+def circuit_structure(qasm_path: str) -> dict:
+    """Connected components of the two-qubit interaction graph, with the
+    non-Clifford count carried by each.
+
+    Stabilizer rank is 2^(0.23t) for t non-Clifford gates *in one entangled
+    block*. If the doping localises into components with no two-qubit path
+    between them, the state is a tensor product and the cost drops from
+    2^(0.23 sum t_i) to the sum of 2^(0.23 t_i) -- which is the difference
+    between intractable and routine at high doping. This decides whether that
+    route is open, without running anything.
+    """
+    parent = {}
+
+    def find(a):
+        parent.setdefault(a, a)
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    per_qubit_t: dict[int, int] = {}
+    n_edges = 0
+    max_q = -1
+
+    with open(qasm_path) as f:
+        for line in f:
+            line = line.split("//")[0].strip()
+            if not line or line.startswith(
+                    ("OPENQASM", "include", "gate ", "qreg", "creg", "}")):
+                continue
+            m = re.match(r"([a-zA-Z_][a-zA-Z0-9_]*)", line)
+            if not m:
+                continue
+            g = m.group(1).lower()
+            if g in ("barrier", "measure", "reset"):
+                continue
+
+            qs = [int(x) for x in _QARG.findall(line)]
+            if not qs:
+                continue
+            max_q = max(max_q, *qs)
+            for q in qs:
+                find(q)
+
+            if g in _TWO_QUBIT and len(qs) >= 2:
+                n_edges += 1
+                for q in qs[1:]:
+                    union(qs[0], q)
+            elif len(qs) == 1:
+                nc = (g in ("t", "tdg")) or (
+                    g in _PARAMETRIC
+                    and (lambda a: a and not _angles_are_clifford(a.group(1)))(
+                        re.search(r"\(([^)]*)\)", line))
+                )
+                if nc:
+                    per_qubit_t[qs[0]] = per_qubit_t.get(qs[0], 0) + 1
+
+    comps: dict[int, list[int]] = {}
+    for q in list(parent):
+        comps.setdefault(find(q), []).append(q)
+
+    out = []
+    for root, qubits in sorted(comps.items(), key=lambda kv: -len(kv[1])):
+        t = sum(per_qubit_t.get(q, 0) for q in qubits)
+        out.append({"qubits": sorted(qubits), "n_qubits": len(qubits), "t": t})
+
+    return {"n_qubits": max_q + 1, "n_two_qubit_gates": n_edges,
+            "components": out,
+            "t_total": sum(c["t"] for c in out)}
+
+
+def structure_report(qasm_path: str) -> str:
+    st = circuit_structure(qasm_path)
+    comps = st["components"]
+    lines = [
+        f"{qasm_path}",
+        f"  {st['n_qubits']} qubits, {st['n_two_qubit_gates']} two-qubit gates",
+        f"  {len(comps)} independent component(s), t_total = {st['t_total']}",
+        "",
+    ]
+    for i, c in enumerate(comps):
+        chi = 0.23 * c["t"]
+        lines.append(f"  component {i}: {c['n_qubits']:3d} qubits, "
+                     f"t = {c['t']:4d}, chi ~ 2^{chi:.1f}")
+
+    mono = 0.23 * st["t_total"]
+    if len(comps) == 1:
+        lines += [
+            "",
+            "  Single entangled block: the doping does not factor, so cost is",
+            f"  the monolithic 2^{mono:.1f}. Splitting by component is not",
+            "  available here -- any decomposition would have to cut through",
+            "  entanglement (tensor-network contraction across a time or space",
+            "  cut), not just separate components.",
+        ]
+    else:
+        split = sum(2 ** (0.23 * c["t"]) for c in comps)
+        lines += [
+            "",
+            f"  monolithic : 2^{mono:.1f}",
+            f"  factored   : 2^{math.log2(split):.1f}  (sum over components)",
+            "  The state is a tensor product across components; simulate each",
+            "  separately and multiply the per-component probabilities.",
+        ]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# noisy sampling -- give post-selection something real to filter
+# --------------------------------------------------------------------------- #
+
+def _grid_shape(n: int) -> tuple[int, int]:
+    """Most square factor pair of n."""
+    best = (1, n)
+    for i in range(1, int(math.isqrt(n)) + 1):
+        if n % i == 0:
+            best = max(best, (i, n // i), key=lambda t: min(t))
+    return best
+
+
+def ace_grid_advice(n_qubits: int) -> tuple[int, tuple[int, int]]:
+    """Pick a padded qubit count that gives ACE a usable 2D grid.
+
+    ACE tiles qubits into a grid and elides couplings between patches. A prime
+    qubit count factors as 1 x n -- a line, not a lattice -- and the patch
+    structure degenerates, taking long_range_columns/rows with it. 70 + 27 = 97
+    is prime, so this matters for exactly the circuit at hand.
+    """
+    r, c = _grid_shape(n_qubits)
+    if min(r, c) > 1:
+        return n_qubits, (r, c)
+    for pad in range(n_qubits + 1, n_qubits + 12):
+        r, c = _grid_shape(pad)
+        if min(r, c) >= 4:          # want a real 2D patch structure
+            return pad, (r, c)
+    return n_qubits, (1, n_qubits)
+
+
+def run_noisy_postselect(qasm_path, n_data, n_ancilla, shots, noise,
+                         out_path, long_range_columns=4, long_range_rows=4,
+                         pad_to=None, progress_every=25):
+    """Post-selected sampling on QrackAceBackend with a physical noise model.
+
+    The difference from dcs_post_select: QrackStabilizer's only error source is
+    T-gate rounding, which the code-preserving doping is constructed to commute
+    with -- so acceptance is 100% and post-selection filters nothing. ACE
+    injects error on the Clifford gates themselves, which is what the checks
+    were built to detect, so acceptance drops below 1 and the filtering becomes
+    measurable.
+
+    Writes two files with the same schema: `out_path` holding the accepted
+    shots, and `<out>.raw.json` holding every shot regardless of syndrome.
+    Running `probs` and `stats` on both gives the fidelity before and after
+    post-selection, which is the quantity the syndrome certificate predicts.
+
+    ACE is approximate and has its own elision error. Characterise it first:
+    run with --noise 0 and XEB the result against exact amplitudes from
+    `probs`. That residual is ACE's floor, and every later number sits on top
+    of it.
+    """
+    import json
+    import time
+
+    n_qubits = n_data + n_ancilla
+    padded, (rows, cols) = ace_grid_advice(n_qubits)
+    if pad_to:
+        padded = pad_to
+        rows, cols = _grid_shape(padded)
+
+    if padded != n_qubits:
+        print(f"note: {n_qubits} qubits factors as {_grid_shape(n_qubits)}; "
+              f"padding to {padded} for a {rows}x{cols} ACE grid "
+              f"({padded - n_qubits} idle)", file=sys.stderr)
+    if min(rows, cols) == 1:
+        print("warning: ACE grid is a line, not a lattice; patch elision is "
+              "degenerate and results will not mean much", file=sys.stderr)
+
+    try:
+        from pyqrack import QrackAceBackend
+        from qiskit import QuantumCircuit
+    except ImportError as e:
+        raise SystemExit(f"`noisy` needs pyqrack and qiskit ({e})")
+
+    qc = QuantumCircuit.from_qasm_file(qasm_path)
+    if qc.num_qubits != n_qubits:
+        raise SystemExit(f"circuit has {qc.num_qubits} qubits, expected {n_qubits}")
+
+    accepted, raw = [], []
+    t0 = time.perf_counter()
+
+    for shot in range(shots):
+        # fresh instance per shot: the noise realisation has to be an
+        # independent draw, so cloning a post-circuit state is not an option
+        # here the way it is for the noiseless reference
+        sim = QrackAceBackend(padded,
+                              long_range_columns=long_range_columns,
+                              long_range_rows=long_range_rows,
+                              noise=noise)
+        try:
+            sim.run_qiskit_circuit(qc, shots=0)
+            syndrome = [sim.m(q) for q in range(n_data, n_qubits)]
+            data = [sim.m(q) for q in range(n_data)]
+            raw.append(data)
+            if all(s == 0 for s in syndrome):
+                accepted.append(data)
+        finally:
+            del sim
+
+        if progress_every and (shot + 1) % progress_every == 0:
+            el = time.perf_counter() - t0
+            print(f"  {shot + 1}/{shots}, {len(accepted)} accepted "
+                  f"({100 * len(accepted) / (shot + 1):.1f}%), "
+                  f"{el / (shot + 1):.2f}s per shot", file=sys.stderr, flush=True)
+
+    elapsed = time.perf_counter() - t0
+    common = {
+        "qasm_path": qasm_path,
+        "shots": shots,
+        "noise": noise,
+        "backend": "QrackAceBackend",
+        "ace_grid": [rows, cols],
+        "padded_qubits": padded,
+        "long_range_columns": long_range_columns,
+        "long_range_rows": long_range_rows,
+        "elapsed_seconds": elapsed,
+    }
+
+    with open(out_path, "w") as f:
+        json.dump({**common, "accepted": len(accepted),
+                   "acceptance_rate": len(accepted) / shots,
+                   "accepted_samples": accepted}, f)
+
+    raw_path = os.path.splitext(out_path)[0] + ".raw.json"
+    with open(raw_path, "w") as f:
+        json.dump({**common, "accepted": len(raw), "acceptance_rate": 1.0,
+                   "post_selected": False, "accepted_samples": raw}, f)
+
+    print(f"\n{len(accepted)}/{shots} accepted "
+          f"({100 * len(accepted) / shots:.2f}%) at noise={noise}")
+    print(f"wrote {out_path} and {raw_path}")
+    print("\nnext, on each file:")
+    print(f"  python xeb3d.py probs {qasm_path} <file> --out <file>.npy")
+    print("  python xeb3d.py stats <file> --amps <file>.npy")
+    print("the difference in F is what post-selection bought you")
+    return accepted, raw
+
+
+# --------------------------------------------------------------------------- #
+
+SUBCOMMANDS = ("view", "stats", "tcount", "probs", "noisy", "structure", "dedope")
 
 
 def _build_data(args) -> XEBData:
@@ -1240,8 +1707,36 @@ def main(argv=None):
     ps = sub.add_parser("stats", help="print the fidelity and health table")
     _add_input_args(ps)
 
+    pn = sub.add_parser("noisy", help="post-selected sampling on ACE with noise")
+    pn.add_argument("qasm_path")
+    pn.add_argument("--n-data", type=int, default=70)
+    pn.add_argument("--n-ancilla", type=int, default=27)
+    pn.add_argument("--shots", type=int, default=500)
+    pn.add_argument("--noise", type=float, default=0.0,
+                    help="ACE noise parameter; start at 0 to measure ACE's own "
+                         "elision error against exact amplitudes")
+    pn.add_argument("--pad-to", type=int, default=None,
+                    help="override the padded qubit count for the ACE grid")
+    pn.add_argument("--long-range-columns", type=int, default=4)
+    pn.add_argument("--long-range-rows", type=int, default=4)
+    pn.add_argument("--out", default="dcs_ace_result.json")
+
     pt = sub.add_parser("tcount", help="count non-Clifford gates in a QASM")
     pt.add_argument("qasm_path")
+
+    pd = sub.add_parser("dedope",
+                        help="reduce doping to build intermediate ladder rungs")
+    pd.add_argument("qasm_path")
+    pd.add_argument("--keep", type=int, required=True,
+                    help="how many non-Clifford gates to leave in place")
+    pd.add_argument("--out", required=True)
+    pd.add_argument("--verify-against", default=None,
+                    help="a vendor file at the same doping level, to check "
+                         "this reconstruction is faithful")
+
+    pst = sub.add_parser("structure",
+                         help="component decomposition of the interaction graph")
+    pst.add_argument("qasm_path")
 
     pp = sub.add_parser("probs", help="strong-simulate ideal probabilities")
     pp.add_argument("qasm_path")
@@ -1256,17 +1751,40 @@ def main(argv=None):
                     help="re-run the circuit per sample instead of cloning")
     pp.add_argument("--force", action="store_true",
                     help="run even when the T-count says it cannot finish")
+    pp.add_argument("--workers", type=int, default=1,
+                    help="concurrent workers; needs clone(). Validate against "
+                         "a serial run before trusting a long one")
+    pp.add_argument("--allow-circuit-mismatch", action="store_true",
+                    help="proceed when the QASM differs from the one recorded "
+                         "in the result JSON")
 
     args = ap.parse_args(argv)
+
+    if args.cmd == "noisy":
+        run_noisy_postselect(args.qasm_path, args.n_data, args.n_ancilla,
+                             args.shots, args.noise, args.out,
+                             args.long_range_columns, args.long_range_rows,
+                             args.pad_to)
+        return 0
 
     if args.cmd == "tcount":
         print(tcount_report(args.qasm_path))
         return 0
 
+    if args.cmd == "dedope":
+        print(dedope_report(args.qasm_path, args.keep, args.out,
+                            args.verify_against))
+        return 0
+
+    if args.cmd == "structure":
+        print(structure_report(args.qasm_path))
+        return 0
+
     if args.cmd == "probs":
         compute_ideal_probs(args.qasm_path, args.result_json, args.n_data,
                             args.n_ancilla, args.out, args.limit,
-                            args.use_clone, args.force)
+                            args.use_clone, args.force, args.workers,
+                            args.allow_circuit_mismatch)
         return 0
 
     data = _build_data(args)
