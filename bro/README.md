@@ -1,4 +1,4 @@
-# Exhaustive Guide to `bro-xeb-viz.py`: Cross-Entropy Benchmarking Toolkit
+## Exhaustive Guide to `bro-xeb-viz.py`: Cross-Entropy Benchmarking Toolkit
 
 ######  This document has been generated; claims and/or facts therein could be totally false - emptor caveat
 
