@@ -1,5 +1,7 @@
 # Exhaustive Guide to `bro-xeb-viz.py`: Cross-Entropy Benchmarking Toolkit
 
+######  This document has been generated; claims and/or facts therein could be totally false - emptor caveat
+
 ## Abstract
 This document provides a highly formalized, comprehensive guide to the `bro-xeb-viz.py` utility, a one-file toolkit designed for evaluating, manipulating, and visualizing sampled quantum circuits through Cross-Entropy Benchmarking (XEB). This guide details the methodology, inputs, commands, and interactive visualization mechanisms provided by the script.
 
