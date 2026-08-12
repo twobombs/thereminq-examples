@@ -3717,6 +3717,13 @@ def _patched_ideal_probs(manifest_path, result_json, n_data, out_path,
               f"{len(meta['data']):>5} {len(meta['ancillas']):>4}",
               file=sys.stderr)
     print(f"  max t = {worst}", file=sys.stderr)
+    widest = max((m["n_qubits"] for m in man["patches"]), default=0)
+    if widest < 20:
+        print(f"  note: widest patch is {widest} qubits, so the GPU will not "
+              f"engage -- Qrack keeps narrow states on the CPU, and the "
+              f"2^(n+t) cost here is 2^t small operations rather than one wide "
+              f"statevector. Parallelism across patches and samples is the "
+              f"lever; the accelerator is not.", file=sys.stderr)
     if worst > 20:
         print(f"  WARNING: a patch with t={worst} needs 2^{worst} terms if "
               f"Qrack takes the exact near-Clifford path. Re-cut with "
