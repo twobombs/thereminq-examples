@@ -349,6 +349,9 @@ def _normalise_bits(b: np.ndarray, n_shots: int) -> np.ndarray:
 
 
 def load_xeb(amps_path: str, bits_path: str) -> XEBData:
+    for label, path in (("amplitude", amps_path), ("bitstring", bits_path)):
+        if not os.path.isfile(path):
+            raise SystemExit(f"no {label} file at {path!r}")
     amps = np.load(amps_path, allow_pickle=False).ravel()
     raw_bits = np.load(bits_path, allow_pickle=False)
 
@@ -432,6 +435,12 @@ def load_json(json_path: str, amps_path: str | None = None,
         kind = f"{kind}  [from JSON key {pkey!r}]"
         src = f"{json_path}:{pkey}"
     elif amps_path:
+        if not os.path.isfile(amps_path):
+            raise SystemExit(
+                f"no amplitude file at {amps_path!r}. `probs` writes it at the "
+                f"end of the run, so this is normal if that run is still going "
+                f"or was interrupted."
+            )
         amps = np.load(amps_path, allow_pickle=False).ravel()
         if amps.size != n_shots:
             raise ValueError(
