@@ -2966,6 +2966,93 @@ def patch_report(qasm_path, outdir, n_data, n_ancilla, target=27.0,
     return "\n".join(L)
 
 
+def synth_dcs(n_data, n_ancilla, depth, t_gates, out_path, seed=0,
+              check_span=3):
+    """Build a small DCS-style circuit: tree topology, interleaved checks.
+
+    The point is a circuit where the monolithic exact amplitude fits, so
+    F_elide can be measured by comparing patched against exact on the same
+    samples. On this build that means n + t <= ~28 for the WHOLE circuit,
+    which the reference family cannot reach at any doping.
+
+    Structure mirrors the reference: data qubits on a line, each ancilla
+    coupled to a short span of neighbouring data qubits, doping spread over
+    the data register, checks repeated through the depth.
+    """
+    import random
+
+    rng = random.Random(seed)
+    n = n_data + n_ancilla
+    L = ["OPENQASM 2.0;", 'include "qelib1.inc";', f"qreg q[{n}];"]
+
+    # ancilla a covers data qubits [start, start+check_span)
+    spans = []
+    for a in range(n_ancilla):
+        start = min(n_data - check_span,
+                    int(a * (n_data - check_span) / max(1, n_ancilla - 1))
+                    if n_ancilla > 1 else 0)
+        spans.append((n_data + a, list(range(start, start + check_span))))
+
+    doped = 0
+    for d in range(depth):
+        for q in range(n_data):
+            L.append(f"h q[{q}];")
+        for q in range(n_data - 1):
+            L.append(f"cz q[{q}],q[{q + 1}];")
+
+        # doping spread evenly through the layers
+        want = round(t_gates * (d + 1) / depth) - doped
+        for _ in range(max(0, want)):
+            L.append(f"t q[{rng.randrange(n_data)}];")
+            doped += 1
+
+        # checks: ancilla picks up the parity of its span, Clifford throughout
+        for anc, qs in spans:
+            L.append(f"h q[{anc}];")
+            for q in qs:
+                L.append(f"cz q[{anc}],q[{q}];")
+            L.append(f"h q[{anc}];")
+
+    for q in range(n_data):
+        L.append(f"h q[{q}];")
+
+    with open(out_path, "w") as f:
+        f.write("\n".join(L) + "\n")
+
+    t_actual, _ = count_nonclifford(out_path)
+    st = circuit_structure(out_path)
+    cost = st["n_qubits"] + t_actual
+    mem = (2.0 ** cost) * 8
+    unit = "B"
+    for u in ("KB", "MB", "GB", "TB"):
+        if mem > 1024:
+            mem /= 1024
+            unit = u
+    return {"path": out_path, "n_qubits": st["n_qubits"], "t": t_actual,
+            "n_t": cost, "mem": f"{mem:.1f} {unit}",
+            "edges": len(circuit_fingerprint(out_path)["edges"]),
+            "two_qubit": st["n_two_qubit_gates"]}
+
+
+def synth_report(**kw):
+    r = synth_dcs(**kw)
+    lines = [
+        f"wrote {r['path']}",
+        f"  {r['n_qubits']} qubits, t = {r['t']}, "
+        f"{r['two_qubit']} two-qubit gates over {r['edges']} pairs",
+        f"  monolithic cost 2^(n+t) = 2^{r['n_t']} = {r['mem']}",
+    ]
+    if r["n_t"] <= 28:
+        lines += ["", "  Both routes are available here: run `probs` exactly "
+                      "and patched on the same samples, and their ratio is "
+                      "F_elide -- the quantity the reference family cannot "
+                      "yield at any doping."]
+    else:
+        lines += ["", f"  Too large: 2^{r['n_t']} will not fit. Reduce "
+                      f"--n-data or --t-gates until n+t <= 28."]
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------- #
 # de-doping -- build intermediate rungs of a validation ladder
 # --------------------------------------------------------------------------- #
@@ -3804,7 +3891,7 @@ def run_ladder(patterns, n_data, n_ancilla, shots, noise, outdir,
 
 # --------------------------------------------------------------------------- #
 
-SUBCOMMANDS = ("view", "stats", "tcount", "probs", "noisy", "structure", "dedope", "compare", "ladder", "cut", "patch", "probe", "selftest", "doctor", "env")
+SUBCOMMANDS = ("view", "stats", "tcount", "probs", "noisy", "structure", "dedope", "compare", "ladder", "cut", "patch", "synth", "probe", "selftest", "doctor", "env")
 
 
 def _build_data(args) -> XEBData:
@@ -3987,6 +4074,17 @@ def main(argv=None):
                          "qubit cap so QUnit has no reason to elide")
     pr.add_argument("--ace-max-qb", type=int, default=None)
 
+    psy = sub.add_parser("synth",
+                         help="build a small DCS-style circuit where the "
+                              "monolithic amplitude is computable")
+    psy.add_argument("--n-data", type=int, default=12)
+    psy.add_argument("--n-ancilla", type=int, default=4)
+    psy.add_argument("--depth", type=int, default=8)
+    psy.add_argument("--t-gates", type=int, default=12)
+    psy.add_argument("--check-span", type=int, default=3)
+    psy.add_argument("--seed", type=int, default=0)
+    psy.add_argument("--out", required=True)
+
     pt = sub.add_parser("tcount", help="count non-Clifford gates in a QASM")
     pt.add_argument("qasm_path")
     pt.add_argument("--cost-model", choices=("auto", "dense", "tinject", "nt"), default="auto",
@@ -4163,6 +4261,13 @@ def main(argv=None):
 
     if args.cmd == "probe":
         print(probe_simulator(args.qasm_path, args.n_data + args.n_ancilla))
+        return 0
+
+    if args.cmd == "synth":
+        print(synth_report(n_data=args.n_data, n_ancilla=args.n_ancilla,
+                           depth=args.depth, t_gates=args.t_gates,
+                           out_path=args.out, seed=args.seed,
+                           check_span=args.check_span))
         return 0
 
     if args.cmd == "tcount":
