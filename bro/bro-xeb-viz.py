@@ -106,6 +106,67 @@ QRACK_ENV_DEFAULTS = {
 }
 
 
+def loaded_qrack_lib():
+    """Which libqrack_pinvoke.so is actually mapped into this process.
+
+    PYQRACK_SHARED_LIB_PATH states an intent; /proc/self/maps states what the
+    loader did. They differ when another copy is found first -- a pip-bundled
+    one under dist-packages, or an ld.so.cache entry -- and results computed
+    against different builds are not comparable even though nothing errors.
+    """
+    seen = []
+    try:
+        with open("/proc/self/maps") as f:
+            for line in f:
+                if "libqrack" in line:
+                    path = line.rstrip().split(" ", 5)[-1].strip()
+                    if path and path not in seen:
+                        seen.append(path)
+    except OSError:
+        return []
+    return seen
+
+
+def verify_qrack_lib(quiet=False):
+    """Compare the mapped library against the requested one."""
+    want = os.environ.get("PYQRACK_SHARED_LIB_PATH")
+    got = loaded_qrack_lib()
+    if not got:
+        return None
+    real_want = os.path.realpath(want) if want else None
+    real_got = [os.path.realpath(g) for g in got]
+
+    if real_want and real_want not in real_got:
+        parent = os.path.dirname(want)
+        print(
+            f"\nWARNING: Qrack library mismatch\n"
+            f"  requested : {want}\n"
+            f"  loaded    : {got[0]}\n"
+            f"\n"
+            f"  pyqrack ships its own libqrack_pinvoke.so and falls back to it\n"
+            f"  when PYQRACK_SHARED_LIB_PATH does not resolve. Some revisions\n"
+            f"  expect the DIRECTORY containing the library rather than the\n"
+            f"  file itself, in which case a file path is silently ignored.\n"
+            f"\n"
+            f"  Check which form this build wants:\n"
+            f"    grep -n -B3 -A6 PYQRACK_SHARED_LIB_PATH \\\n"
+            f"      $(python -c 'import pyqrack.qrack_system.qrack_system as m; "
+            f"print(m.__file__)')\n"
+            f"\n"
+            f"  Then either:\n"
+            f"    export PYQRACK_SHARED_LIB_PATH={parent}\n"
+            f"  or replace the bundled copy outright:\n"
+            f"    mv {os.path.dirname(got[0])}/libqrack_pinvoke.so{{,.bundled}}\n"
+            f"    ln -s {want} {os.path.dirname(got[0])}/libqrack_pinvoke.so\n"
+            f"\n"
+            f"  Until they match, every number produced here came from the\n"
+            f"  library named on the 'loaded' line.\n",
+            file=sys.stderr)
+    elif not quiet:
+        print(f"qrack loaded: {got[0]}", file=sys.stderr)
+    return got[0]
+
+
 def configure_qrack_env(overrides=None, quiet=False):
     """Set Qrack's allocation caps before the library loads.
 
@@ -147,6 +208,11 @@ def configure_qrack_lib(path=None, quiet=False):
         if not os.path.isfile(cand):
             raise SystemExit(f"no libqrack_pinvoke.so at {cand!r}")
         chosen = cand
+        # Revisions differ on whether this variable names the file or the
+        # directory holding it. Setting the file path and letting
+        # verify_qrack_lib() check what was actually mapped is safer than
+        # guessing, because the fallback is silent.
+        os.environ.setdefault("PYQRACK_SHARED_LIB_DIR", os.path.dirname(cand))
     elif os.environ.get("PYQRACK_SHARED_LIB_PATH"):
         chosen = os.environ["PYQRACK_SHARED_LIB_PATH"]
     else:
@@ -1172,6 +1238,7 @@ def tcount_report(qasm_path: str) -> str:
 # the state in stabilizer form while still allowing prob()/force_m().
 _SIM_CLASS = ["QrackSimulator"]
 _WARNED_FLAGS: set = set()
+_LIB_VERIFIED = False
 _ACE_MAX_QB = [None]
 
 
@@ -1242,6 +1309,11 @@ def make_simulator(n_qubits, preset="near-clifford", cls=None):
               f"without (preset {preset!r} is weakened)", file=sys.stderr)
 
     sim = cls(n_qubits, **kw)
+
+    global _LIB_VERIFIED
+    if not _LIB_VERIFIED:
+        _LIB_VERIFIED = True
+        verify_qrack_lib()
 
     return apply_sim_settings(sim, n_qubits)
 
@@ -2379,6 +2451,7 @@ def compute_ideal_probs(qasm_path, result_json, n_data, n_ancilla,
     side = os.path.splitext(out_path)[0] + ".meta.json"
     with open(side, "w") as f:
         json.dump({"qasm_path": qasm_path,
+                   "qrack_lib": (loaded_qrack_lib() or [None])[0],
                    "qasm_basename": os.path.basename(qasm_path),
                    "t_count": t_gates,
                    "result_json": result_json,
@@ -3397,6 +3470,7 @@ def _patched_ideal_probs(manifest_path, result_json, n_data, out_path,
     side = os.path.splitext(out_path)[0] + ".meta.json"
     with open(side, "w") as f:
         json.dump({"patched": True, "method": method,
+                   "qrack_lib": (loaded_qrack_lib() or [None])[0],
                    "zero_probability_samples": n_zero,
                    "patch_t": [p_["t"] for p_ in man["patches"]],
                    "manifest": manifest_path,
@@ -3543,7 +3617,7 @@ def run_ladder(patterns, n_data, n_ancilla, shots, noise, outdir,
 
 # --------------------------------------------------------------------------- #
 
-SUBCOMMANDS = ("view", "stats", "tcount", "probs", "noisy", "structure", "dedope", "compare", "ladder", "cut", "patch", "probe", "selftest", "doctor")
+SUBCOMMANDS = ("view", "stats", "tcount", "probs", "noisy", "structure", "dedope", "compare", "ladder", "cut", "patch", "probe", "selftest", "doctor", "env")
 
 
 def _build_data(args) -> XEBData:
@@ -3689,6 +3763,10 @@ def main(argv=None):
     pse.add_argument("--method", default="chain",
                      choices=("chain", "permutation"))
 
+    penv = sub.add_parser("env",
+                          help="print the exports that pin other scripts "
+                               "(e.g. the sampler) to this Qrack build")
+
     pdoc = sub.add_parser("doctor",
                           help="report the installed build and find the width "
                                "at which prob() starts failing")
@@ -3830,7 +3908,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     lib = _qrack_lib_arg or getattr(args, "qrack_lib", None)
 
-    if args.cmd in ("probs", "noisy", "probe", "selftest", "doctor"):
+    if args.cmd in ("probs", "noisy", "probe", "selftest", "doctor", "env"):
         print(f"xeb3d build {_build_stamp()}", file=sys.stderr)
         configure_qrack_lib(lib)
         configure_qrack_env(
@@ -3860,6 +3938,18 @@ def main(argv=None):
     if args.cmd == "selftest":
         print(selftest(args.n_qubits, args.n_ancilla, args.n_t, args.seed,
                        args.sim_preset, args.sim_class, method=args.method))
+        return 0
+
+    if args.cmd == "env":
+        configure_qrack_lib(lib, quiet=True)
+        configure_qrack_env(quiet=True)
+        print("# source this, or prefix any script that imports pyqrack")
+        for k in ("PYQRACK_SHARED_LIB_PATH", "QRACK_MAX_CPU_QB",
+                  "QRACK_MAX_PAGING_QB"):
+            if os.environ.get(k):
+                print(f'export {k}="{os.environ[k]}"')
+        print("\n# the sampler is a separate process and does NOT inherit "
+              "these unless exported")
         return 0
 
     if args.cmd == "doctor":
