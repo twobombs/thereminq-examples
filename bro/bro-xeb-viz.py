@@ -1179,6 +1179,23 @@ def effective_cost(t: int, n_qubits: int, model=None) -> tuple[float, str]:
     if model == "dense":
         return float(n_qubits), "dense statevector (measured behaviour)"
 
+    # Measured on this build: the exact near-Clifford path allocates 2^t
+    # terms of 16 bytes, matching observation to the byte (t=35 -> 512 GB).
+    # That is the naive t-injection decomposition, not the Bravyi-Gosset
+    # 2^(0.23t) stabilizer rank -- and it does not fall back to dense when
+    # t > n, so a 12-qubit patch that would fit in 64 KB as a statevector
+    # instead asks for half a terabyte. Plan against t, not qubits.
+    if model == "tinject":
+        return float(t), "exact near-Clifford, 2^t terms (measured)"
+
+    # Measured on this build, matching three independent allocations to the
+    # byte: the exact near-Clifford path holds 2^t stabilizer terms, each a
+    # full 2^n statevector of 8-byte complex amplitudes. Width and doping both
+    # count, additively in the exponent -- which is why a 25-qubit patch with
+    # only t=15 still asks for 8 TB while a 4-qubit patch with t=18 runs.
+    if model == "nt":
+        return float(n_qubits + t), "2^(n+t) terms x amplitudes (measured)"
+
     rank = 0.23 * t
     if rank < n_qubits:
         return rank, "near-Clifford (stabilizer rank)"
@@ -1318,7 +1335,10 @@ def make_simulator(n_qubits, preset="near-clifford", cls=None):
     return apply_sim_settings(sim, n_qubits)
 
 
-def apply_sim_settings(sim, n_qubits):
+_SIM_TUNING = ["full"]
+
+
+def apply_sim_settings(sim, n_qubits, tuning=None):
     """Post-construction settings that must be reapplied after every clone().
 
     clone() builds a new simulator from the source's state; it does not carry
@@ -1331,8 +1351,20 @@ def apply_sim_settings(sim, n_qubits):
     # of this pipeline is exact amplitudes, so assert it rather than inherit
     # it. The approximate path is faster and would silently produce numbers
     # that are not p_ideal.
-    for meth, arg in (("set_use_exact_near_clifford", True),
-                      ("set_reactive_separate", False)):
+    tuning = tuning or _SIM_TUNING[0]
+    if tuning == "none":
+        return sim
+
+    # set_reactive_separate(False) was added on a hunch and never justified:
+    # reactive separation is what lets Qrack factor a state into independent
+    # subsystems, so switching it off pushes toward a monolithic
+    # representation. It is off the default path now and only applied under
+    # tuning="full".
+    wanted = [("set_use_exact_near_clifford", True)]
+    if tuning == "full":
+        wanted.append(("set_reactive_separate", False))
+
+    for meth, arg in wanted:
         fn = getattr(sim, meth, None)
         if fn is not None:
             try:
@@ -1352,7 +1384,7 @@ def apply_sim_settings(sim, n_qubits):
     # exactly the F_elide this pipeline exists to measure. Lift the cap; keep
     # the guard as the tripwire.
     cap = _ACE_MAX_QB[0] if _ACE_MAX_QB[0] is not None else n_qubits
-    fn = getattr(sim, "set_ace_max_qb", None)
+    fn = getattr(sim, "set_ace_max_qb", None) if tuning == "full" else None
     if fn is not None:
         try:
             fn(cap)
@@ -2237,6 +2269,37 @@ def patch_plan(manifest_path):
     import json
     man = json.load(open(manifest_path))
 
+    # Validate every patch file, including manifests written by an earlier
+    # revision: a stale or mis-renumbered patch set is indistinguishable from
+    # a simulator problem once it reaches Qrack.
+    for pch in man["patches"]:
+        if not os.path.isfile(pch["file"]):
+            raise SystemExit(f"missing patch circuit {pch['file']}")
+        declared = None
+        refs = []
+        for raw in open(pch["file"]):
+            line = raw.split("//")[0].strip()
+            m2 = re.match(r"qreg\s+\w+\s*\[\s*(\d+)\s*\]", line)
+            if m2:
+                declared = int(m2.group(1))
+                continue          # the size, not a qubit reference
+            if line.lstrip().startswith("creg"):
+                continue
+            refs += [int(x) for x in _QARG.findall(line)]
+        if declared is None:
+            raise SystemExit(f"{pch['file']}: no qreg declaration")
+        if refs and max(refs) >= declared:
+            raise SystemExit(
+                f"{pch['file']}: declares qreg q[{declared}] but references "
+                f"q[{max(refs)}]. Regenerate with `patch`; this file was "
+                f"written by a revision with a renumbering bug."
+            )
+        if declared != pch["n_qubits"]:
+            raise SystemExit(
+                f"{pch['file']}: declares q[{declared}] but the manifest says "
+                f"{pch['n_qubits']} qubits -- manifest and circuits disagree."
+            )
+
     plan = []
     for pch in man["patches"]:
         local = {q: i for i, q in enumerate(pch["qubits"])}
@@ -2501,6 +2564,56 @@ def _components_without(edges, n_qubits, removed):
     return comps
 
 
+def partition_by_capacity(edges, n_qubits, per_q, cap, weight="t"):
+    """Cut a tree so that every component carries at most `cap` weight.
+
+    Greedy bottom-up: root anywhere, DFS, accumulate each subtree's weight,
+    and cut the edge to the parent as soon as a subtree would exceed the cap.
+    Whatever is cut off is a finished component under the cap; the parent
+    continues with the remainder.
+
+    This is the right algorithm when the constraint is a per-part capacity
+    rather than balance. Greedily minimising the largest part stalls the
+    moment no single edge improves it -- which happens as soon as the weight
+    clusters, and doping does cluster. The capacity walk cannot stall: it
+    either meets the cap or names the qubit that makes it impossible.
+
+    Returns (removed_edges, infeasible_qubits).
+    """
+    adj = {}
+    for (a, b) in edges:
+        adj.setdefault(a, []).append(b)
+        adj.setdefault(b, []).append(a)
+
+    bad = [q for q in range(n_qubits) if per_q.get(q, 0) > cap]
+    if bad:
+        return set(), bad
+
+    root = next(iter(adj), 0)
+    order, parent, seen = [], {root: None}, {root}
+    stack = [root]
+    while stack:
+        u = stack.pop()
+        order.append(u)
+        for v in adj.get(u, ()):
+            if v not in seen:
+                seen.add(v)
+                parent[v] = u
+                stack.append(v)
+
+    removed = set()
+    acc = {q: float(per_q.get(q, 0)) for q in seen}
+    for u in reversed(order):          # children before parents
+        p = parent[u]
+        if p is None:
+            continue
+        if acc[p] + acc[u] > cap:
+            removed.add((min(u, p), max(u, p)))   # detach the finished subtree
+        else:
+            acc[p] += acc[u]
+    return removed, []
+
+
 def cut_analysis(qasm_path: str, max_cuts: int = 12, top: int = 5,
                  target: float = 27.0) -> dict:
     """Find edge cuts that split the circuit into cheaper independent patches.
@@ -2547,6 +2660,10 @@ def cut_analysis(qasm_path: str, max_cuts: int = 12, top: int = 5,
         cost, which = effective_cost(t, len(comp))
         return {"n_qubits": len(comp), "t": t, "cost": cost, "route": which}
 
+    # under tinject the binding constraint is doping per patch, so cuts that
+    # split qubits evenly but leave one patch carrying most of the T gates are
+    # useless -- the bisection scores on cost, which now tracks t
+
     # single-edge cuts first; on a tree every edge is a bridge
     singles = [r for r in (score({e}) for e in edges) if r]
     singles.sort(key=lambda r: (r["worst_cost"], r["elided_gates"]))
@@ -2557,6 +2674,31 @@ def cut_analysis(qasm_path: str, max_cuts: int = 12, top: int = 5,
     # *most expensive* patch instead, and score candidates by how balanced the
     # resulting halves are.
     chosen: set = set()
+
+    # Under tinject the cost is 2^t per part, so the constraint is a capacity
+    # on t and the capacity walk solves it directly. Under the other models
+    # cost depends on both t and width, so fall back to bisection.
+    if _COST_MODEL[0] in ("tinject", "nt"):
+        cap = float(target)
+        # under "nt" a part costs 2^(n+t), so each qubit contributes 1 for
+        # itself plus its own doping -- the subtree weight is then exactly
+        # n_sub + t_sub and the capacity walk bounds the real cost
+        w = ({q: 1 + per_q.get(q, 0) for q in range(n)}
+             if _COST_MODEL[0] == "nt" else per_q)
+        chosen, bad = partition_by_capacity(edges, n, w, cap)
+        if bad:
+            print(f"warning: qubits {bad} each carry more than {cap:.0f} "
+                  f"non-Clifford gates on their own; no cut can bring those "
+                  f"parts under the target", file=sys.stderr)
+        greedy = score(chosen) if chosen else None
+        full_t = st["t_total"]
+        full_cost, full_route = effective_cost(full_t, n)
+        return {"n_qubits": n, "n_edges": n_edges, "cycles": cycles,
+                "target": target, "is_tree": is_tree, "t_total": full_t,
+                "full_cost": full_cost, "full_route": full_route,
+                "gate_instances": sum(edges.values()),
+                "singles": singles[:top], "greedy": greedy}
+
     for _ in range(max_cuts):
         comps = _components_without(edges, n, chosen)
         ranked = sorted(((patch_of(c)["cost"], c) for c in comps),
@@ -2728,6 +2870,22 @@ def emit_patches(qasm_path, cuts, outdir, n_data, n_ancilla, prefix="patch"):
         path = os.path.join(outdir, f"{prefix}{i}.qasm")
         with open(path, "w") as f:
             f.write("\n".join(out_lines) + "\n")
+
+        # A gate referencing an index at or above the declared register makes
+        # the simulator size itself to that index instead of the patch width,
+        # which shows up as an allocation wildly larger than the patch should
+        # need. Check the artifact rather than trusting the renumbering.
+        # skip the declaration itself: "qreg q[25];" contains q[25], which is
+        # the register SIZE, not a reference to qubit 25
+        refs = [int(m2) for line in out_lines
+                if not line.lstrip().startswith(("qreg", "creg"))
+                for m2 in _QARG.findall(line)]
+        if refs and max(refs) >= len(comp):
+            raise SystemExit(
+                f"{path}: declares qreg q[{len(comp)}] but references "
+                f"q[{max(refs)}]. The renumbering is wrong and the emitted "
+                f"circuit is invalid."
+            )
 
         t, _ = count_nonclifford(path)
         manifest["patches"].append({
@@ -3365,6 +3523,35 @@ def _patched_ideal_probs(manifest_path, result_json, n_data, out_path,
     except ImportError as e:
         raise SystemExit(f"patched `probs` needs pyqrack and qiskit ({e})")
 
+    # Echo the manifest before simulating. Inferring patch contents from
+    # crash sizes has been unreliable; the run should state what it is about
+    # to do, in the same output as the failure.
+    print(f"\nmanifest {manifest_path}", file=sys.stderr)
+    print(f"  source {os.path.basename(man.get('source', '?'))}, "
+          f"{len(man.get('cuts', []))} cuts", file=sys.stderr)
+    print(f"  {'patch':<16} {'qubits':>6} {'t':>5} {'2^t x16B':>12} "
+          f"{'data':>5} {'anc':>4}", file=sys.stderr)
+    worst = 0
+    for pch, meta in zip(plan, man["patches"]):
+        t = meta.get("t", 0)
+        worst = max(worst, t)
+        nb = (2.0 ** t) * 16
+        unit = "B"
+        for u in ("KB", "MB", "GB", "TB", "PB"):
+            if nb > 1024:
+                nb /= 1024
+                unit = u
+        print(f"  {os.path.basename(meta['file']):<16} {meta['n_qubits']:>6} "
+              f"{t:>5} {nb:>9.1f} {unit:<2} "
+              f"{len(meta['data']):>5} {len(meta['ancillas']):>4}",
+              file=sys.stderr)
+    print(f"  max t = {worst}", file=sys.stderr)
+    if worst > 20:
+        print(f"  WARNING: a patch with t={worst} needs 2^{worst} terms if "
+              f"Qrack takes the exact near-Clifford path. Re-cut with "
+              f"--cost-model tinject --target 18.", file=sys.stderr)
+    print(file=sys.stderr)
+
     covered = sorted(q for pch in plan for q, _ in pch["data_locals"])
     if covered != list(range(n_data)):
         raise SystemExit(
@@ -3802,11 +3989,12 @@ def main(argv=None):
 
     pt = sub.add_parser("tcount", help="count non-Clifford gates in a QASM")
     pt.add_argument("qasm_path")
-    pt.add_argument("--cost-model", choices=("auto", "dense"), default="auto",
-                     help="'dense' plans against 2^n instead of 2^(0.23t); use "
-                          "it when the build's near-Clifford path does not "
-                          "engage, which `probs --limit 2` will show as peak "
-                          "RSS tracking 2^n")
+    pt.add_argument("--cost-model", choices=("auto", "dense", "tinject", "nt"), default="auto",
+                     help="cost law to plan against. 'auto' = 2^(0.23t) "
+                          "stabilizer rank; 'dense' = 2^n; 'tinject' = 2^t, "
+                          "which is what this Qrack build actually allocates "
+                          "for exact near-Clifford. Confirm with `probs "
+                          "--limit 2` before trusting any of them.")
 
     pd = sub.add_parser("dedope",
                         help="reduce doping to build intermediate ladder rungs")
@@ -3831,22 +4019,24 @@ def main(argv=None):
 
     pcut = sub.add_parser("cut", help="find patch cuts of the interaction graph")
     pcut.add_argument("qasm_path")
-    pcut.add_argument("--cost-model", choices=("auto", "dense"), default="auto",
-                     help="'dense' plans against 2^n instead of 2^(0.23t); use "
-                          "it when the build's near-Clifford path does not "
-                          "engage, which `probs --limit 2` will show as peak "
-                          "RSS tracking 2^n")
+    pcut.add_argument("--cost-model", choices=("auto", "dense", "tinject", "nt"), default="auto",
+                     help="cost law to plan against. 'auto' = 2^(0.23t) "
+                          "stabilizer rank; 'dense' = 2^n; 'tinject' = 2^t, "
+                          "which is what this Qrack build actually allocates "
+                          "for exact near-Clifford. Confirm with `probs "
+                          "--limit 2` before trusting any of them.")
     pcut.add_argument("--max-cuts", type=int, default=12)
     pcut.add_argument("--target", type=float, default=27.0,
                       help="bisect until every patch is at or below 2^this")
 
     ppa = sub.add_parser("patch", help="emit patched circuits from the cuts")
     ppa.add_argument("qasm_path")
-    ppa.add_argument("--cost-model", choices=("auto", "dense"), default="auto",
-                     help="'dense' plans against 2^n instead of 2^(0.23t); use "
-                          "it when the build's near-Clifford path does not "
-                          "engage, which `probs --limit 2` will show as peak "
-                          "RSS tracking 2^n")
+    ppa.add_argument("--cost-model", choices=("auto", "dense", "tinject", "nt"), default="auto",
+                     help="cost law to plan against. 'auto' = 2^(0.23t) "
+                          "stabilizer rank; 'dense' = 2^n; 'tinject' = 2^t, "
+                          "which is what this Qrack build actually allocates "
+                          "for exact near-Clifford. Confirm with `probs "
+                          "--limit 2` before trusting any of them.")
     ppa.add_argument("--outdir", default="patches")
     ppa.add_argument("--n-data", type=int, default=70)
     ppa.add_argument("--n-ancilla", type=int, default=27)
@@ -3884,6 +4074,14 @@ def main(argv=None):
                          "simulation, verified by selftest to vary by O(1) "
                          "between identical calls. Do not use it for "
                          "amplitudes.")
+    pp.add_argument("--sim-tuning", default="exact",
+                    choices=("none", "exact", "full"),
+                    help="post-construction settings. 'none' = constructor "
+                         "flags only (matches a bare QrackSimulator call); "
+                         "'exact' = also assert exact near-Clifford; 'full' = "
+                         "also set_reactive_separate(False) and "
+                         "set_ace_max_qb(). Bisect with these when a circuit "
+                         "runs standalone but not here.")
     pp.add_argument("--method", default="chain",
                     choices=("chain", "permutation"),
                     help="permutation uses prob_perm (2 calls/sample) instead "
@@ -4005,6 +4203,7 @@ def main(argv=None):
 
     if args.cmd == "probs":
         _SIM_CLASS[0] = args.sim_class
+        _SIM_TUNING[0] = args.sim_tuning
         compute_ideal_probs(args.qasm_path, args.result_json, args.n_data,
                             args.n_ancilla, args.out, args.limit,
                             args.use_clone, args.force, args.workers,
