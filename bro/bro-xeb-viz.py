@@ -100,8 +100,12 @@ QRACK_LIB_CANDIDATES = (
 # guard throws -- even though the near-Clifford layer underneath could hold
 # the state in polynomial space. Removing the cap removes the reason to elide.
 # -1 means unlimited, which is what the Mitiq CDR near-Clifford tutorial uses.
+# QRACK_MAX_CPU_QB caps how many qubits one CPU engine may hold, and it is
+# also the width at which Qrack hands work to the GPU. Setting it to -1
+# (unlimited) therefore pins everything to the CPU -- which is not what is
+# wanted once the real cost is 2^(n+t) dense amplitudes. Left unset by
+# default; pass --max-cpu-qb to override.
 QRACK_ENV_DEFAULTS = {
-    "QRACK_MAX_CPU_QB": "-1",
     "QRACK_MAX_PAGING_QB": "-1",
 }
 
@@ -1259,6 +1263,20 @@ _LIB_VERIFIED = False
 _ACE_MAX_QB = [None]
 
 
+def warn_if_gpu_disabled(preset):
+    """Flag the two independent ways work gets pinned to the CPU."""
+    reasons = []
+    if SIM_PRESETS.get(preset, {}).get("is_gpu") is False:
+        reasons.append(f"preset {preset!r} sets is_gpu=False")
+    cap = os.environ.get("QRACK_MAX_CPU_QB")
+    if cap in ("-1", "0"):
+        reasons.append(f"QRACK_MAX_CPU_QB={cap} (unlimited CPU width, so "
+                       f"Qrack never hands off to the GPU)")
+    if reasons:
+        print("note: GPU will not be used -- " + "; ".join(reasons),
+              file=sys.stderr)
+
+
 def _warn_if_guard_disabled():
     if os.environ.get("QRACK_DISABLE_QUNIT_FIDELITY_GUARD"):
         print("WARNING: QRACK_DISABLE_QUNIT_FIDELITY_GUARD is set. That does "
@@ -1282,13 +1300,19 @@ SIM_PRESETS = {
     # near-Clifford path engages at all. Measured by exhaustive kwarg search:
     # with it, prob() returns in 0.5s; without it, Qrack times out or throws
     # on the same circuit, whatever the other flags are set to.
+    # GPU is ON here. It was off for several revisions on the theory that
+    # near-Clifford work is CPU-side tableau manipulation -- but the measured
+    # cost law is 2^(n+t) dense complex amplitudes swept per gate, which is
+    # exactly what an accelerator is for. Note that QRACK_MAX_CPU_QB=-1 also
+    # pins work to the CPU by removing the width at which Qrack hands off, so
+    # both have to be right before the GPU sees anything.
     "near-clifford": dict(is_near_clifford_tableau_writer=True,
                           is_stabilizer_hybrid=True,
-                          is_schmidt_decompose_multi=False,
-                          is_gpu=False),
-    "near-clifford-gpu": dict(is_near_clifford_tableau_writer=True,
+                          is_schmidt_decompose_multi=False),
+    "near-clifford-cpu": dict(is_near_clifford_tableau_writer=True,
                               is_stabilizer_hybrid=True,
-                              is_schmidt_decompose_multi=False),
+                              is_schmidt_decompose_multi=False,
+                              is_gpu=False),
     "tableau": dict(is_stabilizer_hybrid=True,
                     is_near_clifford_tableau_writer=True,
                     is_gpu=False),
@@ -2966,6 +2990,66 @@ def patch_report(qasm_path, outdir, n_data, n_ancilla, target=27.0,
     return "\n".join(L)
 
 
+def budget_report(qasm_path=None, ram_gb=64, hours=24, shots=500,
+                  ref_nt=24, ref_s_per_sample=39.0, n_qubits=None,
+                  t_gates=None):
+    """What n+t is reachable given RAM and a time budget, and what that buys.
+
+    Both memory and runtime scale as 2^(n+t) on this build, so RAM raises the
+    ceiling logarithmically while the clock rises exponentially. The binding
+    constraint is almost always time: doubling the exponent is a rounding
+    error in GB and a factor of two in months.
+
+    Calibrated against a measured point rather than a model -- pass --ref-nt
+    and --ref-seconds from a run that completed.
+    """
+    if qasm_path:
+        t_gates, _ = count_nonclifford(qasm_path)
+        n_qubits = circuit_structure(qasm_path)["n_qubits"]
+    n_qubits = n_qubits or 97
+    t_gates = t_gates or 117
+    weight = n_qubits + t_gates
+
+    nt_mem = int(math.floor(math.log2(ram_gb * (1024 ** 3) / 8)))
+    budget_s = hours * 3600.0
+    nt_time = ref_nt
+    while (ref_s_per_sample * 2 ** (nt_time + 1 - ref_nt)) * shots <= budget_s:
+        nt_time += 1
+    nt = min(nt_mem, nt_time)
+
+    parts = max(1, math.ceil(weight / nt))
+    per_sample = ref_s_per_sample * 2 ** (nt - ref_nt)
+
+    lines = [
+        f"circuit: {n_qubits} qubits, t = {t_gates}  (weight n+t = {weight})",
+        f"budget:  {ram_gb} GB, {hours} h, {shots} shots",
+        f"calibration: n+t={ref_nt} measured at {ref_s_per_sample:.0f} s/sample",
+        "",
+        f"  memory allows  n+t <= {nt_mem}",
+        f"  time allows    n+t <= {nt_time}",
+        f"  binding limit  n+t <= {nt}  ({'time' if nt_time < nt_mem else 'memory'})",
+        "",
+        f"  -> {parts} patches, {parts - 1} cuts, ~{(parts - 1) * 30} gates elided",
+        f"  -> {per_sample:.0f} s per sample, "
+        f"{per_sample * shots / 3600:.1f} h for {shots} shots",
+    ]
+
+    if nt >= weight:
+        lines += ["", "  The whole circuit fits: no cuts needed, and the exact "
+                      "monolithic amplitude is available. F_elide is "
+                      "measurable here."]
+    else:
+        # how much RAM would it take to skip cutting entirely?
+        need_gb = (2.0 ** weight) * 8 / (1024 ** 3)
+        need_s = ref_s_per_sample * 2 ** (weight - ref_nt)
+        lines += ["", f"  Running it whole would need "
+                      f"2^{weight} x 8 B = {need_gb:.3g} GB and "
+                      f"{need_s / 3600:.3g} h per sample.",
+                  "  More RAM raises the ceiling by log2(GB); runtime doubles "
+                  "per unit of n+t. Time binds first in every realistic case."]
+    return "\n".join(lines)
+
+
 def synth_dcs(n_data, n_ancilla, depth, t_gates, out_path, seed=0,
               check_span=3):
     """Build a small DCS-style circuit: tree topology, interleaved checks.
@@ -3539,7 +3623,7 @@ def run_noisy_postselect(qasm_path, n_data, n_ancilla, shots, noise,
 
 
 def _patch_worker(task):
-    """Evaluate one patch across every sample. Runs in its own process.
+    """Evaluate one patch across a slice of the samples, in its own process.
 
     Parallelising over patches rather than samples means each worker builds
     its simulator once and reuses it, instead of paying construction on every
@@ -3551,7 +3635,7 @@ def _patch_worker(task):
     and any device handles. The spawn context avoids that, and importing
     inside the worker keeps it true either way.
     """
-    (pch, rows, sim_preset, method, lib_path, env) = task
+    (pch, idx, rows, sim_preset, method, lib_path, env) = task
 
     for k, v in (env or {}).items():
         os.environ.setdefault(k, v)
@@ -3579,7 +3663,7 @@ def _patch_worker(task):
     for pairs in rows:
         lp, ls = fn(factory, pch["ancilla_locals"], pairs)
         out.append((lp, ls))
-    return pch["file"], out
+    return pch["file"], idx, out
 
 
 def _patched_ideal_probs(manifest_path, result_json, n_data, out_path,
@@ -3669,28 +3753,46 @@ def _patched_ideal_probs(manifest_path, result_json, n_data, out_path,
     if workers > 1 and len(plan) > 1:
         import multiprocessing as mp
 
-        n_w = min(workers, len(plan))
-        print(f"  {n_w} workers, one per patch", file=sys.stderr)
+        # One task per patch leaves the pool idle behind the slowest patch:
+        # cost varies as 2^(n+t), so the largest can run 30x the smallest and
+        # every other core waits on it. Split each patch's samples into chunks
+        # instead, with more chunks where the patch is expensive, so the tail
+        # is one chunk rather than one whole patch.
+        costs = [2.0 ** (meta["n_qubits"] + meta.get("t", 0))
+                 for meta in man["patches"]]
+        total = sum(costs) or 1.0
 
-        env = {k: os.environ[k] for k in
-               ("QRACK_MAX_CPU_QB", "QRACK_MAX_PAGING_QB")
-               if k in os.environ}
-        tasks = [(pch,
-                  [[(loc, int(row[orig])) for orig, loc in pch["data_locals"]]
-                   for row in samples],
-                  sim_preset, method,
-                  os.environ.get("PYQRACK_SHARED_LIB_PATH"), env)
-                 for pch in plan]
+        tasks = []
+        for pch, meta, cost in zip(plan, man["patches"], costs):
+            share = max(1, int(round(workers * cost / total)))
+            n_chunks = max(1, min(share, len(samples)))
+            size = math.ceil(len(samples) / n_chunks)
+            for start in range(0, len(samples), size):
+                sl = list(range(start, min(start + size, len(samples))))
+                rows = [[(loc, int(samples[k][orig]))
+                         for orig, loc in pch["data_locals"]] for k in sl]
+                tasks.append((pch, sl, rows, sim_preset, method,
+                              os.environ.get("PYQRACK_SHARED_LIB_PATH"),
+                              {k: os.environ[k] for k in
+                               ("QRACK_MAX_CPU_QB", "QRACK_MAX_PAGING_QB")
+                               if k in os.environ}))
 
-        # spawn, not fork: pyqrack is already initialised in this process and
-        # a forked child would inherit that state wholesale
+        # heaviest first: a long task started last sets the wall time
+        tasks.sort(key=lambda tk: -(2.0 ** (tk[0]["n_qubits"])))
+        n_w = min(workers, len(tasks))
+        print(f"  {len(tasks)} tasks over {n_w} workers "
+              f"({len(plan)} patches x sample chunks)", file=sys.stderr)
+
         ctx = mp.get_context("spawn")
+        done_n = 0
         with ctx.Pool(processes=n_w) as pool:
-            for name, res in pool.imap_unordered(_patch_worker, tasks):
-                for k, (lp, ls) in enumerate(res):
+            for name, idx, res in pool.imap_unordered(_patch_worker, tasks):
+                for k, (lp, ls) in zip(idx, res):
                     log_ps[k] += lp
                     log_syn[k] += ls
-                print(f"  done {os.path.basename(name)} "
+                done_n += 1
+                print(f"  {done_n}/{len(tasks)} {os.path.basename(name)}"
+                      f"[{idx[0]}:{idx[-1] + 1}] "
                       f"({time.perf_counter() - t0:.0f}s)", file=sys.stderr)
     else:
         for k, row in enumerate(samples):
@@ -3766,12 +3868,17 @@ def _patched_ideal_probs(manifest_path, result_json, n_data, out_path,
                   "in one call and never forces a measurement. Try "
                   "--method permutation.", file=sys.stderr)
         else:
-            print("\nSlow even without forced measurement, so the cost is in "
-                  "the representation itself rather than in collapse. Peak RSS "
-                  "is the thing to read: if it is tens of GB for circuits this "
-                  "narrow, Qrack is holding dense state and the near-Clifford "
-                  "path is not engaging on these patches either.",
-                  file=sys.stderr)
+            rss = _peak_rss_mb() or 0.0
+            if rss > 8000:
+                print("\nSlow, and peak RSS is in the tens of GB for circuits "
+                      "this narrow -- Qrack is holding dense state.",
+                      file=sys.stderr)
+            else:
+                print(f"\nSlow, but peak RSS is only {rss:.0f} MB, so this is "
+                      f"compute-bound rather than memory-bound. Runtime scales "
+                      f"as 2^(n+t) like the memory does; the lever is a lower "
+                      f"--target (more, smaller patches), not more RAM.",
+                      file=sys.stderr)
     return amps
 
 
@@ -3891,7 +3998,7 @@ def run_ladder(patterns, n_data, n_ancilla, shots, noise, outdir,
 
 # --------------------------------------------------------------------------- #
 
-SUBCOMMANDS = ("view", "stats", "tcount", "probs", "noisy", "structure", "dedope", "compare", "ladder", "cut", "patch", "synth", "probe", "selftest", "doctor", "env")
+SUBCOMMANDS = ("view", "stats", "tcount", "probs", "noisy", "structure", "dedope", "compare", "ladder", "cut", "patch", "synth", "budget", "probe", "selftest", "doctor", "env")
 
 
 def _build_data(args) -> XEBData:
@@ -4074,6 +4181,16 @@ def main(argv=None):
                          "qubit cap so QUnit has no reason to elide")
     pr.add_argument("--ace-max-qb", type=int, default=None)
 
+    pb = sub.add_parser("budget",
+                        help="what n+t is reachable for a given RAM and time "
+                             "budget, and how many cuts that implies")
+    pb.add_argument("qasm_path", nargs="?")
+    pb.add_argument("--ram-gb", type=float, default=64)
+    pb.add_argument("--hours", type=float, default=24)
+    pb.add_argument("--shots", type=int, default=500)
+    pb.add_argument("--ref-nt", type=int, default=24)
+    pb.add_argument("--ref-seconds", type=float, default=39.0)
+
     psy = sub.add_parser("synth",
                          help="build a small DCS-style circuit where the "
                               "monolithic amplitude is computable")
@@ -4211,6 +4328,8 @@ def main(argv=None):
             {"QRACK_MAX_CPU_QB": args.max_cpu_qb} if
             getattr(args, "max_cpu_qb", None) is not None else None)
         _warn_if_guard_disabled()
+        if getattr(args, "sim_preset", None):
+            warn_if_gpu_disabled(args.sim_preset)
         if getattr(args, "ace_max_qb", None):
             _ACE_MAX_QB[0] = args.ace_max_qb
     elif lib:
@@ -4261,6 +4380,11 @@ def main(argv=None):
 
     if args.cmd == "probe":
         print(probe_simulator(args.qasm_path, args.n_data + args.n_ancilla))
+        return 0
+
+    if args.cmd == "budget":
+        print(budget_report(args.qasm_path, args.ram_gb, args.hours,
+                            args.shots, args.ref_nt, args.ref_seconds))
         return 0
 
     if args.cmd == "synth":
