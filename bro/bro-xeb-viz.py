@@ -442,7 +442,34 @@ def load_json(json_path: str, amps_path: str | None = None,
                 f"or was interrupted."
             )
         amps = np.load(amps_path, allow_pickle=False).ravel()
-        if amps.size != n_shots:
+        if amps.size < n_shots:
+            # `probs --limit N` computes the FIRST N samples in order, so a
+            # short amplitude file pairs with the leading N bitstrings. Confirm
+            # against the provenance sidecar rather than assuming: a file that
+            # is short for any other reason must not be silently truncated to
+            # fit.
+            side = os.path.splitext(amps_path)[0] + ".meta.json"
+            claimed = None
+            if os.path.isfile(side):
+                try:
+                    claimed = json.load(open(side)).get("n_samples")
+                except Exception:
+                    claimed = None
+            if claimed == amps.size:
+                print(f"note: {amps.size} amplitudes for {n_shots} accepted "
+                      f"shots; pairing with the first {amps.size} (a "
+                      f"--limit {amps.size} run, per the sidecar)",
+                      file=sys.stderr)
+                bits = bits[:amps.size]
+                n_shots = amps.size
+            else:
+                raise ValueError(
+                    f"amplitude count ({amps.size}) is short of accepted shots "
+                    f"({n_shots}) and {os.path.basename(side)} does not "
+                    f"confirm a --limit run. Refusing to guess which samples "
+                    f"these are."
+                )
+        elif amps.size != n_shots:
             raise ValueError(
                 f"amplitude count ({amps.size}) does not match accepted shots "
                 f"({n_shots}); these are not from the same run"
