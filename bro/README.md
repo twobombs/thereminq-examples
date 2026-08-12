@@ -52,6 +52,27 @@ The script is invoked via `python3 bro-xeb-viz.py [subcommand] [arguments]`.
 - `compare`: Performs a structural, layer-by-layer comparison between two QASM files.
 - `structure`: Provides a component decomposition report for the interaction graph of a QASM circuit.
 
+
+### 4.6. `selftest`
+**Purpose**: Validates the chain rule of probabilities against a full statevector simulation to ensure exactness.
+- **Usage**: `python3 bro-xeb-viz.py selftest --n-qubits 6 --n-ancilla 2`
+
+### 4.7. `doctor`
+**Purpose**: Reports the installed PyQrack build and explores the parameter space to find the threshold circuit width where probability evaluation begins to fail.
+- **Usage**: `python3 bro-xeb-viz.py doctor --n-max 97`
+
+### 4.8. `probe`
+**Purpose**: Empirically probes Qrack configurations to discover a setup that reliably supports the chain rule computation for a given circuit.
+- **Usage**: `python3 bro-xeb-viz.py probe circuit.qasm`
+
+### 4.9. `cut`
+**Purpose**: Performs a graph cut analysis on the interaction graph of a QASM circuit to identify optimal boundary patches for distributed tensor contraction.
+- **Usage**: `python3 bro-xeb-viz.py cut circuit.qasm --max-cuts 12`
+
+### 4.10. `patch`
+**Purpose**: Emits patched circuit definitions from the cuts found in the prior analysis step, suitable for decoupled evaluation.
+- **Usage**: `python3 bro-xeb-viz.py patch circuit.qasm --outdir patches`
+
 ## 5. Interactive Visualization
 The `view` subcommand summons a matplotlib-based 3D viewer featuring several rendering modes to dissect the sample.
 - **Lattice**: Embeds qubits on an $n_x \times n_y \times n_z$ grid, coloured by either the $P(1)$ marginal probability or by the specific bit pattern of a selected shot.
