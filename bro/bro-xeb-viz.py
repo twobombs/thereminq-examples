@@ -1162,10 +1162,16 @@ SIM_PRESETS = {
     # allocates dense subsystem state and offers nothing here. On a stack
     # where QUnit is allocating gigabytes for a t=5 circuit, the accelerator
     # is the thing pulling it toward a dense representation.
-    "near-clifford": dict(is_stabilizer_hybrid=True,
+    # is_near_clifford_tableau_writer is the flag that decides whether the
+    # near-Clifford path engages at all. Measured by exhaustive kwarg search:
+    # with it, prob() returns in 0.5s; without it, Qrack times out or throws
+    # on the same circuit, whatever the other flags are set to.
+    "near-clifford": dict(is_near_clifford_tableau_writer=True,
+                          is_stabilizer_hybrid=True,
                           is_schmidt_decompose_multi=False,
                           is_gpu=False),
-    "near-clifford-gpu": dict(is_stabilizer_hybrid=True,
+    "near-clifford-gpu": dict(is_near_clifford_tableau_writer=True,
+                              is_stabilizer_hybrid=True,
                               is_schmidt_decompose_multi=False),
     "tableau": dict(is_stabilizer_hybrid=True,
                     is_near_clifford_tableau_writer=True,
@@ -1289,10 +1295,18 @@ if cap_gb > 0:
         pass
 
 kw = json.loads(sys.argv[4])
+
+def rss_mb():
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
 t0 = time.perf_counter()
 try:
     cls = getattr(pyqrack, sys.argv[5])
     qc = QuantumCircuit.from_qasm_file(sys.argv[1])
+    # baseline AFTER the libraries and circuit are loaded: peak RSS is
+    # dominated by the interpreter, qiskit and the OpenCL driver, so only the
+    # delta across simulation says anything about representation cost
+    base_rss = rss_mb()
     n = int(sys.argv[2])
     sim = cls(n, **kw)
     fn = getattr(sim, "set_use_exact_near_clifford", None)
@@ -1304,8 +1318,8 @@ try:
     sim.run_qiskit_circuit(qc, shots=0)
     for q in range(max(0, n - 2), n):
         float(sim.prob(q))
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
-    print(json.dumps({"ok": True, "s": time.perf_counter() - t0, "rss": rss,
+    print(json.dumps({"ok": True, "s": time.perf_counter() - t0,
+                      "rss": rss_mb() - base_rss, "base": base_rss,
                       "va": va_gb()}))
 except MemoryError:
     print(json.dumps({"ok": False, "err": "MemoryError", "s": time.perf_counter() - t0}))
@@ -1449,10 +1463,23 @@ def kwarg_search(qasm_path, n_qubits, sim_class="QrackSimulator",
     if ok:
         best = min(ok, key=lambda r: (r[3], r[2]))
         out.append(f"cheapest working configuration: {on(best[0])}")
-        out.append(f"  {best[2]:.1f}s, peak RSS {best[3]:.0f} MB")
-        out.append("  Genuine near-Clifford simulation at low doping costs "
-                   "almost nothing. A large RSS means it succeeded by going "
-                   "dense, which will not reach the higher rungs.")
+        out.append(f"  {best[2]:.1f}s, {best[3]:.0f} MB added over baseline")
+
+        # which single flags separate success from failure?
+        okset = [r[0] for r in ok]
+        badset = [r[0] for r in rows if r[1] != "OK"]
+        decisive = []
+        for k in knobs:
+            if okset and badset and all(kw.get(k) for kw in okset) and \
+                    not any(kw.get(k) for kw in badset):
+                decisive.append(f"{k}=True")
+            elif okset and badset and not any(kw.get(k) for kw in okset) and \
+                    all(kw.get(k) for kw in badset):
+                decisive.append(f"{k}=False")
+        if decisive:
+            out.append(f"  decisive flag(s): {', '.join(decisive)} -- present "
+                       f"in every success and absent from every failure; the "
+                       f"rest make no difference here.")
     else:
         partial = quick and len(rows) < 40
         harness = [r for r in rows if r[1].startswith("rc=")]
