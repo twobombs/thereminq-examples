@@ -1270,6 +1270,9 @@ _SIM_CLASS = ["QrackSimulator"]
 _WARNED_FLAGS: set = set()
 _LIB_VERIFIED = False
 _ACE_MAX_QB = [None]
+_PROTECT_CHECKS = [True]
+_NDATA = [70]
+_NANC = [27]
 
 
 def warn_if_gpu_disabled(preset):
@@ -2597,7 +2600,54 @@ def _components_without(edges, n_qubits, removed):
     return comps
 
 
-def partition_by_capacity(edges, n_qubits, per_q, cap, weight="t"):
+def ancilla_protected_edges(edges, n_qubits, n_data, n_ancilla):
+    """Edges that must not be cut, or a check loses part of its support.
+
+    An ancilla measures a stabilizer over the data qubits it couples to. On a
+    tree there is exactly one path from the ancilla to each partner, so cutting
+    any edge on those paths detaches part of the support and the syndrome
+    becomes a fragment -- measurable, plausible, and meaningless. Marking them
+    up front is better than discovering afterwards which check was destroyed.
+    """
+    adj = {}
+    for (a, b) in edges:
+        adj.setdefault(a, []).append(b)
+        adj.setdefault(b, []).append(a)
+
+    partners = {}
+    for (a, b) in edges:
+        for x, y in ((a, b), (b, a)):
+            if x >= n_data:
+                partners.setdefault(x, set()).add(y)
+
+    protected = set()
+    for anc in range(n_data, n_data + n_ancilla):
+        targets = partners.get(anc, set())
+        if not targets:
+            continue
+        # BFS from the ancilla, recording the parent edge of each node, then
+        # walk back from every partner
+        parent, seen, stack = {anc: None}, {anc}, [anc]
+        while stack:
+            u = stack.pop()
+            for v in adj.get(u, ()):
+                if v not in seen:
+                    seen.add(v)
+                    parent[v] = u
+                    stack.append(v)
+        for tgt in targets:
+            cur = tgt
+            while cur is not None and parent.get(cur) is not None:
+                p_ = parent[cur]
+                protected.add((min(cur, p_), max(cur, p_)))
+                if p_ == anc:
+                    break
+                cur = p_
+    return protected
+
+
+def partition_by_capacity(edges, n_qubits, per_q, cap, weight="t",
+                          protected=None):
     """Cut a tree so that every component carries at most `cap` weight.
 
     Greedy bottom-up: root anywhere, DFS, accumulate each subtree's weight,
@@ -2634,17 +2684,24 @@ def partition_by_capacity(edges, n_qubits, per_q, cap, weight="t"):
                 parent[v] = u
                 stack.append(v)
 
+    protected = protected or set()
     removed = set()
+    over = []
     acc = {q: float(per_q.get(q, 0)) for q in seen}
     for u in reversed(order):          # children before parents
         p = parent[u]
         if p is None:
             continue
-        if acc[p] + acc[u] > cap:
-            removed.add((min(u, p), max(u, p)))   # detach the finished subtree
+        e = (min(u, p), max(u, p))
+        if acc[p] + acc[u] > cap and e not in protected:
+            removed.add(e)                        # detach the finished subtree
         else:
+            # either it fits, or the edge carries a check and must be kept:
+            # merging past the cap is the lesser evil against a broken syndrome
+            if acc[p] + acc[u] > cap:
+                over.append(e)
             acc[p] += acc[u]
-    return removed, []
+    return removed, over
 
 
 def cut_analysis(qasm_path: str, max_cuts: int = 12, top: int = 5,
@@ -2718,11 +2775,13 @@ def cut_analysis(qasm_path: str, max_cuts: int = 12, top: int = 5,
         # n_sub + t_sub and the capacity walk bounds the real cost
         w = ({q: 1 + per_q.get(q, 0) for q in range(n)}
              if _COST_MODEL[0] == "nt" else per_q)
-        chosen, bad = partition_by_capacity(edges, n, w, cap)
-        if bad:
-            print(f"warning: qubits {bad} each carry more than {cap:.0f} "
-                  f"non-Clifford gates on their own; no cut can bring those "
-                  f"parts under the target", file=sys.stderr)
+        prot = (ancilla_protected_edges(edges, n, _NDATA[0], _NANC[0])
+                if _PROTECT_CHECKS[0] else set())
+        chosen, over = partition_by_capacity(edges, n, w, cap, protected=prot)
+        if prot:
+            print(f"  {len(prot)} edges protected (carry a check); "
+                  f"{len(over)} places had to exceed the cap to keep a "
+                  f"syndrome intact", file=sys.stderr)
         greedy = score(chosen) if chosen else None
         full_t = st["t_total"]
         full_cost, full_route = effective_cost(full_t, n)
@@ -4250,6 +4309,10 @@ def main(argv=None):
 
     pcut = sub.add_parser("cut", help="find patch cuts of the interaction graph")
     pcut.add_argument("qasm_path")
+    pcut.add_argument("--allow-broken-checks", action="store_true",
+                     help="permit cuts through a check's support; by default "
+                          "such edges are protected even at the cost of a "
+                          "larger patch")
     pcut.add_argument("--cost-model", choices=("auto", "dense", "tinject", "nt"), default="auto",
                      help="cost law to plan against. 'auto' = 2^(0.23t) "
                           "stabilizer rank; 'dense' = 2^n; 'tinject' = 2^t, "
@@ -4257,11 +4320,17 @@ def main(argv=None):
                           "for exact near-Clifford. Confirm with `probs "
                           "--limit 2` before trusting any of them.")
     pcut.add_argument("--max-cuts", type=int, default=12)
+    pcut.add_argument("--n-data", type=int, default=70)
+    pcut.add_argument("--n-ancilla", type=int, default=27)
     pcut.add_argument("--target", type=float, default=27.0,
                       help="bisect until every patch is at or below 2^this")
 
     ppa = sub.add_parser("patch", help="emit patched circuits from the cuts")
     ppa.add_argument("qasm_path")
+    ppa.add_argument("--allow-broken-checks", action="store_true",
+                     help="permit cuts through a check's support; by default "
+                          "such edges are protected even at the cost of a "
+                          "larger patch")
     ppa.add_argument("--cost-model", choices=("auto", "dense", "tinject", "nt"), default="auto",
                      help="cost law to plan against. 'auto' = 2^(0.23t) "
                           "stabilizer rank; 'dense' = 2^n; 'tinject' = 2^t, "
@@ -4431,6 +4500,11 @@ def main(argv=None):
 
     if getattr(args, "cost_model", None):
         _COST_MODEL[0] = args.cost_model
+    if getattr(args, "n_data", None):
+        _NDATA[0] = args.n_data
+    if getattr(args, "n_ancilla", None):
+        _NANC[0] = args.n_ancilla
+    _PROTECT_CHECKS[0] = not getattr(args, "allow_broken_checks", False)
 
     if args.cmd == "cut":
         print(cut_report(args.qasm_path, args.max_cuts, args.target))
