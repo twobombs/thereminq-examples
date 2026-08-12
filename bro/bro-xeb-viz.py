@@ -168,6 +168,25 @@ def configure_qrack_lib(path=None, quiet=False):
     return chosen
 
 
+def _build_stamp():
+    """Short hash of this file, printed at startup.
+
+    Long debugging sessions involve copying the script around; a run against a
+    stale copy looks like a fix that did not work, and the only tell is
+    output that should have changed and did not. The stamp makes that visible
+    instead of inferred.
+    """
+    try:
+        import hashlib
+        with open(os.path.abspath(__file__), "rb") as f:
+            h = hashlib.sha256(f.read()).hexdigest()[:8]
+        mt = os.path.getmtime(os.path.abspath(__file__))
+        import time as _t
+        return f"{h} ({_t.strftime('%H:%M:%S', _t.localtime(mt))})"
+    except Exception:
+        return "unknown"
+
+
 EULER_GAMMA = 0.5772156649015329
 LN2 = math.log(2.0)
 
@@ -1072,7 +1091,10 @@ def count_nonclifford(qasm_path: str) -> tuple[int, dict[str, int]]:
     return nonclifford, counts
 
 
-def effective_cost(t: int, n_qubits: int) -> tuple[float, str]:
+_COST_MODEL = ["auto"]
+
+
+def effective_cost(t: int, n_qubits: int, model=None) -> tuple[float, str]:
     """log2 of the cheaper of the two representations, and which one wins.
 
     Stabilizer rank grows as 2^(0.23t) without bound, but a dense statevector
@@ -1081,6 +1103,16 @@ def effective_cost(t: int, n_qubits: int) -> tuple[float, str]:
     hybrid simulator will have fallen back to dense long before. The honest
     ceiling is the minimum.
     """
+    model = model or _COST_MODEL[0]
+
+    # "dense" is the empirical model for a build whose near-Clifford path does
+    # not engage: measured peak RSS tracks 2^n regardless of t, so planning
+    # against 2^(0.23t) produces patches that are cheap on paper and
+    # unaffordable in practice. Verify with `probs --limit 2` before trusting
+    # either model -- the right one is a property of the build, not the theory.
+    if model == "dense":
+        return float(n_qubits), "dense statevector (measured behaviour)"
+
     rank = 0.23 * t
     if rank < n_qubits:
         return rank, "near-Clifford (stabilizer rank)"
@@ -1316,9 +1348,35 @@ try:
         except Exception:
             pass
     sim.run_qiskit_circuit(qc, shots=0)
+
+    # Exercise BOTH access patterns the pipeline uses. prob() alone is cheap
+    # and certifies configurations that then collapse under the chain rule:
+    # force_m() mutates the state and can drive a near-Clifford
+    # representation dense, and prob_perm() is the alternative that never
+    # collapses at all. Timing them separately shows which is affordable.
+    t_prob = time.perf_counter()
     for q in range(max(0, n - 2), n):
         float(sim.prob(q))
+    t_prob = time.perf_counter() - t_prob
+
+    t_perm = -1.0
+    if hasattr(sim, "prob_perm"):
+        _t = time.perf_counter()
+        try:
+            float(sim.prob_perm(list(range(min(n, 8))), [False] * min(n, 8)))
+            t_perm = time.perf_counter() - _t
+        except Exception:
+            t_perm = -1.0
+
+    t_force = time.perf_counter()
+    for q in range(max(0, n - 4), n):
+        float(sim.prob(q))
+        sim.force_m(q, False)
+    t_force = time.perf_counter() - t_force
+
     print(json.dumps({"ok": True, "s": time.perf_counter() - t0,
+                      "t_prob": t_prob, "t_perm": t_perm,
+                      "t_force": t_force,
                       "rss": rss_mb() - base_rss, "base": base_rss,
                       "va": va_gb()}))
 except MemoryError:
@@ -1433,9 +1491,13 @@ def kwarg_search(qasm_path, n_qubits, sim_class="QrackSimulator",
                 line = [l for l in r.stdout.splitlines() if l.startswith("{")]
                 if line:
                     d = json.loads(line[-1])
-                    rows.append((kw, "OK" if d.get("ok") else
-                                 d.get("err", "?"),
-                                 d.get("s", 0.0), d.get("rss", 0.0)))
+                    res = "OK" if d.get("ok") else d.get("err", "?")
+                    if d.get("ok"):
+                        tf, tp = d.get("t_force", 0.0), d.get("t_perm", -1.0)
+                        res = (f"OK force_m={tf:.2f}s"
+                               + (f" perm={tp:.3f}s" if tp >= 0 else
+                                  " perm=n/a"))
+                    rows.append((kw, res, d.get("s", 0.0), d.get("rss", 0.0)))
                 else:
                     # a silent child is a harness fault, not a result -- say
                     # what the process actually did rather than logging "no
@@ -1452,22 +1514,25 @@ def kwarg_search(qasm_path, n_qubits, sim_class="QrackSimulator",
         # stream each row as it lands; a search this slow is useless if the
         # first result only appears after the last one
         print(f"{on(kw_):<56} {res_:<26} {el_:6.1f} {rss_:8.0f}", flush=True)
-        if res_ == "OK" and rss_ < 512:
+        if res_.startswith("OK") and rss_ < 512:
             print(f"\n-> cheap success on {on(kw_)}; stopping the sweep",
                   flush=True)
             break
 
     out = [""]
-    ok = [r for r in rows if r[1] == "OK"]
+    ok = [r for r in rows if r[1].startswith("OK")]
     out.append("")
     if ok:
         best = min(ok, key=lambda r: (r[3], r[2]))
         out.append(f"cheapest working configuration: {on(best[0])}")
+        out.append("  Compare the force_m and perm timings above: if force_m "
+                   "dominates, use --method permutation, which never collapses "
+                   "the state.")
         out.append(f"  {best[2]:.1f}s, {best[3]:.0f} MB added over baseline")
 
         # which single flags separate success from failure?
         okset = [r[0] for r in ok]
-        badset = [r[0] for r in rows if r[1] != "OK"]
+        badset = [r[0] for r in rows if not r[1].startswith("OK")]
         decisive = []
         for k in knobs:
             if okset and badset and all(kw.get(k) for kw in okset) and \
@@ -2117,7 +2182,8 @@ def patch_plan(manifest_path):
 def compute_ideal_probs(qasm_path, result_json, n_data, n_ancilla,
                         out_path, limit=None, use_clone=True, force=False,
                         workers=1, allow_circuit_mismatch=False,
-                        patches=None, sim_preset="near-clifford"):
+                        patches=None, sim_preset="near-clifford",
+                        method="chain"):
     """Strong-simulate p_ideal for each accepted sample and save magnitudes.
 
     Only tractable while the T-count keeps the state near-Clifford;
@@ -2129,9 +2195,21 @@ def compute_ideal_probs(qasm_path, result_json, n_data, n_ancilla,
     import json
     import time
 
+    # Validate inputs before anything expensive: loading Qrack, applying a
+    # circuit and spawning workers all happen before the samples are read, so
+    # a missing file surfaces late and after a wait.
+    for label, path in (("result JSON", result_json), ("circuit", qasm_path),
+                        ("patch manifest", patches)):
+        if path and not os.path.isfile(path):
+            raise SystemExit(
+                f"no {label} at {path!r}.\n"
+                + ("The sampler writes this; check it finished and that --out "
+                   "matched this path." if label == "result JSON" else "")
+            )
+
     if patches:
         return _patched_ideal_probs(patches, result_json, n_data, out_path,
-                                    limit, sim_preset)
+                                    limit, sim_preset, method, workers)
 
     # feasibility gate first: a job that cannot finish should not start
     t_gates, _ = count_nonclifford(qasm_path)
@@ -3142,8 +3220,53 @@ def run_noisy_postselect(qasm_path, n_data, n_ancilla, shots, noise,
     return accepted, raw
 
 
+def _patch_worker(task):
+    """Evaluate one patch across every sample. Runs in its own process.
+
+    Parallelising over patches rather than samples means each worker builds
+    its simulator once and reuses it, instead of paying construction on every
+    task. Patches are independent circuits by construction, so there is no
+    cross-talk to synchronise.
+
+    pyqrack is imported here, never in the parent: a forked child would
+    otherwise inherit an already-initialised library, including its RNG state
+    and any device handles. The spawn context avoids that, and importing
+    inside the worker keeps it true either way.
+    """
+    (pch, rows, sim_preset, method, lib_path, env) = task
+
+    for k, v in (env or {}).items():
+        os.environ.setdefault(k, v)
+    if lib_path:
+        os.environ["PYQRACK_SHARED_LIB_PATH"] = lib_path
+
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit.from_qasm_file(pch["file"])
+    n = pch["n_qubits"]
+
+    base = make_simulator(n, sim_preset)
+    base.run_qiskit_circuit(qc, shots=0)
+    can_clone = hasattr(base, "clone")
+
+    def factory():
+        if can_clone:
+            return apply_sim_settings(base.clone(), n)
+        sim = make_simulator(n, sim_preset)
+        sim.run_qiskit_circuit(qc, shots=0)
+        return sim
+
+    fn = log_prob_perm if method == "permutation" else log_prob_generic
+    out = []
+    for pairs in rows:
+        lp, ls = fn(factory, pch["ancilla_locals"], pairs)
+        out.append((lp, ls))
+    return pch["file"], out
+
+
 def _patched_ideal_probs(manifest_path, result_json, n_data, out_path,
-                         limit=None, sim_preset="near-clifford"):
+                         limit=None, sim_preset="near-clifford",
+                         method="chain", workers=1):
     """Amplitudes as a product over patches: p(x) = prod_i p_i(x_i).
 
     These are the ideal probabilities of the *patched* circuit, not the real
@@ -3182,7 +3305,7 @@ def _patched_ideal_probs(manifest_path, result_json, n_data, out_path,
               f"weaker than the unpatched run's", file=sys.stderr)
 
     bases = []
-    for pch in plan:
+    for pch in (plan if workers <= 1 or len(plan) <= 1 else []):
         sim = make_simulator(pch["n_qubits"], sim_preset)
         sim.run_qiskit_circuit(
             QuantumCircuit.from_qasm_file(pch["file"]), shots=0)
@@ -3190,38 +3313,93 @@ def _patched_ideal_probs(manifest_path, result_json, n_data, out_path,
         print(f"  {os.path.basename(pch['file'])}: {pch['n_qubits']}q applied",
               file=sys.stderr)
 
+    prob_fn = log_prob_perm if method == "permutation" else log_prob_generic
+
     log_ps = np.zeros(len(samples))
     log_syn = np.zeros(len(samples))
     t0 = time.perf_counter()
 
-    for k, row in enumerate(samples):
-        for pch, base in zip(plan, bases):
-            def factory(_p=pch, _b=base):
-                if _b is not None:
-                    return apply_sim_settings(_b.clone(), _p["n_qubits"])
-                sim = make_simulator(_p["n_qubits"], sim_preset)
-                sim.run_qiskit_circuit(
-                    QuantumCircuit.from_qasm_file(_p["file"]), shots=0)
-                return sim
+    if workers > 1 and len(plan) > 1:
+        import multiprocessing as mp
 
-            lp, ls = log_prob_generic(
-                factory, _p_anc(pch),
-                [(loc, row[orig]) for orig, loc in pch["data_locals"]])
-            log_ps[k] += lp
-            log_syn[k] += ls
+        n_w = min(workers, len(plan))
+        print(f"  {n_w} workers, one per patch", file=sys.stderr)
 
-        if k % 10 == 9 or k == len(samples) - 1:
-            el = time.perf_counter() - t0
-            print(f"  {k + 1}/{len(samples)}  {el / (k + 1):.2f}s per sample",
-                  file=sys.stderr, flush=True)
+        env = {k: os.environ[k] for k in
+               ("QRACK_MAX_CPU_QB", "QRACK_MAX_PAGING_QB")
+               if k in os.environ}
+        tasks = [(pch,
+                  [[(loc, int(row[orig])) for orig, loc in pch["data_locals"]]
+                   for row in samples],
+                  sim_preset, method,
+                  os.environ.get("PYQRACK_SHARED_LIB_PATH"), env)
+                 for pch in plan]
+
+        # spawn, not fork: pyqrack is already initialised in this process and
+        # a forked child would inherit that state wholesale
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=n_w) as pool:
+            for name, res in pool.imap_unordered(_patch_worker, tasks):
+                for k, (lp, ls) in enumerate(res):
+                    log_ps[k] += lp
+                    log_syn[k] += ls
+                print(f"  done {os.path.basename(name)} "
+                      f"({time.perf_counter() - t0:.0f}s)", file=sys.stderr)
+    else:
+        for k, row in enumerate(samples):
+            for pch, base in zip(plan, bases):
+                def factory(_p=pch, _b=base):
+                    if _b is not None:
+                        return apply_sim_settings(_b.clone(), _p["n_qubits"])
+                    sim = make_simulator(_p["n_qubits"], sim_preset)
+                    sim.run_qiskit_circuit(
+                        QuantumCircuit.from_qasm_file(_p["file"]), shots=0)
+                    return sim
+
+                lp, ls = prob_fn(
+                    factory, _p_anc(pch),
+                    [(loc, row[orig]) for orig, loc in pch["data_locals"]])
+                log_ps[k] += lp
+                log_syn[k] += ls
+
+            if k % 10 == 9 or k == len(samples) - 1:
+                el = time.perf_counter() - t0
+                print(f"  {k + 1}/{len(samples)}  {el / (k + 1):.2f}s per sample",
+                      file=sys.stderr, flush=True)
 
     log_post = log_ps          # already conditioned; see log_prob_generic
     amps = np.exp(0.5 * log_post)
     np.save(out_path, amps)
 
+    n_zero = int((log_post == -math.inf).sum())
+    if n_zero:
+        frac = n_zero / len(log_post)
+        print(f"\n{n_zero}/{len(log_post)} samples ({frac:.0%}) have EXACTLY "
+              f"zero probability under the patched circuit.", file=sys.stderr)
+        if frac > 0.9:
+            tt = [p_["t"] for p_ in man["patches"]]
+            print(
+                "\nThis is a property of the method, not a failure of the run.\n"
+                f"The patches carry t = {tt}. Eliding the cross-cut gates left\n"
+                "them at or near zero doping, and a stabilizer state has support\n"
+                "on a coset of 2^k basis states with exact zeros everywhere else.\n"
+                "Samples drawn from the full circuit fall outside that support\n"
+                "almost surely, so p_patched(x) = 0 and XEB collapses to -1.\n"
+                "\n"
+                "Patching therefore carries no information at low doping: the\n"
+                "patched circuit is MORE Clifford than the original, and the\n"
+                "gap widens as t falls. Rungs with enough doping left in each\n"
+                "patch after the cut are the only ones where F_elide is\n"
+                "measurable -- at t=468 the patches carry t = 79..145, which is\n"
+                "a different regime entirely.",
+                file=sys.stderr)
+
     side = os.path.splitext(out_path)[0] + ".meta.json"
     with open(side, "w") as f:
-        json.dump({"patched": True, "manifest": manifest_path,
+        json.dump({"patched": True, "method": method,
+                   "zero_probability_samples": n_zero,
+                   "patch_t": [p_["t"] for p_ in man["patches"]],
+                   "manifest": manifest_path,
                    "source": man["source"], "cuts": man["cuts"],
                    "result_json": result_json, "n_samples": int(len(amps)),
                    "broken_ancillas": man["broken_ancillas"]}, f, indent=2)
@@ -3232,6 +3410,20 @@ def _patched_ideal_probs(manifest_path, result_json, n_data, out_path,
           "measured on a rung where the exact route also runs")
     print(f"wrote {out_path} and {side}")
     print(_cost_report(len(samples), time.perf_counter() - t0, "(patched)"))
+    if (time.perf_counter() - t0) / max(len(samples), 1) > 10:
+        if method == "chain":
+            print("\nThat is slow for these widths. The chain rule spends most "
+                  "of its time in force_m, which can expand the representation "
+                  "on every collapse; prob_perm asks for the joint probability "
+                  "in one call and never forces a measurement. Try "
+                  "--method permutation.", file=sys.stderr)
+        else:
+            print("\nSlow even without forced measurement, so the cost is in "
+                  "the representation itself rather than in collapse. Peak RSS "
+                  "is the thing to read: if it is tens of GB for circuits this "
+                  "narrow, Qrack is holding dense state and the near-Clifford "
+                  "path is not engaging on these patches either.",
+                  file=sys.stderr)
     return amps
 
 
@@ -3532,6 +3724,11 @@ def main(argv=None):
 
     pt = sub.add_parser("tcount", help="count non-Clifford gates in a QASM")
     pt.add_argument("qasm_path")
+    pt.add_argument("--cost-model", choices=("auto", "dense"), default="auto",
+                     help="'dense' plans against 2^n instead of 2^(0.23t); use "
+                          "it when the build's near-Clifford path does not "
+                          "engage, which `probs --limit 2` will show as peak "
+                          "RSS tracking 2^n")
 
     pd = sub.add_parser("dedope",
                         help="reduce doping to build intermediate ladder rungs")
@@ -3556,12 +3753,22 @@ def main(argv=None):
 
     pcut = sub.add_parser("cut", help="find patch cuts of the interaction graph")
     pcut.add_argument("qasm_path")
+    pcut.add_argument("--cost-model", choices=("auto", "dense"), default="auto",
+                     help="'dense' plans against 2^n instead of 2^(0.23t); use "
+                          "it when the build's near-Clifford path does not "
+                          "engage, which `probs --limit 2` will show as peak "
+                          "RSS tracking 2^n")
     pcut.add_argument("--max-cuts", type=int, default=12)
     pcut.add_argument("--target", type=float, default=27.0,
                       help="bisect until every patch is at or below 2^this")
 
     ppa = sub.add_parser("patch", help="emit patched circuits from the cuts")
     ppa.add_argument("qasm_path")
+    ppa.add_argument("--cost-model", choices=("auto", "dense"), default="auto",
+                     help="'dense' plans against 2^n instead of 2^(0.23t); use "
+                          "it when the build's near-Clifford path does not "
+                          "engage, which `probs --limit 2` will show as peak "
+                          "RSS tracking 2^n")
     ppa.add_argument("--outdir", default="patches")
     ppa.add_argument("--n-data", type=int, default=70)
     ppa.add_argument("--n-ancilla", type=int, default=27)
@@ -3624,6 +3831,7 @@ def main(argv=None):
     lib = _qrack_lib_arg or getattr(args, "qrack_lib", None)
 
     if args.cmd in ("probs", "noisy", "probe", "selftest", "doctor"):
+        print(f"xeb3d build {_build_stamp()}", file=sys.stderr)
         configure_qrack_lib(lib)
         configure_qrack_env(
             {"QRACK_MAX_CPU_QB": args.max_cpu_qb} if
@@ -3688,6 +3896,9 @@ def main(argv=None):
         print(compare_circuits(args.qasm_a, args.qasm_b))
         return 0
 
+    if getattr(args, "cost_model", None):
+        _COST_MODEL[0] = args.cost_model
+
     if args.cmd == "cut":
         print(cut_report(args.qasm_path, args.max_cuts, args.target))
         return 0
@@ -3708,7 +3919,7 @@ def main(argv=None):
                             args.n_ancilla, args.out, args.limit,
                             args.use_clone, args.force, args.workers,
                             args.allow_circuit_mismatch, args.patches,
-                            args.sim_preset)
+                            args.sim_preset, args.method)
         return 0
 
     data = _build_data(args)
