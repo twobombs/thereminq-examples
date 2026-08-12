@@ -51,6 +51,11 @@ The script is invoked via `python3 bro-xeb-viz.py [subcommand] [arguments]`.
 - `dedope`: Reduces non-Clifford gate doping to construct intermediate ladder rungs.
 - `compare`: Performs a structural, layer-by-layer comparison between two QASM files.
 - `structure`: Provides a component decomposition report for the interaction graph of a QASM circuit.
+- `cut`: Evaluates the interaction graph to find patch cuts, facilitating modular circuit analysis.
+- `patch`: Emits patched sub-circuits derived from calculated interaction graph cuts.
+- `probe`: Diagnoses and identifies a PyQrack configuration capable of supporting the chain rule for exact probability evaluation.
+- `selftest`: Validates the stability and accuracy of the implemented chain rule against a dense statevector reference.
+- `doctor`: Reports the installed PyQrack build configuration and systematically determines the architectural width at which simulation constraints induce failure.
 
 ## 5. Interactive Visualization
 The `view` subcommand summons a matplotlib-based 3D viewer featuring several rendering modes to dissect the sample.
