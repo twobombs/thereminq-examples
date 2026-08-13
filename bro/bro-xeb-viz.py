@@ -604,7 +604,33 @@ def stats_text(d: XEBData, t: dict[str, float] | None) -> str:
               "\n" + sample_health(d)
         )
 
-    return head + "\n" + _fidelity_block(d, t) + "\n\n" + sample_health(d)
+    body = head + "\n" + _fidelity_block(d, t)
+
+    # The three estimators coincide only under P = F*p + (1-F)/D. Wide
+    # disagreement is not noise in one of them -- it says that model does not
+    # describe the sampling, and the XEB number should not be read as a
+    # fidelity at all.
+    vals = [t["F_linear"], t["F_log"], t["F_HOG"]]
+    spread = max(vals) - min(vals)
+    if spread > 0.3:
+        body += (
+            f"\n\nESTIMATORS DISAGREE by {spread:.2f}. They coincide only "
+            f"when the samples come from\nF*p_ideal + (1-F)/D. This spread "
+            f"means that model does not hold, so none\nof these is a "
+            f"fidelity."
+        )
+        if t["HOG"] < 0.2:
+            body += (
+                f"\nHOG = {t['HOG']:.3f} against 0.5 for an ideal "
+                f"distribution: {100 * (1 - t['HOG']):.0f}% of samples sit in\n"
+                f"the low-probability tail of the reference. Median D*p = "
+                f"{t['median_x']:.4f} against a\nmean of {t['mean_x']:.4f} -- "
+                f"the mean is carried by a few outliers while the bulk has\n"
+                f"almost no support. The reference distribution is "
+                f"concentrated away from the\nsamples rather than being a "
+                f"noisy version of the right one."
+            )
+    return body + "\n\n" + sample_health(d)
 
 
 def _fidelity_block(d: XEBData, t: dict[str, float]) -> str:
@@ -3145,6 +3171,166 @@ def budget_report(qasm_path=None, ram_gb=64, hours=24, shots=500,
     return "\n".join(lines)
 
 
+def exact_sample(qasm_path, n_data, n_ancilla, shots, out_path, seed=0):
+    """Draw shots from the circuit's EXACT post-selected distribution.
+
+    A weak simulator (QrackStabilizer with stochastic T-gate rounding) does
+    not sample p_ideal -- it samples an approximation, and the gap grows with
+    doping. That breaks the F_elide measurement at its root: XEB_exact is
+    supposed to equal F_true, and Cauchy-Schwarz guarantees
+    E_{x~p}[D p(x)] = D sum(p^2) >= 1, so exact XEB can never be negative.
+    Observing a negative one proves the samples did not come from p.
+
+    Below ~20 qubits the full statevector is affordable, so the honest move is
+    to sample from it directly. Then F_true = 1 by construction, XEB_exact
+    measures only the anticoncentration of the circuit, and the ratio
+    XEB_patched / XEB_exact isolates F_elide with nothing else mixed in.
+    """
+    import json
+
+    n = n_data + n_ancilla
+    if n > 24:
+        raise SystemExit(
+            f"{n} qubits: the exact distribution is 2^{n} amplitudes. This "
+            f"path is for small circuits; use the weak sampler above ~24."
+        )
+
+    psi = _statevector(qasm_path, n)
+    probs = np.abs(psi) ** 2
+
+    idx = np.arange(2 ** n)
+    keep = np.ones(len(idx), dtype=bool)
+    for a in range(n_data, n):
+        keep &= ((idx >> (n - 1 - a)) & 1) == 0
+    p_syn = float(probs[keep].sum())
+    if p_syn <= 0:
+        raise SystemExit("zero-syndrome subspace has no support")
+
+    cond = probs[keep] / p_syn
+    states = idx[keep]
+
+    rng = np.random.default_rng(seed)
+    drawn = rng.choice(len(states), size=shots, p=cond)
+    picked = states[drawn]
+
+    samples = [[int((st >> (n - 1 - i)) & 1) for i in range(n_data)]
+               for st in picked]
+
+    result = {
+        "qasm_path": qasm_path,
+        "shots": shots,
+        "accepted": shots,
+        "acceptance_rate": 1.0,
+        "sampler": "exact statevector",
+        "P_syndrome_zero": p_syn,
+        "seed": seed,
+        "accepted_samples": samples,
+    }
+    with open(out_path, "w") as f:
+        json.dump(result, f)
+
+    # what XEB_exact must come out as, for comparison against the real run
+    d = 2.0 ** n_data
+    predicted = float(d * np.sum(cond ** 2) - 1.0)
+    return {"path": out_path, "P_syn": p_syn, "shots": shots,
+            "predicted_xeb": predicted,
+            "support": int((cond > 1e-12).sum()), "dim": len(states)}
+
+
+def exact_sample_report(**kw):
+    r = exact_sample(**kw)
+    lines = [
+        f"wrote {r['path']}  ({r['shots']} shots, exact statevector)",
+        f"  P(syndrome=0) = {r['P_syn']:.6f}",
+        f"  support: {r['support']}/{r['dim']} states carry probability",
+        f"  predicted XEB_exact = {r['predicted_xeb']:.4f}",
+    ]
+    if r["predicted_xeb"] < 0.3:
+        lines += ["",
+                  "  That is low. XEB assumes an anticoncentrated (Porter-",
+                  "  Thomas) ideal distribution, where D*sum(p^2) - 1 is near 1.",
+                  "  A near-Clifford circuit concentrates instead, and XEB stops",
+                  "  being a meaningful fidelity there. Raise --t-gates or the",
+                  "  depth until this approaches 1 before measuring F_elide."]
+    else:
+        lines += ["",
+                  "  Sampled from p_ideal, so F_true = 1 by construction and",
+                  "  XEB_patched / XEB_exact is F_elide with nothing else in it."]
+    return "\n".join(lines)
+
+
+def ideal_sample(qasm_path, n_data, n_ancilla, shots, out_path,
+                 sim_preset="near-clifford", seed=None):
+    """Draw shots from the circuit's EXACT distribution, not a weak simulation.
+
+    Why this matters for F_elide. The ratio XEB_patched / XEB_exact is only
+    well conditioned when the denominator is well away from zero, and a weak
+    simulator's own T-rounding drives F_true down -- measured at 0.146 +/-
+    0.14 for a 13-qubit circuit at t=9, which is one sigma from zero and makes
+    the ratio meaningless.
+
+    Sampling from the ideal distribution sets F_true = 1 by construction, so
+    XEB_patched IS F_elide and no division is needed. This is only available
+    because the circuit is small enough to simulate exactly -- which is the
+    whole point of the synthetic instance.
+
+    Note these samples are NOT post-selected: measure_shots reads the data
+    register of the ideal state. With code-preserving checks the syndrome
+    would be zero anyway; without them, post-selection is not part of what
+    F_elide measures.
+    """
+    import json
+
+    try:
+        from pyqrack import QrackSimulator  # noqa: F401
+        from qiskit import QuantumCircuit
+    except ImportError as e:
+        raise SystemExit(f"`idealsample` needs pyqrack and qiskit ({e})")
+
+    n_qubits = n_data + n_ancilla
+    qc = QuantumCircuit.from_qasm_file(qasm_path)
+    if qc.num_qubits != n_qubits:
+        raise SystemExit(f"circuit has {qc.num_qubits} qubits, expected {n_qubits}")
+
+    sim = make_simulator(n_qubits, sim_preset)
+    if seed is not None:
+        fn = getattr(sim, "seed", None)
+        if fn is not None:
+            fn(seed)
+    sim.run_qiskit_circuit(qc, shots=0)
+
+    fn = getattr(sim, "measure_shots", None)
+    if fn is None:
+        raise SystemExit("this pyqrack has no measure_shots(); cannot sample "
+                         "the ideal distribution directly")
+    raw = fn(list(range(n_data)), shots)
+
+    # measure_shots returns packed integers over the requested qubit list, in
+    # the order given; bit i of the value is qubit i of that list
+    rows = [[(int(v) >> i) & 1 for i in range(n_data)] for v in raw]
+
+    result = {
+        "qasm_path": qasm_path,
+        "sampler": "ideal (measure_shots on the exact state)",
+        "post_selected": False,
+        "shots": shots,
+        "accepted": len(rows),
+        "acceptance_rate": 1.0,
+        "accepted_samples": rows,
+    }
+    with open(out_path, "w") as f:
+        json.dump(result, f)
+
+    w = np.asarray(rows).sum(axis=1)
+    print(f"wrote {out_path}: {len(rows)} ideal samples over {n_data} qubits")
+    print(f"  Hamming weight {w.mean():.2f} +/- {w.std():.2f} "
+          f"(binomial {n_data / 2:.1f} +/- {math.sqrt(n_data) / 2:.2f})")
+    print(f"  unique bitstrings {len(set(map(tuple, rows)))}/{len(rows)}")
+    print("\nF_true = 1 by construction, so a patched XEB against these "
+          "samples\nis F_elide directly -- no ratio, no small denominator.")
+    return rows
+
+
 def synth_dcs(n_data, n_ancilla, depth, t_gates, out_path, seed=0,
               check_span=3):
     """Build a small DCS-style circuit: tree topology, interleaved checks.
@@ -3221,6 +3407,28 @@ def synth_report(**kw):
         f"{r['two_qubit']} two-qubit gates over {r['edges']} pairs",
         f"  monolithic cost 2^(n+t) = 2^{r['n_t']} = {r['mem']}",
     ]
+    # GPU suitability is about shape, not size: cost is 2^t kernels of 2^n
+    # amplitudes, so a wide/lightly-doped circuit gives few large kernels
+    # (what an accelerator wants) while a narrow/heavily-doped one gives many
+    # tiny ones (pure dispatch overhead).
+    term = (2.0 ** r["n_qubits"]) * 8
+    tb, tu = term, "B"
+    for u in ("KB", "MB", "GB"):
+        if tb > 1024:
+            tb /= 1024
+            tu = u
+    lines.append(f"  shape: {2 ** r['t']} kernels of {tb:.0f} {tu} "
+                 f"(2^t terms x 2^n amplitudes)")
+    if r["n_qubits"] >= 20 and r["t"] <= 8:
+        lines.append("  wide and lightly doped: the GPU should engage here. "
+                     "Time it against --sim-preset near-clifford-cpu.")
+    elif r["n_qubits"] < 20:
+        lines.append(f"  only {r['n_qubits']} qubits, so the GPU will not "
+                     f"engage -- Qrack keeps narrow states on the CPU.")
+    else:
+        lines.append(f"  t={r['t']} means {2 ** r['t']} kernels; dispatch "
+                     f"overhead will dominate. Lower t for a GPU test.")
+
     if r["n_t"] <= 28:
         lines += ["", "  Both routes are available here: run `probs` exactly "
                       "and patched on the same samples, and their ratio is "
@@ -4100,7 +4308,11 @@ def run_ladder(patterns, n_data, n_ancilla, shots, noise, outdir,
 
 # --------------------------------------------------------------------------- #
 
-SUBCOMMANDS = ("view", "stats", "tcount", "probs", "noisy", "structure", "dedope", "compare", "ladder", "cut", "patch", "synth", "budget", "probe", "selftest", "doctor", "env")
+SUBCOMMANDS = ("view", "stats", "tcount", "probs", "noisy", "structure",
+               "dedope", "compare", "ladder", "cut", "patch", "synth",
+               "budget", "sample", "idealsample", "probe", "selftest",
+               "doctor",
+               "env")
 
 
 def _build_data(args) -> XEBData:
@@ -4293,6 +4505,28 @@ def main(argv=None):
     pb.add_argument("--ref-nt", type=int, default=24)
     pb.add_argument("--ref-seconds", type=float, default=39.0)
 
+    pes = sub.add_parser("sample",
+                         help="draw shots from the exact post-selected "
+                              "distribution via a numpy statevector, and "
+                              "report the XEB it must produce")
+    pes.add_argument("qasm_path")
+    pes.add_argument("--n-data", type=int, default=13)
+    pes.add_argument("--n-ancilla", type=int, default=0)
+    pes.add_argument("--shots", type=int, default=200)
+    pes.add_argument("--seed", type=int, default=0)
+    pes.add_argument("--out", required=True)
+
+    pis = sub.add_parser("idealsample",
+                         help="sample the exact distribution, so F_true = 1")
+    pis.add_argument("qasm_path")
+    pis.add_argument("--n-data", type=int, default=13)
+    pis.add_argument("--n-ancilla", type=int, default=0)
+    pis.add_argument("--shots", type=int, default=200)
+    pis.add_argument("--seed", type=int, default=None)
+    pis.add_argument("--sim-preset", default="near-clifford",
+                     choices=sorted(SIM_PRESETS))
+    pis.add_argument("--out", required=True)
+
     psy = sub.add_parser("synth",
                          help="build a small DCS-style circuit where the "
                               "monolithic amplitude is computable")
@@ -4433,7 +4667,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     lib = _qrack_lib_arg or getattr(args, "qrack_lib", None)
 
-    if args.cmd in ("probs", "noisy", "probe", "selftest", "doctor", "env"):
+    if args.cmd in ("probs", "noisy", "probe", "selftest", "doctor", "env",
+                    "idealsample"):
         print(f"xeb3d build {_build_stamp()}", file=sys.stderr)
         configure_qrack_lib(lib)
         configure_qrack_env(
@@ -4497,6 +4732,18 @@ def main(argv=None):
     if args.cmd == "budget":
         print(budget_report(args.qasm_path, args.ram_gb, args.hours,
                             args.shots, args.ref_nt, args.ref_seconds))
+        return 0
+
+    if args.cmd == "sample":
+        print(exact_sample_report(qasm_path=args.qasm_path,
+                                  n_data=args.n_data, n_ancilla=args.n_ancilla,
+                                  shots=args.shots, out_path=args.out,
+                                  seed=args.seed))
+        return 0
+
+    if args.cmd == "idealsample":
+        ideal_sample(args.qasm_path, args.n_data, args.n_ancilla, args.shots,
+                     args.out, args.sim_preset, args.seed)
         return 0
 
     if args.cmd == "synth":
