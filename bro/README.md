@@ -56,6 +56,11 @@ The script is invoked via `python3 bro-xeb-viz.py [subcommand] [arguments]`.
 - `probe`: Diagnoses and identifies a PyQrack configuration capable of supporting the chain rule for exact probability evaluation.
 - `selftest`: Validates the stability and accuracy of the implemented chain rule against a dense statevector reference.
 - `doctor`: Reports the installed PyQrack build configuration and systematically determines the architectural width at which simulation constraints induce failure.
+- `env`: Prints the exports that pin other scripts (e.g., the sampler) to this Qrack build.
+- `budget`: Estimates the accessible circuit width and depth for a given RAM and time budget, detailing the implied number of cuts.
+- `sample`: Draws shots from the exact post-selected distribution via a NumPy statevector and reports the expected XEB.
+- `idealsample`: Samples the exact distribution (such that $F_{\text{true}} = 1$).
+- `synth`: Builds a small DCS-style circuit where the monolithic amplitude is computable.
 
 ## 5. Interactive Visualization
 The `view` subcommand summons a matplotlib-based 3D viewer featuring several rendering modes to dissect the sample.
@@ -69,9 +74,9 @@ Controls are exposed via matplotlib widgets, allowing users to select shots, swa
 
 ## 6. References
 1. Arute, F., et al. "Quantum supremacy using a programmable superconducting processor." Nature 574.7779 (2019): 505-510.
-2. Aaronson, S., and Gunn, S. "On the Classical Hardness of Spoofing Linear Cross-Entropy Benchmarking." arXiv preprint arXiv:1910.12085 (2019).
-3. Zlokapa, A., Boixo, S., and Lidar, D. "Boundaries of quantum supremacy via random circuit sampling." arXiv preprint arXiv:2005.02464 (2020).
-4. Pan, F., and Zhang, P. "Simulating the Sycamore quantum supremacy circuits." arXiv preprint arXiv:2103.03074 (2021).
+2. Barak, B., Chou, C., and Gao, X. "Spoofing linear cross-entropy benchmarking in shallow quantum circuits." [arXiv:2005.02421](https://arxiv.org/abs/2005.02421) (2020).
+3. Gao, X., Kalinowski, M., Chou, C., Lukin, M. D., Barak, B., and Choi, S. "Limitations of linear cross-entropy as a measure of quantum advantage." PRX Quantum 5 (2024): 010334.
+4. Ware, B., Deshpande, A., Hangleiter, D., Niroula, P., Fefferman, B., Gorshkov, A. V., and Gullans, M. J. "A sharp phase transition in linear cross-entropy benchmarking." [arXiv:2305.04954](https://arxiv.org/abs/2305.04954) (2023).
 
 
 -----------------------------
