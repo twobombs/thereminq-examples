@@ -784,6 +784,70 @@ def _amp_worker(task):
     return val, peak
 
 
+def cmd_plan(args):
+    """How to spend a machine on a batch of amplitudes.
+
+    Two kinds of parallelism, and they trade against each other through
+    memory. Workers each hold an independent boundary and never synchronise --
+    perfect scaling, but N workers need N boundaries. Absorption threads split
+    one boundary, so they cost no extra memory but only pay until bandwidth
+    saturates, and they synchronise on every step.
+
+    So: use workers while they fit, and only spend the remainder on threads.
+    The crossover is set entirely by 2^(ceil(d/2)+1) x 8 bytes against the
+    memory budget.
+    """
+    cores = args.cores or os.cpu_count() or 1
+    ram = args.budget_gb * 1e9
+    rows = args.shots
+
+    out = [f"{cores} cores, {args.budget_gb:g} GB budget, {rows} bitstrings",
+           "",
+           f"{'d':>4} {'width':>6} {'boundary':>10} {'workers':>8} "
+           f"{'threads':>8} {'cores':>6} {'batch time':>14}"]
+    for d in [int(x) for x in args.depths.split(",")]:
+        w = math.ceil(d / 2) + 1
+        b = (2.0 ** w) * 8
+        fit = int(ram // b)
+        if fit < 1:
+            out.append(f"{d:4d} {w:6d} {b / 2 ** 30:7.1f} GB "
+                       f"{'-':>8} {'-':>8} {'-':>6}   does not fit")
+            continue
+        workers = max(1, min(cores, fit, rows))
+        threads = max(1, cores // workers)
+        u, unit = b, "B"
+        for x in ("KB", "MB", "GB"):
+            if u > 1024:
+                u /= 1024
+                unit = x
+        # cost per amplitude scales as 2^width; anchor on a measured point and
+        # assume threads help sub-linearly, since they contend for bandwidth
+        per = args.ref_seconds * (2.0 ** (w - args.ref_width))
+        eff = per / max(1.0, threads ** 0.6)
+        batch = eff * math.ceil(rows / workers)
+        out.append(f"{d:4d} {w:6d} {u:7.1f} {unit:<2} {workers:8d} "
+                   f"{threads:8d} {workers * threads:6d} "
+                   f"{_dur(batch):>14}")
+
+    out += ["",
+            "  batch time assumes cost 2^width anchored at "
+            f"{args.ref_seconds:g}s for width {args.ref_width}, and that "
+            "threads scale as t^0.6.",
+            "  re-anchor with --ref-width/--ref-seconds from your own bench "
+            "before trusting the far rows."]
+    return "\n".join(out)
+
+
+def _dur(sec):
+    if sec < 90:
+        return f"{sec:.1f} s"
+    if sec < 5400:
+        return f"{sec / 60:.1f} min"
+    if sec < 86400 * 2:
+        return f"{sec / 3600:.1f} h"
+    return f"{sec / 86400:.1f} d"
+
+
 def cmd_profile(args):
     """Where the sweep actually spends its time, bucketed by absorption shape.
 
@@ -1022,6 +1086,15 @@ def main(argv=None):
                          "default is deliberately small so a typo in --depth "
                          "cannot take the machine into swap")
 
+    pl = sub.add_parser("plan",
+                        help="workers vs absorption threads for a batch")
+    pl.add_argument("--depths", default="44,48,50,52,56,60,64,68,70")
+    pl.add_argument("--cores", type=int, default=None)
+    pl.add_argument("--budget-gb", type=float, default=300.0)
+    pl.add_argument("--shots", type=int, default=100)
+    pl.add_argument("--ref-width", type=int, default=26)
+    pl.add_argument("--ref-seconds", type=float, default=1339.0)
+
     pp = sub.add_parser("profile",
                         help="time per absorption, bucketed by shape")
     pp.add_argument("--n", type=int, default=70)
@@ -1053,6 +1126,9 @@ def main(argv=None):
                          "lever that moves memory, since cost is 2^(d/2)")
 
     args = ap.parse_args(argv)
+    if args.cmd == "plan":
+        print(cmd_plan(args))
+        return 0
     if args.cmd == "profile":
         print(cmd_profile(args))
         return 0
