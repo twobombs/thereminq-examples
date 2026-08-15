@@ -39,13 +39,29 @@ Usage
 
 from __future__ import annotations
 
+import os
+
 import argparse
 import json
 import math
-import os
 import re
 import sys
 import time
+
+# BLAS threading must be pinned BEFORE numpy loads -- OpenBLAS reads these at
+# import and the pool size is fixed thereafter.
+#
+# Every absorption is a matmul with inner dimension 2. OpenBLAS still spawns
+# its full pool and synchronises it for each one: measured at 64 threads and
+# 5895% CPU on a run nominally using one, achieving 1.4 GB/s. The barrier
+# costs orders of magnitude more than the arithmetic behind it.
+#
+# Parallelism belongs in ABSORB_THREADS, which splits the boundary itself and
+# does real work per thread. Override with TNSWEEP_BLAS_THREADS if a build
+# genuinely benefits.
+for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_v, os.environ.get("TNSWEEP_BLAS_THREADS", "1"))
 
 import numpy as np
 
@@ -758,8 +774,9 @@ def _amp_worker(task):
     concurrent workers.
     """
     qasm, bits, cap, blas, max_depth, ceiling = task
-    for v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
-        os.environ[v] = str(blas)
+    # deliberately NOT raising BLAS threads here: with inner dimension 2 the
+    # pool costs more than it computes. `blas` now sets the boundary split.
+    ABSORB_THREADS[0] = max(1, blas)
     circ = Brickwork.from_qasm(qasm)
     if max_depth:
         circ = circ.truncate(max_depth)
@@ -920,9 +937,10 @@ def cmd_amps(args):
         print(f"  {workers} workers instead of {asked} -- {why}",
               file=sys.stderr)
     # when only one amplitude fits, hand the cores to BLAS instead
-    blas = max(1, (os.cpu_count() or 1) // workers) if workers > 1 else \
-        (os.cpu_count() or 1)
-    print(f"  {workers} worker(s) x {blas} BLAS thread(s)", file=sys.stderr)
+    blas = max(1, (os.cpu_count() or 1) // workers)
+    print(f"  {workers} worker(s) x {blas} absorption thread(s)   "
+          f"(BLAS pinned to {os.environ.get('OPENBLAS_NUM_THREADS')})",
+          file=sys.stderr)
 
     out = np.empty(len(rows), dtype=np.complex64)
     t0 = time.perf_counter()
