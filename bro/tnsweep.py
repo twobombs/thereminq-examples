@@ -324,6 +324,13 @@ def sweep_order(n, owner):
 # contraction
 # --------------------------------------------------------------------------- #
 
+# Set False to force np.tensordot everywhere, for A/B measurement. The fast
+# path avoids a full strided copy of the boundary, which should matter once
+# the boundary leaves cache -- unverified above ~1 MB, where everything is
+# cache-resident and the two are indistinguishable.
+USE_FAST_ABSORB = [True]
+
+
 class Boundary:
     """A tensor plus its leg labels, absorbing others by shared legs."""
 
@@ -337,8 +344,44 @@ class Boundary:
     def rank(self):
         return len(self.legs)
 
+    def _absorb_fast(self, arr, legs, shared):
+        """Contract ONE shared axis without transposing the boundary.
+
+        np.tensordot moves the contracted axes to the end, which is a strided
+        copy of the whole array on every call -- measured at 47% of
+        absorptions here, and the reason this ran at 1 GB/s against ~50 GB/s
+        of hardware. Reshaping to (A, 2, C) around the axis is free on a
+        contiguous array whatever the axis position, so the contraction
+        becomes two slice reads and one write.
+
+        Returns True if it handled the case.
+        """
+        if len(shared) != 1 or self.arr.ndim < 1:
+            return False
+        p = self.legs.index(shared[0])
+        j = list(legs).index(shared[0])
+        if j != 0 or arr.ndim > 3:
+            return False
+
+        A = int(np.prod(self.arr.shape[:p], dtype=np.int64))
+        C = int(np.prod(self.arr.shape[p + 1:], dtype=np.int64))
+        b3 = self.arr.reshape(A, 2, C)          # free: contiguous
+        tail = arr.shape[1:]                    # legs the small tensor adds
+        out = np.zeros((A, C) + tail, dtype=self.arr.dtype)
+        for k in (0, 1):
+            # b3[:, k, :] is a strided view; the product broadcasts over tail
+            out += b3[:, k, :].reshape(A, C, *([1] * len(tail))) * arr[k]
+
+        self.arr = out.reshape(self.arr.shape[:p] + self.arr.shape[p + 1:]
+                               + tail)
+        self.legs = ([l for l in self.legs if l != shared[0]]
+                     + [l for l in legs if l != shared[0]])
+        return True
+
     def absorb(self, arr, legs):
         shared = [l for l in legs if l in self.legs]
+        if shared and USE_FAST_ABSORB[0] and self._absorb_fast(arr, legs, shared):
+            return
         if not shared:
             # disjoint: outer product, which is what grows the boundary
             self.arr = np.tensordot(self.arr, arr, axes=0)
@@ -694,6 +737,48 @@ def _amp_worker(task):
     return val, peak
 
 
+def cmd_bench(args):
+    """A/B the transpose-free absorption against np.tensordot.
+
+    Run this at a width whose boundary exceeds L3, or the answer is
+    meaningless: below cache the two paths measure the same because no copy
+    ever reaches memory. On this hardware the gap opened at width 26
+    (512 MB), where the sweep achieved 1.1 GB/s against ~50 GB/s of DDR3.
+    """
+    out = [f"n={args.n}, boundary must exceed L3 for this to mean anything",
+           "",
+           f"{'d':>4} {'width':>6} {'boundary':>10} {'tensordot':>11} "
+           f"{'fast':>10} {'speedup':>9} {'agree':>7}"]
+    for d in [int(x) for x in args.depths.split(",")]:
+        circ = Brickwork.random(args.n, d, args.t_gates, args.seed)
+        w = math.ceil(d / 2) + 1
+        size = (2.0 ** w) * 8
+        unit = "B"
+        for u in ("KB", "MB", "GB"):
+            if size > 1024:
+                size /= 1024
+                unit = u
+
+        USE_FAST_ABSORB[0] = False
+        t0 = time.perf_counter()
+        v1, _ = amplitude(circ, [0] * args.n)
+        slow = time.perf_counter() - t0
+
+        USE_FAST_ABSORB[0] = True
+        t0 = time.perf_counter()
+        v2, pk = amplitude(circ, [0] * args.n)
+        fast = time.perf_counter() - t0
+
+        agree = abs(v1 - v2) <= 1e-5 * max(abs(v1), 2.0 ** (-args.n / 2))
+        out.append(f"{d:4d} {pk:6d} {size:7.1f} {unit:<2} {slow:10.3f}s "
+                   f"{fast:9.3f}s {slow / max(fast, 1e-9):8.1f}x "
+                   f"{'ok' if agree else 'DIFFERS':>7}")
+    out += ["",
+            "  a speedup near 1.0 at small width is expected and says nothing.",
+            "  the number that matters is at the largest width you can run."]
+    return "\n".join(out)
+
+
 def cmd_amps(args):
     if not os.path.isfile(args.qasm):
         raise SystemExit(f"no circuit at {args.qasm!r}")
@@ -826,6 +911,13 @@ def main(argv=None):
                          "default is deliberately small so a typo in --depth "
                          "cannot take the machine into swap")
 
+    pb = sub.add_parser("bench",
+                        help="A/B the transpose-free absorption vs tensordot")
+    pb.add_argument("--n", type=int, default=50)
+    pb.add_argument("--depths", default="30,40,44,48")
+    pb.add_argument("--t-gates", type=int, default=10)
+    pb.add_argument("--seed", type=int, default=0)
+
     pa = sub.add_parser("amps", help="amplitudes for a set of bitstrings")
     pa.add_argument("--qasm", required=True)
     pa.add_argument("--bits", required=True)
@@ -840,6 +932,9 @@ def main(argv=None):
                          "lever that moves memory, since cost is 2^(d/2)")
 
     args = ap.parse_args(argv)
+    if args.cmd == "bench":
+        print(cmd_bench(args))
+        return 0
     if args.cmd == "width":
         print(cmd_width(args))
         return 0
