@@ -358,13 +358,34 @@ ABSORB_THREADS = [1]
 
 
 class Boundary:
-    """A tensor plus its leg labels, absorbing others by shared legs."""
+    """A tensor plus its leg labels, absorbing others by shared legs.
 
-    __slots__ = ("arr", "legs")
+    Carries a separate log-scale so the stored entries stay O(1).
+
+    Without it the boundary drifts toward the float32 floor -- measured
+    minimum nonzero 1.5e-26 by width 20, against an underflow limit of
+    1.2e-38. Entries that cross it become exact zeros, which is wrong twice
+    over: the amplitude loses them, and they are then counted as structural
+    sparsity when they are nothing of the kind.
+    """
+
+    __slots__ = ("arr", "legs", "logscale")
 
     def __init__(self, arr, legs):
         self.arr = arr
         self.legs = list(legs)
+        self.logscale = 0.0          # true value is arr * exp(logscale)
+
+    def renormalise(self, floor=1e-12, ceil=1e12):
+        """Rescale to O(1) when the entries stray, tracking the factor."""
+        a = np.abs(self.arr)
+        m = float(a.max()) if a.size else 0.0
+        if m == 0.0 or not np.isfinite(m):
+            return
+        if floor < m < ceil:
+            return
+        self.arr = self.arr / np.float32(m)
+        self.logscale += math.log(m)
 
     @property
     def rank(self):
@@ -480,11 +501,13 @@ def contract(tensors, order, width_cap=None, report=None, ceiling=None):
                 csh = sum(1 for l in clegs if l in b.legs)
                 check(b.rank + len(clegs) - 2 * csh)
                 b.absorb(comp, clegs)
+                b.renormalise()
                 peak = max(peak, b.rank)
                 i += 2
                 continue
         check(would)
         b.absorb(arr, legs)
+        b.renormalise()
         peak = max(peak, b.rank)
         if report is not None and b.rank >= peak:
             report(b.rank)
@@ -505,7 +528,7 @@ def amplitude(circ, xbits, width_cap=None, ceiling=None, threads=None):
     b, peak = contract(tensors, order, width_cap=cap, ceiling=ceiling)
     if b.rank != 0:
         raise RuntimeError(f"contraction left rank {b.rank}, expected a scalar")
-    return complex(b.arr), peak
+    return complex(b.arr) * math.exp(b.logscale), peak
 
 
 # --------------------------------------------------------------------------- #
@@ -782,6 +805,96 @@ def _amp_worker(task):
         circ = circ.truncate(max_depth)
     val, peak = amplitude(circ, bits, width_cap=cap, ceiling=ceiling)
     return val, peak
+
+
+def cmd_sparsity(args):
+    """Zero fraction of the boundary during a sweep of a REAL circuit.
+
+    This is the load-bearing measurement for the sparse route. A boundary that
+    is 87.5% zeros needs 8x less memory, which is the difference between d=70
+    fitting 64 GiB of VRAM and needing 512 GiB. Everything else in that plan
+    is engineering; this is the part that could simply be false.
+
+    Sparsity was measured at 87.5% on RANDOM Clifford circuits up to width 16.
+    IBM's circuit is a specific Clifford frame and the target is width 35, so
+    the extrapolation spans 19 doublings on a different distribution. Running
+    it here on the actual QASM at the largest reachable width is the closest
+    check available without solving the problem first.
+    """
+    circ = Brickwork.from_qasm(args.qasm)
+    if args.max_depth:
+        circ = circ.truncate(args.max_depth)
+    tensors, owner = build_network(circ, [0] * circ.n)
+    order = sweep_order(circ.n, owner)
+    ABSORB_THREADS[0] = args.threads
+
+    # print as we go: a d=50 sweep is ~20 minutes and a command that shows
+    # nothing until it finishes is indistinguishable from one that has hung
+    head = [f"{os.path.basename(args.qasm)}  n={circ.n} d={circ.depth}",
+            "",
+            f"{'step':>7} {'rank':>5} {'entries':>12} {'zeros':>8} "
+            f"{'distinct':>9} {'sparse':>8}"]
+    for line in head:
+        print(line, flush=True)
+    out = []
+    worst = 1.0
+
+    b = Boundary(*tensors[order[0]])
+    peak = b.rank
+    samples = 0
+    for k, i in enumerate(order[1:], 1):
+        b.absorb(*tensors[i])
+        peak = max(peak, b.rank)
+        flat = np.asarray(b.arr).ravel()
+        if flat.size < 4096 or b.rank < peak - 1 or k % args.every:
+            continue
+        if True:
+            z = float(np.count_nonzero(flat == 0)) / flat.size
+            # how close is the smallest surviving entry to the float32 floor?
+            # if it is within a few orders, the zero count is contaminated by
+            # underflow and is not a statement about structure
+            nz = np.abs(flat[flat != 0])
+            tiny = float(nz.min()) if nz.size else 0.0
+            margin = tiny / 1.2e-38 if tiny else float("inf")
+            # distinct values to float32 rounding: few values means the
+            # structure is Clifford-like and compresses beyond mere sparsity
+            # a strided slice is not contiguous, and .view() to a different
+            # itemsize needs contiguity -- copy the subsample first. This only
+            # bites above 2^20 entries, i.e. exactly on the real circuit.
+            samp = (flat if flat.size <= 1 << 20
+                    else np.ascontiguousarray(flat[::flat.size >> 20]))
+            # The boundary is unnormalised, so entries reach ~1e34 by width 26.
+            # np.round(x, 5) scales by 1e5 and overflows float32 there, which
+            # silently corrupts the count. Round in float64, and relative to
+            # the largest magnitude so the tolerance means the same thing at
+            # every scale.
+            pair = samp.view(np.float32).reshape(-1, 2).astype(np.float64)
+            mx = float(np.abs(pair).max()) or 1.0
+            distinct = len(np.unique(np.round(pair / mx, 6), axis=0))
+            worst = min(worst, z)
+            row = (f"{k:7d} {b.rank:5d} {flat.size:12d} {z:7.1%} "
+                   f"{distinct:9d} {1 / max(1e-9, 1 - z):7.1f}x"
+                   + ("   underflow risk: min nonzero is %.0e of the float32 "
+                      "floor" % margin if margin < 1e6 else ""))
+            print(row, flush=True)
+            out.append(row)
+            samples += 1
+            if samples >= args.samples:
+                break
+
+    out = ["",
+           f"  WORST case across the sweep: {worst:.1%} zeros -> "
+           f"{1 / max(1e-9, 1 - worst):.1f}x. A sparse representation has to "
+           f"hold the worst step,",
+           f"  so that is the operative figure. At width 35 it puts d=70 at "
+           f"{(2.0 ** 35) * 8 * (1 - worst) / 2 ** 30:.0f} GiB against 64 GiB "
+           f"of VRAM.",
+           "",
+            "  'sparse' is 1/(1-zeros): what storing only nonzeros would save.",
+            "  87.5% -> 8x, which puts d=70 at 64 GiB across 8 dies instead",
+            "  of 512 GiB. A figure near 0% means the sparse route is closed",
+            "  and d=64 on GPUs is the honest target."]
+    return "\n".join(out)
 
 
 def cmd_plan(args):
@@ -1086,6 +1199,14 @@ def main(argv=None):
                          "default is deliberately small so a typo in --depth "
                          "cannot take the machine into swap")
 
+    psp = sub.add_parser("sparsity",
+                         help="zero fraction of the boundary on a real circuit")
+    psp.add_argument("--qasm", required=True)
+    psp.add_argument("--max-depth", type=int, default=None)
+    psp.add_argument("--threads", type=int, default=1)
+    psp.add_argument("--every", type=int, default=200)
+    psp.add_argument("--samples", type=int, default=12)
+
     pl = sub.add_parser("plan",
                         help="workers vs absorption threads for a batch")
     pl.add_argument("--depths", default="44,48,50,52,56,60,64,68,70")
@@ -1126,6 +1247,9 @@ def main(argv=None):
                          "lever that moves memory, since cost is 2^(d/2)")
 
     args = ap.parse_args(argv)
+    if args.cmd == "sparsity":
+        print(cmd_sparsity(args))
+        return 0
     if args.cmd == "plan":
         print(cmd_plan(args))
         return 0
