@@ -330,6 +330,16 @@ def sweep_order(n, owner):
 # cache-resident and the two are indistinguishable.
 USE_FAST_ABSORB = [True]
 
+# Threads used to split one absorption across the boundary.
+#
+# This is the parallelism that was missing. BLAS will not thread a matmul
+# whose inner dimension is 2, and numpy elementwise operations never thread,
+# so the whole sweep ran on one core -- measured at 1.4 GB/s, which is about
+# what a single Opteron core sustains. The boundary partitions cleanly along
+# its leading axis, and numpy ufuncs release the GIL, so plain threads scale
+# until memory bandwidth saturates.
+ABSORB_THREADS = [1]
+
 
 class Boundary:
     """A tensor plus its leg labels, absorbing others by shared legs."""
@@ -367,10 +377,28 @@ class Boundary:
         C = int(np.prod(self.arr.shape[p + 1:], dtype=np.int64))
         b3 = self.arr.reshape(A, 2, C)          # free: contiguous
         tail = arr.shape[1:]                    # legs the small tensor adds
-        out = np.zeros((A, C) + tail, dtype=self.arr.dtype)
-        for k in (0, 1):
-            # b3[:, k, :] is a strided view; the product broadcasts over tail
-            out += b3[:, k, :].reshape(A, C, *([1] * len(tail))) * arr[k]
+        out = np.empty((A, C) + tail, dtype=self.arr.dtype)
+        pad = (1,) * len(tail)
+
+        def block(lo, hi):
+            # np.multiply(..., out=) avoids the temporary that `x * y` builds,
+            # which on a 512 MB boundary is a second full array
+            np.multiply(b3[lo:hi, 0, :].reshape(hi - lo, C, *pad), arr[0],
+                        out=out[lo:hi])
+            out[lo:hi] += b3[lo:hi, 1, :].reshape(hi - lo, C, *pad) * arr[1]
+
+        nt = min(ABSORB_THREADS[0], max(1, A))
+        if nt <= 1 or A < 4096:
+            block(0, A)
+        else:
+            import threading
+            step = (A + nt - 1) // nt
+            ts = [threading.Thread(target=block, args=(i, min(i + step, A)))
+                  for i in range(0, A, step)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
 
         self.arr = out.reshape(self.arr.shape[:p] + self.arr.shape[p + 1:]
                                + tail)
@@ -448,8 +476,10 @@ def contract(tensors, order, width_cap=None, report=None, ceiling=None):
     return b, peak
 
 
-def amplitude(circ, xbits, width_cap=None, ceiling=None):
+def amplitude(circ, xbits, width_cap=None, ceiling=None, threads=None):
     """<x|U|0^n> by the temporal-boundary sweep. Returns (value, peak_rank)."""
+    if threads:
+        ABSORB_THREADS[0] = threads
     tensors, owner = build_network(circ, xbits)
     order = sweep_order(circ.n, owner)
     # h+1, not h. Measured: capping at h makes the pairing rule fire on almost
@@ -745,10 +775,11 @@ def cmd_bench(args):
     ever reaches memory. On this hardware the gap opened at width 26
     (512 MB), where the sweep achieved 1.1 GB/s against ~50 GB/s of DDR3.
     """
+    threads = [int(x) for x in args.threads.split(",")]
     out = [f"n={args.n}, boundary must exceed L3 for this to mean anything",
            "",
-           f"{'d':>4} {'width':>6} {'boundary':>10} {'tensordot':>11} "
-           f"{'fast':>10} {'speedup':>9} {'agree':>7}"]
+           f"{'d':>4} {'width':>6} {'boundary':>10} "
+           + "".join(f"{'t=' + str(t):>11}" for t in threads) + f"{'best':>9}"]
     for d in [int(x) for x in args.depths.split(",")]:
         circ = Brickwork.random(args.n, d, args.t_gates, args.seed)
         w = math.ceil(d / 2) + 1
@@ -758,24 +789,23 @@ def cmd_bench(args):
             if size > 1024:
                 size /= 1024
                 unit = u
-
-        USE_FAST_ABSORB[0] = False
-        t0 = time.perf_counter()
-        v1, _ = amplitude(circ, [0] * args.n)
-        slow = time.perf_counter() - t0
-
-        USE_FAST_ABSORB[0] = True
-        t0 = time.perf_counter()
-        v2, pk = amplitude(circ, [0] * args.n)
-        fast = time.perf_counter() - t0
-
-        agree = abs(v1 - v2) <= 1e-5 * max(abs(v1), 2.0 ** (-args.n / 2))
-        out.append(f"{d:4d} {pk:6d} {size:7.1f} {unit:<2} {slow:10.3f}s "
-                   f"{fast:9.3f}s {slow / max(fast, 1e-9):8.1f}x "
-                   f"{'ok' if agree else 'DIFFERS':>7}")
+        row, ref, times = "", None, []
+        for t in threads:
+            t0 = time.perf_counter()
+            v, pk = amplitude(circ, [0] * args.n, threads=t)
+            el = time.perf_counter() - t0
+            if ref is None:
+                ref = v
+            bad = abs(v - ref) > 1e-5 * max(abs(ref), 2.0 ** (-args.n / 2))
+            times.append(el)
+            row += f"{el:10.2f}s" + ("!" if bad else " ")
+        out.append(f"{d:4d} {pk:6d} {size:7.1f} {unit:<2} {row}"
+                   f"{times[0] / min(times):8.1f}x")
     out += ["",
-            "  a speedup near 1.0 at small width is expected and says nothing.",
-            "  the number that matters is at the largest width you can run."]
+            "  '!' marks a thread count that changed the answer -- there "
+            "should be none.",
+            "  scaling stops when memory bandwidth saturates, typically well "
+            "below core count."]
     return "\n".join(out)
 
 
@@ -917,6 +947,8 @@ def main(argv=None):
     pb.add_argument("--depths", default="30,40,44,48")
     pb.add_argument("--t-gates", type=int, default=10)
     pb.add_argument("--seed", type=int, default=0)
+    pb.add_argument("--threads", default="1,4,12,24",
+                    help="absorption thread counts to compare")
 
     pa = sub.add_parser("amps", help="amplitudes for a set of bitstrings")
     pa.add_argument("--qasm", required=True)
