@@ -767,6 +767,69 @@ def _amp_worker(task):
     return val, peak
 
 
+def cmd_profile(args):
+    """Where the sweep actually spends its time, bucketed by absorption shape.
+
+    Guessing has a poor record here: transposes were ruled out by measurement
+    after a fix was already written for them. The buckets below separate the
+    cases that have different memory behaviour, so the next optimisation
+    targets whichever one dominates rather than whichever seems likely.
+
+      trailing  contracted axis is last -> the (A,2,C) view has C=1, so the
+                two halves interleave element by element and half of every
+                cache line is discarded
+      interior  C>1 -> each half is read in contiguous runs
+      2-shared  falls through to np.tensordot, which does transpose
+    """
+    circ = Brickwork.random(args.n, args.depth, args.t_gates, args.seed)
+    tensors, owner = build_network(circ, [0] * args.n)
+    order = sweep_order(args.n, owner)
+    cap = math.ceil(args.depth / 2) + 1
+    ABSORB_THREADS[0] = args.threads
+
+    buckets = {}
+    b = Boundary(*tensors[order[0]])
+    i = 1
+    while i < len(order):
+        arr, legs = tensors[order[i]]
+        shared = [l for l in legs if l in b.legs]
+        if shared:
+            p_ = min(b.legs.index(l) for l in shared)
+            if len(shared) >= 2:
+                kind = "2-shared (tensordot)"
+            elif p_ == b.rank - 1:
+                kind = "1-shared trailing"
+            else:
+                kind = "1-shared interior"
+        else:
+            kind = "disjoint (outer)"
+        sz = self_sz = b.arr.size
+        t0 = time.perf_counter()
+        b.absorb(arr, legs)
+        el = time.perf_counter() - t0
+        rec = buckets.setdefault(kind, [0, 0.0, 0])
+        rec[0] += 1
+        rec[1] += el
+        rec[2] += sz
+        i += 1
+
+    total = sum(v[1] for v in buckets.values())
+    out = [f"n={args.n} d={args.depth} threads={args.threads}   "
+           f"total {total:.2f} s",
+           "",
+           f"{'bucket':<24} {'calls':>7} {'time':>9} {'share':>7} "
+           f"{'GB touched':>11} {'GB/s':>8}"]
+    for k, (cnt, t, sz) in sorted(buckets.items(), key=lambda kv: -kv[1][1]):
+        gb = sz * 8 / 1e9
+        out.append(f"{k:<24} {cnt:7d} {t:8.2f}s {t / total:6.1%} "
+                   f"{gb:10.2f} {gb / max(t, 1e-9):8.2f}")
+    out += ["",
+            "  the dominant bucket is where any optimisation has to land.",
+            "  GB/s well under 10 on a modern socket points at access pattern",
+            "  or per-call overhead, not at memory capacity."]
+    return "\n".join(out)
+
+
 def cmd_bench(args):
     """A/B the transpose-free absorption against np.tensordot.
 
@@ -941,6 +1004,14 @@ def main(argv=None):
                          "default is deliberately small so a typo in --depth "
                          "cannot take the machine into swap")
 
+    pp = sub.add_parser("profile",
+                        help="time per absorption, bucketed by shape")
+    pp.add_argument("--n", type=int, default=70)
+    pp.add_argument("--depth", type=int, default=40)
+    pp.add_argument("--t-gates", type=int, default=10)
+    pp.add_argument("--threads", type=int, default=1)
+    pp.add_argument("--seed", type=int, default=0)
+
     pb = sub.add_parser("bench",
                         help="A/B the transpose-free absorption vs tensordot")
     pb.add_argument("--n", type=int, default=50)
@@ -964,6 +1035,9 @@ def main(argv=None):
                          "lever that moves memory, since cost is 2^(d/2)")
 
     args = ap.parse_args(argv)
+    if args.cmd == "profile":
+        print(cmd_profile(args))
+        return 0
     if args.cmd == "bench":
         print(cmd_bench(args))
         return 0
