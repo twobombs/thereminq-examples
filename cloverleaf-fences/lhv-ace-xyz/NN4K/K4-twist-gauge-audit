@@ -1,0 +1,297 @@
+# -*- coding: us-ascii -*-
+"""
+twist_gauge_audit.py -- does the K4 Moebius gluing implement a topological
+invariant, or a local rewiring artifact?
+
+Rev 1. Pure combinatorics: no pyqrack, no GPU, runs in under a second.
+
+BACKGROUND
+----------
+The parity-class test ("only the twist parity on each of the 3 independent
+cycles matters; which junctions carry the twist is irrelevant") rests on an
+assumption that has to hold before the test means anything:
+
+  the CUT MOVE must be a gauge transformation.
+
+Cut move = flip the twist on all 3 junctions incident to one manifold. In F_2^6
+the cut space is the kernel of the cycle-parity map, dim 6-3 = 3. If the cut
+move is a relabelling of that manifold's qubits which preserves its intra-rim
+edge set, then it cannot change any observable, the 64 twist vectors collapse to
+exactly 8 physical classes of 8, and same-class configurations must agree
+exactly. If it is NOT such a relabelling, the cut move changes the local
+Hamiltonian, same-class configurations differ, and "parity class" is not an
+equivalence class at all.
+
+WHAT THIS SCRIPT FINDS
+----------------------
+1. The engine's gluing -- reverse the corner block and the mid-edge block
+   SEPARATELY, `corners[::-1] + midedge[::-1]` -- fails the gauge condition at
+   every rung with E_MIDEDGE > 0. The cut move breaks 9 intra-rim edges.
+2. Reversing the WHOLE edge block, `range(C+E)[::-1]`, satisfies it exactly at
+   every rung: cut move breaks 0 edges, single-junction twist still breaks 4
+   (as it must -- that is the physical twist, not gauge).
+3. The two coincide only when E_MIDEDGE = 0.
+
+So the fix is one line in junction_pairing(). See PROPOSED_FIX below.
+
+4. Separately: the shipped configuration twists all 6 junctions, which puts
+   EVEN twist parity on the racetrack 4-cycle 0-1-2-3-0 -- the exact loop the
+   Racetrack DFT measures. Odd parity sits on the four triangles, which the
+   DFT does not look at.
+
+USAGE
+  python3 twist_gauge_audit.py                # full audit
+  python3 twist_gauge_audit.py --classes      # emit the 8 parity classes
+  python3 twist_gauge_audit.py --rung 2 2     # audit one (C,E) rung
+"""
+
+import argparse
+import itertools
+from typing import Dict, List, Sequence, Tuple
+
+N_MANIFOLDS = 4
+LOCAL_EDGES = 3
+JUNCTION_PAIRS = [(i, j) for i in range(N_MANIFOLDS)
+                  for j in range(i + 1, N_MANIFOLDS)]
+LOOP_CYCLE = [0, 1, 2, 3]
+LOOP_JUNCTIONS = [tuple(sorted((LOOP_CYCLE[i], LOOP_CYCLE[(i + 1) % 4])))
+                  for i in range(4)]
+
+RUNGS = [(2, 0), (1, 2), (2, 2), (2, 3), (3, 3), (3, 4), (3, 6)]
+
+PROPOSED_FIX = '''
+def junction_pairing(twist: bool) -> List[int]:
+    """Map slot index on side A to slot index on side B within a junction.
+    Identity = trivial gluing; order-reversal of the FULL edge block = the
+    discrete Moebius half-twist.
+
+    NOTE: reversing the corner and mid-edge blocks separately is NOT gauge
+    consistent -- the cut move (twisting all 3 junctions of one manifold) then
+    fails to be a rim-graph automorphism, so twist-parity classes are not
+    equivalence classes and no holonomy interpretation is available.
+    """
+    if not twist:
+        return list(range(QUBITS_PER_EDGE))
+    return list(range(QUBITS_PER_EDGE))[::-1]
+'''
+
+
+# ---------------------------------------------------------------- topology
+class Rung:
+    def __init__(self, c: int, e: int):
+        self.c, self.e = c, e
+        self.q = c + e
+        self.qpm = LOCAL_EDGES * self.q
+        self.unique = N_MANIFOLDS * self.qpm - len(JUNCTION_PAIRS) * self.q
+        self.edges = self._rim_edges()
+
+    def block(self, k: int) -> List[int]:
+        return list(range(k * self.q, (k + 1) * self.q))
+
+    def _ring(self, p: int) -> List[int]:
+        return self.block((p - 1) % LOCAL_EDGES) + self.block(p)
+
+    def _rim_edges(self):
+        ed = set()
+        for p in range(LOCAL_EDGES):
+            r = self._ring(p)
+            for s in range(len(r)):
+                a, b = r[s], r[(s + 1) % len(r)]
+                ed.add((min(a, b), max(a, b)))
+        return ed
+
+    def apply(self, perm: Sequence[int], nblocks: int) -> List[int]:
+        out = list(range(self.qpm))
+        for k in range(nblocks):
+            blk = self.block(k)
+            for i, q in enumerate(blk):
+                out[q] = blk[perm[i]]
+        return out
+
+    def breaks(self, perm: Sequence[int], nblocks: int) -> int:
+        s = self.apply(perm, nblocks)
+        img = {(min(s[a], s[b]), max(s[a], s[b])) for a, b in self.edges}
+        return len(self.edges - img)
+
+
+def engine_pairing(c: int, e: int) -> List[int]:
+    return list(range(c))[::-1] + [c + i for i in range(e)][::-1]
+
+
+def fullrev_pairing(c: int, e: int) -> List[int]:
+    return list(range(c + e))[::-1]
+
+
+def n_transpositions(perm: Sequence[int]) -> int:
+    seen, cycles = set(), 0
+    for i in range(len(perm)):
+        if i in seen:
+            continue
+        cycles += 1
+        j = i
+        while j not in seen:
+            seen.add(j)
+            j = perm[j]
+    return len(perm) - cycles
+
+
+def human(nbytes: float) -> str:
+    for u in ("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"):
+        if nbytes < 1024:
+            return f"{nbytes:.0f}{u}"
+        nbytes /= 1024
+    return f"{nbytes:.0f}ZiB"
+
+
+# ---------------------------------------------------------------- audits
+def audit_cost(rungs) -> None:
+    print("=" * 92)
+    print("RUNG COST -- note that unique qubits = 6*(C+E) for K4, NOT N*n")
+    print("=" * 92)
+    print("  Junction qubits are shared: each is carried as two coupled copies,")
+    print("  one per manifold. N*n double-counts them. The exact monolithic")
+    print("  reference is built on the UNIQUE count.\n")
+    print(f"  {'(C,E)':>7} {'q/edge':>7} {'q/mf':>5} {'N*n':>5} {'unique':>7} "
+          f"{'per-worker SV':>14} {'exact monolithic':>17}")
+    for c, e in rungs:
+        r = Rung(c, e)
+        print(f"  {str((c, e)):>7} {r.q:>7d} {r.qpm:>5d} "
+              f"{N_MANIFOLDS * r.qpm:>5d} {r.unique:>7d} "
+              f"{human(2 ** r.qpm * 8):>14} {human(2 ** r.unique * 8):>17}")
+    print("\n  Exact monolithic reference needs unique <= ~30, i.e. C+E <= 5.")
+    print("  (3,6) is 54 unique qubits: no exact reference exists, as expected.")
+
+
+def audit_twist(rungs) -> None:
+    print("\n" + "=" * 92)
+    print("TWIST NON-DEGENERACY")
+    print("=" * 92)
+    print(f"  {'(C,E)':>7} {'engine pairing':>32} {'transp':>7}  status")
+    for c, e in rungs:
+        p = engine_pairing(c, e)
+        ident = p == list(range(len(p)))
+        print(f"  {str((c, e)):>7} {str(p):>32} {n_transpositions(p):>7d}  "
+              f"{'DEAD (twist == identity)' if ident else 'live'}")
+    p11 = engine_pairing(1, 1)
+    print(f"\n  (1,1) -> {p11}: reversal of a 1-element block is the identity.")
+    print("  Any rung with C<=1 and E<=1 silently returns 'no effect'.")
+
+
+def audit_gauge(rungs) -> None:
+    print("\n" + "=" * 92)
+    print("GAUGE CONSISTENCY -- the assumption the parity-class test rests on")
+    print("=" * 92)
+    print("  cut move = flip twist on all 3 junctions of one manifold.")
+    print("  It must be a rim-graph automorphism (0 edges broken) for parity")
+    print("  classes to be physical equivalence classes.\n")
+    print(f"  {'(C,E)':>7} {'gluing':>10} {'permutation':>32} "
+          f"{'1 junction':>12} {'CUT MOVE':>12}  verdict")
+    verdicts = {}
+    for c, e in rungs:
+        r = Rung(c, e)
+        for name, fn in (("engine", engine_pairing),
+                         ("full-rev", fullrev_pairing)):
+            p = fn(c, e)
+            b1, b3 = r.breaks(p, 1), r.breaks(p, 3)
+            ok = (b3 == 0)
+            verdicts[(c, e, name)] = ok
+            print(f"  {str((c, e)):>7} {name:>10} {str(p):>32} "
+                  f"{str(b1) + ' broken':>12} {str(b3) + ' broken':>12}  "
+                  f"{'GAUGE OK' if ok else 'NOT GAUGE'}")
+        print()
+    bad = [k for k, v in verdicts.items() if k[2] == "engine" and not v]
+    good = [k for k, v in verdicts.items() if k[2] == "full-rev" and v]
+    print(f"  engine gluing fails the gauge condition at {len(bad)}/"
+          f"{len(rungs)} rungs; full-block reversal passes at "
+          f"{len(good)}/{len(rungs)}.")
+    print("  The single-junction twist SHOULD break edges (4 of them) -- that")
+    print("  is the physical half-twist. Only the cut move must be clean.")
+    print("\n  ONE-LINE FIX in junction_pairing():")
+    print(PROPOSED_FIX)
+
+
+def audit_cycles() -> None:
+    print("=" * 92)
+    print("CYCLE PARITY OF THE SHIPPED CONFIGURATION (TWIST_GLUING = True)")
+    print("=" * 92)
+    print(f"  K4: V=4, E=6, cycle rank = {6 - 4 + 1}. "
+          f"TWIST_GLUING is a single global bool, so all 6 junctions twist.\n")
+    tri = [c for c in itertools.combinations(JUNCTION_PAIRS, 3)
+           if len({x for ed in c for x in ed}) == 3]
+    print(f"  racetrack 4-cycle {LOOP_JUNCTIONS}")
+    print(f"    twisted junctions on cycle = 4 -> parity = 0  (TRIVIAL)")
+    print(f"    <-- this is the loop LOOP_CYCLE/Racetrack DFT measures\n")
+    for c in tri:
+        print(f"  triangle {list(c)} -> twisted = 3 -> parity = 1  (NON-TRIVIAL)")
+    print("\n  Under the parity account, the shipped config puts trivial")
+    print("  holonomy on the one loop that is instrumented, and non-trivial")
+    print("  holonomy on four triangles that are not. Any k!=0 splitting")
+    print("  currently read off the racetrack cannot be holonomy.")
+
+
+def parity_classes(verbose: bool = True):
+    """All 64 twist vectors over the 6 junctions, grouped by parity signature
+    on 3 independent cycles."""
+    tri = [c for c in itertools.combinations(JUNCTION_PAIRS, 3)
+           if len({x for ed in c for x in ed}) == 3][:3]
+    idx = {jp: i for i, jp in enumerate(JUNCTION_PAIRS)}
+    basis = [[1 if jp in cyc else 0 for jp in JUNCTION_PAIRS] for cyc in tri]
+
+    classes: Dict[Tuple[int, ...], List[Tuple[int, ...]]] = {}
+    for t in itertools.product((0, 1), repeat=6):
+        sig = tuple(sum(b[i] * t[i] for i in range(6)) % 2 for b in basis)
+        classes.setdefault(sig, []).append(t)
+
+    if verbose:
+        print("=" * 92)
+        print("TWIST-PARITY CLASSES  (the experiment to actually run)")
+        print("=" * 92)
+        print("  independent cycles used as the basis:")
+        for cyc in tri:
+            print(f"    {list(cyc)}")
+        print(f"\n  junction order: {JUNCTION_PAIRS}")
+        print(f"  {len(classes)} classes, "
+              f"{len(next(iter(classes.values())))} configurations each\n")
+        rt = tuple(1 if jp in LOOP_JUNCTIONS else 0 for jp in JUNCTION_PAIRS)
+        for sig, members in sorted(classes.items()):
+            rt_par = sum(rt[i] * m for i, m in enumerate(members[0])) % 2
+            shipped = " <- SHIPPED" if members[0] == (1,) * 6 or \
+                (1,) * 6 in members else ""
+            print(f"  signature {sig}  racetrack parity {rt_par}  "
+                  f"n={len(members)}"
+                  f"{'   <- contains all-twist SHIPPED config' if (1,)*6 in members else ''}")
+            print(f"    e.g. {members[0]}, {members[1]}, {members[-1]}")
+        print("\n  PROTOCOL: run all 64 at a cheap rung. Group by signature.")
+        print("  Compare WITHIN-class scatter of the loop spectrum against")
+        print("  BETWEEN-class separation. Holonomy means between >> within.")
+        print("  With the engine gluing as shipped, within-class scatter is")
+        print("  guaranteed non-zero, because the cut move is not gauge --")
+        print("  so run this only after the one-line fix, or the null result")
+        print("  is uninterpretable.")
+    return classes
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rung", nargs=2, type=int, metavar=("C", "E"))
+    ap.add_argument("--classes", action="store_true",
+                    help="emit the 8 twist-parity classes only")
+    a = ap.parse_args()
+
+    if a.classes:
+        parity_classes()
+        return 0
+
+    rungs = [tuple(a.rung)] if a.rung else RUNGS
+    audit_cost(rungs)
+    audit_twist(rungs)
+    audit_gauge(rungs)
+    print()
+    audit_cycles()
+    print()
+    parity_classes()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
