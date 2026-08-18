@@ -1,6 +1,6 @@
-#### ACE XYZ LHV introduction into the workflow - work in progress !
+### ACE XYZ LHV introduction into the workflow - work in progress !
 
-the papers in this folder (tex/pdf) are generated and are only there to reflect a formal chain of thought of the code residing in this folder - they are *not* claiming anything, and are of all things emphimeral and are not to be regarded as any final statement nor claim to be authoritative in any way.
+#### this document has been generated; claims and stated fact could be false, incorrect or a total hallucination - emptor caveat
 
 <img width="553" height="323" alt="image (4)" src="https://github.com/user-attachments/assets/21fe5c91-7fa0-4c98-bb9f-5d55472e8ddf" />
 
