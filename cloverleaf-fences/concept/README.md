@@ -2,7 +2,7 @@
 
 ## Abstract
 
-##### this document has been generated; claims and stated fact could be false, incorrect or a total hallucination - emtor caveat
+#### this document has been generated; claims and stated fact could be false, incorrect or a total hallucination - emtor caveat
 
 Classical simulation of large-scale quantum systems is fundamentally constrained by the exponential memory overhead of monolithic state-vector representations, scaling as $\mathcal{O}(2^N)$. For a 72-qubit physical lattice, an exact evaluation is intractable for standard single-node architectures. In this work, we propose and implement a PyQrack-accelerated Holographic Distributed Engine designed to circumvent this bottleneck. By partitioning the global 72-qubit Heisenberg XX model into four classically tractable $3 \times 6$ planar sub-lattices (18 qubits each), we execute localized hardware-efficient variational ansatzes across independent, multi-processed GPU workers. To resolve the severed inter-patch entanglement, we embed parameterized ancilla qubits—representing a holographic bath—at the boundary of each patch. Through exact classical post-processing of localized Bell-basis measurements and unitary uncomputation, we reconstruct the global energy landscape $E_{\text{fence}}$, providing a scalable pathway for multi-node quantum circuit simulation.
 
