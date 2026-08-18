@@ -61,3 +61,6 @@ The methodologies formalized in this engine provide a robust numerical framework
 2. Kandala, A. et al. "Hardware-efficient Variational Quantum Eigensolver for Small Molecules and Quantum Magnets", *Nature* 549, 242 (2017). [arXiv:1704.05018](https://arxiv.org/abs/1704.05018)
 3. Huang, H.-Y. et al. "Provably efficient machine learning for quantum many-body problems", *Science* 377, eabk3333 (2022). [arXiv:2106.12627](https://arxiv.org/abs/2106.12627)
 4. Cerezo, M. et al. "Variational Quantum Algorithms", *Nature Reviews Physics* 3, 625-644 (2021). [arXiv:2012.09265](https://arxiv.org/abs/2012.09265)
+
+
+5. <img width="1232" height="971" alt="1000009456" src="https://github.com/user-attachments/assets/a9147525-4952-45ac-a4fa-86e9d48e329e" />
