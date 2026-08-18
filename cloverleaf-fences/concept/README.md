@@ -1,68 +1,47 @@
-# Holographic Distributed Engine for Scaling Quantum Ground-State Simulations via Multi-Node Entanglement Forging
+# High-Throughput Volumetric Engine for Distributed Adiabatic Ground State Estimation of 3D Lattices via a Patch-and-Kick Mechanism
 
 ## Abstract
 
-#### this document has been generated; claims and stated fact could be false, incorrect or a total hallucination - emptor caveat
-
-Classical simulation of large-scale quantum systems is fundamentally constrained by the exponential memory overhead of monolithic state-vector representations, scaling as $\mathcal{O}(2^N)$. For a 72-qubit physical lattice, an exact evaluation is intractable for standard single-node architectures. In this work, we propose and implement a PyQrack-accelerated Holographic Distributed Engine designed to circumvent this bottleneck. By partitioning the global 72-qubit Heisenberg XX model into four classically tractable $3 \times 6$ planar sub-lattices (18 qubits each), we execute localized hardware-efficient variational ansatzes across independent, multi-processed GPU workers. To resolve the severed inter-patch entanglement, we embed parameterized ancilla qubits—representing a holographic bath—at the boundary of each patch. Through exact classical post-processing of localized Bell-basis measurements and unitary uncomputation, we reconstruct the global energy landscape $E_{\text{fence}}$, providing a scalable pathway for multi-node quantum circuit simulation.
+The classical simulation of large-scale, strongly correlated quantum systems is profoundly limited by the exponential scaling of the Hilbert space, generally bounded as $\mathcal{O}(2^N)$. Exact state-vector evaluation of a 3D Transverse-Field Ising Model (TFIM) rapidly becomes intractable for standard single-node architectures. In this work, we present a High-Throughput Volumetric Engine designed to circumvent these memory and computational constraints. By physically partitioning the global SU(2) 3D lattice into isolated sub-volumes (patches), we enable native simulation on multi-GPU architectures using PyQrack. To account for the severed inter-patch entanglement, we introduce an iterative "patch-and-kick" mechanism. This approach approximates boundary interactions via classical macro-spin exchanges—kicks—acting on the boundary qubits. This framework, inspired by mean-field decouplings and holographic traversable wormhole protocols, provides a highly scalable classical proxy for quantum correlations, unlocking multi-node quantum circuit simulation capabilities.
 
 ## 1. Introduction
 
-The accurate determination of ground-state properties in strongly correlated quantum many-body systems remains a central challenge in modern condensed matter physics and computational chemistry. Variational Quantum Algorithms (VQAs) [arXiv:2012.09265](https://arxiv.org/abs/2012.09265), such as the Variational Quantum Eigensolver (VQE), provide a heuristic framework for these calculations. However, current fault-tolerant capabilities are limited, and classical simulators evaluating the exact full-state vector must manage vectors of length $2^N$.
+The quest to find the ground state of generic local Hamiltonians is a central problem in condensed matter physics, quantum chemistry, and computational complexity, often classified as QMA-hard. Quantum Adiabatic Evolution (QAE) provides a physical framework to reach these ground states by slowly evolving the system from a trivial, easily prepared state to the target Hamiltonian's ground state [1]. However, on near-term hardware or full-state classical simulators, system size is strictly bottlenecked by qubit counts and exponentially growing memory requirements.
 
-To address the memory constraints associated with simulating a 72-qubit interacting spin-lattice (e.g., the Heisenberg XX model), we apply principles of circuit cutting and entanglement forging [arXiv:2104.10220](https://arxiv.org/abs/2104.10220). This methodology mathematically divides a large bipartite or multipartite quantum state into smaller localized sub-circuits, effectively shifting a portion of the quantum entanglement overhead into classical post-processing. Specifically, our framework utilizes a parameterized entanglement bath to proxy non-local correlations, drawing from boundary-bulk dualities found in tensor network holography [arXiv:2106.12627](https://arxiv.org/abs/2106.12627).
+To address these constraints in simulating a 3D Transverse-Field Ising Model (TFIM) coupled to a longitudinal field, we introduce a distributed multi-GPU architecture. Drawing connections between condensed matter models and holographic dualities—such as Sachdev-Ye-Kitaev (SYK) models—we utilize classical multi-qubit interactions as channels for information exchange across boundaries [2]. Our ThereminQ High-Performance Computing (HPC) Volumetric Engine physically partitions a 3D lattice into smaller SU(2) sub-volumes, simulating intra-patch entanglement exactly while approximating inter-patch entanglement dynamically using a mean-field surrogate, enabling large-scale adiabatic annealing simulations.
 
 ## 2. Formal Methodology
 
-We consider the task of determining the ground state properties of a 72-qubit physical lattice governed by the 2D Heisenberg XX Hamiltonian:
-$$ H = -\sum_{\langle i, j \rangle} (X_i X_j + Y_i Y_j) $$
+We consider the task of determining the ground state properties of a 3D TFIM coupled to a longitudinal field, governed by the Hamiltonian:
+$$ H = -J \sum_{\langle i, j \rangle} Z_i Z_j - h_x \sum_i X_i - h_z \sum_i Z_i $$
+where $X_i, Z_i$ are Pauli matrices, $J$ is the exchange coupling, and $h_x, h_z$ are the transverse and longitudinal magnetic fields, respectively.
 
-### 2.1 Lattice Topology and Circuit Fragmentation
+### 2.1 Lattice Topology and Volumetric Partitioning
 
-The target geometry is a $6 \times 12$ physical grid mapped using the function `get_topology()`. To distribute the computational load and adhere to finite memory bounds, this global lattice is partitioned into a $2 \times 2$ arrangement of isolated $3 \times 6$ planar sub-lattices (patches), each comprising 18 qubits.
+To distribute the computational load, the global 3D lattice is spatially decomposed into isolated sub-volumes or patches, $P_k$, with dimensions $L_x \times L_y \times L_z$ (e.g., $3 \times 3 \times 2 = 18$ qubits). Each patch is assigned to an independent GPU worker maintaining a persistent PyQrack simulator state.
 
-The original inter-patch boundary edges ($\mathcal{E}_{\text{fence}}$) are explicitly severed. Consequently, the exponential complexity of contracting the full 72-qubit system is reduced to evaluating four independent 18-qubit fragments. This spatial fragmentation directly implements the principles of entanglement forging, mapping the global bipartite entanglement into localized, separable expectation values.
+Because the total Hamiltonian is strictly nonseparable, the inter-patch boundary Hamiltonian $H_{\text{boundary}} = -g_{\text{face}} \sum_{i \in \partial P_a, j \in \partial P_b} \sigma_i \cdot \sigma_j$ is severed. This spatial fragmentation transforms an exponentially complex global contraction into parallelized, tractable sub-volume evaluations.
 
-### 2.2 Local Variational Ansatz
+### 2.2 Adiabatic Evolution and Strang Splitting
 
-Within each isolated $3 \times 6$ patch, a parameterized quantum state $|\psi_{\text{local}}(\vec{\theta})\rangle$ is prepared using a hardware-efficient ansatz [arXiv:1704.05018](https://arxiv.org/abs/1704.05018). As executed in `isolated_holographic_worker()`, the localized state preparation entails:
-1.  **Single-Qubit Rotations:** Application of parameterized $R_x(\theta_1)$ and $R_y(\theta_2)$ gates across all physical qubits.
-2.  **Entangling Layer:** Sequential application of controlled-NOT (CNOT) operations across the localized nearest-neighbor edges ($\mathcal{E}_{\text{intra}}$) to capture short-range quantum correlations.
+To reach the ground state, we employ an adiabatic schedule parameterized by $s(t) = t/T \in [0, 1]$, interpolating between an initial Hamiltonian $H_0$ (driven by a strong transverse field $h_x(0) \gg 1$) and the target Hamiltonian $H_{\text{target}}$:
+$$ H(s) = (1 - s)H_0 + sH_{\text{target}} $$
 
-### 2.3 Holographic Bath Embedding
+The distributed simulation uses a numerical Strang-splitting integration to perform the evolution. The algorithm alternates between exact unitary evolution within the isolated patches (intra-patch entanglement generation) and classical boundary interactions.
 
-The severing of inter-patch edges inherently destroys non-local quantum correlations. To recuperate these interactions, each 18-qubit patch is coupled to an "entanglement bath" consisting of localized ancilla qubits (`fence_qubits`).
+### 2.3 Patch-and-Kick Mean-Field Boundary Coupling
 
-For each physical qubit residing on a severed boundary, a corresponding ancilla qubit is allocated. Both the physical boundary qubit and its ancilla are subjected to parameterized unitary rotations ($R_y, R_z$) dictated by the `boundary_params` vector. They are subsequently entangled via a CNOT gate. This sequence maps the mean-field entanglement spectrum of the external geometry directly into the localized state, serving as a boundary condition for the simulated patch.
+To approximate the severed non-local quantum correlations, we utilize a mean-field surrogate. For a boundary qubit $i \in \partial P_a$, the interaction with the adjacent face $\partial P_b$ is replaced by a coupling to the macroscopic magnetization of $\partial P_b$:
+$$ \langle \sigma_{\partial P_b} \rangle = \frac{1}{|\partial P_b|} \sum_{j \in \partial P_b} \langle \sigma_j \rangle $$
 
-### 2.4 Unitary Uncomputation for Observable Evaluation
-
-The energy expectation value of each patch involves evaluating $\langle X_i X_j \rangle$ and $\langle Y_i Y_j \rangle$. In conventional simulations, repeated measurements would require duplicating the underlying quantum state ($|\psi\rangle \to |\psi\rangle \otimes |\psi\rangle$), which violates strict memory efficiency and incurs massive computational overhead.
-
-To bypass state cloning, the engine implements unitary uncomputation. After transforming into the relevant Pauli basis (e.g., applying Hadamard gates for the $X$-basis) and extracting probability marginals, the inverse unitary operations are deterministically applied to restore the wave-function to its unmeasured, pre-expectation state. This compute-measure-uncompute cycle preserves the continuous vector space without generating garbage qubits.
-
-### 2.5 Global Energy Reconstruction
-
-Once the isolated intra-patch energies are evaluated, the algorithm classically synthesizes the inter-patch boundary interactions. By computing local boundary marginals in both the physical ($X, Y$) and ancilla ($I, X, Y, Z$) bases, the distributed components are mathematically stitched back together.
-
-This reconstruction operates by contracting the reduced density matrices over the Bell basis ($|\Phi^+\rangle$) across the boundary. The expected inter-patch energy is exactly formulated as:
-$$ E_{\text{fence}} = -\frac{1}{4} \sum_P s_P \langle X_A \otimes X_B \rangle_P $$
-where $P \in \{I, X, Y, Z\}$ and $s_P$ represents the structural sign associated with the target Bell state. This exact classical summation resolves the continuous energy landscape without requiring coherent multi-patch quantum communication.
-
-### 2.6 Classical Orchestration and Oracle Validation
-
-To validate the accuracy of the holographic embedding, the distributed `HolographicDistributedEngine` is quantitatively benchmarked against a `MonolithicCPUEngine`. The monolithic oracle employs exact PyQrack Binary Decision Trees to process the un-bathed 72-qubit ansatz natively, providing deterministic verification. The absolute difference between the exact monolithic evaluation and the reconstructed distributed evaluation yields an "Entanglement Embedding Loss," measuring the fidelity of the holographic boundary parameters against true global correlations.
+The boundary interaction energy is thus minimized via iterative classical kicks on the boundary qubits. These kicks, parameterized by the coupling constant $g_{\text{face}}$ and the macroscopic magnetization of the adjacent face, apply classical rotational updates to the boundary qubits. This "patch-and-kick" mechanism acts as a classical proxy for quantum entanglement [3], dynamically injecting boundary conditions into the simulated patches without requiring coherent quantum links.
 
 ## 3. Conclusion
 
-The methodologies formalized in this engine provide a robust numerical framework for scaling classical quantum simulation. By synthesizing hardware-efficient local ansatzes with parameterized boundary baths and rigorous Bell-basis state reconstruction, we bypass the $O(2^N)$ memory barrier for calculating ground-state energies in large, multi-partite geometries. This distributed approach provides critical infrastructure for future multi-node, exascale evaluations of quantum advantage.
+The "patch-and-kick" High-Throughput Volumetric Engine provides a robust numerical framework for scaling the classical simulation of quantum systems. By partitioning a global 3D lattice into tractable sub-volumes and utilizing classical macro-spin exchanges to approximate boundary interactions, we bypass the $O(2^N)$ memory barrier for calculating ground-state energies. This distributed architecture, synthesizing exact intra-patch evolution with mean-field boundary proxies, offers a critical pathway for the exascale evaluation of complex quantum many-body systems.
 
 ## 4. References
 
-1. Eddins, A. et al. "Doubling the size of quantum simulators by entanglement forging", *PRX Quantum* 3, 010309 (2022). [arXiv:2104.10220](https://arxiv.org/abs/2104.10220)
-2. Kandala, A. et al. "Hardware-efficient Variational Quantum Eigensolver for Small Molecules and Quantum Magnets", *Nature* 549, 242 (2017). [arXiv:1704.05018](https://arxiv.org/abs/1704.05018)
-3. Huang, H.-Y. et al. "Provably efficient machine learning for quantum many-body problems", *Science* 377, eabk3333 (2022). [arXiv:2106.12627](https://arxiv.org/abs/2106.12627)
-4. Cerezo, M. et al. "Variational Quantum Algorithms", *Nature Reviews Physics* 3, 625-644 (2021). [arXiv:2012.09265](https://arxiv.org/abs/2012.09265)
-
-
-5. <img width="1232" height="971" alt="1000009456" src="https://github.com/user-attachments/assets/a9147525-4952-45ac-a4fa-86e9d48e329e" />
+1. Chakrabarti, B. K. et al. "Tranverse Ising Model, Glass and Quantum Annealing", *Quantum Annealing and Related Optimization Methods* (2005). [arXiv:cond-mat/0312611](https://arxiv.org/abs/cond-mat/0312611)
+2. Lykken, J. D. et al. "Long-range wormhole teleportation" (2024). [arXiv:2405.07876](https://arxiv.org/abs/2405.07876)
+3. Matsuura, S. et al. "Mean Field Analysis of Quantum Annealing Correction", *Phys. Rev. Lett.* 116, 220501 (2016). [arXiv:1510.07709](https://arxiv.org/abs/1510.07709)
