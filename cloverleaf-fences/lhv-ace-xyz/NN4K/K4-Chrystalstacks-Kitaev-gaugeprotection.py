@@ -1,9 +1,37 @@
 # -*- coding: us-ascii -*-
-# flux_diag.py -- Rev 2.
+# flux_diag.py -- Rev 3.
 #
 # eps_W: the flux-sector analogue of Andrade et al.'s gauge-violation
 # scalar <eps_G> = sum_j <G_j>^2 / N_g (arXiv:2608.02756, Fig. 2), for
 # Kitaev on the hyperoctagon / (10,3)-a / K4 crystal.
+#
+# WHAT CHANGED IN REV 3
+# =====================================================================
+# eps_W is a SYNDROME, and Rev 2 shipped it without saying what its
+# kernel is. Over F2 the 384 x 384 loop-bond incidence matrix at L = 4
+# has rank 126, so there are only 126 independent flux checks and the
+# kernel of undetectable bond-flip patterns is 258-dimensional. Of
+# those, 255 are pure gauge (one per site, minus the global flip) and
+# exactly 3 are not: the three Wilson twists. That is the cycle rank
+# 129 = 126 + 3 split as 0 -> B_1 -> Z_1 -> H_1 -> 0 with dim H_1 = 3,
+# the first homology of the 3-torus.
+#
+# So eps_W = 0 does NOT mean the state is right. All 8 twist sectors
+# have <W_p> = -1 on every elementary 10-loop and therefore eps_W = 0
+# exactly, while their energies differ:
+#
+#     twist (1,1,1)  E0/site = -0.772885762799   <- ground
+#     twist (0,0,0)  E0/site = -0.768194888772
+#     six mixed      E0/site = -0.769264383131
+#
+# An engine that drifts to the wrong sector reads a perfectly clean
+# eps_W and a per-site energy error of up to 4.7e-3. Rev 3 adds the
+# missing layer: three weight-12 non-contractible Wilson lines, one
+# per torus axis, whose signs separate all 8 sectors. They are logical
+# operators, not stabilisers -- necessarily global, necessarily
+# straddling every manifold, and undefined on a partial assembly that
+# does not wrap. That is not a defect of the construction; a class in
+# H_1 cannot be read by any local check.
 #
 # WHAT CHANGED IN REV 2
 # =====================================================================
@@ -63,6 +91,13 @@
 # s_p = +1 and the target is <W_p> = -1 throughout. At L = 2 the torus
 # is too small and the "10-loops" wrap; s_p is mixed there. L >= 4 is
 # enforced, not advised.
+#
+# HOW TO READ THE THREE READINGS
+# =====================================================================
+#   sector       -- three Wilson signs. Wrong sector = wrong ground
+#                   state, whatever eps_W says. Check it FIRST; the
+#                   flux channels below only make sense inside the
+#                   right sector.
 #
 # HOW TO READ THE TWO NUMBERS
 # =====================================================================
@@ -238,6 +273,97 @@ def grow_block(L=4, B=27, ell=10):
 
 
 # =====================================================================
+# WILSON LINES -- the layer eps_W cannot see
+# =====================================================================
+def wilson_lines(L=4, twist=None, max_len=14):
+    """Three non-contractible loop operators, one per torus axis.
+
+    Same dangling-colour Pauli rule and same sign rule as the
+    elementary loops -- these are ordinary Kitaev loop operators that
+    happen to wrap. At L=4 the shortest are weight 12 with purely
+    cyclic colour words, so n_ret = 0 and s = -1.
+
+    Returns [(axis, record)] with record fields as in `stabilizers`.
+    """
+    bonds, idx = K.srs_bonds(L)
+    inv = {v: k for k, v in idx.items()}
+    colmap = _colour_map(bonds)
+    adj = collections.defaultdict(list)
+    eid = {}
+    for b, (i, j, c) in enumerate(bonds):
+        adj[i].append(j)
+        adj[j].append(i)
+        eid[(i, j)] = (b, +1)
+        eid[(j, i)] = (b, -1)
+    u = K.wilson_u(L, K.GROUND_TWIST if twist is None else twist)
+
+    def disp(a, b):
+        return np.array(K.edge_shift(inv[a][0], inv[b][0]))
+
+    best = {}
+    start = 0
+    stack = [(start, [start], {start}, np.zeros(3, int))]
+    while stack:
+        v, path, seen, d = stack.pop()
+        if len(path) >= 4 and len(path) % 2 == 0 and start in adj[v]:
+            w = d + disp(v, start)
+            aw = np.abs(w)
+            if aw.sum() == L and aw.max() == L:
+                ax = int(np.argmax(aw))
+                if ax not in best or len(path) < len(best[ax]):
+                    best[ax] = list(path)
+        if len(path) >= max_len:
+            continue
+        for x in adj[v]:
+            if x not in seen:
+                stack.append((x, path + [x], seen | {x}, d + disp(v, x)))
+
+    out = []
+    for ax in sorted(best):
+        path = tuple(best[ax])
+        n = len(path)
+        s = loop_sign(path, colmap)
+        out.append((ax, {
+            "key": ("wilson", ax),
+            "path": path,
+            "pauli": pauli_string(path, colmap),
+            "word": "".join(K.COLOR_NAME[colmap[(path[r],
+                                                 path[(r + 1) % n])]]
+                            for r in range(n)),
+            "sign": s,
+            "target": float(s * K.loop_flux(path, u, eid)),
+        }))
+    if len(out) != 3:
+        raise RuntimeError("found %d of 3 Wilson lines; raise max_len"
+                           % len(out))
+    return out
+
+
+def sector_table(lines, L=4):
+    """{(s0,s1,s2): twist} -- the reference signature of all 8 sectors."""
+    bonds, idx = K.srs_bonds(L)
+    eid = {}
+    for b, (i, j, c) in enumerate(bonds):
+        eid[(i, j)] = (b, +1)
+        eid[(j, i)] = (b, -1)
+    tab = {}
+    for t in itertools.product((0, 1), repeat=3):
+        uu = K.wilson_u(L, t)
+        sig = tuple(int(round(rec["sign"]
+                              * K.loop_flux(rec["path"], uu, eid)))
+                    for _, rec in lines)
+        tab[sig] = t
+    return tab
+
+
+def sector_from_wilson(lines, measured, L=4):
+    """Measured Wilson signs -> (twist or None, signature)."""
+    got = tuple(int(round(float(measured[rec["key"]])))
+                for _, rec in lines)
+    return sector_table(lines, L).get(got), got
+
+
+# =====================================================================
 # MEASUREMENT HELPER
 # =====================================================================
 _PAULI = {0: np.array([[0, 1], [1, 0]], dtype=complex),
@@ -280,11 +406,15 @@ class FluxMonitor(object):
         print(mon.line(w))
     """
 
-    def __init__(self, L=4, ell=10, twist=None, block_of=None):
+    def __init__(self, L=4, ell=10, twist=None, block_of=None,
+                 wilson=True):
         self.L, self.ell = L, ell
         self.stabs, aux = stabilizers(L, ell, twist)
         self.u, self.eid, self.bonds, self.idx, self.colmap = aux
         self.by_key = {st["key"]: st for st in self.stabs}
+        self.lines = wilson_lines(L, twist) if wilson else []
+        self.sector_ref = sector_table(self.lines, L) if wilson else {}
+        self.by_key.update({rec["key"]: rec for _, rec in self.lines})
         self.block_of = dict(block_of or {})
         self.history = []
         self._last = {}
@@ -305,6 +435,25 @@ class FluxMonitor(object):
                             {site_to_qubit[s]: c for s, c in st["pauli"]}))
         return out
 
+    def wilson_targets(self, site_to_qubit=None):
+        """[(key, {qubit: colour})] for the three Wilson lines. These
+        wrap the torus, so they never fit inside one manifold; a
+        partial assembly cannot measure them at all."""
+        out = []
+        for _, rec in self.lines:
+            if site_to_qubit is None:
+                out.append((rec["key"], {s: c for s, c in rec["pauli"]}))
+            elif all(s in site_to_qubit for s, _ in rec["pauli"]):
+                out.append((rec["key"],
+                            {site_to_qubit[s]: c for s, c in rec["pauli"]}))
+        return out
+
+    def sector(self, measured):
+        """(twist or None, signature). None means the three signs do
+        not match any of the 8 reference sectors -- the state is not a
+        gauge sector at all."""
+        return sector_from_wilson(self.lines, measured, self.L)
+
     def intra_keys(self):
         return {st["key"] for st in self.stabs
                 if len({self.block_of.get(s, ("_", s))
@@ -324,6 +473,10 @@ class FluxMonitor(object):
             rec.update(eps_W_split(seen, w, self.block_of))
         rec["worst"] = max((abs(w[st["key"]] - st["target"]), st["path"])
                            for st in seen)
+        if self.lines and all(r["key"] in measured for _, r in self.lines):
+            rec["sector"], rec["signature"] = self.sector(measured)
+            rec["sector_ok"] = (rec["sector"] == tuple(
+                K.GROUND_TWIST if self.L % 2 == 0 else K.GROUND_TWIST))
         self.history.append(rec)
         self._last = w
         return rec
@@ -335,7 +488,12 @@ class FluxMonitor(object):
     def line(self, measured=None, label=None):
         r = self.update(measured, label) if measured is not None \
             else self.history[-1]
-        s = "eps_W %.3e (%d)" % (r["eps_W"], r["n"])
+        s = ""
+        if "sector" in r:
+            s += "sector %s%s  " % (
+                r["sector"] if r["sector"] is not None else "NONE",
+                "" if r.get("sector_ok") else "  <-- NOT GROUND")
+        s += "eps_W %.3e (%d)" % (r["eps_W"], r["n"])
         if "intra" in r:
             s += "  intra %.3e (%d)  inter %.3e (%d)" % (
                 r["intra"], r["n_intra"], r["inter"], r["n_inter"])
@@ -554,6 +712,41 @@ def self_test(L=4, ell=10):
     ok5 = abs(a - b) < 1e-12 and len(tg) == 1
     ok = ok and ok5
     print("VERDICT: %s\n" % ("PASS" if ok5 else "FAIL"))
+
+    print("=" * 74)
+    print("SELF TEST 6 -- THE eps_W BLIND SPOT AND THE WILSON LAYER")
+    print("=" * 74)
+    print("%-12s %14s %10s %14s" % ("twist", "E0/site", "eps_W", "signature"))
+    print("-" * 74)
+    ok6 = True
+    seen_sig = set()
+    for t in itertools.product((0, 1), repeat=3):
+        mon_t = FluxMonitor(L=L, ell=ell, twist=K.GROUND_TWIST)
+        ut = K.wilson_u(L, t)
+        w = w_from_u(mon_t.stabs, ut, mon_t.eid)
+        e, _ = eps_W(mon_t.stabs, w)
+        bt, it = K.srs_bonds(L)
+        eidt = {}
+        for b, (i, j, c) in enumerate(bt):
+            eidt[(i, j)] = (b, +1)
+            eidt[(j, i)] = (b, -1)
+        wl = {rec["key"]: rec["sign"] * K.loop_flux(rec["path"], ut, eidt)
+              for _, rec in mon_t.lines}
+        sec, sig = mon_t.sector(wl)
+        seen_sig.add(sig)
+        ok6 = ok6 and (e < 1e-24) and (sec == t)
+        print("%-12s %14.12f %10.3e %14s %s"
+              % (str(t), K.energy_real_space(L, twist=t), e, str(sig),
+                 "" if sec == t else " <-- sector misread"))
+    print("-" * 74)
+    print("every sector reads eps_W = 0; the Wilson signs separate all %d"
+          % len(seen_sig))
+    print("energy spread across sectors: %.3e per site"
+          % (K.energy_real_space(L, twist=(0, 0, 0))
+             - K.energy_real_space(L, twist=(1, 1, 1))))
+    ok6 = ok6 and len(seen_sig) == 8
+    ok = ok and ok6
+    print("VERDICT: %s\n" % ("PASS" if ok6 else "FAIL"))
 
     print("ALL: %s" % ("PASS" if ok else "FAIL"))
     return ok
