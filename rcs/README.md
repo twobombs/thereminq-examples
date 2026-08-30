@@ -12,3 +12,6 @@ This directory contains benchmarks related to Random Circuit Sampling (RCS), a t
 
 * [1801.00862] Characterizing Quantum Supremacy in Near-Term Devices (https://arxiv.org/abs/1801.00862)
 * [1910.11333] Quantum supremacy using a programmable superconducting processor (https://arxiv.org/abs/1910.11333)
+
+
+<img width="1760" height="1280" alt="xeb3d" src="https://github.com/user-attachments/assets/1063daf9-768d-4a62-a917-d683e278d671" />
