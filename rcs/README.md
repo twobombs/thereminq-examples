@@ -1,6 +1,6 @@
 # Random Circuit Sampling (RCS) Benchmarks
 
-##### This document is generated; it can therefore contain errors and falsehoods but if correct it could mean that we need a bigger boat
+##### This document is generated; it can therefore contain errors and falsehoods but if correct it could also mean that we need a bigger boat
 
 ## Title
 
