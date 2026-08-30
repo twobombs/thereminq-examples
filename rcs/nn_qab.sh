@@ -2,10 +2,23 @@
 #
 # sweep.sh -- regenerate the whole B-to-B series set under one pyqrack version.
 #
-# Stage 1 runs the ACE pass for every geometry on the small card. Stage 2 runs
-# the exact reference on the big card, in a loop that re-scans for work, so the
-# two stages pipeline: ideal workers consume seeds as soon as ACE produces them
-# instead of waiting for the whole ACE stage to finish. Stage 3 merges.
+# Everything runs on OpenCL device 0 by default, matching the single-device
+# directive: Qrack otherwise spreads work across every detected card, which is
+# what turned an ~18s reference run into a ~227s one by scattering the state
+# vector across a PCIe 1.0 x4 link.
+#
+# Because both stages share one card, series are processed one at a time, and
+# only the ACE and ideal workers for the SAME series are ever in flight
+# together. That overlap is still worth having: the ACE pass is dominated by
+# Python-side _correct()/prob() traffic rather than GPU work, so it fills CPU
+# while the reference pass has the GPU.
+#
+# Device memory at width 28, per worker:
+#     ideal   ~3.6 GiB   (2 GiB state vector + CUDA context)
+#     ace     ~0.4 GiB   (patch sims are <= 20 qubits, 8 MiB)
+# Defaults of ACE_JOBS=1 + IDEAL_JOBS=2 therefore sit near 7.6 GiB of the
+# CMP 50HX's 10 GiB. Host RAM is the other ceiling: ~5.3 GiB per ideal worker.
+# Raise IDEAL_JOBS only after checking both.
 #
 # Both stages are resumable. Seeds already finished are skipped, so killing
 # this script and re-running it costs only the samples that were in flight.
@@ -19,9 +32,10 @@
 #   SEEDS         seed range                        (default 0-99)
 #   DEPTH         circuit depth                     (default 12)
 #   OUT_ROOT      output directory                  (default runs)
-#   ACE_DEVICE    OpenCL device for the ACE pass    (default 1)
-#   IDEAL_DEVICE  OpenCL device for the reference   (default 0)
-#   ACE_JOBS      concurrent ACE workers            (default 2)
+#   DEVICE        OpenCL device for both stages     (default 0)
+#   ACE_DEVICE    override for the ACE pass         (default $DEVICE)
+#   IDEAL_DEVICE  override for the reference        (default $DEVICE)
+#   ACE_JOBS      concurrent ACE workers            (default 1)
 #   IDEAL_JOBS    concurrent ideal workers          (default 2)
 #   PY            python interpreter                (default python3)
 #   SCRIPT        path to nn_qab.py                 (default ./nn_qab.py)
@@ -31,31 +45,35 @@ set -euo pipefail
 SEEDS="${SEEDS:-0-99}"
 DEPTH="${DEPTH:-12}"
 OUT_ROOT="${OUT_ROOT:-runs}"
-ACE_DEVICE="${ACE_DEVICE:-1}"
-IDEAL_DEVICE="${IDEAL_DEVICE:-0}"
-ACE_JOBS="${ACE_JOBS:-2}"
+DEVICE="${DEVICE:-0}"
+ACE_DEVICE="${ACE_DEVICE:-$DEVICE}"
+IDEAL_DEVICE="${IDEAL_DEVICE:-$DEVICE}"
+ACE_JOBS="${ACE_JOBS:-1}"
 IDEAL_JOBS="${IDEAL_JOBS:-2}"
 PY="${PY:-python3}"
 SCRIPT="${SCRIPT:-./nn_qab.py}"
 
 # width lrc lrr -- the geometrically optimal 2-patch config for each width.
-# B-to-B ratio is 1.5, 2.5, 3.5, 4.5, 5.5, and 2.5 again at width 28, which
+# B-to-B ratio is 1.5, 2.5, 4.5, 5.5, 3.5, and 2.5 again at width 28, which
 # is the replicate that breaks the width/ratio collinearity in the fit.
+# Ordered cheapest-first so a failure surfaces on a small series.
 SERIES=(
     "10 2 2"
     "14 3 2"
-    "27 4 3"
     "22 5 2"
     "26 6 2"
+    "27 4 3"
     "28 3 4"
 )
 
 # ---------------------------------------------------------------------------
 
 log() { printf '%s  %s\n' "$(date +%H:%M:%S)" "$*"; }
-die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-[ -f "$SCRIPT" ] || die "$SCRIPT not found (set SCRIPT=/path/to/nn_qab.py)"
+[ -f "$SCRIPT" ] || {
+    printf 'error: %s not found (set SCRIPT=...)\n' "$SCRIPT" >&2
+    exit 1
+}
 
 # Expand the seed spec so we know when a series is complete. Accepts the same
 # "0-9,20,30-39" syntax nn_qab.py takes.
@@ -103,10 +121,10 @@ fi
 mkdir -p "$OUT_ROOT/logs"
 
 # Kill background workers if we're interrupted, rather than orphaning GPU jobs.
-PIDS=()
+ACE_PIDS=()
 cleanup() {
     local pid
-    for pid in "${PIDS[@]:-}"; do
+    for pid in "${ACE_PIDS[@]:-}"; do
         kill "$pid" 2>/dev/null || true
     done
 }
@@ -118,34 +136,38 @@ count_done() {  # count_done <dir>
     find "$d" -maxdepth 1 -name '*.json' -type f 2>/dev/null | wc -l | tr -d ' '
 }
 
+any_alive() {   # any_alive <pid...>
+    local pid
+    for pid in "$@"; do
+        kill -0 "$pid" 2>/dev/null && return 0
+    done
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 log "sweep: ${#SERIES[@]} series x $N_SEEDS seeds, depth $DEPTH"
 log "ace -> device $ACE_DEVICE ($ACE_JOBS jobs)   ideal -> device $IDEAL_DEVICE ($IDEAL_JOBS jobs)"
 START=$(date +%s)
 
-# --- stage 1: ACE, backgrounded so stage 2 can start consuming --------------
 for cfg in "${SERIES[@]}"; do
+    # shellcheck disable=SC2086
     set -- $cfg
     width="$1"; lrc="$2"; lrr="$3"
     out="$OUT_ROOT/w$width"
+    log "series width=$width lrc=$lrc lrr=$lrr"
+
+    # --- stage 1: ACE, backgrounded so stage 2 can consume as it goes -------
+    ACE_PIDS=()
     for ((j = 0; j < ACE_JOBS; j++)); do
         "$PY" -u "$SCRIPT" ace \
             --device "$ACE_DEVICE" \
             --width "$width" --depth "$DEPTH" --lrc "$lrc" --lrr "$lrr" \
             --seeds "$SEEDS" --out "$out" \
             >> "$OUT_ROOT/logs/ace-w$width.log" 2>&1 &
-        PIDS+=($!)
+        ACE_PIDS+=($!)
     done
-done
-log "stage 1: ${#PIDS[@]} ACE workers launched"
 
-# --- stage 2: ideal, looping until each series is complete ------------------
-for cfg in "${SERIES[@]}"; do
-    set -- $cfg
-    width="$1"
-    out="$OUT_ROOT/w$width"
-    log "stage 2: width $width"
-
+    # --- stage 2: ideal, looping until this series is complete --------------
     stall=0
     while :; do
         before="$(count_done "$out/xeb")"
@@ -161,42 +183,46 @@ for cfg in "${SERIES[@]}"; do
         wait "${ipids[@]}" || true
 
         after="$(count_done "$out/xeb")"
-        log "  width $width: $after/$N_SEEDS"
+        log "  w$width: xeb $after/$N_SEEDS  ace $(count_done "$out/ace")/$N_SEEDS"
         [ "$after" -ge "$N_SEEDS" ] && break
 
-        # No progress this pass means we're waiting on the ACE stage -- or,
-        # if ACE has finished too, that some seeds died and left a stale
-        # lock. Give up rather than spin forever.
         if [ "$after" -le "$before" ]; then
-            stall=$(( stall + 1 ))
-            if [ "$stall" -ge 20 ]; then
-                log "  width $width: stalled at $after/$N_SEEDS, moving on"
-                log "  (check $OUT_ROOT/logs/, and for stale *.lock in $out)"
-                break
+            # No progress. Either the ACE pass hasn't caught up yet, or it has
+            # finished and some seeds died leaving stale locks behind.
+            if any_alive "${ACE_PIDS[@]}"; then
+                sleep 15
+            else
+                stall=$(( stall + 1 ))
+                if [ "$stall" -ge 3 ]; then
+                    log "  w$width: stalled at $after/$N_SEEDS, moving on"
+                    log "  (see $OUT_ROOT/logs/, and for stale *.lock under $out)"
+                    break
+                fi
+                sleep 5
             fi
-            sleep 15
         else
             stall=0
         fi
     done
+
+    wait "${ACE_PIDS[@]}" 2>/dev/null || true
+    ACE_PIDS=()
 done
 
-wait || true          # let any still-running ACE workers finish
-PIDS=()
-
 # --- stage 3: merge ---------------------------------------------------------
-log "stage 3: merge"
+log "merge"
 SUMMARY="$OUT_ROOT/summary.tsv"
 printf 'width\tlrc\tlrr\tB_to_B\tn\tmean_xeb\tstdev_xeb\n' > "$SUMMARY"
 
 for cfg in "${SERIES[@]}"; do
+    # shellcheck disable=SC2086
     set -- $cfg
     width="$1"; lrc="$2"; lrr="$3"
     out="$OUT_ROOT/w$width"
     csv="$OUT_ROOT/w$width.csv"
 
     if ! "$PY" "$SCRIPT" merge --out "$out" --csv "$csv" > /dev/null 2>&1; then
-        log "  width $width: no results"
+        log "  w$width: no results"
         continue
     fi
 
