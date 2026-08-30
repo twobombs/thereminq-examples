@@ -3,8 +3,7 @@
 # Original By Dan Strano and (Anthropic) Claude.
 # https://github.com/vm6502q/pyqrack-examples/blob/main/rcs/nn_qab.py
 #
-# rights and license for this algo remain for Dan Strano et al
-#
+# rights and license remain for this code for Dan Strano et al
 # modifications are done for environment variable requirements
 # within the ThereminQ container ecosystem
 #
@@ -365,6 +364,40 @@ for _set in GATE_SETS.values():
 
 SWAP_RATIO_THRESHOLD = 7.0
 
+# ---------------------------------------------------------------------------
+# Reference-simulator engines
+# ---------------------------------------------------------------------------
+# Constructor kwargs for the exact/approximate reference. The ACE backend is
+# untouched by this -- only the QrackSimulator that provides ground truth.
+#
+# MEASURED on this circuit family (depth-12 nearest-neighbour RCS, CPU):
+#
+#     width   statevector   qbdd      ratio
+#        12        0.01 s    2.56 s     256x
+#        14        0.04 s    8.65 s     216x
+#        16        0.19 s   55.95 s     294x
+#
+# QBDD is not merely slower, it scales worse: 3.4x then 6.5x per +2 qubits
+# against the state vector's steady 4x (= 2**2, as expected). It also does
+# not reproduce state-vector amplitudes -- up to 6.3% relative error per
+# permutation, median 0.5%, unchanged by QRACK_QBDT_SEPARABILITY_THRESHOLD=0,
+# so it is fp32 accumulation through the tree rather than branch rounding.
+#
+# That is what a decision diagram does on a circuit built to have no
+# structure: RCS at depth 12 is maximally entangling by construction, which
+# is the whole point of it as a benchmark. QBDD, sparse truncation and MPS
+# all exploit structure this circuit deliberately destroys.
+#
+# The flag is here so the result can be re-tested on GPU, where the constant
+# factors differ even if the scaling exponent should not.
+ENGINES = {
+    "statevector": {},
+    "qbdd":        {"is_binary_decision_tree": True},
+    "sparse":      {"is_sparse": True},
+    "stabilizer":  {"is_stabilizer_hybrid": True},
+    "cpu":         {"is_gpu": False},
+}
+
 
 def resolve_swap_mode(ratio, swap_mode):
     if swap_mode not in ("auto", "swap", "cnot"):
@@ -480,7 +513,26 @@ def calc_stats(ideal_probs, counts, shots):
 # Mode: single self-contained run
 # ---------------------------------------------------------------------------
 
-def bench_qrack(width, depth, lrc=4, lrr=4, swap_mode="auto", seed=None):
+def make_reference(width, engine="statevector", sdrp=None):
+    """The exact (or, with SDRP, approximate) ground-truth simulator.
+
+    With SDRP set, Qrack rounds Schmidt decompositions and can report an
+    estimate of its own fidelity afterwards. That turns the reference from
+    exact into approximate-with-a-number-attached, which is the only option
+    left once 2**n amplitudes no longer fit -- past roughly width 30 on a
+    10 GiB card. Record the fidelity alongside the XEB or the comparison
+    is not interpretable.
+    """
+    if engine not in ENGINES:
+        raise ValueError(f"engine must be one of {sorted(ENGINES)}")
+    sim = QrackSimulator(width, **ENGINES[engine])
+    if sdrp is not None:
+        sim.set_sdrp(sdrp)
+    return sim
+
+
+def bench_qrack(width, depth, lrc=4, lrr=4, swap_mode="auto", seed=None,
+                engine="statevector", sdrp=None):
     all_bits = list(range(width))
     shots = 1 << min(10, width + 2)
 
@@ -505,8 +557,9 @@ def bench_qrack(width, depth, lrc=4, lrr=4, swap_mode="auto", seed=None):
     # -----------------------------------------------------------------------
     # Ideal ground truth via QrackSimulator
     # -----------------------------------------------------------------------
-    sim_ideal = QrackSimulator(width)
+    sim_ideal = make_reference(width, engine, sdrp)
     run_circuit(sim_ideal, qc)
+    fidelity = sim_ideal.get_unitary_fidelity() if sdrp is not None else None
     ideal_probs = out_probs_np(sim_ideal).astype(np.float64)
     del sim_ideal
     gc.collect()
@@ -532,6 +585,9 @@ def bench_qrack(width, depth, lrc=4, lrr=4, swap_mode="auto", seed=None):
         "swap_mode":          swap_mode,
         "resolved_swap_mode": resolved_swap_mode,
         "seed":               seed,
+        "engine":             engine,
+        "sdrp":               sdrp,
+        "unitary_fidelity":   fidelity,
         "qrack_lib":          QRACK_LIB_SOURCE,
         "qrack_device":       QRACK_DEVICE,
         "xeb_ace":            xeb_ace,
@@ -541,7 +597,8 @@ def bench_qrack(width, depth, lrc=4, lrr=4, swap_mode="auto", seed=None):
 
 def run_single(args):
     result = bench_qrack(
-        args.width, args.depth, args.lrc, args.lrr, args.swap_mode, args.seed
+        args.width, args.depth, args.lrc, args.lrr, args.swap_mode, args.seed,
+        getattr(args, "engine", "statevector"), getattr(args, "sdrp", None)
     )
     for k, v in result.items():
         print(f"  {k}: {v}")
@@ -670,8 +727,10 @@ def run_ideal(args):
             qc = deserialize(rec["circuit"])
             counts = {int(k): v for k, v in rec["counts"].items()}
 
-            sim_ideal = QrackSimulator(rec["width"])
+            sim_ideal = make_reference(rec["width"], args.engine, args.sdrp)
             run_circuit(sim_ideal, qc)
+            fidelity = (sim_ideal.get_unitary_fidelity()
+                        if args.sdrp is not None else None)
             ideal_probs = out_probs_np(sim_ideal).astype(np.float64)
             del sim_ideal
             gc.collect()
@@ -688,6 +747,9 @@ def run_ideal(args):
                 "hog_ace": hog,
                 "ideal_seconds": t_ideal - t0,
                 "stats_seconds": time.perf_counter() - t_ideal,
+                "engine": args.engine,
+                "sdrp": args.sdrp,
+                "unitary_fidelity": fidelity,
                 "qrack_lib": QRACK_LIB_SOURCE,
                 "qrack_device_ideal": QRACK_DEVICE,
             })
@@ -714,6 +776,7 @@ FIELDS = [
     "swap_mode", "resolved_swap_mode", "shots",
     "xeb_ace", "hog_ace",
     "ace_seconds", "ideal_seconds", "stats_seconds",
+    "engine", "sdrp", "unitary_fidelity",
     "qrack_lib", "qrack_device_ace", "qrack_device_ideal",
 ]
 
@@ -782,6 +845,11 @@ def build_parser():
     geom(r)
     r.add_argument("--seed", type=int, default=None,
                    help="pin the circuit (default: unseeded)")
+    r.add_argument("--engine", default="statevector", choices=sorted(ENGINES),
+                   help="reference simulator engine (default statevector)")
+    r.add_argument("--sdrp", type=float, default=None,
+                   help="Schmidt-decomposition rounding parameter; makes the "
+                        "reference approximate and records its fidelity")
     r.set_defaults(func=run_single)
 
     a = sub.add_parser("ace", help="sweep pass A: ACE + shot counts")
@@ -794,6 +862,11 @@ def build_parser():
     b = sub.add_parser("ideal", help="sweep pass B: exact reference + XEB")
     b.add_argument("--seeds", required=True)
     b.add_argument("--out", required=True)
+    b.add_argument("--engine", default="statevector", choices=sorted(ENGINES),
+                   help="reference simulator engine (default statevector)")
+    b.add_argument("--sdrp", type=float, default=None,
+                   help="Schmidt-decomposition rounding parameter; makes the "
+                        "reference approximate and records its fidelity")
     b.add_argument("--stop-on-error", action="store_true")
     b.set_defaults(func=run_ideal)
 
@@ -824,6 +897,8 @@ def main():
             lrr=int(argv[3]) if len(argv) > 3 else 4,
             swap_mode=argv[4] if len(argv) > 4 else "auto",
             seed=None,
+            engine="statevector",
+            sdrp=None,
         )
         return run_single(args)
 
