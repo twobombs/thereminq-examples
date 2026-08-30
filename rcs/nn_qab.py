@@ -3,12 +3,10 @@
 # Original By Dan Strano and (Anthropic) Claude.
 # https://github.com/vm6502q/pyqrack-examples/blob/main/rcs/nn_qab.py
 #
-# rights and license remain for the algo by Dan Strano et al
+# rights and license remain for this code for Dan Strano et al
+# modifications are done for environment variable requirements
+# within the ThereminQ container ecosystem
 #
-# modifications are done for runtime environment requirements
-# within the ThereminQ container ecosystem ( parallel - sweep )
-# runs are stored as JSON/CSV files
-# 
 # ---------------------------------------------------------------------------
 # MODES
 # ---------------------------------------------------------------------------
@@ -31,6 +29,9 @@
 #             ~90% of the wall time.
 #
 #   merge     Collects per-seed results into one CSV, prints n/mean/stdev.
+#
+# All modes, including the legacy form, accept --device N to pin Qrack to a
+# single OpenCL device (default 0). See the "Device selection" block below.
 #
 # Splitting ace from ideal keeps the big GPU busy with the only work that
 # needs it instead of idling through the ACE run. Sweep workers coordinate
@@ -93,10 +94,71 @@ else:
         file=sys.stderr,
     )
 
+# ---------------------------------------------------------------------------
+# Device selection
+# ---------------------------------------------------------------------------
+# Qrack binds its device configuration when the shared library is loaded, at
+# `from pyqrack import ...` below -- long before argparse runs. So the device
+# has to be settled here, by environment variable, or not at all.
+#
+# Qrack uses ALL detected OpenCL devices by default. On a mixed box that means
+# the ACE patch simulators get scattered across cards, and a single bad device
+# can take down a run that had no business touching it. Default to pinning
+# everything to device 0, which is the device Qrack lists first in the
+# "OpenCL device #n:" block it prints at startup.
+#
+# Precedence: --device N  >  $QRACK_DEVICE  >  0. Any of the three underlying
+# variables you set yourself is left alone, so an explicit multi-device list
+# (e.g. QRACK_QPAGER_DEVICES=4.0,4.1 for segment-level load balancing) still
+# works as written.
+
+_DEVICE_VARS = (
+    "QRACK_OCL_DEFAULT_DEVICE",
+    "QRACK_QPAGER_DEVICES",
+    "QRACK_QUNITMULTI_DEVICES",
+)
+
+
+def _take_early_arg(name):
+    """Pull `--name VALUE` / `--name=VALUE` out of sys.argv before argparse.
+
+    Removed from argv entirely so neither the subcommand parser nor the
+    legacy positional form has to know about it.
+    """
+    argv = sys.argv
+    for i in range(1, len(argv)):
+        if argv[i] == name and (i + 1) < len(argv):
+            value = argv[i + 1]
+            del argv[i:i + 2]
+            return value
+        if argv[i].startswith(name + "="):
+            value = argv[i].split("=", 1)[1]
+            del argv[i]
+            return value
+    return None
+
+
+_device_flag = _take_early_arg("--device")
+if _device_flag is not None:
+    QRACK_DEVICE = _device_flag
+    for _var in _DEVICE_VARS:
+        os.environ[_var] = QRACK_DEVICE          # flag overrides the env
+else:
+    QRACK_DEVICE = os.environ.get("QRACK_DEVICE", "0")
+    for _var in _DEVICE_VARS:
+        os.environ.setdefault(_var, QRACK_DEVICE)
+
+QRACK_DEVICE_ENV = {_var: os.environ[_var] for _var in _DEVICE_VARS}
+
+print(
+    "qrack_device: "
+    + ", ".join(f"{k}={v}" for k, v in QRACK_DEVICE_ENV.items()),
+    file=sys.stderr,
+)
+
 import numpy as np
 from pyqrack import QrackSimulator, QrackAceBackend
 from pyqrack.qrack_system import Qrack
-
 
 # ---------------------------------------------------------------------------
 # Geometry
@@ -470,6 +532,7 @@ def bench_qrack(width, depth, lrc=4, lrr=4, swap_mode="auto", seed=None):
         "resolved_swap_mode": resolved_swap_mode,
         "seed":               seed,
         "qrack_lib":          QRACK_LIB_SOURCE,
+        "qrack_device":       QRACK_DEVICE,
         "xeb_ace":            xeb_ace,
         "hog_ace":            hog_ace,
     }
@@ -565,6 +628,7 @@ def run_ace(args):
                 "resolved_swap_mode": resolved,
                 "shots": shots,
                 "ace_seconds": time.perf_counter() - t0,
+                "qrack_device_ace": QRACK_DEVICE,
                 "counts": {str(k): v for k, v in counts.items()},
                 "circuit": serialize(qc),
             })
@@ -624,6 +688,7 @@ def run_ideal(args):
                 "ideal_seconds": t_ideal - t0,
                 "stats_seconds": time.perf_counter() - t_ideal,
                 "qrack_lib": QRACK_LIB_SOURCE,
+                "qrack_device_ideal": QRACK_DEVICE,
             })
             write_json(done, out)
             print(f"ideal seed={seed} xeb={xeb:.6f} "
@@ -647,7 +712,8 @@ FIELDS = [
     "boundary_qubits", "bulk_qubits", "bulk_to_boundary",
     "swap_mode", "resolved_swap_mode", "shots",
     "xeb_ace", "hog_ace",
-    "ace_seconds", "ideal_seconds", "stats_seconds", "qrack_lib",
+    "ace_seconds", "ideal_seconds", "stats_seconds",
+    "qrack_lib", "qrack_device_ace", "qrack_device_ideal",
 ]
 
 
@@ -693,6 +759,10 @@ def build_parser():
         epilog=(
             "legacy form (unchanged):\n"
             "  nn_qab.py WIDTH DEPTH [LRC=4] [LRR=4] [SWAP_MODE=auto]\n"
+            "\n"
+            "device selection (any mode, incl. the legacy form):\n"
+            "  --device N     pin Qrack to OpenCL device N (default 0)\n"
+            "  $QRACK_DEVICE  same, via the environment\n"
         ),
     )
     sub = p.add_subparsers(dest="mode", required=True)
