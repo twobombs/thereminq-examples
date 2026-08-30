@@ -1,13 +1,14 @@
 # Nearest-neighbor RCS: Automatic circuit elision
 # Original By Dan Strano and (Anthropic) Claude.
 # https://github.com/vm6502q/pyqrack-examples/blob/main/rcs/nn_qab.py
-# 
+#
 # rights and license remain for this code for Dan Strano et al
 # modifications are done for environment variable requirements
 # within the ThereminQ container ecosystem
 #
 
 import math
+import os
 import random
 import statistics
 import sys
@@ -15,9 +16,44 @@ import time
 
 from collections import Counter
 
+# ---------------------------------------------------------------------------
+# Qrack shared library resolution
+# ---------------------------------------------------------------------------
+# PyQrack resolves PYQRACK_SHARED_LIB_PATH at *import* time (ctypes.CDLL), so
+# this block must run before `from pyqrack import ...` -- setting it later has
+# no effect on which .so is bound.
+#
+# ThereminQ container builds place a locally-compiled libqrack_pinvoke.so at
+# /usr/local/lib/qrack/ rather than relying on the copy bundled inside the
+# pyqrack wheel. Override the default with the QRACK_LIB_PATH env var.
+#
+# NOTE: this only selects which file ctypes opens. If libqrack_pinvoke.so links
+# against a sibling libqrack.so (or OpenCL/CUDA runtimes) in the same directory,
+# the dynamic loader must also be able to find those. Setting LD_LIBRARY_PATH
+# from inside Python is too late -- the loader reads it at process start. Either
+# build with `-Wl,-rpath,/usr/local/lib/qrack` or export it in the container
+# entrypoint:
+#
+#     export LD_LIBRARY_PATH=/usr/local/lib/qrack:${LD_LIBRARY_PATH}
+
+QRACK_LIB_PATH = os.environ.get(
+    "QRACK_LIB_PATH", "/usr/local/lib/qrack/libqrack_pinvoke.so"
+)
+
+if os.path.isfile(QRACK_LIB_PATH):
+    os.environ["PYQRACK_SHARED_LIB_PATH"] = QRACK_LIB_PATH
+    QRACK_LIB_SOURCE = QRACK_LIB_PATH
+else:
+    # Fall back to whatever ships with the installed pyqrack wheel.
+    os.environ.pop("PYQRACK_SHARED_LIB_PATH", None)
+    QRACK_LIB_SOURCE = "pyqrack-bundled"
+    print(
+        f"warning: {QRACK_LIB_PATH} not found; using bundled pyqrack library",
+        file=sys.stderr,
+    )
+
 import numpy as np
 from pyqrack import QrackSimulator, QrackAceBackend
-from qiskit import QuantumCircuit
 
 
 def factor_width(width):
@@ -293,6 +329,7 @@ def bench_qrack(width, depth, lrc=4, lrr=4, swap_mode="auto"):
         "bulk_to_boundary":   ratio,
         "swap_mode":          swap_mode,
         "resolved_swap_mode": resolved_swap_mode,
+        "qrack_lib":          QRACK_LIB_SOURCE,
         "xeb_ace":            xeb_ace,
         "hog_ace":            hog_ace,
     }
