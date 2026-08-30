@@ -477,36 +477,60 @@ def deserialize(rows):
 # ---------------------------------------------------------------------------
 
 def calc_stats(ideal_probs, counts, shots):
-    """Vectorized XEB / HOG.
+    """XEB / HOG in one pass over the probability vector, no extra copies.
 
     Identical arithmetic to the original scalar loop (agrees to ~1e-16), but
-    the pure-Python version is O(2**n) interpreted iterations plus
-    statistics.median(), which sorts 2**n numpy scalars into a Python list.
-    At width 28 that is roughly 7-8 minutes and ~9 GB of transient list per
-    call; here it is a couple of seconds.
+    the naive vectorization materializes three more 2**n arrays -- a float64
+    cast, a dense shot vector, and a centered copy -- which is what puts a
+    ~5x multiplier on the memory ceiling. Past width 32 that multiplier is
+    the thing that stops you, not the state vector itself.
 
-    ideal_probs is consumed in place (centered) to avoid a second 2.1 GB
-    temporary -- pass a copy if the caller still needs it.
+    The dense shot vector is avoidable because counts has at most `shots`
+    nonzero entries. Writing q_b for the shot frequency and mu = 1/N:
+
+        numer = SUM_all (p-mu)(q-mu)
+              = SUM_all (p-mu) q  -  mu * SUM_all (p-mu)
+              = SUM_sampled (p-mu) q  -  mu * (SUM_all p  -  1)
+
+    since q vanishes off the sample and sums to 1. Only the <= 1024 sampled
+    amplitudes are ever touched. Likewise
+
+        denom = SUM (p-mu)^2 = SUM p^2 - 2 mu SUM p + N mu^2
+
+    needs two reductions, both accumulated in float64 regardless of the
+    buffer dtype, and no centered copy. HOG is a lookup over the same
+    sampled indices.
+
+    Peak memory is therefore the probability vector alone: 64 GiB at width
+    34 in fp32, where the previous path wanted well over 300 GiB.
+
+    ideal_probs is read, and permuted in place by the median if it is
+    writable -- pass a copy if the caller still needs the original order.
     """
-    ideal = np.asarray(ideal_probs, dtype=np.float64)
+    p = np.asarray(ideal_probs)
+    n_pow = p.size
+    mu = 1.0 / n_pow
 
-    threshold = float(np.median(ideal))
-    u_u = float(ideal.mean())
-
-    # Sparse shot histogram -> dense probability vector.
+    # Gather the sampled amplitudes FIRST. np.median(overwrite_input=True)
+    # partitions in place, which permutes the array and destroys the
+    # bitstring -> index correspondence; anything positional has to happen
+    # before it.
     idx = np.fromiter(counts.keys(), dtype=np.int64, count=len(counts))
-    val = np.fromiter(counts.values(), dtype=np.float64, count=len(counts))
-    patch = np.zeros_like(ideal)
-    patch[idx] = val / shots
+    q = np.fromiter(counts.values(), dtype=np.float64, count=len(counts))
+    q /= shots
+    p_s = p[idx].astype(np.float64)
 
-    hog_prob = float(patch[ideal > threshold].sum())
+    total = float(p.sum(dtype=np.float64))
+    sum_sq = float(np.einsum("i,i->", p, p, dtype=np.float64))
+    denom = sum_sq - 2.0 * mu * total + n_pow * mu * mu
 
-    ideal -= u_u                                   # in place: no extra copy
-    denom = float(ideal @ ideal)
-    numer = float(ideal @ patch) - u_u * float(ideal.sum())
+    numer = float(((p_s - mu) * q).sum()) - mu * (total - 1.0)
 
-    xeb = numer / denom
-    return xeb, hog_prob
+    # Last: overwrite_input spares numpy a full copy to partition.
+    threshold = float(np.median(p, overwrite_input=p.flags.writeable))
+    hog_prob = float(q[p_s > threshold].sum())
+
+    return numer / denom, hog_prob
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +584,7 @@ def bench_qrack(width, depth, lrc=4, lrr=4, swap_mode="auto", seed=None,
     sim_ideal = make_reference(width, engine, sdrp)
     run_circuit(sim_ideal, qc)
     fidelity = sim_ideal.get_unitary_fidelity() if sdrp is not None else None
-    ideal_probs = out_probs_np(sim_ideal).astype(np.float64)
+    ideal_probs = out_probs_np(sim_ideal)
     del sim_ideal
     gc.collect()
 
@@ -731,7 +755,7 @@ def run_ideal(args):
             run_circuit(sim_ideal, qc)
             fidelity = (sim_ideal.get_unitary_fidelity()
                         if args.sdrp is not None else None)
-            ideal_probs = out_probs_np(sim_ideal).astype(np.float64)
+            ideal_probs = out_probs_np(sim_ideal)
             del sim_ideal
             gc.collect()
 
