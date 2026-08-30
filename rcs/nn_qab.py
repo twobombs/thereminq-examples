@@ -4,9 +4,11 @@
 # https://github.com/vm6502q/pyqrack-examples/blob/main/rcs/nn_qab.py
 #
 # rights and license remain for the algo by Dan Strano et al
+#
 # modifications are done for runtime environment requirements
 # within the ThereminQ container ecosystem ( parallel - sweep )
-#
+# 
+# 
 # ---------------------------------------------------------------------------
 # MODES
 # ---------------------------------------------------------------------------
