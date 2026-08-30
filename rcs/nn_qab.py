@@ -7,7 +7,7 @@
 #
 # modifications are done for runtime environment requirements
 # within the ThereminQ container ecosystem ( parallel - sweep )
-# 
+# runs are stored as JSON/CSV files
 # 
 # ---------------------------------------------------------------------------
 # MODES
