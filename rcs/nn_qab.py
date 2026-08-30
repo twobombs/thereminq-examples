@@ -3,7 +3,8 @@
 # Original By Dan Strano and (Anthropic) Claude.
 # https://github.com/vm6502q/pyqrack-examples/blob/main/rcs/nn_qab.py
 #
-# rights and license remain for this code for Dan Strano et al
+# rights and license for this algo remain for Dan Strano et al
+#
 # modifications are done for environment variable requirements
 # within the ThereminQ container ecosystem
 #
