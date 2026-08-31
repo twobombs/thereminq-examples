@@ -1,4 +1,5 @@
 # Random Circuit Sampling (RCS) Benchmarks
+<img width="669" height="135" alt="image (1)" src="https://github.com/user-attachments/assets/6f18bdcd-e3cd-45c8-8e6b-b38f2ad4e254" />
 
 ##### This document is generated; it can therefore contain errors and falsehoods but if correct it could also mean that we need a bigger boat
 
