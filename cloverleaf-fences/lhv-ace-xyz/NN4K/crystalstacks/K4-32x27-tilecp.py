@@ -75,6 +75,41 @@
 #
 #     Check failed: heuristics.fixed_search != nullptr
 #
+# REV 2.3 -- LARGE NEIGHBOURHOOD SEARCH
+# =====================================================================
+# The global model is the wrong instrument. Given 864 sites, 32
+# interchangeable labels and a complete verified 28-block warm start,
+# 48 workers spent 610 seconds without ever improving on the packing
+# they were handed. But the leftover from a 28-block packing is 108
+# sites -- exactly four blocks -- so the real question is local: can
+# four more blocks be made to fit if a few neighbours may move?
+#
+# --lns freezes most of the solution, tears out a few blocks, and
+# re-solves the induced subgraph of whatever is now free. That
+# subproblem is ~200 sites and ~8 labels, and it closes to OPTIMAL in
+# seconds. Sound, not a relaxation: a block's validity depends only on
+# its own 27 sites, their induced edges and their cycle, so adjacency
+# to a frozen block outside the region cannot affect it.
+#
+# 28 -> 31 blocks in 215s on 8 cores, against 28 in 610s on 48.
+#
+# TUNE IT BY WATCHING THE STATUS COLUMN, NOT THE REGION SIZE.
+# A bigger neighbourhood is not a better one:
+#
+#   --lns-destroy 4   region 162-216   mostly OPTIMAL   28 -> 31
+#   --lns-destroy 6   region 270       UNKNOWN always   28 -> 28
+#
+# At destroy 6 the subproblem stops being solvable inside the
+# per-iteration budget, every iteration returns nothing, and the search
+# never moves at all. A small neighbourhood solved to proven optimality
+# beats a large one not solved. If you raise --lns-destroy, raise
+# --lns-seconds with it and check the status column really does say
+# OPTIMAL.
+#
+# LNS constructs; it cannot refute. Reaching 31 says nothing about
+# whether 32 exists. Only --lb 32 returning INFEASIBLE proves
+# impossibility, and that is the global model that stalls.
+#
 #   - repair_hint is now OFF by default, behind --repair-hint. That is
 #     the fix. The complete warm start added in Rev 2 is what actually
 #     mattered; repair_hint was belt-and-braces and it cost a core
@@ -584,6 +619,85 @@ class Progress(cp_model.CpSolverSolutionCallback):
 
 
 # =====================================================================
+# PART 4b -- LARGE NEIGHBOURHOOD SEARCH
+# =====================================================================
+# The global model hands CP-SAT 864 sites and 32 interchangeable
+# labels, and on 48 workers it spent 610 seconds without improving on
+# the packing it started from. That is the wrong shape of question.
+#
+# The leftover from a 28-block packing is 108 sites -- exactly four
+# blocks' worth -- so what is actually being asked is local: can four
+# more blocks be made to fit if a few neighbouring ones are allowed to
+# move? So freeze most of the solution, tear out a handful of blocks,
+# and re-solve the induced subgraph of what is now free. That
+# subproblem has ~200 sites and ~8 labels instead of 864 and 32, and
+# it is solved to OPTIMALITY in seconds rather than approached for ten
+# minutes.
+#
+# This is sound because a block's validity depends only on its own
+# sites: its 27 induced edges, its cycle, its tree. Adjacency to a
+# frozen block outside the region is irrelevant. So the subproblem on
+# the induced subgraph is exactly the right subproblem, not a
+# relaxation of one.
+
+def lns(adj, loops, blocks, B, iters, destroy, seconds, workers,
+        out=None, seed=0, target=None):
+    import random
+    rng = random.Random(seed)
+    best = [list(b) for b in blocks]
+    n = len(adj)
+    print("LNS: %d iterations, tearing out %d blocks at a time,"
+          " %.0fs each" % (iters, destroy, seconds))
+    for it in range(iters):
+        if target and len(best) >= target:
+            break
+        assigned = set().union(*best) if best else set()
+        idx = list(range(len(best)))
+        rng.shuffle(idx)
+        D = set(idx[:min(destroy, len(best))])
+        keep = [best[i] for i in idx[min(destroy, len(best)):]]
+        region = (set(adj) - assigned) | set().union(
+            *[set(best[i]) for i in D]) if D else set(adj) - assigned
+        K2 = len(region) // B
+        if K2 < 1:
+            continue
+        ren = {v: i for i, v in enumerate(sorted(region))}
+        inv = {i: v for v, i in ren.items()}
+        sadj = {ren[v]: sorted(ren[w] for w in adj[v] if w in region)
+                for v in region}
+        sloops = [tuple(ren[v] for v in p) for p in loops
+                  if set(p) <= region]
+        m, V = build(sadj, sloops, K2, B)
+        m.Add(V["nb"] >= len(D))          # never regress
+        s = cp_model.CpSolver()
+        s.parameters.max_time_in_seconds = seconds
+        s.parameters.num_search_workers = workers
+        st = s.Solve(m)
+        got = 0
+        if st in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            new = [sorted(inv[i] for i in blk) for blk in extract(s, V)]
+            ok, bad = verify_blocks(keep + new, adj, loops, B)
+            got = len(new)
+            if ok and len(new) > len(D):
+                best = keep + new
+                print("  iter %3d: region %3d sites / %2d labels ->"
+                      " %d blocks (was %d), TOTAL %d  [%s]"
+                      % (it, len(region), K2, got, len(D), len(best),
+                         s.StatusName(st)))
+                if out:
+                    json.dump({"n_blocks": len(best), "verified": True,
+                               "blocks": best}, open(out, "w"), indent=1)
+                continue
+            if not ok:
+                print("  iter %3d: REJECTED, verifier: %s" % (it, bad[:1]))
+        if it % 10 == 0:
+            print("  iter %3d: region %3d / %2d labels -> %d, no gain"
+                  " [%s]" % (it, len(region), K2, got, s.StatusName(st)))
+        sys.stdout.flush()
+    return best
+
+
+# =====================================================================
 # PART 5 -- SELF-TEST
 # =====================================================================
 
@@ -652,6 +766,16 @@ def main(argv=None):
                     help="enable CP-SAT hint repair. OFF by default: it "
                          "aborts on some versions when the model declares "
                          "no decision strategy")
+    ap.add_argument("--start", metavar="FILE",
+                    help="resume from a checkpoint written by --out "
+                         "instead of building a greedy packing")
+    ap.add_argument("--lns", type=int, default=0, metavar="ITERS",
+                    help="large-neighbourhood search instead of the "
+                         "global solve. Recommended: --lns 500")
+    ap.add_argument("--lns-destroy", type=int, default=4,
+                    help="blocks torn out per LNS iteration")
+    ap.add_argument("--lns-seconds", type=float, default=30.0,
+                    help="solver budget per LNS subproblem")
     ap.add_argument("--no-hintcheck", action="store_true",
                     help="skip the hint feasibility probe")
     ap.add_argument("--no-strategy", action="store_true",
@@ -685,7 +809,17 @@ def main(argv=None):
         return 0 if selftest(adj, loops, B) else 2
 
     hint = []
-    if ns.hint:
+    if ns.start:
+        blob = json.load(open(ns.start))
+        hint = [list(b) for b in blob["blocks"]]
+        ok, bad = verify_blocks(hint, adj, loops, B)
+        print("resumed %s: %d blocks, verifier %s"
+              % (ns.start, len(hint), "pass" if ok else "FAIL"))
+        for b in bad[:3]:
+            print("  ! %s" % b)
+        if not ok:
+            return 1
+    elif ns.hint:
         t = time.time()
         hint = best_greedy(adj, loops, B, ns.hint, K)
         ok, bad = verify_blocks(hint, adj, loops, B)
@@ -706,6 +840,28 @@ def main(argv=None):
                   " Re-run with --no-symmetry to see whether the"
                   " symmetry breaking is the cause.")
             hint = []
+
+    if ns.lns:
+        if not hint:
+            print("LNS needs a starting packing; raise --hint")
+            return 1
+        t0 = time.time()
+        best = lns(adj, loops, hint, B, ns.lns, ns.lns_destroy,
+                   ns.lns_seconds, workers, ns.out, target=K)
+        ok, bad = verify_blocks(best, adj, loops, B)
+        print("")
+        print("LNS finished in %.1fs: %d blocks, verifier %s, %d sites left"
+              % (time.time() - t0, len(best), "pass" if ok else "FAIL",
+                 n - len(best) * B))
+        for b in bad[:3]:
+            print("  ! %s" % b)
+        if len(best) >= K and ok:
+            print("TILING EXISTS. %s holds the %d blocks." % (ns.out, K))
+        else:
+            print("Best construction %d of %d. LNS cannot prove"
+                  " impossibility -- use --lb %d for that."
+                  % (len(best), K, K))
+        return 0
 
     t0 = time.time()
     m, V = build(adj, loops, K, B, ELL,
