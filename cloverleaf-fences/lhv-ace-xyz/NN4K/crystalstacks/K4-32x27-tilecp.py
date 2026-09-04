@@ -86,6 +86,29 @@
 #     smallest label first, matches the order the value-precedence
 #     symmetry breaking wants anyway. --no-strategy disables it.
 #
+# REV 2.2 -- THE HINT WAS NEVER BEING ACCEPTED
+# =====================================================================
+# On 48 workers, 610 seconds, with a verified 28-block warm start, the
+# solver reported best found 0. It had been discarding the hint every
+# time.
+#
+# The value-precedence symmetry breaking requires block labels to
+# appear in site order: the first assigned site must carry label 0, the
+# next new label 1, and so on. The greedy packing numbers blocks in the
+# order it happened to find them. Site 0 landed in greedy block 6, the
+# precedence constraint rejected it, and the whole hint was infeasible.
+# add_hint now sorts blocks by their smallest site before assigning
+# labels. Fixing blk to the hint goes INFEASIBLE -> OPTIMAL.
+#
+# Worth recording how this got past Rev 2.1: the check that "proved"
+# the encoding accepts a greedy packing was built with symmetry=False.
+# It disabled the very constraint that made the hint infeasible, so it
+# passed for the wrong reason and I reported the encoding as validated.
+# A validation that turns off part of the model validates part of the
+# model. hint_is_feasible() now runs against the REAL model before
+# every solve, and a rejected hint is reported and dropped rather than
+# silently wasting the run.
+#
 # A SECOND BUG, FOUND WHILE TESTING THE FIRST
 # =====================================================================
 # Rev 2 read solver.BestObjectiveBound() unconditionally. On a run that
@@ -360,6 +383,7 @@ def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True,
         # a chord may not join two sites of the same assigned block
         m.Add(blk[u] != blk[v]).OnlyEnforceIf([ok[e].Not(), un[u].Not()])
 
+    aux = {}
     if redundant:
         m.Add(sum(lp) == ell * nb)
         m.Add(sum(ok) == B * nb)
@@ -372,6 +396,7 @@ def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True,
                 m.AddBoolOr([y[v][k].Not(), lp[v].Not(), ly[v][k]])
         for k in range(K):
             m.Add(sum(ly[v][k] for v in range(n)) == ell * used[k])
+        aux["ly"] = ly
 
     if symmetry and K > 1:
         cc = [m.NewIntVar(0, K - 1, "c%d" % v) for v in range(n)]
@@ -384,6 +409,7 @@ def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True,
         for v in range(1, n):
             m.Add(blk[v] <= mx[v - 1] + 1).OnlyEnforceIf(un[v].Not())
             m.AddMaxEquality(mx[v], [mx[v - 1], cc[v]])
+        aux["cc"], aux["mx"] = cc, mx
 
     if strategy:
         # Declaring this is what keeps heuristics.fixed_search non-null,
@@ -395,7 +421,7 @@ def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True,
     m.Maximize(nb)
     return m, {"x": x, "blk": blk, "nb": nb, "used": used, "y": y,
                "lp": lp, "d": d, "ok": ok, "par": par, "eid": eid,
-               "loops": loops, "adj": adj, "ell": ell,
+               "loops": loops, "adj": adj, "ell": ell, "aux": aux,
                "n": n, "K": K, "B": B, "edges": edges}
 
 
@@ -431,6 +457,27 @@ def block_structure(S, adj, ell=ELL):
     return rem, parent, depth
 
 
+def hint_is_feasible(adj, loops, K, B, blocks, seconds=60.0, workers=1):
+    """Hard-fix blk to `blocks` and ask whether the model admits it.
+
+    Cheap, and it makes the Rev 2.2 class of bug impossible to ship
+    again: a hint the model cannot accept is worse than no hint, since
+    it looks like it is helping while the solver quietly discards it.
+    """
+    m, V = build(adj, loops, K, B)
+    where = {}
+    for k, S in enumerate(sorted(blocks[:K], key=min)):
+        for v in S:
+            where[v] = k
+    for v in range(V["n"]):
+        m.Add(V["blk"][v] == where.get(v, K))
+    s = cp_model.CpSolver()
+    s.parameters.max_time_in_seconds = seconds
+    s.parameters.num_search_workers = workers
+    st = s.Solve(m)
+    return st in (cp_model.OPTIMAL, cp_model.FEASIBLE), s.StatusName(st)
+
+
 def add_hint(m, V, blocks):
     """A COMPLETE warm start. Rev 1 hinted blk alone and left every
     auxiliary variable -- loop choice, parent pointers, depths, edge
@@ -438,7 +485,9 @@ def add_hint(m, V, blocks):
     it never managed inside the budget. Hint all of it or none."""
     n, K, ell = V["n"], V["K"], V["ell"]
     loop_id = {frozenset(p): i for i, p in enumerate(V["loops"])}
-    blocks = blocks[:K]
+    # Labels MUST appear in site order or the value-precedence symmetry
+    # breaking rejects the hint outright -- see the Rev 2.2 note.
+    blocks = sorted(blocks[:K], key=min)
     where, isloop, par_of, dep = {}, set(), {}, {}
     chosen = set()
     for k, S in enumerate(blocks):
@@ -478,6 +527,27 @@ def add_hint(m, V, blocks):
     for e in range(len(V["edges"])):
         m.AddHint(V["ok"][e], 1 if e in just else 0)
     m.AddHint(V["nb"], len(blocks))
+
+    # The auxiliary variables need hinting as well. Leaving cc, mx and
+    # ly unset made the hint incomplete, and CP-SAT then failed to
+    # complete it: 48 workers for 610s reported no solution at all
+    # while holding a perfectly good 28-block packing. Hint everything
+    # or the hint does nothing.
+    aux = V.get("aux", {})
+    if "cc" in aux:
+        run = 0
+        for v in range(n):
+            c = where.get(v, None)
+            c = 0 if c is None else c
+            run = max(run, c)
+            m.AddHint(aux["cc"][v], c)
+            m.AddHint(aux["mx"][v], run)
+    if "ly" in aux:
+        for v in range(n):
+            k = where.get(v, K)
+            for kk in range(K):
+                m.AddHint(aux["ly"][v][kk],
+                          1 if (kk == k and v in isloop) else 0)
     return len(blocks)
 
 
@@ -582,6 +652,8 @@ def main(argv=None):
                     help="enable CP-SAT hint repair. OFF by default: it "
                          "aborts on some versions when the model declares "
                          "no decision strategy")
+    ap.add_argument("--no-hintcheck", action="store_true",
+                    help="skip the hint feasibility probe")
     ap.add_argument("--no-strategy", action="store_true",
                     help="do not declare a decision strategy")
     ap.add_argument("--log", action="store_true", help="CP-SAT search log")
@@ -622,6 +694,17 @@ def main(argv=None):
         for b in bad[:3]:
             print("  ! %s" % b)
         if not ok:
+            hint = []
+    if hint and not ns.no_hintcheck:
+        t = time.time()
+        good, why = hint_is_feasible(adj, loops, K, B, hint,
+                                     min(120.0, ns.seconds / 4), workers)
+        print("hint feasibility: %s (%s) in %.1fs"
+              % ("accepted" if good else "REJECTED", why, time.time() - t))
+        if not good:
+            print("  the model cannot represent this hint; dropping it."
+                  " Re-run with --no-symmetry to see whether the"
+                  " symmetry breaking is the cause.")
             hint = []
 
     t0 = time.time()
