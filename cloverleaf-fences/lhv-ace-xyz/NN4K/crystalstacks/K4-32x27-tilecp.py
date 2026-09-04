@@ -65,6 +65,44 @@
 #      internal edges), behind --no-redundant so you can measure
 #      whether they earn their keep.
 #
+# REV 2.1 -- CRASH FIX
+# =====================================================================
+# Rev 2 set solver.parameters.repair_hint = True. On one core CP-SAT
+# clamps its portfolio and never spawns the hint-repair subsolver, so
+# the parameter was never exercised; on 48 workers it is spawned, asks
+# for a fixed-search heuristic, finds none because the model declares
+# no decision strategy, and aborts:
+#
+#     Check failed: heuristics.fixed_search != nullptr
+#
+#   - repair_hint is now OFF by default, behind --repair-hint. That is
+#     the fix. The complete warm start added in Rev 2 is what actually
+#     mattered; repair_hint was belt-and-braces and it cost a core
+#     dump. Passing --repair-hint still aborts and now warns you so.
+#   - AddDecisionStrategy is declared as well. This was expected to be
+#     an independent fix and IT IS NOT: with the strategy declared,
+#     --repair-hint still aborts identically on 9.15.6755 at 8
+#     workers. It is kept because branching on blk in site order,
+#     smallest label first, matches the order the value-precedence
+#     symmetry breaking wants anyway. --no-strategy disables it.
+#
+# A SECOND BUG, FOUND WHILE TESTING THE FIRST
+# =====================================================================
+# Rev 2 read solver.BestObjectiveBound() unconditionally. On a run that
+# timed out at UNKNOWN having found nothing, that returned 0 and the
+# verdict logic duly printed
+#
+#     NO TILING EXISTS: proven upper bound 0 < 32
+#
+# which is a false negative on a question this script exists to answer.
+# The bound is only meaningful once the solver has proven something, so
+# every verdict is now gated on the status: OPTIMAL or INFEASIBLE may
+# conclude, FEASIBLE may claim only what it has built, and UNKNOWN
+# concludes nothing at all.
+#
+# The ortools version is printed at startup; please report it with any
+# further crash. 9.15.6755 reproduces the repair_hint abort exactly.
+#
 # A NOTE ON HARDWARE
 # =====================================================================
 # Rev 1's inconclusive 900-second run was made on ONE core. This model
@@ -257,7 +295,8 @@ def best_greedy(adj, loops, B, restarts, target):
 # PART 4 -- THE MODEL
 # =====================================================================
 
-def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True):
+def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True,
+          strategy=True):
     """Blocks 0..K-1 plus an 'unassigned' class K. Maximises the count
     of complete blocks. Returns (model, vars)."""
     n = len(adj)
@@ -345,6 +384,13 @@ def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True):
         for v in range(1, n):
             m.Add(blk[v] <= mx[v - 1] + 1).OnlyEnforceIf(un[v].Not())
             m.AddMaxEquality(mx[v], [mx[v - 1], cc[v]])
+
+    if strategy:
+        # Declaring this is what keeps heuristics.fixed_search non-null,
+        # which is what Rev 2 tripped over on a 48-worker portfolio.
+        # Smallest label first also matches the value-precedence order.
+        m.AddDecisionStrategy(blk, cp_model.CHOOSE_FIRST,
+                              cp_model.SELECT_MIN_VALUE)
 
     m.Maximize(nb)
     return m, {"x": x, "blk": blk, "nb": nb, "used": used, "y": y,
@@ -532,10 +578,24 @@ def main(argv=None):
                     help="require at least N blocks. Default: the greedy "
                          "hint size. --lb 32 makes it a pure decision "
                          "problem, where INFEASIBLE disproves the tiling")
+    ap.add_argument("--repair-hint", action="store_true",
+                    help="enable CP-SAT hint repair. OFF by default: it "
+                         "aborts on some versions when the model declares "
+                         "no decision strategy")
+    ap.add_argument("--no-strategy", action="store_true",
+                    help="do not declare a decision strategy")
     ap.add_argument("--log", action="store_true", help="CP-SAT search log")
     ns = ap.parse_args(argv)
     workers = ns.workers or max(1, os.cpu_count() or 1)
 
+    try:
+        import ortools
+        print("ortools %s, python %s, %d core%s"
+              % (getattr(ortools, "__version__", "unknown"),
+                 sys.version.split()[0], workers,
+                 "" if workers == 1 else "s"))
+    except Exception:
+        pass
     adj, loops, n = load_lattice(ns.engine, ns.L)
     edges, _ = edge_index(adj)
     print("lattice L=%d: %d sites, %d bonds, %d elementary %d-loops"
@@ -567,7 +627,8 @@ def main(argv=None):
     t0 = time.time()
     m, V = build(adj, loops, K, B, ELL,
                  symmetry=not ns.no_symmetry,
-                 redundant=not ns.no_redundant)
+                 redundant=not ns.no_redundant,
+                 strategy=not ns.no_strategy)
     lb = ns.lb if ns.lb >= 0 else len(hint)
     if lb > 0:
         m.Add(V["nb"] >= lb)
@@ -584,27 +645,45 @@ def main(argv=None):
     s.parameters.max_time_in_seconds = ns.seconds
     s.parameters.num_search_workers = workers
     s.parameters.log_search_progress = ns.log
-    s.parameters.repair_hint = True
+    if ns.repair_hint:
+        print("WARNING: --repair-hint aborts on ortools 9.15 with"
+              " 'Check failed: heuristics.fixed_search != nullptr'."
+              " Declaring a decision strategy does not prevent it.")
+        s.parameters.repair_hint = True
     cb = Progress(V, adj, loops, ns.out)
     st = s.Solve(m, cb)
 
     best = cb.best if cb.best >= 0 else 0
-    bound = int(s.BestObjectiveBound())
+    proven = st in (cp_model.OPTIMAL, cp_model.INFEASIBLE)
+    bound = int(s.BestObjectiveBound()) if proven else None
     print("")
     print("status %s after %.1fs" % (s.StatusName(st), s.WallTime()))
-    print("blocks: best found %d, upper bound %d, target %d"
-          % (best, bound, K))
+    print("blocks: best found %d, upper bound %s, target %d"
+          % (best, bound if proven else "not proven", K))
+
+    # Only OPTIMAL and INFEASIBLE license a conclusion. Rev 2 read the
+    # bound on any status and announced "no tiling exists" off the back
+    # of a timeout that had proven nothing.
     if st == cp_model.INFEASIBLE:
-        print("INFEASIBLE at lb=%d: at most %d racetrack blocks fit." % (lb, lb - 1))
+        print("INFEASIBLE at lb=%d: at most %d racetrack blocks fit."
+              % (lb, lb - 1))
         if lb >= K:
-            print("NO TILING EXISTS.")
-    elif best == K:
-        print("TILING EXISTS. %s holds the %d blocks." % (ns.out, K))
-    elif bound < K:
-        print("NO TILING EXISTS: proven upper bound %d < %d." % (bound, K))
+            print("NO TILING EXISTS. This is a proof.")
+    elif st == cp_model.OPTIMAL:
+        if best >= K:
+            print("TILING EXISTS. %s holds the %d blocks." % (ns.out, K))
+        else:
+            print("NO TILING EXISTS: proven optimum %d < %d." % (best, K))
+    elif st == cp_model.FEASIBLE:
+        print("PARTIAL: %d verified blocks in %s, %d sites left over."
+              % (best, ns.out, n - best * B))
+        print("Nothing is proven about %d. Run longer." % K)
     else:
-        print("OPEN: bracketed in [%d, %d]. Run longer, or compare with"
-              " --no-symmetry / --no-redundant." % (max(best, lb), bound))
+        print("OPEN: no conclusion. Best construction %d block%s%s."
+              % (best, "" if best == 1 else "s",
+                 " (from the greedy hint)" if best == 0 and hint else ""))
+        print("The solver proved nothing in the time given -- this is"
+              " not evidence either way. Run longer.")
     return 0
 
 
