@@ -1,9 +1,10 @@
 # Nearest-neighbor RCS: adversarial-hardened measurement harness.
+# eg: python3 nn_qab_pool.py run --runs 4 --reps 50 --seed0 1000 14 12 3 2 --bases zxy --csv summary.csv
 #
 # Extends nn_qab.py (Dan Strano and Claude) with the controls needed to
 # separate "approximate simulation" from "XEB spoofing" in the sense of
 # Gao, Kalinowski, Chou, Lukin, Barak & Choi, arXiv:2112.01657.
-#
+# 
 # Arms scored against the SAME ideal distribution and the SAME circuit:
 #   ace       -- QrackAceBackend as shipped (the method under test)
 #   severed   -- identical, with seam reconciliation disabled: elision
