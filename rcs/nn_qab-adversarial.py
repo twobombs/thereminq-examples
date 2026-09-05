@@ -5,6 +5,8 @@
 # Gao, Kalinowski, Chou, Lukin, Barak & Choi, arXiv:2112.01657.
 #
 # example of a run:
+# python3 nn_qab_adversarial.py 14 12 3 2 --reps 20 --consensus 3 --json out.json
+# full example:
 # nn_qab_adversarial.py bench 14 12 3 2 --reps 20 --bases zxy --json out.json
 # nn_qab_adversarial.py run --runs 4 --reps 50 14 12 3 2 --bases zxy --csv summary.csv
 # nn_qab_adversarial.py pool 'runs/*.json' --metric xeb
