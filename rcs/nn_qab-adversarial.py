@@ -1,10 +1,14 @@
 # Nearest-neighbor RCS: adversarial-hardened measurement harness.
-# eg: python3 nn_qab_pool.py run --runs 4 --reps 50 --seed0 1000 14 12 3 2 --bases zxy --csv summary.csv
 #
 # Extends nn_qab.py (Dan Strano and Claude) with the controls needed to
 # separate "approximate simulation" from "XEB spoofing" in the sense of
 # Gao, Kalinowski, Chou, Lukin, Barak & Choi, arXiv:2112.01657.
-# 
+#
+# example of a run:
+# nn_qab_adversarial.py bench 14 12 3 2 --reps 20 --bases zxy --json out.json
+# nn_qab_adversarial.py run --runs 4 --reps 50 14 12 3 2 --bases zxy --csv summary.csv
+# nn_qab_adversarial.py pool 'runs/*.json' --metric xeb
+#
 # Arms scored against the SAME ideal distribution and the SAME circuit:
 #   ace       -- QrackAceBackend as shipped (the method under test)
 #   severed   -- identical, with seam reconciliation disabled: elision
@@ -35,17 +39,29 @@
 # Repetitions produce mean, sd, sem and a bootstrap 95% CI per metric per
 # arm, so every point carries a range bar.
 #
-# Usage:
-#   python3 nn_qab_adversarial.py WIDTH DEPTH [LRC] [LRR] [--reps N]
-#          [--shots N] [--seed N] [--no-null] [--consensus N]
-#          [--sever-mode correct|edetect|both] [--bases zxy] [--json OUT]
+# THREE MODES (see --help):
+#   bench  one run
+#   run    R independent seeded bench runs as separate processes, then pool
+#   pool   pool bench JSON files that already exist
+#
+# The bare positional form still means bench:
+#   python3 nn_qab_adversarial.py 14 12 3 2 --reps 20 --bases zxy
+#
+# WHY `run` EXISTS. Two bench runs of the identical command at n=20 gave
+# paired ace-minus-severed differences of +0.1376 (t=+3.98, sign 17/20,
+# p=0.0026) and -0.0407 (t=-1.59, sign 9/20, p=0.82). Cochran's Q on those
+# two put I^2 at 94%: the within-run standard error is anticonservative, so
+# a single run's t-test will manufacture a result the next run reverses.
+# Treat the RUN as the unit of analysis and quote the random-effects line.
 
 import argparse
+import glob
 import json
 import math
 import os
 import random
 import statistics
+import subprocess
 import sys
 import time
 
@@ -851,8 +867,8 @@ def print_table(agg, meta, args):
     print()
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def bench_main(argv):
+    ap = argparse.ArgumentParser(prog="nn_qab_adversarial.py bench")
     ap.add_argument("width", type=int)
     ap.add_argument("depth", type=int)
     ap.add_argument("lrc", type=int, nargs="?", default=4)
@@ -873,7 +889,7 @@ def main():
                          "diagonal and cannot see phase repair. Each extra "
                          "basis costs one measure_shots per ACE arm per rep.")
     ap.add_argument("--json", type=str, default=None)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.shots is None:
         args.shots = 1 << min(10, args.width + 2)
@@ -914,6 +930,483 @@ def main():
         print(f"wrote {args.json}")
 
     return 0
+
+
+
+# ---------------------------------------------------------------------------
+# Distributions without scipy (the container may not have it)
+# ---------------------------------------------------------------------------
+
+def _gammap_series(a, x, itmax=500, eps=3e-12):
+    ap, s, d = a, 1.0 / a, 1.0 / a
+    for _ in range(itmax):
+        ap += 1.0
+        d *= x / ap
+        s += d
+        if abs(d) < abs(s) * eps:
+            break
+    return s * math.exp(-x + a * math.log(x) - math.lgamma(a))
+
+
+def _gammaq_cf(a, x, itmax=500, eps=3e-12, fpmin=1e-300):
+    b, c, d = x + 1.0 - a, 1.0 / fpmin, 1.0 / (x + 1.0 - a)
+    h = d
+    for i in range(1, itmax + 1):
+        an = -i * (i - a)
+        b += 2.0
+        d = an * d + b
+        if abs(d) < fpmin:
+            d = fpmin
+        c = b + an / c
+        if abs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        de = d * c
+        h *= de
+        if abs(de - 1.0) < eps:
+            break
+    return h * math.exp(-x + a * math.log(x) - math.lgamma(a))
+
+
+def chi2_sf(x, k):
+    """Upper tail of the chi-square distribution. Used for Cochran's Q."""
+    if x <= 0:
+        return 1.0
+    a, xx = k / 2.0, x / 2.0
+    if xx < a + 1.0:
+        return 1.0 - _gammap_series(a, xx)
+    return _gammaq_cf(a, xx)
+
+
+def norm_sf2(z):
+    """Two-sided normal tail."""
+    return math.erfc(abs(z) / math.sqrt(2.0))
+
+
+def sign_p(wins, n):
+    if n == 0:
+        return float("nan")
+    k = max(wins, n - wins)
+    return min(1.0, 2.0 * sum(math.comb(n, i)
+                              for i in range(k, n + 1)) / (2 ** n))
+
+
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+GEOMETRY_KEYS = ("width", "depth", "lrc", "lrr", "shots", "sever_mode", "bases")
+
+
+def load_runs(paths):
+    runs = []
+    for p in paths:
+        with open(p) as f:
+            d = json.load(f)
+        if "reps" not in d or "args" not in d:
+            print(f"skipping {p}: not a harness JSON", file=sys.stderr)
+            continue
+        runs.append({
+            "path": p,
+            "args": d["args"],
+            "meta": d.get("meta", {}),
+            "reps": d["reps"],
+            "seed": d["args"].get("seed"),
+        })
+    if not runs:
+        sys.exit("no usable JSON files")
+
+    # Pooling runs with different geometry is meaningless. Refuse rather
+    # than silently averaging incomparable things.
+    ref = {k: runs[0]["args"].get(k) for k in GEOMETRY_KEYS}
+    bad = []
+    for r in runs[1:]:
+        cur = {k: r["args"].get(k) for k in GEOMETRY_KEYS}
+        if cur != ref:
+            bad.append((r["path"], cur))
+    if bad:
+        print("refusing to pool: geometry/settings differ from "
+              f"{runs[0]['path']} ({ref})", file=sys.stderr)
+        for path, cur in bad:
+            print(f"  {path}: {cur}", file=sys.stderr)
+        sys.exit(1)
+
+    seeds = [r["seed"] for r in runs]
+    if any(s is None for s in seeds):
+        print("warning: at least one run has no --seed; it cannot be "
+              "reproduced if it turns out to be an outlier", file=sys.stderr)
+    elif len(set(seeds)) != len(seeds):
+        print(f"warning: duplicate seeds {seeds} -- runs are not independent",
+              file=sys.stderr)
+    return runs
+
+
+def paired_diffs(rep_list, arm_a, arm_b, metric):
+    out = []
+    for r in rep_list:
+        if arm_a not in r or arm_b not in r:
+            continue
+        va, vb = r[arm_a].get(metric), r[arm_b].get(metric)
+        if va is None or vb is None:
+            continue
+        if isinstance(va, float) and math.isnan(va):
+            continue
+        if isinstance(vb, float) and math.isnan(vb):
+            continue
+        out.append(va - vb)
+    return np.asarray(out, dtype=np.float64)
+
+
+# ---------------------------------------------------------------------------
+# Meta-analysis
+# ---------------------------------------------------------------------------
+
+def meta_analyze(per_run):
+    """per_run: list of (mean, se, n). Returns fixed and random effects."""
+    usable = [(m, se, n) for (m, se, n) in per_run
+              if se and se > 0 and not math.isnan(se)]
+    if len(usable) < 1:
+        return None
+    m = np.array([x[0] for x in usable])
+    se = np.array([x[1] for x in usable])
+    w = 1.0 / se ** 2
+
+    fe = float((w * m).sum() / w.sum())
+    fe_se = float(math.sqrt(1.0 / w.sum()))
+
+    k = len(usable)
+    Q = float((w * (m - fe) ** 2).sum())
+    df = k - 1
+    q_p = chi2_sf(Q, df) if df > 0 else float("nan")
+    i2 = max(0.0, (Q - df) / Q) * 100 if Q > 0 and df > 0 else 0.0
+
+    if df > 0:
+        c = w.sum() - (w ** 2).sum() / w.sum()
+        tau2 = max(0.0, (Q - df) / c) if c > 0 else 0.0
+    else:
+        tau2 = 0.0
+
+    wr = 1.0 / (se ** 2 + tau2)
+    re = float((wr * m).sum() / wr.sum())
+    re_se = float(math.sqrt(1.0 / wr.sum()))
+
+    return {
+        "k": k, "fe": fe, "fe_se": fe_se,
+        "Q": Q, "df": df, "Q_p": q_p, "I2": i2, "tau2": tau2,
+        "re": re, "re_se": re_se,
+    }
+
+
+def analyze_metric(runs, metric, arm_a, arm_b, rng, n_boot=20000):
+    per_run, all_d = [], []
+    rows = []
+    for r in runs:
+        d = paired_diffs(r["reps"], arm_a, arm_b, metric)
+        if len(d) < 2:
+            continue
+        n = len(d)
+        sd = float(d.std(ddof=1))
+        se = sd / math.sqrt(n)
+        wins = int((d > 0).sum())
+        per_run.append((float(d.mean()), se, n))
+        all_d.append(d)
+        rows.append({
+            "path": os.path.basename(r["path"]), "seed": r["seed"],
+            "n": n, "mean": float(d.mean()), "sd": sd, "se": se,
+            "t": float(d.mean() / se) if se > 0 else float("nan"),
+            "wins": wins, "p_sign": sign_p(wins, n),
+        })
+    if not rows:
+        return None
+
+    pooled = np.concatenate(all_d)
+    n = len(pooled)
+    sd = float(pooled.std(ddof=1))
+    naive_se = sd / math.sqrt(n)
+    wins = int((pooled > 0).sum())
+    draws = rng.choice(pooled, size=(n_boot, n), replace=True).mean(axis=1)
+
+    meta = meta_analyze(per_run)
+    return {
+        "metric": metric, "rows": rows, "meta": meta,
+        "pooled": {
+            "n": n, "mean": float(pooled.mean()), "sd": sd,
+            "naive_se": naive_se,
+            "t": float(pooled.mean() / naive_se) if naive_se > 0 else float("nan"),
+            "dz": float(pooled.mean() / sd) if sd > 0 else float("nan"),
+            "ci_lo": float(np.quantile(draws, 0.025)),
+            "ci_hi": float(np.quantile(draws, 0.975)),
+            "wins": wins, "p_sign": sign_p(wins, n),
+        },
+    }
+
+
+def arm_means(runs, arm, metric):
+    vals = []
+    for r in runs:
+        for rep in r["reps"]:
+            v = rep.get(arm, {}).get(metric)
+            if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                vals.append(v)
+    return np.asarray(vals, dtype=np.float64)
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+ERROR_METRICS_PREFIXES = ("tvd",)
+
+
+def is_error_metric(m):
+    return m.startswith(ERROR_METRICS_PREFIXES) or "_err_" in m
+
+
+def default_metrics(runs):
+    seen, ordered = set(), []
+    for rep in runs[0]["reps"]:
+        for arm in ("ace", "severed"):
+            for k in rep.get(arm, {}):
+                if k == "seconds" or k in seen:
+                    continue
+                seen.add(k)
+                ordered.append(k)
+        break
+    return ordered
+
+
+def report(runs, metrics, arm_a, arm_b, rng, csv_path=None):
+    a = runs[0]["args"]
+    print()
+    print(f"pooled {len(runs)} run(s): width={a.get('width')} "
+          f"depth={a.get('depth')} lrc={a.get('lrc')} lrr={a.get('lrr')} "
+          f"shots={a.get('shots')} sever_mode={a.get('sever_mode')} "
+          f"bases={''.join(a.get('bases') or 'z')}")
+    print(f"seeds: {[r['seed'] for r in runs]}")
+    print(f"qrack_lib: {runs[0]['meta'].get('qrack_lib', '?')}")
+    print()
+
+    csv_rows = []
+    for metric in metrics:
+        res = analyze_metric(runs, metric, arm_a, arm_b, rng)
+        if res is None:
+            continue
+        meta, pl = res["meta"], res["pooled"]
+        direction = "lower is better" if is_error_metric(metric) else "higher is better"
+
+        print(f"=== {metric}  ({arm_a} - {arm_b}; {direction}) ===")
+        print("  run".ljust(22) + "seed".ljust(9) + "n".ljust(6)
+              + "mean".ljust(11) + "se".ljust(10) + "t".ljust(8) + "sign")
+        for row in res["rows"]:
+            print("  " + row["path"][:20].ljust(20)
+                  + str(row["seed"]).ljust(9)
+                  + str(row["n"]).ljust(6)
+                  + f"{row['mean']:+.4f}".ljust(11)
+                  + f"{row['se']:.4f}".ljust(10)
+                  + f"{row['t']:+.2f}".ljust(8)
+                  + f"{row['wins']}/{row['n']}")
+
+        if meta:
+            fe_lo, fe_hi = meta["fe"] - 1.96 * meta["fe_se"], meta["fe"] + 1.96 * meta["fe_se"]
+            re_lo, re_hi = meta["re"] - 1.96 * meta["re_se"], meta["re"] + 1.96 * meta["re_se"]
+            print(f"  fixed-effect   {meta['fe']:+.4f} "
+                  f"[{fe_lo:+.4f},{fe_hi:+.4f}]  "
+                  f"z={meta['fe'] / meta['fe_se']:+.2f} "
+                  f"p={norm_sf2(meta['fe'] / meta['fe_se']):.4f}")
+            if meta["df"] > 0:
+                print(f"  heterogeneity  Q={meta['Q']:.2f} df={meta['df']} "
+                      f"p={meta['Q_p']:.4f}  I^2={meta['I2']:.0f}%  "
+                      f"tau^2={meta['tau2']:.5f}")
+            print(f"  random-effects {meta['re']:+.4f} "
+                  f"[{re_lo:+.4f},{re_hi:+.4f}]  "
+                  f"z={meta['re'] / meta['re_se']:+.2f} "
+                  f"p={norm_sf2(meta['re'] / meta['re_se']):.4f}")
+            if meta["df"] > 0 and meta["I2"] >= 50:
+                print("  ^ runs are heterogeneous (I^2 >= 50%). Quote the "
+                      "random-effects line, not the fixed-effect one.")
+
+        print(f"  all reps       {pl['mean']:+.4f} "
+              f"[{pl['ci_lo']:+.4f},{pl['ci_hi']:+.4f}] "
+              f"n={pl['n']} t={pl['t']:+.2f} dz={pl['dz']:+.2f} "
+              f"sign={pl['wins']}/{pl['n']} p={pl['p_sign']:.4f}")
+
+        # power: reps needed for 80% power at the observed effect size
+        if pl["sd"] > 0 and abs(pl["mean"]) > 0:
+            need = math.ceil((2.8 * pl["sd"] / abs(pl["mean"])) ** 2)
+            print(f"  reps for 80% power at the observed effect: {need} "
+                  f"(have {pl['n']})")
+        print()
+
+        csv_rows.append({
+            "metric": metric,
+            "runs": len(res["rows"]),
+            "n_reps": pl["n"],
+            "fe": meta["fe"] if meta else "",
+            "fe_se": meta["fe_se"] if meta else "",
+            "I2": meta["I2"] if meta else "",
+            "tau2": meta["tau2"] if meta else "",
+            "re": meta["re"] if meta else "",
+            "re_se": meta["re_se"] if meta else "",
+            "Q_p": meta["Q_p"] if meta else "",
+            "pooled_mean": pl["mean"],
+            "pooled_ci_lo": pl["ci_lo"],
+            "pooled_ci_hi": pl["ci_hi"],
+            "sign_wins": pl["wins"],
+            "sign_p": pl["p_sign"],
+        })
+
+    # absolute arm levels, for the bands that do not need a paired test
+    print("=== arm levels (all reps pooled) ===")
+    arms = ["ace", "severed", "ceiling", "null"]
+    arms += sorted({k for r in runs for rep in r["reps"] for k in rep
+                    if k.startswith("consensus_inst")})
+    hdr = "metric".ljust(16) + "".join(x.ljust(20) for x in arms)
+    print(hdr)
+    print("-" * len(hdr))
+    for metric in metrics:
+        line = metric.ljust(16)
+        any_val = False
+        for arm in arms:
+            v = arm_means(runs, arm, metric)
+            if len(v) == 0:
+                line += "--".ljust(20)
+                continue
+            any_val = True
+            se = v.std(ddof=1) / math.sqrt(len(v)) if len(v) > 1 else 0.0
+            line += f"{v.mean():+.4f}+-{se:.4f}".ljust(20)
+        if any_val:
+            print(line)
+    print()
+
+    if csv_path and csv_rows:
+        import csv as _csv
+        with open(csv_path, "w", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=list(csv_rows[0]))
+            w.writeheader()
+            w.writerows(csv_rows)
+        print(f"wrote {csv_path}")
+
+
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
+
+def do_run(args, extra):
+    script = os.path.abspath(__file__)
+    os.makedirs(args.outdir, exist_ok=True)
+    paths = []
+    for i in range(args.runs):
+        seed = args.seed0 + i
+        out = os.path.join(args.outdir, f"run_seed{seed}.json")
+        if os.path.isfile(out) and args.skip_existing:
+            print(f"[{i + 1}/{args.runs}] seed {seed}: exists, skipping")
+            paths.append(out)
+            continue
+        # Each run is a SEPARATE process on purpose. Fresh Qrack/OpenCL
+        # state per run is part of what between-run heterogeneity is
+        # meant to capture; running them in-process would hide exactly
+        # the variance this analysis exists to measure.
+        cmd = [sys.executable, script, "bench",
+               str(args.width), str(args.depth), str(args.lrc), str(args.lrr),
+               "--reps", str(args.reps), "--seed", str(seed),
+               "--json", out] + list(extra)
+        print(f"[{i + 1}/{args.runs}] seed {seed}: {' '.join(cmd)}",
+              file=sys.stderr)
+        r = subprocess.run(cmd)
+        if r.returncode != 0:
+            print(f"  run failed (exit {r.returncode}); continuing",
+                  file=sys.stderr)
+            continue
+        paths.append(out)
+    return paths
+
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+SUBCOMMANDS = ("bench", "run", "pool")
+
+USAGE = """usage:
+  nn_qab_adversarial.py bench WIDTH DEPTH [LRC] [LRR] [--reps N] [--bases zxy]
+                              [--shots N] [--seed N] [--consensus N]
+                              [--sever-mode correct|edetect|both] [--json OUT]
+        One run. Arms: ace, severed, ceiling, null. Prints the per-arm table
+        and the paired ace-minus-severed table.
+
+  nn_qab_adversarial.py run --runs R --reps N WIDTH DEPTH [LRC] [LRR] [...]
+        R independent seeded bench runs as separate processes, then pools
+        them. Extra flags pass through to bench.
+
+  nn_qab_adversarial.py pool FILES... [--metric M] [--csv OUT]
+        Pool existing bench JSON files.
+
+A single run at n=20 is NOT enough to compare ace against severed: two such
+runs produced +0.1376 (t=+3.98, p=0.003) and -0.0407 (t=-1.59, p=0.82) on the
+identical command, I^2 = 94%. Use `run --runs 4 --reps 50` and quote the
+random-effects line."""
+
+
+def run_main(argv):
+    ap = argparse.ArgumentParser(prog="nn_qab_adversarial.py run")
+    ap.add_argument("width", type=int)
+    ap.add_argument("depth", type=int)
+    ap.add_argument("lrc", type=int, nargs="?", default=4)
+    ap.add_argument("lrr", type=int, nargs="?", default=4)
+    ap.add_argument("--runs", type=int, default=4,
+                    help="independent seeded runs; >=3 before between-run "
+                         "heterogeneity means anything")
+    ap.add_argument("--reps", type=int, default=50)
+    ap.add_argument("--seed0", type=int, default=1000)
+    ap.add_argument("--outdir", type=str, default="runs")
+    ap.add_argument("--skip-existing", action="store_true")
+    ap.add_argument("--no-pool", action="store_true")
+    ap.add_argument("--metric", action="append", default=None)
+    ap.add_argument("--csv", type=str, default=None)
+    args, extra = ap.parse_known_args(argv)
+
+    paths = do_run(args, extra)
+    if args.no_pool or not paths:
+        return 0
+    runs = load_runs(paths)
+    metrics = args.metric or default_metrics(runs)
+    report(runs, metrics, "ace", "severed", np.random.default_rng(0), args.csv)
+    return 0
+
+
+def pool_main(argv):
+    ap = argparse.ArgumentParser(prog="nn_qab_adversarial.py pool")
+    ap.add_argument("files", nargs="+")
+    ap.add_argument("--metric", action="append", default=None)
+    ap.add_argument("--arm-a", type=str, default="ace")
+    ap.add_argument("--arm-b", type=str, default="severed")
+    ap.add_argument("--csv", type=str, default=None)
+    args = ap.parse_args(argv)
+
+    files = []
+    for f in args.files:
+        files.extend(sorted(glob.glob(f)) or [f])
+    runs = load_runs(files)
+    metrics = args.metric or default_metrics(runs)
+    report(runs, metrics, args.arm_a, args.arm_b,
+           np.random.default_rng(0), args.csv)
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help"):
+        print(USAGE)
+        return 0
+    if argv[0] in SUBCOMMANDS:
+        cmd, rest = argv[0], argv[1:]
+    else:
+        # Bare positional form kept working on purpose: the earlier runs in
+        # this project were launched as `nn_qab_adversarial.py 14 12 3 2 ...`
+        # and those command lines are quoted in the notes and the JSON.
+        cmd, rest = "bench", argv
+    return {"bench": bench_main, "run": run_main, "pool": pool_main}[cmd](rest)
 
 
 if __name__ == "__main__":
