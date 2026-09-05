@@ -36,7 +36,8 @@
 #
 # Usage:
 #   python3 nn_qab_adversarial.py WIDTH DEPTH [LRC] [LRR] [--reps N]
-#          [--shots N] [--seed N] [--no-null] [--consensus] [--json OUT]
+#          [--shots N] [--seed N] [--no-null] [--consensus N]
+#          [--sever-mode correct|edetect|both] [--bases zxy] [--json OUT]
 
 import argparse
 import json
@@ -383,6 +384,30 @@ def sample_ideal(ideal_probs, shots, rng, chunk=1 << 20):
 # Correlators
 # ---------------------------------------------------------------------------
 
+def rotate_to_basis(sim, width, basis):
+    """Rotate every qubit so a computational-basis measurement reads out
+    the requested Pauli. Verified against a Bell state: <XX>=+1, <YY>=-1,
+    <ZZ>=+1 on both QrackSimulator and QrackAceBackend.
+
+    Z-basis correlators are DIAGONAL and therefore blind to relative
+    phase. If a repair mechanism is restoring coherence between replicas
+    rather than populations, ZZ cannot see it by construction -- which is
+    why running at least one off-diagonal basis is not optional when the
+    question is whether seam repair does physical work.
+    """
+    if basis == "z":
+        return
+    if basis == "x":
+        for q in range(width):
+            sim.h(q)
+    elif basis == "y":
+        for q in range(width):
+            sim.adjs(q)
+            sim.h(q)
+    else:
+        raise ValueError(f"unknown basis {basis!r}")
+
+
 def ideal_correlators(ideal_probs, pairs, singles, chunk=1 << 20):
     """Exact <Z_i> and <Z_i Z_j> from the dense ideal distribution,
     computed chunked so we never materialize 2^N-sized bit arrays.
@@ -464,7 +489,7 @@ def shift_index(i, row_shift, col_shift, row_len, col_len):
 
 def one_rep(width, depth, lrc, lrr, shots, rng, do_null=True,
             consensus_instances=0, corr_pairs_max=16,
-            sever_mode="correct"):
+            sever_mode="correct", bases=("z",)):
     row_len, col_len = factor_width(width)
     n_pow = 1 << width
 
@@ -483,8 +508,12 @@ def one_rep(width, depth, lrc, lrr, shots, rng, do_null=True,
     sim_ideal = QrackSimulator(width)
     run_circuit(sim_ideal, qc)
     ideal_probs = np.asarray(sim_ideal.out_probs(), dtype=np.float64)
-    del sim_ideal
     t_ideal = time.perf_counter() - t0
+    # NOTE sim_ideal is deliberately kept alive until the correlator block
+    # below, so each extra basis can be reached by clone-and-rotate rather
+    # than re-running the circuit. Peak memory is one statevector plus one
+    # clone plus one probability array; at large width, drop to
+    # --bases z if that is tight.
 
     u_u = 1.0 / n_pow
     centered = ideal_probs - u_u
@@ -517,10 +546,13 @@ def one_rep(width, depth, lrc, lrr, shots, rng, do_null=True,
     bulk_singles = [q for q in range(width) if q not in bset][:corr_pairs_max]
     all_pairs = seam_pairs + bulk_pairs
     all_singles = seam_singles + bulk_singles
-    z_ideal, zz_ideal = ideal_correlators(ideal_probs, all_pairs, all_singles)
 
     # ---- arms ----------------------------------------------------------
+    # Z-basis counts drive every distribution-level metric (XEB is defined
+    # in the computational basis). Extra bases are used for correlators
+    # only, so the cost is one extra measure_shots per arm per basis.
     arms = {}
+    backends = {}
     timings = {"ideal": t_ideal}
 
     for name, sever in (("ace", False), ("severed", True)):
@@ -529,11 +561,69 @@ def one_rep(width, depth, lrc, lrr, shots, rng, do_null=True,
         run_circuit(sim, qc)
         counts = dict(Counter(sim.measure_shots(list(range(width)), shots)))
         timings[name] = time.perf_counter() - t
-        arms[name] = (counts, sim)
+        arms[name] = counts
+        backends[name] = (sim, sever)
 
     ceiling_counts = sample_ideal(ideal_probs, shots, rng)
-    arms["ceiling"] = (ceiling_counts, None)
+    arms["ceiling"] = ceiling_counts
     timings["ceiling"] = 0.0
+
+    # ---- correlators, per basis ---------------------------------------
+    corr = {}          # corr[arm][basis] = (z_err_seam, z_err_bulk, zz_s, zz_b)
+    for name in arms:
+        corr[name] = {}
+
+    for basis in bases:
+        cl = sim_ideal.clone()
+        rotate_to_basis(cl, width, basis)
+        probs_b = np.asarray(cl.out_probs(), dtype=np.float64)
+        del cl
+        z_ideal, zz_ideal = ideal_correlators(probs_b, all_pairs, all_singles)
+
+        basis_counts = {}
+        if basis == "z":
+            basis_counts["ace"] = arms["ace"]
+            basis_counts["severed"] = arms["severed"]
+            basis_counts["ceiling"] = arms["ceiling"]
+        else:
+            for name, (sim, sever) in backends.items():
+                c = sim.clone()
+                if sever and sever_mode in ("correct", "both"):
+                    # clone() constructs a fresh backend, so the severing
+                    # monkeypatch does NOT survive it. Re-apply, or the
+                    # off-diagonal bases silently measure a repaired arm.
+                    c._correct = lambda *a, **k: None
+                rotate_to_basis(c, width, basis)
+                basis_counts[name] = dict(
+                    Counter(c.measure_shots(list(range(width)), shots))
+                )
+                del c
+            basis_counts["ceiling"] = sample_ideal(probs_b, shots, rng)
+
+        ns, nb = len(seam_pairs), len(bulk_pairs)
+        nss = len(seam_singles)
+        for name, cnts in basis_counts.items():
+            z_s, zz_s = sampled_correlators(cnts, shots, all_pairs, all_singles)
+            corr[name][basis] = {
+                f"{basis}{basis}_err_seam": (
+                    float(np.mean(np.abs(zz_s[:ns] - zz_ideal[:ns])))
+                    if ns else float("nan")),
+                f"{basis}{basis}_err_bulk": (
+                    float(np.mean(np.abs(zz_s[ns:] - zz_ideal[ns:])))
+                    if nb else float("nan")),
+                f"{basis}_err_seam": (
+                    float(np.mean(np.abs(z_s[:nss] - z_ideal[:nss])))
+                    if nss else float("nan")),
+                f"{basis}_err_bulk": (
+                    float(np.mean(np.abs(z_s[nss:] - z_ideal[nss:])))
+                    if len(bulk_singles) else float("nan")),
+            }
+        del probs_b
+
+    del sim_ideal
+    for sim, _ in backends.values():
+        del sim
+    backends.clear()
 
     # ---- optional: index-shifted consensus, reported PER INSTANCE ------
     per_instance = []
@@ -566,27 +656,18 @@ def one_rep(width, depth, lrc, lrr, shots, rng, do_null=True,
 
     # ---- scoring -------------------------------------------------------
     results = {}
-    for name, (counts, sim) in arms.items():
+    for name, counts in arms.items():
         m = score(ideal_probs, counts, shots, tail_mask,
                   denom_full, denom_tail, tail_center_sum, median_p, u_u)
-        z_s, zz_s = sampled_correlators(counts, shots, all_pairs, all_singles)
-        ns, nb = len(seam_pairs), len(bulk_pairs)
-        m["zz_err_seam"] = (float(np.mean(np.abs(zz_s[:ns] - zz_ideal[:ns])))
-                            if ns else float("nan"))
-        m["zz_err_bulk"] = (float(np.mean(np.abs(zz_s[ns:] - zz_ideal[ns:])))
-                            if nb else float("nan"))
-        nss = len(seam_singles)
-        m["z_err_seam"] = (float(np.mean(np.abs(z_s[:nss] - z_ideal[:nss])))
-                           if nss else float("nan"))
-        m["z_err_bulk"] = (float(np.mean(np.abs(z_s[nss:] - z_ideal[nss:])))
-                           if len(bulk_singles) else float("nan"))
+        for basis in bases:
+            m.update(corr[name][basis])
         m["seconds"] = timings.get(name, float("nan"))
         results[name] = m
 
     # null band: ace's own counts, scored against an unrelated circuit
     if do_null:
         results["null"] = score(
-            decoy_probs, arms["ace"][0], shots, decoy_tail,
+            decoy_probs, arms["ace"], shots, decoy_tail,
             decoy_denom, decoy_denom_tail, decoy_tail_center,
             decoy_median, u_u
         )
@@ -648,18 +729,92 @@ def aggregate(reps, rng):
     return out
 
 
-ROW_METRICS = [
-    "xeb", "xeb_google", "xeb_tail", "hog",
-    "hellinger", "tvd",
-    "zz_err_seam", "zz_err_bulk", "z_err_seam", "z_err_bulk",
-    "seconds",
-]
+BASE_METRICS = ["xeb", "xeb_google", "xeb_tail", "hog", "hellinger", "tvd"]
+
+
+def row_metrics(bases):
+    rows = list(BASE_METRICS)
+    for b in bases:
+        rows += [f"{b}{b}_err_seam", f"{b}{b}_err_bulk",
+                 f"{b}_err_seam", f"{b}_err_bulk"]
+    return rows + ["seconds"]
+
+
+# ---------------------------------------------------------------------------
+# Paired comparison
+# ---------------------------------------------------------------------------
+# ace and severed run the SAME circuit in every repetition, so they are
+# paired observations. Comparing their independent bootstrap CIs throws
+# that pairing away and badly understates the evidence: at width 14 the
+# unpaired intervals nearly touch while the paired test gives t ~ 4 and a
+# sign test at p ~ 0.003 on the same 20 reps. Always read this table for
+# ace-vs-severed; the per-arm table is for magnitudes, not comparisons.
+
+def paired_stats(reps, arm_a, arm_b, metric, rng, n_boot=20000):
+    d = []
+    for r in reps:
+        if arm_a not in r or arm_b not in r:
+            return None
+        va, vb = r[arm_a].get(metric), r[arm_b].get(metric)
+        if va is None or vb is None or math.isnan(va) or math.isnan(vb):
+            continue
+        d.append(va - vb)
+    if len(d) < 2:
+        return None
+    d = np.asarray(d, dtype=np.float64)
+    n = len(d)
+    sd = float(d.std(ddof=1))
+    sem = sd / math.sqrt(n) if sd > 0 else float("nan")
+    draws = rng.choice(d, size=(n_boot, n), replace=True).mean(axis=1)
+    wins = int((d > 0).sum())
+    p_sign = 2.0 * sum(math.comb(n, k) for k in range(max(wins, n - wins), n + 1))
+    p_sign = min(1.0, p_sign / (2 ** n))
+    return {
+        "mean_diff": float(d.mean()),
+        "sd": sd,
+        "sem": sem,
+        "t": float(d.mean() / sem) if sem and not math.isnan(sem) else float("nan"),
+        "dz": float(d.mean() / sd) if sd > 0 else float("nan"),
+        "ci_lo": float(np.quantile(draws, 0.025)),
+        "ci_hi": float(np.quantile(draws, 0.975)),
+        "wins": wins,
+        "n": n,
+        "p_sign": p_sign,
+    }
+
+
+def print_paired(reps, args, rng, arm_a="ace", arm_b="severed"):
+    if arm_a not in reps[0] or arm_b not in reps[0]:
+        return
+    print(f"paired {arm_a} - {arm_b} (same circuit each rep)")
+    print("  sign convention: xeb/xeb_tail/hog/hellinger are SCORES, so a "
+          "positive diff favours " + arm_a + ".")
+    print("  tvd and every *_err_* row are ERRORS, so a NEGATIVE diff "
+          "favours " + arm_a + ".")
+    print("metric".ljust(16) + "mean diff".ljust(12) + "95% CI".ljust(22)
+          + "t".ljust(8) + "dz".ljust(7) + "sign".ljust(9) + "p")
+    print("-" * 82)
+    for m in row_metrics(args.bases):
+        if m == "seconds":
+            continue
+        st = paired_stats(reps, arm_a, arm_b, m, rng)
+        if st is None:
+            continue
+        print(m.ljust(16)
+              + f"{st['mean_diff']:+.4f}".ljust(12)
+              + f"[{st['ci_lo']:+.4f},{st['ci_hi']:+.4f}]".ljust(22)
+              + f"{st['t']:+.2f}".ljust(8)
+              + f"{st['dz']:+.2f}".ljust(7)
+              + f"{st['wins']}/{st['n']}".ljust(9)
+              + f"{st['p_sign']:.4f}")
+    print()
 
 
 def print_table(agg, meta, args):
     print()
     print(f"width={args.width} depth={args.depth} lrc={args.lrc} lrr={args.lrr} "
-          f"shots={args.shots} reps={args.reps} sever_mode={args.sever_mode}")
+          f"shots={args.shots} reps={args.reps} sever_mode={args.sever_mode} "
+          f"bases={''.join(args.bases)}")
     print(f"qrack_lib={meta['qrack_lib']}")
     print(f"bulk={meta['n_bulk']} boundary={meta['n_boundary']} "
           f"B-to-B={meta['bulk_to_boundary']:.4g}  "
@@ -671,7 +826,7 @@ def print_table(agg, meta, args):
     header = "metric".ljust(16) + "".join(a.ljust(w) for a in arms)
     print(header)
     print("-" * len(header))
-    for m in ROW_METRICS:
+    for m in row_metrics(args.bases):
         row = m.ljust(16)
         for a in arms:
             s = agg[a].get(m)
@@ -712,11 +867,19 @@ def main():
     ap.add_argument("--sever-mode", choices=("correct", "edetect", "both"),
                     default="correct",
                     help="which repair mechanism the severed arm removes")
+    ap.add_argument("--bases", type=str, default="z",
+                    help="Pauli bases for correlators, e.g. zxy. Z alone is "
+                         "diagonal and cannot see phase repair. Each extra "
+                         "basis costs one measure_shots per ACE arm per rep.")
     ap.add_argument("--json", type=str, default=None)
     args = ap.parse_args()
 
     if args.shots is None:
         args.shots = 1 << min(10, args.width + 2)
+    args.bases = tuple(dict.fromkeys(args.bases.lower()))
+    for b in args.bases:
+        if b not in ("x", "y", "z"):
+            ap.error(f"--bases must contain only x, y, z (got {b!r})")
     if args.seed is not None:
         random.seed(args.seed)
     rng = np.random.default_rng(args.seed)
@@ -729,6 +892,7 @@ def main():
             consensus_instances=args.consensus,
             corr_pairs_max=args.corr_pairs,
             sever_mode=args.sever_mode,
+            bases=args.bases,
         )
         reps.append(res)
         print(f"  rep {r + 1}/{args.reps} "
@@ -740,6 +904,7 @@ def main():
 
     agg = aggregate(reps, rng)
     print_table(agg, meta, args)
+    print_paired(reps, args, rng)
 
     if args.json:
         with open(args.json, "w") as f:
