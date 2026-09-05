@@ -4,9 +4,6 @@
 # separate "approximate simulation" from "XEB spoofing" in the sense of
 # Gao, Kalinowski, Chou, Lukin, Barak & Choi, arXiv:2112.01657.
 #
-# https://github.com/vm6502q/pyqrack-examples/blob/main/rcs/nn_qab.py
-# https://arxiv.org/abs/2112.01657
-# 
 # Arms scored against the SAME ideal distribution and the SAME circuit:
 #   ace       -- QrackAceBackend as shipped (the method under test)
 #   severed   -- identical, with seam reconciliation disabled: elision
@@ -44,6 +41,7 @@
 import argparse
 import json
 import math
+import os
 import random
 import statistics
 import sys
@@ -52,7 +50,42 @@ import time
 from collections import Counter
 
 import numpy as np
-from pyqrack import QrackSimulator, QrackAceBackend
+
+# ---------------------------------------------------------------------------
+# Qrack shared library resolution
+# ---------------------------------------------------------------------------
+# PyQrack resolves PYQRACK_SHARED_LIB_PATH at *import* time (ctypes.CDLL), so
+# this block must run before `from pyqrack import ...` -- setting it later has
+# no effect on which .so is bound.
+#
+# ThereminQ container builds place a locally-compiled libqrack_pinvoke.so at
+# /usr/local/lib/qrack/ rather than relying on the copy bundled inside the
+# pyqrack wheel. Override the default with the QRACK_LIB_PATH env var.
+#
+# NOTE: this only selects which file ctypes opens. If libqrack_pinvoke.so links
+# against a sibling libqrack.so (or OpenCL/CUDA runtimes) in the same directory,
+# the dynamic loader must also be able to find those. Setting LD_LIBRARY_PATH
+# from inside Python is too late -- the loader reads it at process start. Either
+# build with `-Wl,-rpath,/usr/local/lib/qrack` or export it in the container
+# entrypoint:
+#
+#     export LD_LIBRARY_PATH=/usr/local/lib/qrack:${LD_LIBRARY_PATH}
+QRACK_LIB_PATH = os.environ.get(
+    "QRACK_LIB_PATH", "/usr/local/lib/qrack/libqrack_pinvoke.so"
+)
+if os.path.isfile(QRACK_LIB_PATH):
+    os.environ["PYQRACK_SHARED_LIB_PATH"] = QRACK_LIB_PATH
+    QRACK_LIB_SOURCE = QRACK_LIB_PATH
+else:
+    # Fall back to whatever ships with the installed pyqrack wheel.
+    os.environ.pop("PYQRACK_SHARED_LIB_PATH", None)
+    QRACK_LIB_SOURCE = "pyqrack-bundled"
+    print(
+        f"warning: {QRACK_LIB_PATH} not found; using bundled pyqrack library",
+        file=sys.stderr,
+    )
+
+from pyqrack import QrackSimulator, QrackAceBackend  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +598,7 @@ def one_rep(width, depth, lrc, lrr, shots, rng, do_null=True,
             results[f"consensus_inst{k}"]["seconds"] = 0.0
 
     meta = {
+        "qrack_lib": QRACK_LIB_SOURCE,
         "bulk_to_boundary": ratio,
         "n_boundary": len(bset),
         "n_bulk": width - len(bset),
@@ -626,6 +660,7 @@ def print_table(agg, meta, args):
     print()
     print(f"width={args.width} depth={args.depth} lrc={args.lrc} lrr={args.lrr} "
           f"shots={args.shots} reps={args.reps} sever_mode={args.sever_mode}")
+    print(f"qrack_lib={meta['qrack_lib']}")
     print(f"bulk={meta['n_bulk']} boundary={meta['n_boundary']} "
           f"B-to-B={meta['bulk_to_boundary']:.4g}  "
           f"seam_pairs={meta['n_seam_pairs']} bulk_pairs={meta['n_bulk_pairs']}")
