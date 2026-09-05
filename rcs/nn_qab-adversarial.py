@@ -4,6 +4,9 @@
 # separate "approximate simulation" from "XEB spoofing" in the sense of
 # Gao, Kalinowski, Chou, Lukin, Barak & Choi, arXiv:2112.01657.
 #
+# https://github.com/vm6502q/pyqrack-examples/blob/main/rcs/nn_qab.py
+# https://arxiv.org/abs/2112.01657
+# 
 # Arms scored against the SAME ideal distribution and the SAME circuit:
 #   ace       -- QrackAceBackend as shipped (the method under test)
 #   severed   -- identical, with seam reconciliation disabled: elision
