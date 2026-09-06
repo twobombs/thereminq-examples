@@ -22,6 +22,7 @@
 #   SECS=3600 ./K4-32x27-tile.sh             # shorter
 #   MIXED_W=0 ./K4-32x27-tile.sh             # skip the mixed-cycle run
 #   PROOF2_W=0 ./K4-32x27-tile.sh            # one proof, not two
+#   DEVICES=0:0 ./K4-32x27-tile.sh           # one GPU instead of all
 #   ./K4-32x27-tile.sh --detach              # keep running, free the prompt
 
 set -u
@@ -32,6 +33,10 @@ CP=${CP:-./K4-32x27-tilecp.py}
 OCL=${OCL:-./K4-32x27-tileocl.py}
 SECS=${SECS:-43200}
 TEAR=${TEAR:-6}
+# 'all' uses every GPU on every platform. Without this the OpenCL job
+# defaults to the first device and leaves the rest of the fleet idle --
+# on a six-die host that is five sixths of the throughput unused.
+DEVICES=${DEVICES:-all}
 GSIZE=${GSIZE:-1048576}
 ROUNDS=${ROUNDS:-5000}
 LOGDIR=${LOGDIR:-logs}
@@ -95,7 +100,7 @@ printf "  %-22s %s\n" "proof (symmetry)"    "$PROOF_W workers"
 printf "  %-22s %s\n" "proof (--no-symmetry)" "$PROOF2_W workers"
 [ "$MIXED_W" -gt 0 ] && \
 printf "  %-22s %s\n" "mixed cycles 10,14"  "$MIXED_W workers"
-printf "  %-22s %s\n" "gpu repair (host)"   "$GPU_W thread(s)"
+printf "  %-22s %s\n" "gpu repair (host)"   "$GPU_W thread(s), devices=$DEVICES"
 printf "  %-22s %s\n" "budget"              "${SECS}s"
 if [ "$PLAN_ONLY" = "1" ]; then exit 0; fi
 
@@ -144,7 +149,7 @@ if [ "$MIXED_W" -gt 0 ]; then
     launch mixed $PY "$CP" --cycles 10,14 --lb 32 --seconds "$SECS" \
            --workers "$MIXED_W" --no-builtin --log --out proof-mixed.json
 fi
-launch gpu $PY "$OCL" --fix base.json --tear "$TEAR" \
+launch gpu $PY "$OCL" --fix base.json --tear "$TEAR" --devices "$DEVICES" \
        --global-size "$GSIZE" --rounds "$ROUNDS" --keep 64 --out rep.json
 
 echo ""
