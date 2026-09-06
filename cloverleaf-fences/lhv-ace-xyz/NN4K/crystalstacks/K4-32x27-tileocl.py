@@ -52,6 +52,28 @@
 # looked for and what was examined instead of raising FileNotFoundError
 # from inside the import machinery.
 #
+# SIX DEVICES WERE RUNNING NEARLY IN SERIES
+# =====================================================================
+# Measured on a six-die V340 host:
+#
+#   one die   --devices 0:0     705,000 candidates/sec
+#   six dies  --devices all   1,030,000 candidates/sec
+#
+# 1.46x for six times the hardware. Not the cards -- a single Vega10
+# against the Vega20 Pro VII's 1.14M is exactly the ratio you would
+# expect -- but this file.
+#
+# pyopencl enqueues lazily. Nothing forces a submit until something
+# flushes the queue, and collect() calls finish() on each device in
+# turn, so device k's kernel did not start until device k-1 had
+# finished. Adding q.flush() at the end of enqueue() submits every
+# device's work before any of them is waited on.
+#
+# The per-round host work was vectorised at the same time. Building the
+# availability mask was 1296 Python set intersections PER DEVICE PER
+# ROUND; with six devices and sub-second kernels that stops being free.
+# It is one numpy AND-reduce against a precomputed incidence matrix now.
+#
 # MULTI-DEVICE  (--devices)
 # =====================================================================
 # Earlier revisions used exactly one device: devs[0], one context, one
@@ -658,6 +680,13 @@ def main(argv=None):
             self.krn(self.q, (self.G,), (self.lsz,), self.lmask, self.lsite,
                      self.adjb, self.conf, self.dbl, self.dav,
                      np.int32(nfix), np.uint32(seed), self.dscore)
+            # Submit NOW. Without this the enqueue sits in the queue
+            # until something forces a flush, and since collect() calls
+            # finish() on each device in turn, device k's kernel would
+            # not start until device k-1 had finished: six dies running
+            # nearly in series. One die measured 705k candidates/sec;
+            # six measured 1.03M, i.e. 1.46x for 6x the hardware.
+            self.q.flush()
 
         def collect(self):
             cl.enqueue_copy(self.q, self.score, self.dscore)
@@ -675,6 +704,13 @@ def main(argv=None):
     if nl & 63:
         ones[cw - 1] = np.uint64((1 << (nl & 63)) - 1)
     loopset = {frozenset(p): i for i, p in enumerate(loops)}
+    # loop-by-site incidence, built once. The per-round availability
+    # mask used to be 1296 Python set intersections PER DEVICE per
+    # round; with six devices and sub-second kernels that host work
+    # stops being free.
+    LSITE = np.zeros((nl, n), dtype=bool)
+    for i, p in enumerate(loops):
+        LSITE[i, list(p)] = True
 
     def feasible(av_bool, need):
         """Can `need` disjoint loops even be drawn from what is left?
@@ -722,12 +758,14 @@ def main(argv=None):
             for v in blk:
                 bl[v >> 6] |= np.uint64(1) << np.uint64(v & 63)
                 held.add(v)
-        av = np.zeros(cw, dtype=np.uint64)
-        avb = np.zeros(nl, dtype=bool)
-        for i, p in enumerate(loops):
-            if not (set(p) & held):
-                av[i >> 6] |= np.uint64(1) << np.uint64(i & 63)
-                avb[i] = True
+        held_mask = np.zeros(n, dtype=bool)
+        if held:
+            held_mask[list(held)] = True
+        avb = ~(LSITE & held_mask).any(axis=1)
+        packed = np.packbits(avb.astype(np.uint8), bitorder="little")
+        buf = np.zeros(cw * 8, dtype=np.uint8)
+        buf[:len(packed)] = packed
+        av = buf.view(np.uint64)
         return bl, av, keep, len(keep), avb
 
     import random as _random
