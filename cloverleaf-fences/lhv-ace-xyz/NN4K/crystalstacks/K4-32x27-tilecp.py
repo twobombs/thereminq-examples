@@ -206,6 +206,7 @@
 
 import argparse
 import collections
+import importlib.util
 import json
 import os
 import pickle
@@ -222,6 +223,48 @@ CACHE = "/tmp/k4_lattice_cache.pkl"
 # =====================================================================
 # PART 1 -- LATTICE
 # =====================================================================
+
+def find_engine(explicit):
+    """The lattice engine, located by capability rather than filename.
+
+    These files get renamed; hard-coding one name means the default
+    invocation breaks the moment the directory convention changes.
+    """
+    import glob
+    cands = [explicit] if explicit else []
+    if not explicit:
+        here = os.path.dirname(os.path.abspath(__file__))
+        me = os.path.abspath(__file__)
+        for pat in ("*Kitaev-single*.py", "*Kitaev*single*.py",
+                    "*[CK]rystalstacks*Kitaev*.py", "*rystalstacks*.py"):
+            for d in (here, os.getcwd()):
+                for p in sorted(glob.glob(os.path.join(d, pat))):
+                    if os.path.abspath(p) != me and p not in cands:
+                        cands.append(p)
+    for p in cands:
+        if not os.path.exists(p):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("k4engine", p)
+            m = importlib.util.module_from_spec(spec)
+            argv, sys.argv = sys.argv, ["k4engine"]
+            try:
+                spec.loader.exec_module(m)
+            finally:
+                sys.argv = argv
+        except Exception:
+            continue
+        if hasattr(m, "srs_bonds") and hasattr(m, "elementary_loops"):
+            if not explicit:
+                print("found engine: %s" % os.path.basename(p))
+            return p
+    raise SystemExit(
+        "could not find the K4 lattice engine.\n"
+        "  it must define srs_bonds and elementary_loops\n"
+        "  examined: %s\n"
+        "  pass it explicitly with --engine <file>"
+        % (", ".join(os.path.basename(c) for c in cands) or "nothing"))
+
 
 def load_lattice(engine, L, cache=CACHE):
     """(adj, loops, n) for the L^3 hyperoctagon torus. Enumerating the
@@ -747,19 +790,21 @@ def load_checkpoint(path, adj, loops, B):
     try:
         blob = json.load(open(path))
         blocks = [list(b) for b in blob["blocks"]]
+        pool = [[list(b) for b in p] for p in blob.get("pool", [])]
     except Exception as e:
         print("could not read %s (%s) -- building a greedy packing"
               " instead." % (path, e))
         return []
     ok, bad = verify_blocks(blocks, adj, loops, B)
-    print("resumed %s: %d blocks, verifier %s"
-          % (path, len(blocks), "pass" if ok else "FAIL"))
+    print("resumed %s: %d blocks, verifier %s%s"
+          % (path, len(blocks), "pass" if ok else "FAIL",
+             ", pool of %d" % len(pool) if pool else ""))
     if not ok:
         for b in bad[:3]:
             print("  ! %s" % b)
         print("  checkpoint rejected -- building a greedy packing instead.")
         return []
-    return blocks
+    return blocks if not pool else (blocks, pool)
 
 
 def lns(adj, loops, blocks, B, iters, destroy, seconds, workers,
@@ -867,8 +912,9 @@ def selftest(adj, loops, B):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Racetrack-block tiling of the hyperoctagon lattice")
-    ap.add_argument("--engine", default="K4-Chrystalstacks-Kitaev-single.py",
-                    help="path to the K4 engine, which supplies the lattice")
+    ap.add_argument("--engine", default=None,
+                    help="path to the K4 engine. Found automatically by "
+                         "the symbols it defines if not given")
     ap.add_argument("--L", type=int, default=6)
     ap.add_argument("--B", type=int, default=DEFAULT_B)
     ap.add_argument("--seconds", type=float, default=600.0)
@@ -899,6 +945,9 @@ def main(argv=None):
                          "global solve. Recommended: --lns 500")
     ap.add_argument("--lns-destroy", type=int, default=4,
                     help="blocks torn out per LNS iteration")
+    ap.add_argument("--pool-starts", type=int, default=16,
+                    help="how many pooled packings to try when the "
+                         "checkpoint carries a pool")
     ap.add_argument("--lns-seconds", type=float, default=30.0,
                     help="solver budget per LNS subproblem")
     ap.add_argument("--no-hintcheck", action="store_true",
@@ -917,7 +966,7 @@ def main(argv=None):
                  "" if workers == 1 else "s"))
     except Exception:
         pass
-    adj, loops, n = load_lattice(ns.engine, ns.L)
+    adj, loops, n = load_lattice(find_engine(ns.engine), ns.L)
     edges, _ = edge_index(adj)
     print("lattice L=%d: %d sites, %d bonds, %d elementary %d-loops"
           % (ns.L, n, len(edges), len(loops), ELL))
@@ -933,9 +982,11 @@ def main(argv=None):
     if ns.selftest:
         return 0 if selftest(adj, loops, B) else 2
 
-    hint = []
+    hint, pool = [], []
     if ns.start:
         hint = load_checkpoint(ns.start, adj, loops, B)
+        if isinstance(hint, tuple):
+            hint, pool = hint
     if not hint and not ns.no_builtin:
         hint = builtin_packing(adj, loops, ns.L, B)
     if not hint and ns.hint:
@@ -966,8 +1017,31 @@ def main(argv=None):
                   " --hint came up empty. Re-run with --hint 200.")
             return 1
         t0 = time.time()
-        best = lns(adj, loops, hint, B, ns.lns, ns.lns_destroy,
-                   ns.lns_seconds, workers, ns.out, target=K)
+        if pool:
+            # A pool of distinct good packings beats one deep start:
+            # LNS holds most of the loop selection fixed, so its reach
+            # is bounded by where it began. Spend the budget across
+            # starts rather than all of it on one.
+            starts = sorted(pool, key=lambda p: -len(p))[:ns.pool_starts]
+            per = max(1, ns.lns // max(1, len(starts)))
+            print("pool: %d starts, %d LNS iterations each"
+                  % (len(starts), per))
+            best = hint
+            for si, st0 in enumerate(starts):
+                r = lns(adj, loops, st0, B, per, ns.lns_destroy,
+                        ns.lns_seconds, workers, None, seed=si, target=K)
+                if len(r) > len(best):
+                    best = r
+                    json.dump({"n_blocks": len(best), "verified": True,
+                               "blocks": best}, open(ns.out, "w"), indent=1)
+                print("  start %d/%d: began %d, reached %d, best so far %d"
+                      % (si + 1, len(starts), len(st0), len(r), len(best)))
+                sys.stdout.flush()
+                if len(best) >= K:
+                    break
+        else:
+            best = lns(adj, loops, hint, B, ns.lns, ns.lns_destroy,
+                       ns.lns_seconds, workers, ns.out, target=K)
         ok, bad = verify_blocks(best, adj, loops, B)
         print("")
         print("LNS finished in %.1fs: %d blocks, verifier %s, %d sites left"
