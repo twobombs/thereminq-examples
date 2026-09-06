@@ -75,6 +75,18 @@
 # Work-group size is derived per device from its own local_mem_size, so
 # a card with less LDS gets a smaller group rather than a build failure.
 #
+# Two things a six-device host made obvious:
+#   - sel_out was written by every work-item on every candidate and
+#     never read back. At --global-size 1048576 that is 134 MB of
+#     pointless VRAM and 134 MB of pointless writes per round PER
+#     DEVICE. replay() reconstructs the selection from (gid, seed), so
+#     the buffer was always dead. Removed.
+#   - in --fix mode every device used to sample the SAME torn region.
+#     Six cards re-sampling one neighbourhood explores no more than one
+#     card does; six cards on six neighbourhoods explores six times as
+#     much. Tears are drawn per device now. With one device this is
+#     bit-for-bit the old behaviour.
+#
 # GPU AS THE LNS REPAIR ENGINE  (--fix)
 # =====================================================================
 # LNS in tilecp.py stalled because --lns-destroy 8 returned UNKNOWN on
@@ -219,8 +231,7 @@ void search(__global const ulong *lmask,   // NL * W
             __global const ulong *avail0,  // CW, loops still selectable
             const int nfix,                // fixed blocks, scored as-is
             const uint seed,
-            __global int *score,
-            __global int *sel_out)
+            __global int *score)
 {
     int gid = get_global_id(0);
     int lid = get_local_id(0);
@@ -254,7 +265,6 @@ void search(__global const ulong *lmask,   // NL * W
         for (w = 0; w < CW; w++) avail[w] &= ~conf[r * CW + w];
     }
     if (k < need) { score[gid] = 0; return; }
-    for (j = 0; j < need; j++) sel_out[gid * KT + j] = sel[j];
 
     for (w = 0; w < W; w++) lfree[base + w] = ~blocked[w];
     for (j = 0; j < need; j++)
@@ -633,8 +643,6 @@ def main(argv=None):
                                   hostbuf=confw)
             self.score = np.zeros(self.G, dtype=np.int32)
             self.dscore = cl.Buffer(self.ctx, f.WRITE_ONLY, self.score.nbytes)
-            self.dsel = cl.Buffer(self.ctx, f.WRITE_ONLY,
-                                  self.G * K_TARGET * 4)
             print("  [%d] %s (%s), %d CUs, wg %d, %d work-items,"
                   " built in %.2fs"
                   % (idx, dev.name.strip(), plat.name.strip(),
@@ -649,7 +657,7 @@ def main(argv=None):
                                  hostbuf=av)
             self.krn(self.q, (self.G,), (self.lsz,), self.lmask, self.lsite,
                      self.adjb, self.conf, self.dbl, self.dav,
-                     np.int32(nfix), np.uint32(seed), self.dscore, self.dsel)
+                     np.int32(nfix), np.uint32(seed), self.dscore)
 
         def collect(self):
             cl.enqueue_copy(self.q, self.score, self.dscore)
@@ -659,8 +667,9 @@ def main(argv=None):
     print("devices:")
     units = [Unit(i, p, d) for i, (p, d) in enumerate(picked)]
     total_items = sum(u.G for u in units)
-    print("work-items per round: %d across %d device%s"
-          % (total_items, len(units), "" if len(units) == 1 else "s"))
+    print("work-items per round: %d across %d device%s, %d CUs total"
+          % (total_items, len(units), "" if len(units) == 1 else "s",
+             sum(u.dev.max_compute_units for u in units)))
 
     ones = np.array([np.uint64(0xFFFFFFFFFFFFFFFF)] * cw, dtype=np.uint64)
     if nl & 63:
@@ -728,29 +737,38 @@ def main(argv=None):
     pool, pool_keys = [], set()
     total, elapsed = 0, 0.0
     for rnd in range(ns.rounds):
-        bl, av, keep, nfix = make_round(rng)
-        blmask = np.zeros(n, dtype=bool)
-        for blk in keep:
-            blmask[list(blk)] = True
-        avb = np.zeros(nl, dtype=bool)
-        for i in range(nl):
-            avb[i] = bool((av[i >> 6] >> np.uint64(i & 63)) & np.uint64(1))
+        # A tear PER DEVICE, not one shared by all of them. Six cards
+        # sampling six different neighbourhoods explores six times as
+        # much of the space as six cards re-sampling one; with a single
+        # device this is exactly the old behaviour.
+        jobs = []
+        for u in units:
+            bl, av, keep, nfix = make_round(rng)
+            blmask = np.zeros(n, dtype=bool)
+            for blk in keep:
+                blmask[list(blk)] = True
+            avb = np.zeros(nl, dtype=bool)
+            for i in range(nl):
+                avb[i] = bool((av[i >> 6] >> np.uint64(i & 63))
+                              & np.uint64(1))
+            # replay() is a function of (gid, seed), so a distinct seed
+            # per device keeps every work-item independently
+            # reproducible: the correctness story does not weaken as
+            # devices are added.
+            sd = np.uint32((ns.seed + rnd * 7919 + u.idx * 104729)
+                           & 0xFFFFFFFF)
+            jobs.append((u, sd, bl, av, nfix, blmask, avb, keep))
 
-        # One seed per device per round. replay() is a function of
-        # (gid, seed), so distinct seeds keep every work-item
-        # independently reproducible on the host -- the validation
-        # story does not change just because there are more devices.
-        seeds = [np.uint32((ns.seed + rnd * 7919 + u.idx * 104729)
-                           & 0xFFFFFFFF) for u in units]
         t0 = time.time()
-        for u, sd in zip(units, seeds):
+        for u, sd, bl, av, nfix, _, _, _ in jobs:
             u.enqueue(bl, av, nfix, sd)      # all devices run concurrently
-        results = [(u, sd, u.collect().copy()) for u, sd in zip(units, seeds)]
+        results = [(u, sd, u.collect().copy(), bm, ab, kp)
+                   for u, sd, _, _, _, bm, ab, kp in jobs]
         dt = time.time() - t0
         elapsed += dt
         total += total_items
         top = 0
-        for _, _, sc in results:
+        for _, _, sc, _, _, _ in results:
             for v in sc:
                 hist[int(v)] += 1
             top = max(top, int(sc.max()))
@@ -761,7 +779,7 @@ def main(argv=None):
         thr = ns.threshold or max(best, top) - 1
         if len(pool) < ns.keep or top > min(len(p) for p in pool):
             floor = thr if len(pool) < ns.keep else min(len(p) for p in pool)
-            for u, sd, sc in results:
+            for u, sd, sc, blmask, avb, keep in results:
                 gids = np.nonzero(sc >= floor)[0]
                 if len(gids) > 4 * ns.keep:
                     gids = gids[np.argsort(-sc[gids])[:4 * ns.keep]]
@@ -794,7 +812,7 @@ def main(argv=None):
                 print("    pool %d/%d, sizes %d..%d"
                       % (len(pool), ns.keep, min(len(p) for p in pool),
                          max(len(p) for p in pool)))
-        last = (results, blmask, avb, keep)
+        last = results
 
     print("")
     print("%d candidates in %.1fs = %.0f/sec" % (total, elapsed,
@@ -805,9 +823,8 @@ def main(argv=None):
         print("")
         print("validating %d work-items per device by exact host replay"
               % ns.validate)
-        results, blmask, avb, keep = last
         bad = tot = 0
-        for u, sd, sc in results:
+        for u, sd, sc, blmask, avb, keep in last:
             for gid in range(min(ns.validate, len(sc))):
                 tot += 1
                 s_, _ = replay(gid, int(sd), loops, adj, n, ns.maxatt,
