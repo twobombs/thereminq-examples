@@ -75,6 +75,22 @@
 #
 #     Check failed: heuristics.fixed_search != nullptr
 #
+# REV 2.6 -- SAFE TO RUN CONCURRENTLY
+# =====================================================================
+# The lattice cache was a single fixed path shared by every process and
+# every --cycles setting. Two hazards, both real once you run the proof
+# and a search side by side:
+#   - different --cycles values thrash: each run finds the other's key,
+#     rebuilds, and overwrites, forever.
+#   - a reader can catch a half-written pickle mid-dump.
+# Now one cache file per key, written to a pid-suffixed temp and moved
+# into place with os.replace, which is atomic. Readers see the old file
+# or the new one, never a partial. Any number of processes may share a
+# machine.
+#
+# Still your job: give every concurrent run a distinct --out. They do
+# not coordinate, and the default paths collide.
+#
 # REV 2.5 -- DO NOT HINT BELOW THE LOWER BOUND
 # =====================================================================
 # Running --lb 32 with the built-in 31-block packing produced
@@ -290,6 +306,15 @@ def load_lattice(engine, L, cache=CACHE, cycles=(ELL,)):
     elementary 10-loops is the expensive step, so it is cached."""
     key = "%s-L%d-c%s" % (os.path.basename(engine), L,
                           "_".join(str(c) for c in cycles))
+    # One cache FILE per key, not one file shared by every key. With a
+    # single path, concurrent runs with different --cycles each find
+    # the other's key and rebuild over it forever; and a reader can
+    # catch a half-written pickle from a writer. Per-key paths plus an
+    # atomic rename remove both. Safe to run many processes at once.
+    if cache:
+        safe = "".join(c if c.isalnum() or c in "-._" else "_" for c in key)
+        cache = os.path.join(os.path.dirname(cache) or ".",
+                             "k4_lattice_%s.pkl" % safe)
     if cache and os.path.exists(cache):
         try:
             blob = pickle.load(open(cache, "rb"))
@@ -314,8 +339,17 @@ def load_lattice(engine, L, cache=CACHE, cycles=(ELL,)):
         print("  %d-cycles: %d" % (c, len(got)))
         loops.extend(got)
     if cache:
-        pickle.dump({"key": key, "adj": adj, "loops": loops,
-                     "n": len(idx)}, open(cache, "wb"))
+        tmp = "%s.%d.tmp" % (cache, os.getpid())
+        try:
+            with open(tmp, "wb") as fh:
+                pickle.dump({"key": key, "adj": adj, "loops": loops,
+                             "n": len(idx)}, fh)
+            os.replace(tmp, cache)          # atomic; readers see one or
+        except Exception:                   # the other, never a partial
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
     return adj, loops, len(idx)
 
 
@@ -962,6 +996,10 @@ def main(argv=None):
     ap.add_argument("--out", default="tiling.json")
     ap.add_argument("--hint", type=int, default=200, metavar="RESTARTS",
                     help="greedy restarts for the warm start; 0 disables")
+    ap.add_argument("--warm", action="store_true",
+                    help="build and cache the lattice, then exit. Run "
+                         "this before launching concurrent jobs so they "
+                         "do not each enumerate the same cycles")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--no-symmetry", action="store_true")
     ap.add_argument("--no-redundant", action="store_true")
@@ -1018,6 +1056,10 @@ def main(argv=None):
     print("target: %d blocks x %d sites; %d internal + %d shared bonds"
           % (K, B, K * B, K * B // 2))
     print("")
+
+    if ns.warm:
+        print("lattice cached.")
+        return 0
 
     if ns.selftest:
         return 0 if selftest(adj, loops, B) else 2
@@ -1083,6 +1125,12 @@ def main(argv=None):
             best = lns(adj, loops, hint, B, ns.lns, ns.lns_destroy,
                        ns.lns_seconds, workers, ns.out, target=K)
         ok, bad = verify_blocks(best, adj, loops, B)
+        # Always write the result, improved or not. Writing only on
+        # improvement means a run that gains nothing leaves no file,
+        # and the next --start or --fix then dies on a missing path.
+        if ok and ns.out:
+            json.dump({"n_blocks": len(best), "verified": True,
+                       "blocks": best}, open(ns.out, "w"), indent=1)
         print("")
         print("LNS finished in %.1fs: %d blocks, verifier %s, %d sites left"
               % (time.time() - t0, len(best), "pass" if ok else "FAIL",
