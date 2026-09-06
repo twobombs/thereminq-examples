@@ -75,6 +75,25 @@
 #
 #     Check failed: heuristics.fixed_search != nullptr
 #
+# REV 2.5 -- DO NOT HINT BELOW THE LOWER BOUND
+# =====================================================================
+# Running --lb 32 with the built-in 31-block packing produced
+#
+#     The solution hint is complete, but it is infeasible!
+#
+# which is exactly right: nb >= 32 and a 31-block hint cannot both
+# hold. The hint is now dropped whenever it falls below the lower
+# bound, with a printed reason. It only ever cost time and bias.
+#
+# Two other things that 12-hour run made visible, neither a bug:
+#   - presolve takes ~260s, of which ~240s is three [Probe] rounds at
+#     80s each. Irrelevant against a 12-hour budget; if you care,
+#     cp_model_probing_level can be lowered.
+#   - with lb == K the objective is pinned at [32,32], so this is a
+#     pure SAT/UNSAT decision. There will be no #Bound movement to
+#     watch: the only progress signal is #Model variable shaving, and
+#     the answer arrives all at once or not at all.
+#
 # REV 2.4 -- THE PACKING IS NOW IN THE FILE
 # =====================================================================
 # The best construction so far, 31 of 32 blocks, is embedded as
@@ -266,10 +285,11 @@ def find_engine(explicit):
         % (", ".join(os.path.basename(c) for c in cands) or "nothing"))
 
 
-def load_lattice(engine, L, cache=CACHE):
+def load_lattice(engine, L, cache=CACHE, cycles=(ELL,)):
     """(adj, loops, n) for the L^3 hyperoctagon torus. Enumerating the
     elementary 10-loops is the expensive step, so it is cached."""
-    key = "%s-L%d" % (os.path.basename(engine), L)
+    key = "%s-L%d-c%s" % (os.path.basename(engine), L,
+                          "_".join(str(c) for c in cycles))
     if cache and os.path.exists(cache):
         try:
             blob = pickle.load(open(cache, "rb"))
@@ -287,8 +307,12 @@ def load_lattice(engine, L, cache=CACHE):
         a[i].append(j)
         a[j].append(i)
     adj = {v: sorted(a[v]) for v in range(len(idx))}
-    uniq, _, _, _ = k4.elementary_loops(L, ELL)
-    loops = [tuple(p) for p in uniq.values()]
+    loops = []
+    for c in cycles:
+        uniq, _, _, _ = k4.elementary_loops(L, c)
+        got = [tuple(p) for p in uniq.values()]
+        print("  %d-cycles: %d" % (c, len(got)))
+        loops.extend(got)
     if cache:
         pickle.dump({"key": key, "adj": adj, "loops": loops,
                      "n": len(idx)}, open(cache, "wb"))
@@ -384,12 +408,13 @@ def builtin_packing(adj, loops, L, B):
 # Shares nothing with the model. If the encoding is wrong, this is what
 # catches it.
 
-def verify_blocks(blocks, adj, loops, B=DEFAULT_B, ell=ELL):
+def verify_blocks(blocks, adj, loops, B=DEFAULT_B, ell=None):
     """(ok, [problems]). Each block must be 27 sites, disjoint from the
     others, with exactly 27 induced edges, connected, and carrying one
     cycle which is a genuine elementary ell-loop."""
     bad, seen = [], {}
     loopset = {frozenset(p) for p in loops}
+    lens = {len(p) for p in loops} if ell is None else {ell}
     for bi, blk in enumerate(blocks):
         S = set(blk)
         if len(S) != B:
@@ -435,12 +460,12 @@ def verify_blocks(blocks, adj, loops, B=DEFAULT_B, ell=ELL):
                     deg[w] -= 1
                     if deg[w] == 1:
                         leaves.append(w)
-        if len(rem) != ell:
-            bad.append("block %d: cycle length %d, want %d"
-                       % (bi, len(rem), ell))
+        if len(rem) not in lens:
+            bad.append("block %d: cycle length %d, allowed %s"
+                       % (bi, len(rem), sorted(lens)))
         elif frozenset(rem) not in loopset:
-            bad.append("block %d: its %d-cycle is not an elementary loop"
-                       % (bi, ell))
+            bad.append("block %d: its %d-cycle is not an admissible loop"
+                       % (bi, len(rem)))
     return (not bad), bad
 
 
@@ -489,19 +514,23 @@ def best_greedy(adj, loops, B, restarts, target):
 # PART 4 -- THE MODEL
 # =====================================================================
 
-def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True,
+def build(adj, loops, K, B, ell=None, symmetry=True, redundant=True,
           strategy=True):
+    # `ell` is per-loop now: loops may have different lengths when
+    # --cycles admits more than one. Anything that used a single
+    # constant length reads len(p) instead.
     """Blocks 0..K-1 plus an 'unassigned' class K. Maximises the count
     of complete blocks. Returns (model, vars)."""
     n = len(adj)
     edges, eid = edge_index(adj)
     loops_at = collections.defaultdict(list)
     loops_with = collections.defaultdict(list)
+    lmin = min(len(p) for p in loops)
     for i, p in enumerate(loops):
         for v in p:
             loops_at[v].append(i)
-        for r in range(ell):
-            a, b = p[r], p[(r + 1) % ell]
+        for r in range(len(p)):
+            a, b = p[r], p[(r + 1) % len(p)]
             loops_with[eid[(min(a, b), max(a, b))]].append(i)
 
     m = cp_model.CpModel()
@@ -512,7 +541,7 @@ def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True,
          for v in range(n)]
     un = [y[v][K] for v in range(n)]
     lp = [m.NewBoolVar("lp%d" % v) for v in range(n)]
-    d = [m.NewIntVar(0, B - ell, "d%d" % v) for v in range(n)]
+    d = [m.NewIntVar(0, B - lmin, "d%d" % v) for v in range(n)]
     ok = [m.NewBoolVar("ok%d" % e) for e in range(len(edges))]
     par = {v: [m.NewBoolVar("p%d_%d" % (v, j)) for j in range(len(adj[v]))]
            for v in range(n)}
@@ -542,8 +571,8 @@ def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True,
         m.Add(used[k] >= used[k + 1])
 
     for i, p in enumerate(loops):
-        for r in range(ell):
-            m.Add(blk[p[r]] == blk[p[(r + 1) % ell]]).OnlyEnforceIf(x[i])
+        for r in range(len(p)):
+            m.Add(blk[p[r]] == blk[p[(r + 1) % len(p)]]).OnlyEnforceIf(x[i])
 
     for e, (u, v) in enumerate(edges):
         ju, jv = adj[v].index(u), adj[u].index(v)
@@ -555,8 +584,11 @@ def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True,
         m.Add(blk[u] != blk[v]).OnlyEnforceIf([ok[e].Not(), un[u].Not()])
 
     aux = {}
+    mixed = len({len(p) for p in loops}) > 1
     if redundant:
-        m.Add(sum(lp) == ell * nb)
+        # with mixed cycle lengths the loop-site count is no longer
+        # ell*nb: it is the total length of whichever loops got picked
+        m.Add(sum(lp) == sum(x[i] * len(loops[i]) for i in range(len(loops))))
         m.Add(sum(ok) == B * nb)
         ly = [[m.NewBoolVar("ly%d_%d" % (v, k)) for k in range(K)]
               for v in range(n)]
@@ -565,9 +597,11 @@ def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True,
                 m.AddImplication(ly[v][k], y[v][k])
                 m.AddImplication(ly[v][k], lp[v])
                 m.AddBoolOr([y[v][k].Not(), lp[v].Not(), ly[v][k]])
-        for k in range(K):
-            m.Add(sum(ly[v][k] for v in range(n)) == ell * used[k])
-        aux["ly"] = ly
+        if not mixed:
+            for k in range(K):
+                m.Add(sum(ly[v][k] for v in range(n))
+                      == len(loops[0]) * used[k])
+            aux["ly"] = ly
 
     if symmetry and K > 1:
         cc = [m.NewIntVar(0, K - 1, "c%d" % v) for v in range(n)]
@@ -592,11 +626,11 @@ def build(adj, loops, K, B, ell=ELL, symmetry=True, redundant=True,
     m.Maximize(nb)
     return m, {"x": x, "blk": blk, "nb": nb, "used": used, "y": y,
                "lp": lp, "d": d, "ok": ok, "par": par, "eid": eid,
-               "loops": loops, "adj": adj, "ell": ell, "aux": aux,
+               "loops": loops, "adj": adj, "ell": None, "aux": aux,
                "n": n, "K": K, "B": B, "edges": edges}
 
 
-def block_structure(S, adj, ell=ELL):
+def block_structure(S, adj):
     """(cycle, parent, depth) for one block: peel leaves to expose the
     unique cycle, then root a BFS forest on it."""
     S = set(S)
@@ -654,7 +688,7 @@ def add_hint(m, V, blocks):
     auxiliary variable -- loop choice, parent pointers, depths, edge
     justification -- for the solver to reconstruct, which on one core
     it never managed inside the budget. Hint all of it or none."""
-    n, K, ell = V["n"], V["K"], V["ell"]
+    n, K = V["n"], V["K"]
     loop_id = {frozenset(p): i for i, p in enumerate(V["loops"])}
     # Labels MUST appear in site order or the value-precedence symmetry
     # breaking rejects the hint outright -- see the Rev 2.2 note.
@@ -662,7 +696,7 @@ def add_hint(m, V, blocks):
     where, isloop, par_of, dep = {}, set(), {}, {}
     chosen = set()
     for k, S in enumerate(blocks):
-        cyc, parent, depth = block_structure(S, V["adj"], ell)
+        cyc, parent, depth = block_structure(S, V["adj"])
         i = loop_id.get(frozenset(cyc))
         if i is None:
             return 0                       # not a racetrack block; skip hint
@@ -692,8 +726,8 @@ def add_hint(m, V, blocks):
                 just.add(V["eid"][(min(u, v), max(u, v))])
     for i in chosen:
         p = V["loops"][i]
-        for r in range(ell):
-            a, b = p[r], p[(r + 1) % ell]
+        for r in range(len(p)):
+            a, b = p[r], p[(r + 1) % len(p)]
             just.add(V["eid"][(min(a, b), max(a, b))])
     for e in range(len(V["edges"])):
         m.AddHint(V["ok"][e], 1 if e in just else 0)
@@ -917,6 +951,11 @@ def main(argv=None):
                          "the symbols it defines if not given")
     ap.add_argument("--L", type=int, default=6)
     ap.add_argument("--B", type=int, default=DEFAULT_B)
+    ap.add_argument("--cycles", default=str(ELL),
+                    help="comma-separated cycle lengths a block may "
+                         "carry. The L=6 lattice has 1296 10-cycles, "
+                         "none at 11/12/13/15, 1296 at 14 and 9072 at "
+                         "16, so '10,14,16' is the meaningful relaxation")
     ap.add_argument("--seconds", type=float, default=600.0)
     ap.add_argument("--workers", type=int, default=0,
                     help="0 = every core on the machine")
@@ -966,10 +1005,11 @@ def main(argv=None):
                  "" if workers == 1 else "s"))
     except Exception:
         pass
-    adj, loops, n = load_lattice(find_engine(ns.engine), ns.L)
+    cycles = tuple(int(c) for c in ns.cycles.split(","))
+    adj, loops, n = load_lattice(find_engine(ns.engine), ns.L, cycles=cycles)
     edges, _ = edge_index(adj)
-    print("lattice L=%d: %d sites, %d bonds, %d elementary %d-loops"
-          % (ns.L, n, len(edges), len(loops), ELL))
+    print("lattice L=%d: %d sites, %d bonds, %d admissible cycles %s"
+          % (ns.L, n, len(edges), len(loops), list(cycles)))
     if n % ns.B:
         print("%d does not divide %d -- no exact tiling is possible"
               % (ns.B, n))
@@ -1058,7 +1098,7 @@ def main(argv=None):
         return 0
 
     t0 = time.time()
-    m, V = build(adj, loops, K, B, ELL,
+    m, V = build(adj, loops, K, B, None,
                  symmetry=not ns.no_symmetry,
                  redundant=not ns.no_redundant,
                  strategy=not ns.no_strategy)
@@ -1066,6 +1106,16 @@ def main(argv=None):
     if lb > 0:
         m.Add(V["nb"] >= lb)
         print("lower bound: requiring at least %d blocks" % lb)
+    # A hint smaller than the lower bound is INFEASIBLE by
+    # construction -- CP-SAT reports "the solution hint is complete,
+    # but it is infeasible" and burns time trying to repair it, while
+    # hint-guided subsolvers get anchored to a region that provably
+    # holds no solution. In decision mode (lb == K) drop it.
+    if hint and lb > len(hint):
+        print("hint has %d blocks but the lower bound is %d: dropping it"
+              " (a hint below the bound is infeasible by construction)"
+              % (len(hint), lb))
+        hint = []
     hinted = add_hint(m, V, hint) if hint else 0
     if hint and not hinted:
         print("  hint rejected: greedy blocks are not racetrack blocks")
