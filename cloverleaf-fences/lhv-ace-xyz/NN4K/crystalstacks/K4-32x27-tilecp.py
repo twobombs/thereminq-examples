@@ -75,6 +75,21 @@
 #
 #     Check failed: heuristics.fixed_search != nullptr
 #
+# REV 2.4 -- THE PACKING IS NOW IN THE FILE
+# =====================================================================
+# The best construction so far, 31 of 32 blocks, is embedded as
+# BUILTIN_PACKINGS and used automatically when --start finds nothing.
+# One file, no companion JSON, and a run begins one block from the
+# target rather than four.
+#
+# Site indices only mean anything relative to how the engine numbers
+# sites, so the constant is VERIFIED against the freshly built lattice
+# before use and declined with a printed reason if it does not hold. An
+# embedded constant that silently disagreed with the lattice would be
+# worse than no constant at all. --no-builtin skips it.
+#
+# Precedence: --start file, then the built-in, then greedy.
+
 # REV 2.3 -- LARGE NEIGHBOURHOOD SEARCH
 # =====================================================================
 # The global model is the wrong instrument. Given 864 sites, 32
@@ -240,6 +255,84 @@ def load_lattice(engine, L, cache=CACHE):
 def edge_index(adj):
     edges = sorted({(min(u, v), max(u, v)) for u in adj for v in adj[u]})
     return edges, {e: i for i, e in enumerate(edges)}
+
+
+# =====================================================================
+# PART 1b -- BUILT-IN PACKING
+# =====================================================================
+# The best construction reached so far: 31 of the 32 blocks, 837 of 864
+# sites, one block short. Embedded so the script is self-contained and
+# a run starts one block from the target instead of four.
+#
+# These are site indices into the lattice as this engine builds it, so
+# they mean something only if your engine numbers sites the same way.
+# builtin_packing() therefore VERIFIES them against the lattice it has
+# just constructed and declines, with a reason, if they do not hold up.
+# A stale or mis-indexed constant must not quietly poison a run.
+# --no-builtin skips it, which is what you want when measuring what the
+# search reaches unaided.
+#
+# It is a construction, not a proof. 31 says nothing about whether 32
+# exists.
+
+BUILTIN_PACKINGS = {
+    # (L, B): blocks
+    (6, 27): (
+    (0,1,5,30,31,66,180,185,221,246,247,282,396,401,432,437,462,463,498,648,649,653,679,680,828,834,839),
+    (2,157,182,183,186,187,188,218,248,336,367,397,398,404,433,434,470,588,614,618,619,650,651,805,831,835,836),
+    (3,9,39,45,219,225,255,261,286,399,435,440,441,471,476,477,482,513,620,652,657,663,687,688,693,699,837),
+    (6,8,13,19,192,193,216,224,229,235,402,403,408,409,438,439,444,445,451,629,654,656,661,662,667,840,841),
+    (7,36,37,38,43,44,73,140,217,223,253,260,319,468,469,473,475,505,571,655,684,685,686,691,692,721,788),
+    (10,11,15,41,42,46,47,220,222,226,227,252,257,406,442,443,447,474,478,479,504,509,658,659,664,690,695),
+    (12,18,24,49,50,55,228,234,240,259,265,271,414,450,455,461,480,481,486,492,660,666,672,678,697,698,703),
+    (14,20,51,81,87,117,123,230,231,267,297,302,303,333,339,452,483,519,549,554,555,585,668,669,735,766,771),
+    (16,52,53,58,59,88,89,196,232,238,263,268,269,412,448,453,484,485,490,520,521,670,696,701,706,707,736),
+    (17,22,23,167,191,197,202,203,208,233,383,407,413,418,419,449,454,628,634,635,665,671,845,846,850,851,856),
+    (21,27,170,200,201,206,207,237,380,385,386,416,417,423,458,459,489,602,632,637,638,639,675,823,849,854,855),
+    (25,26,57,63,204,205,236,242,243,273,279,420,421,456,457,488,494,495,525,636,641,673,674,705,711,852,859),
+    (28,29,32,33,34,35,239,244,245,250,281,424,430,460,464,465,466,467,491,496,502,676,677,681,682,683,719),
+    (40,72,77,102,107,132,138,256,287,317,318,323,348,354,472,508,539,570,606,689,694,720,725,750,755,786,787),
+    (48,54,84,85,120,121,122,158,264,295,300,301,337,368,516,517,547,552,553,589,702,733,739,768,769,770,806),
+    (56,61,62,67,68,86,93,103,241,266,272,277,278,283,487,493,499,518,524,530,535,704,709,710,715,716,741),
+    (60,65,71,90,96,97,251,270,275,276,306,308,497,503,522,528,529,533,558,708,713,714,738,744,745,746,775),
+    (64,70,94,95,101,126,131,249,274,280,305,311,347,501,526,527,532,557,562,563,712,718,742,743,749,774,779),
+    (69,74,99,104,105,135,254,284,285,290,315,320,321,351,500,506,536,537,567,572,717,722,747,752,753,784,789),
+    (75,80,111,112,116,152,178,291,296,327,328,332,358,511,512,543,548,579,584,610,728,729,734,759,760,765,801),
+    (76,113,137,143,149,174,179,292,322,353,359,395,544,545,569,574,611,647,724,730,761,780,791,797,822,827,858),
+    (78,79,109,110,114,115,151,258,289,294,330,331,355,510,541,542,546,582,583,727,732,757,758,762,763,799,800),
+    (82,108,144,145,181,210,211,288,298,324,329,360,361,390,391,427,540,550,576,581,613,642,643,767,792,793,829),
+    (83,119,125,155,161,262,293,299,304,335,341,365,371,514,515,551,556,587,592,593,617,623,726,731,773,803,809),
+    (91,127,128,153,159,160,307,338,343,344,369,375,376,523,559,560,590,591,596,621,627,776,777,807,808,813,844),
+    (100,106,136,141,172,173,177,310,316,352,357,388,389,568,573,603,604,609,640,748,754,785,790,820,821,826,857),
+    (118,148,154,184,190,209,215,334,363,364,370,394,400,425,431,580,586,615,616,646,772,796,802,832,833,838,863),
+    (124,129,130,134,165,166,171,309,340,345,346,350,377,381,382,387,561,566,597,598,633,778,783,814,815,819,825),
+    (133,168,169,198,199,312,313,349,378,379,384,410,415,564,565,600,601,605,630,631,781,816,817,818,847,848,853),
+    (146,147,176,212,213,325,326,362,392,393,422,428,429,577,578,607,608,644,645,764,794,795,824,830,860,861,862),
+    (150,156,162,163,164,189,194,195,342,366,372,373,374,405,411,594,595,624,625,626,798,804,810,811,812,842,843),
+    ),
+}
+
+
+def builtin_packing(adj, loops, L, B):
+    """The embedded packing if it verifies against this lattice, else []."""
+    blocks = BUILTIN_PACKINGS.get((L, B))
+    if not blocks:
+        return []
+    flat = [v for b in blocks for v in b]
+    if flat and max(flat) >= len(adj):
+        print("built-in packing does not fit this lattice (site %d of %d)"
+              " -- ignoring it." % (max(flat), len(adj)))
+        return []
+    blocks = [list(b) for b in blocks]
+    ok, bad = verify_blocks(blocks, adj, loops, B)
+    if not ok:
+        print("built-in packing failed verification against this lattice"
+              " -- ignoring it.")
+        for b in bad[:2]:
+            print("  ! %s" % b)
+        return []
+    print("built-in packing: %d blocks, verifier pass" % len(blocks))
+    return blocks
 
 
 # =====================================================================
@@ -640,6 +733,35 @@ class Progress(cp_model.CpSolverSolutionCallback):
 # the induced subgraph is exactly the right subproblem, not a
 # relaxation of one.
 
+def load_checkpoint(path, adj, loops, B):
+    """A packing from a --out checkpoint, or [] with a printed reason.
+
+    Never raises: a missing or unusable checkpoint is a reason to build
+    a fresh greedy packing, not to abort the run.
+    """
+    if not os.path.exists(path):
+        print("no checkpoint at %s -- building a greedy packing instead."
+              " (--start resumes a file an earlier --out wrote; there is"
+              " nothing to resume on a first run.)" % path)
+        return []
+    try:
+        blob = json.load(open(path))
+        blocks = [list(b) for b in blob["blocks"]]
+    except Exception as e:
+        print("could not read %s (%s) -- building a greedy packing"
+              " instead." % (path, e))
+        return []
+    ok, bad = verify_blocks(blocks, adj, loops, B)
+    print("resumed %s: %d blocks, verifier %s"
+          % (path, len(blocks), "pass" if ok else "FAIL"))
+    if not ok:
+        for b in bad[:3]:
+            print("  ! %s" % b)
+        print("  checkpoint rejected -- building a greedy packing instead.")
+        return []
+    return blocks
+
+
 def lns(adj, loops, blocks, B, iters, destroy, seconds, workers,
         out=None, seed=0, target=None):
     import random
@@ -766,6 +888,9 @@ def main(argv=None):
                     help="enable CP-SAT hint repair. OFF by default: it "
                          "aborts on some versions when the model declares "
                          "no decision strategy")
+    ap.add_argument("--no-builtin", action="store_true",
+                    help="ignore the embedded 31-block packing and start "
+                         "from a fresh greedy one")
     ap.add_argument("--start", metavar="FILE",
                     help="resume from a checkpoint written by --out "
                          "instead of building a greedy packing")
@@ -810,16 +935,10 @@ def main(argv=None):
 
     hint = []
     if ns.start:
-        blob = json.load(open(ns.start))
-        hint = [list(b) for b in blob["blocks"]]
-        ok, bad = verify_blocks(hint, adj, loops, B)
-        print("resumed %s: %d blocks, verifier %s"
-              % (ns.start, len(hint), "pass" if ok else "FAIL"))
-        for b in bad[:3]:
-            print("  ! %s" % b)
-        if not ok:
-            return 1
-    elif ns.hint:
+        hint = load_checkpoint(ns.start, adj, loops, B)
+    if not hint and not ns.no_builtin:
+        hint = builtin_packing(adj, loops, ns.L, B)
+    if not hint and ns.hint:
         t = time.time()
         hint = best_greedy(adj, loops, B, ns.hint, K)
         ok, bad = verify_blocks(hint, adj, loops, B)
@@ -843,7 +962,8 @@ def main(argv=None):
 
     if ns.lns:
         if not hint:
-            print("LNS needs a starting packing; raise --hint")
+            print("LNS needs a starting packing, and both --start and"
+                  " --hint came up empty. Re-run with --hint 200.")
             return 1
         t0 = time.time()
         best = lns(adj, loops, hint, B, ns.lns, ns.lns_destroy,
