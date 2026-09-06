@@ -52,6 +52,49 @@
 # looked for and what was examined instead of raising FileNotFoundError
 # from inside the import machinery.
 #
+# MULTI-DEVICE  (--devices)
+# =====================================================================
+# Earlier revisions used exactly one device: devs[0], one context, one
+# queue. On a host with a Vega and two NVIDIA cards that leaves most of
+# the machine idle, and rusticl only enumerated the AMD card anyway.
+#
+# --devices takes 'auto' (first GPU, the old behaviour), 'all' (every
+# GPU on every platform), or an explicit 'platform:device' list. Each
+# device gets its own context, program and queue, because an OpenCL
+# context cannot straddle two platforms and a mixed AMD/NVIDIA fleet is
+# always two platforms. Rounds are enqueued on every device before any
+# is collected, so they genuinely overlap rather than taking turns.
+#
+# Every device gets its own seed each round. replay() is a function of
+# (gid, seed), so each work-item stays independently reproducible on
+# the host and --validate checks all devices: the correctness story
+# does not weaken as devices are added. Naming one device twice
+# (--devices 0:0,0:0) is a legitimate way to exercise this path on a
+# single-GPU box, and is how it was tested here.
+#
+# Work-group size is derived per device from its own local_mem_size, so
+# a card with less LDS gets a smaller group rather than a build failure.
+#
+# GPU AS THE LNS REPAIR ENGINE  (--fix)
+# =====================================================================
+# LNS in tilecp.py stalled because --lns-destroy 8 returned UNKNOWN on
+# every iteration: CP-SAT could not SOLVE a 243-site subproblem inside
+# the per-iteration budget. Sampling does not have to solve it.
+#
+# --fix holds most blocks of a packing fixed and samples completions of
+# the rest, which is destroy-and-repair with the repair done by brute
+# force. Against the 31-block packing with --tear 6:
+#
+#   uniform sampling   42,000,000 candidates, never once reached 31
+#   --fix repair          393,216 candidates, reached 31 eight times
+#
+# That is the difference between an instrument that plateaus at 30 and
+# one that lives at 31. It has not produced a 32.
+#
+# Larger tears are fine here, unlike in CP-SAT LNS where 8 was already
+# past the point of solvability. The limit is different: see feasible()
+# on why 58 percent of work-items score zero in this mode.
+#
 # WHAT 42 MILLION SAMPLES SHOWED
 # =====================================================================
 # On a Radeon Pro VII the LDS and conflict-row changes below took this
@@ -172,6 +215,9 @@ void search(__global const ulong *lmask,   // NL * W
             __global const int   *lsite,   // NL * ELL
             __global const int   *adjv,    // N * 3
             __global const ulong *conf,    // NL * CW, loop conflict rows
+            __global const ulong *blocked, // W, sites held by fixed blocks
+            __global const ulong *avail0,  // CW, loops still selectable
+            const int nfix,                // fixed blocks, scored as-is
             const uint seed,
             __global int *score,
             __global int *sel_out)
@@ -191,26 +237,32 @@ void search(__global const ulong *lmask,   // NL * W
     int sel[KT], cand[CAP], added[B - ELL];
     int w, j, k = 0;
 
-    // ---- pick KT pairwise-disjoint loops -------------------------
-    for (w = 0; w < CW; w++) avail[w] = ~0UL;
-    if (NL & 63) avail[CW - 1] = (1UL << (NL & 63)) - 1UL;
+    // ---- pick the remaining pairwise-disjoint loops ---------------
+    // With nfix > 0 the host has already cleared avail0 of every loop
+    // that touches a fixed block, so sampling here can only ever
+    // produce completions consistent with what is held fixed. This is
+    // LNS repair by brute force: CP-SAT could not SOLVE a 243-site
+    // subproblem inside a per-iteration budget, but it does not need
+    // solving when it can be sampled a million times a second.
+    int need = KT - nfix;
+    for (w = 0; w < CW; w++) avail[w] = avail0[w];
 
-    for (int a = 0; a < MAXATT && k < KT; a++) {
+    for (int a = 0; a < MAXATT && k < need; a++) {
         int r = (int)(xs32(&st) % (uint)NL);
         if (!GET(avail, r)) continue;
         sel[k++] = r;
         for (w = 0; w < CW; w++) avail[w] &= ~conf[r * CW + w];
     }
-    if (k < KT) { score[gid] = 0; return; }
-    for (j = 0; j < KT; j++) sel_out[gid * KT + j] = sel[j];
+    if (k < need) { score[gid] = 0; return; }
+    for (j = 0; j < need; j++) sel_out[gid * KT + j] = sel[j];
 
-    for (w = 0; w < W; w++) lfree[base + w] = ~0UL;
-    for (j = 0; j < KT; j++)
+    for (w = 0; w < W; w++) lfree[base + w] = ~blocked[w];
+    for (j = 0; j < need; j++)
         for (w = 0; w < W; w++) lfree[base + w] &= ~lmask[sel[j] * W + w];
 
     // ---- grow each loop into a B-site block ----------------------
-    int done = 0;
-    for (int b = 0; b < KT; b++) {
+    int done = nfix;
+    for (int b = 0; b < need; b++) {
         int i = sel[b];
         for (w = 0; w < W; w++) { lcur[base + w] = lmask[i * W + w]; inc[w] = 0UL; }
         int cnt = ELL, nc = 0, na = 0;
@@ -284,26 +336,30 @@ class XS32(object):
         return self.s
 
 
-def replay(gid, seed, loops, adj, n, maxatt, cap, conf):
+def replay(gid, seed, loops, adj, n, maxatt, cap, conf,
+           blocked=None, avail0=None, fixed=()):
     """Reproduce one work-item exactly. Returns (score, blocks)."""
     r = XS32(gid, seed)
     nl = len(loops)
-    avail = np.ones(nl, dtype=bool)
+    need = K_TARGET - len(fixed)
+    avail = np.ones(nl, dtype=bool) if avail0 is None else avail0.copy()
     sel = []
     for _ in range(maxatt):
-        if len(sel) >= K_TARGET:
+        if len(sel) >= need:
             break
         i = r.next() % nl
         if not avail[i]:
             continue
         sel.append(i)
         avail &= ~conf[i]
-    if len(sel) < K_TARGET:
+    if len(sel) < need:
         return 0, []
     free = np.ones(n, dtype=bool)
+    if blocked is not None:
+        free &= ~blocked
     for i in sel:
         free[list(loops[i])] = False
-    blocks = []
+    blocks = [list(b) for b in fixed]
     for i in sel:
         cur = set(loops[i])
         inc = set()
@@ -423,9 +479,22 @@ def main(argv=None):
     ap.add_argument("--local", type=int, default=64,
                     help="work-group size; LDS use is 2*local*W*8 bytes")
     ap.add_argument("--seed", type=int, default=12345)
+    ap.add_argument("--devices", default="auto",
+                    help="'auto' (first GPU), 'all' (every GPU across "
+                         "every platform), or a list like '0:0,1:0' of "
+                         "platform:device. Each device gets its own "
+                         "context, so mixed AMD/NVIDIA fleets work")
     ap.add_argument("--platform", type=int, default=-1)
     ap.add_argument("--device", type=int, default=-1)
     ap.add_argument("--list-devices", action="store_true")
+    ap.add_argument("--fix", metavar="FILE",
+                    help="hold most blocks of a packing fixed and sample "
+                         "completions of the rest -- LNS repair, but by "
+                         "brute force on the GPU instead of CP-SAT")
+    ap.add_argument("--tear", type=int, default=6,
+                    help="blocks torn out of --fix each round. Larger is "
+                         "fine here: sampling does not have to SOLVE the "
+                         "region, which is what capped CP-SAT at 4-5")
     ap.add_argument("--threshold", type=int, default=0,
                     help="keep every candidate scoring at least this. "
                          "0 = best seen minus one")
@@ -481,109 +550,251 @@ def main(argv=None):
           % (lmask.nbytes // 1024, lsite.nbytes // 1024, adjv.nbytes // 1024,
              confw.nbytes // 1024))
 
+    base_blocks = []
+    if ns.fix:
+        if not os.path.exists(ns.fix):
+            raise SystemExit(
+                "no packing at %s.\n"
+                "  --fix needs a checkpoint to hold blocks from. Make one"
+                " with:\n    python3 %s --lns 1 --out %s"
+                % (ns.fix, os.path.basename(tpath), ns.fix))
+        try:
+            blob = json.load(open(ns.fix))
+            base_blocks = [list(b) for b in blob["blocks"]]
+        except Exception as e:
+            raise SystemExit("could not read %s (%s)" % (ns.fix, e))
+        ok, bad = t.verify_blocks(base_blocks, adj, loops, B)
+        print("fix source %s: %d blocks, verifier %s"
+              % (ns.fix, len(base_blocks), "pass" if ok else "FAIL"))
+        for b in bad[:2]:
+            print("  ! %s" % b)
+        if not ok:
+            return 1
+
     plats = cl.get_platforms()
-    plat = plats[ns.platform] if ns.platform >= 0 else None
-    if plat is None:
-        for p in plats:
-            if p.get_devices(cl.device_type.GPU):
-                plat = p
-                break
-        plat = plat or plats[0]
-    devs = plat.get_devices()
-    dev = devs[ns.device] if ns.device >= 0 else devs[0]
-    print("device: %s (%s), %d CUs"
-          % (dev.name.strip(), plat.name.strip(), dev.max_compute_units))
 
-    ctx = cl.Context([dev])
-    q = cl.CommandQueue(ctx)
-    lsz = ns.local
-    lds = 2 * lsz * w * 8
-    if lds > dev.local_mem_size:
-        lsz = max(8, int(dev.local_mem_size / (2 * w * 8)) & ~7)
-        print("local size %d needs %d KB LDS, only %d KB available;"
-              " dropping to %d" % (ns.local, lds // 1024,
-                                   dev.local_mem_size // 1024, lsz))
-    print("work-group %d, LDS %d B/group (%d B/item)"
-          % (lsz, 2 * lsz * w * 8, 2 * w * 8))
-    opts = ("-D N=%d -D W=%d -D NL=%d -D CW=%d -D ELL=%d -D B=%d -D KT=%d "
-            "-D CAP=%d -D MAXATT=%d -D LS=%d"
-            % (n, w, nl, cw, ELL, B, K_TARGET, ns.cap, ns.maxatt, lsz))
-    t0 = time.time()
-    prg = cl.Program(ctx, KERNEL).build(options=opts)
-    krn = cl.Kernel(prg, "search")   # retrieve once; re-retrieving per
-    print("kernel built in %.2fs" % (time.time() - t0))   # round is costly
+    def pick_devices():
+        """Resolve --devices into a list of (platform, device) pairs.
 
-    mf = cl.mem_flags
-    d_lmask = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=lmask)
-    d_lsite = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=lsite)
-    d_adj = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=adjv)
-    d_conf = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=confw)
-    G = (ns.global_size // lsz) * lsz
-    score = np.zeros(G, dtype=np.int32)
-    d_score = cl.Buffer(ctx, mf.WRITE_ONLY, score.nbytes)
-    d_sel = cl.Buffer(ctx, mf.WRITE_ONLY, G * K_TARGET * 4)
+        Different vendors live on different platforms and an OpenCL
+        context cannot straddle two, so each device gets its own
+        context, program and queue. Duplicates are allowed -- naming
+        the same device twice is a legitimate way to test the
+        multi-device path on a single-GPU box.
+        """
+        spec = ns.devices
+        if ns.platform >= 0 or ns.device >= 0:
+            p = plats[ns.platform if ns.platform >= 0 else 0]
+            ds = p.get_devices()
+            return [(p, ds[ns.device if ns.device >= 0 else 0])]
+        if spec and spec not in ("auto", "all"):
+            out = []
+            for tok in spec.split(","):
+                pi, _, di = tok.partition(":")
+                p = plats[int(pi)]
+                out.append((p, p.get_devices()[int(di or 0)]))
+            return out
+        gpus = [(p, d) for p in plats for d in p.get_devices(cl.device_type.GPU)]
+        if spec == "all":
+            return gpus or [(plats[0], plats[0].get_devices()[0])]
+        return [gpus[0]] if gpus else [(plats[0], plats[0].get_devices()[0])]
 
+    picked = pick_devices()
+    if not picked:
+        raise SystemExit("no OpenCL devices; try --list-devices")
+
+    opts_common = ("-D N=%d -D W=%d -D NL=%d -D CW=%d -D ELL=%d -D B=%d "
+                   "-D KT=%d -D CAP=%d -D MAXATT=%d"
+                   % (n, w, nl, cw, ELL, B, K_TARGET, ns.cap, ns.maxatt))
+
+    class Unit(object):
+        """One device: its own context, queue, program and buffers."""
+
+        def __init__(self, idx, plat, dev):
+            self.idx, self.plat, self.dev = idx, plat, dev
+            self.ctx = cl.Context([dev])
+            self.q = cl.CommandQueue(self.ctx)
+            self.lsz = ns.local
+            if 2 * self.lsz * w * 8 > dev.local_mem_size:
+                self.lsz = max(8, int(dev.local_mem_size / (2 * w * 8)) & ~7)
+            self.G = max(self.lsz, (ns.global_size // self.lsz) * self.lsz)
+            t0 = time.time()
+            prg = cl.Program(self.ctx, KERNEL).build(
+                options=opts_common + " -D LS=%d" % self.lsz)
+            self.krn = cl.Kernel(prg, "search")
+            f = cl.mem_flags
+            self.lmask = cl.Buffer(self.ctx, f.READ_ONLY | f.COPY_HOST_PTR,
+                                   hostbuf=lmask)
+            self.lsite = cl.Buffer(self.ctx, f.READ_ONLY | f.COPY_HOST_PTR,
+                                   hostbuf=lsite)
+            self.adjb = cl.Buffer(self.ctx, f.READ_ONLY | f.COPY_HOST_PTR,
+                                  hostbuf=adjv)
+            self.conf = cl.Buffer(self.ctx, f.READ_ONLY | f.COPY_HOST_PTR,
+                                  hostbuf=confw)
+            self.score = np.zeros(self.G, dtype=np.int32)
+            self.dscore = cl.Buffer(self.ctx, f.WRITE_ONLY, self.score.nbytes)
+            self.dsel = cl.Buffer(self.ctx, f.WRITE_ONLY,
+                                  self.G * K_TARGET * 4)
+            print("  [%d] %s (%s), %d CUs, wg %d, %d work-items,"
+                  " built in %.2fs"
+                  % (idx, dev.name.strip(), plat.name.strip(),
+                     dev.max_compute_units, self.lsz, self.G,
+                     time.time() - t0))
+
+        def enqueue(self, bl, av, nfix, seed):
+            f = cl.mem_flags
+            self.dbl = cl.Buffer(self.ctx, f.READ_ONLY | f.COPY_HOST_PTR,
+                                 hostbuf=bl)
+            self.dav = cl.Buffer(self.ctx, f.READ_ONLY | f.COPY_HOST_PTR,
+                                 hostbuf=av)
+            self.krn(self.q, (self.G,), (self.lsz,), self.lmask, self.lsite,
+                     self.adjb, self.conf, self.dbl, self.dav,
+                     np.int32(nfix), np.uint32(seed), self.dscore, self.dsel)
+
+        def collect(self):
+            cl.enqueue_copy(self.q, self.score, self.dscore)
+            self.q.finish()
+            return self.score
+
+    print("devices:")
+    units = [Unit(i, p, d) for i, (p, d) in enumerate(picked)]
+    total_items = sum(u.G for u in units)
+    print("work-items per round: %d across %d device%s"
+          % (total_items, len(units), "" if len(units) == 1 else "s"))
+
+    ones = np.array([np.uint64(0xFFFFFFFFFFFFFFFF)] * cw, dtype=np.uint64)
+    if nl & 63:
+        ones[cw - 1] = np.uint64((1 << (nl & 63)) - 1)
+    loopset = {frozenset(p): i for i, p in enumerate(loops)}
+
+    def feasible(av_bool, need):
+        """Can `need` disjoint loops even be drawn from what is left?
+
+        Cheap insurance against a tear that leaves no room at all, and
+        it costs microseconds. Be clear about what it does NOT fix: in
+        --fix mode roughly 58 percent of work-items still score zero,
+        and adding this precheck did not move that figure. Raising
+        --maxatt eightfold did not move it either, so the failures are
+        not probe exhaustion and not dead tears. They are random
+        selection order failing in a tight region -- greedy from a good
+        start finds `need` disjoint loops where a random order paints
+        itself into a corner after four picks. Inherent to uniform
+        probing; a biased sampler would be the fix, not a bigger
+        budget.
+        """
+        avail = av_bool.copy()
+        got = 0
+        for i in np.nonzero(avail)[0]:
+            if not avail[i]:
+                continue
+            got += 1
+            if got >= need:
+                return True
+            avail &= ~conf[i]
+        return False
+
+    def make_round(rng, tries=64):
+        """Choose which blocks to hold fixed, and derive the masks."""
+        if not base_blocks:
+            return np.zeros(w, dtype=np.uint64), ones.copy(), [], 0
+        for _ in range(tries):
+            r = _make_round(rng)
+            if feasible(r[4], K_TARGET - r[3]):
+                return r[:4]
+        return r[:4]
+
+    def _make_round(rng):
+        idx = list(range(len(base_blocks)))
+        rng.shuffle(idx)
+        keep = [base_blocks[i] for i in idx[ns.tear:]]
+        bl = np.zeros(w, dtype=np.uint64)
+        held = set()
+        for blk in keep:
+            for v in blk:
+                bl[v >> 6] |= np.uint64(1) << np.uint64(v & 63)
+                held.add(v)
+        av = np.zeros(cw, dtype=np.uint64)
+        avb = np.zeros(nl, dtype=bool)
+        for i, p in enumerate(loops):
+            if not (set(p) & held):
+                av[i >> 6] |= np.uint64(1) << np.uint64(i & 63)
+                avb[i] = True
+        return bl, av, keep, len(keep), avb
+
+    import random as _random
+    rng = _random.Random(ns.seed)
     hist = collections.Counter()
     best, best_blocks = 0, []
     pool, pool_keys = [], set()
     total, elapsed = 0, 0.0
     for rnd in range(ns.rounds):
-        seed = np.uint32((ns.seed + rnd * 7919) & 0xFFFFFFFF)
+        bl, av, keep, nfix = make_round(rng)
+        blmask = np.zeros(n, dtype=bool)
+        for blk in keep:
+            blmask[list(blk)] = True
+        avb = np.zeros(nl, dtype=bool)
+        for i in range(nl):
+            avb[i] = bool((av[i >> 6] >> np.uint64(i & 63)) & np.uint64(1))
+
+        # One seed per device per round. replay() is a function of
+        # (gid, seed), so distinct seeds keep every work-item
+        # independently reproducible on the host -- the validation
+        # story does not change just because there are more devices.
+        seeds = [np.uint32((ns.seed + rnd * 7919 + u.idx * 104729)
+                           & 0xFFFFFFFF) for u in units]
         t0 = time.time()
-        krn(q, (G,), (lsz,), d_lmask, d_lsite, d_adj, d_conf, seed,
-            d_score, d_sel)
-        cl.enqueue_copy(q, score, d_score)
-        q.finish()
+        for u, sd in zip(units, seeds):
+            u.enqueue(bl, av, nfix, sd)      # all devices run concurrently
+        results = [(u, sd, u.collect().copy()) for u, sd in zip(units, seeds)]
         dt = time.time() - t0
         elapsed += dt
-        total += G
-        for s in score:
-            hist[int(s)] += 1
-        top = int(score.max())
+        total += total_items
+        top = 0
+        for _, _, sc in results:
+            for v in sc:
+                hist[int(v)] += 1
+            top = max(top, int(sc.max()))
         print("  round %d: %d candidates in %.2fs = %.0f/sec, best %d"
-              % (rnd, G, dt, G / dt, top))
+              % (rnd, total_items, dt, total_items / max(dt, 1e-9), top))
         sys.stdout.flush()
-        # Harvest EVERY good candidate, not just the round's best.
-        # A single winner per round throws away ~150 distinct 30-block
-        # packings a second, and a diverse pool of starts is worth far
-        # more to LNS than one deep one.
-        # The pool must EVICT, not merely fill: filling it with the
-        # first round's 29s and then ignoring every later 30 is worse
-        # than keeping one winner. Accept anything beating the pool's
-        # weakest member and drop that member.
+
         thr = ns.threshold or max(best, top) - 1
         if len(pool) < ns.keep or top > min(len(p) for p in pool):
             floor = thr if len(pool) < ns.keep else min(len(p) for p in pool)
-            gids = np.nonzero(score >= floor)[0]
-            if len(gids) > 4 * ns.keep:
-                gids = gids[np.argsort(-score[gids])[:4 * ns.keep]]
-            for gid in gids:
-                sc, blocks = replay(int(gid), int(seed), loops, adj, n,
-                                    ns.maxatt, ns.cap, conf)
-                if sc != int(score[gid]):
-                    print("    MISMATCH gid %d: kernel %d, host %d"
-                          % (gid, int(score[gid]), sc))
-                    continue
-                ok, bad = t.verify_blocks(blocks, adj, loops, B)
-                if not ok:
-                    print("    gid %d failed the verifier: %s" % (gid, bad[:1]))
-                    continue
-                key = tuple(sorted(tuple(b) for b in blocks))
-                if key in pool_keys:
-                    continue
-                pool_keys.add(key)
-                pool.append(blocks)
-                if len(pool) > ns.keep:
-                    pool.sort(key=lambda p: -len(p))
-                    pool.pop()
-                if sc > best:
-                    best, best_blocks = sc, blocks
-                    print("    gid %d: %d blocks, verifier pass" % (gid, sc))
-            if gids.size:
+            for u, sd, sc in results:
+                gids = np.nonzero(sc >= floor)[0]
+                if len(gids) > 4 * ns.keep:
+                    gids = gids[np.argsort(-sc[gids])[:4 * ns.keep]]
+                for gid in gids:
+                    s_, blocks = replay(int(gid), int(sd), loops, adj, n,
+                                        ns.maxatt, ns.cap, conf,
+                                        blmask, avb, keep)
+                    if s_ != int(sc[gid]):
+                        print("    MISMATCH dev %d gid %d: kernel %d, host %d"
+                              % (u.idx, gid, int(sc[gid]), s_))
+                        continue
+                    ok, bad = t.verify_blocks(blocks, adj, loops, B)
+                    if not ok:
+                        print("    dev %d gid %d failed the verifier: %s"
+                              % (u.idx, gid, bad[:1]))
+                        continue
+                    key = tuple(sorted(tuple(b) for b in blocks))
+                    if key in pool_keys:
+                        continue
+                    pool_keys.add(key)
+                    pool.append(blocks)
+                    if len(pool) > ns.keep:
+                        pool.sort(key=lambda p: -len(p))
+                        pool.pop()
+                    if s_ > best:
+                        best, best_blocks = s_, blocks
+                        print("    dev %d gid %d: %d blocks, verifier pass"
+                              % (u.idx, gid, s_))
+            if pool:
                 print("    pool %d/%d, sizes %d..%d"
-                      % (len(pool), ns.keep,
-                         min(len(p) for p in pool) if pool else 0,
-                         max(len(p) for p in pool) if pool else 0))
+                      % (len(pool), ns.keep, min(len(p) for p in pool),
+                         max(len(p) for p in pool)))
+        last = (results, blmask, avb, keep)
 
     print("")
     print("%d candidates in %.1fs = %.0f/sec" % (total, elapsed,
@@ -592,18 +803,20 @@ def main(argv=None):
 
     if ns.validate:
         print("")
-        print("validating %d work-items by exact host replay" % ns.validate)
-        seed = int(np.uint32((ns.seed + (ns.rounds - 1) * 7919) & 0xFFFFFFFF))
-        bad = 0
-        for gid in range(min(ns.validate, G)):
-            sc, _ = replay(gid, seed, loops, adj, n, ns.maxatt,
-                           ns.cap, conf)
-            if sc != int(score[gid]):
-                bad += 1
-                print("  MISMATCH gid %d: kernel %d, host %d"
-                      % (gid, int(score[gid]), sc))
-        print("  %d/%d agree" % (min(ns.validate, G) - bad,
-                                 min(ns.validate, G)))
+        print("validating %d work-items per device by exact host replay"
+              % ns.validate)
+        results, blmask, avb, keep = last
+        bad = tot = 0
+        for u, sd, sc in results:
+            for gid in range(min(ns.validate, len(sc))):
+                tot += 1
+                s_, _ = replay(gid, int(sd), loops, adj, n, ns.maxatt,
+                               ns.cap, conf, blmask, avb, keep)
+                if s_ != int(sc[gid]):
+                    bad += 1
+                    print("  MISMATCH dev %d gid %d: kernel %d, host %d"
+                          % (u.idx, gid, int(sc[gid]), s_))
+        print("  %d/%d agree" % (tot - bad, tot))
         if bad:
             print("  kernel and host disagree -- do not trust the output")
             return 2
