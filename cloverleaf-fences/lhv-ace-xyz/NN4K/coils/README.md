@@ -1,5 +1,6 @@
 # Exact Solutions and Tiling Optimizations for the 3D Kitaev Model on the Hyperoctagon Lattice
 
+## This document has been generated - statements, results and conclusions could be totally hallucinated; emptor caveat
 ## Abstract
 
 This repository provides exact solutions and optimization engines for the three-dimensional Kitaev quantum spin liquid on the hyperoctagon lattice. We document two highly specialized Python engines: `K4-32x27-equiv.py`, which utilizes Constraint Programming (CP-SAT) to search for translation-equivariant $32 \times 27$ tilings on the $L=6$ lattice to construct optimal loop-orbit closures; and `K4-Chrystalstacks-Kitaev-single.py`, which computes the exact free-fermion ground state and introduces a formalism for exact seam repair using entanglement Hamiltonians. These techniques allow for the localized extraction and export of a 27-qubit subsystem (the "racetrack manifold") specifically conditioned for ingestion by multi-GPU Tensor Network and Automatic Circuit Elision (ACE) backends.
