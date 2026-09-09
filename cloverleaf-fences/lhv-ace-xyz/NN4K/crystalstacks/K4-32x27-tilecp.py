@@ -75,6 +75,47 @@
 #
 #     Check failed: heuristics.fixed_search != nullptr
 #
+# THE NEXT ENCODING QUESTION: --no-redundant
+# =====================================================================
+# With symmetry settled, the redundant constraints are the remaining
+# unmeasured choice. They are not small: dropping them takes the model
+# from 63,969 variables to 36,321, because the ly[v][k] reification is
+# 864 x 32 booleans on its own. Presolve gets cheaper too -- probing
+# runs in about 0.8s against 1.3s.
+#
+# Cheaper is not the same as better: the whole point of a redundant
+# constraint is to propagate, and fewer variables that propagate worse
+# can easily lose. This has NOT been measured to completion, which is
+# why the launcher now spends its second proof slot on it rather than
+# on the symmetry question that is already answered.
+#
+# REV 2.7 -- THE SYMMETRY BREAKING WAS HARMFUL; NOW OFF BY DEFAULT
+# =====================================================================
+# A 96-thread run put both encodings side by side for an hour, 40
+# workers each, identical model otherwise. The result is not close.
+#
+#                        with my symmetry    --no-symmetry
+#   [Probe] first round         29.5s              2.2s
+#   variables probed           14,267           175,254
+#   search began at            100.3s             14.9s
+#   subtrees closed in 1h           0        2 (of 49)
+#
+# The cause is the value-precedence encoding itself. It builds an
+# 864-long chain of AddMaxEquality -- mx[v] = max(mx[v-1], cc[v]) --
+# and that sequential dependency is poison for probing: twelve times
+# FEWER variables probed in thirteen times MORE time, about 440x worse
+# per probe. Presolve then eats a hundred seconds before search starts.
+#
+# And it was never needed. CP-SAT finds the symmetry by itself -- 4
+# generators, orbits of size 216 -- and applies orbit-based breaking
+# during presolve. My constraints did not add information, they only
+# obstructed the machinery that would have found it anyway.
+#
+# So --symmetry is now opt-in and off by default. Only the version
+# without it made any proof progress at all: closed:1/47 at 454s and
+# closed:2/49 at 680s, against zero subtrees closed by the other in a
+# full hour.
+#
 # REV 2.6 -- SAFE TO RUN CONCURRENTLY
 # =====================================================================
 # The lattice cache was a single fixed path shared by every process and
@@ -1001,7 +1042,12 @@ def main(argv=None):
                          "this before launching concurrent jobs so they "
                          "do not each enumerate the same cycles")
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--no-symmetry", action="store_true")
+    ap.add_argument("--symmetry", action="store_true",
+                    help="enable the hand-written value-precedence "
+                         "symmetry breaking. OFF by default: it is "
+                         "measurably harmful, see REV 2.7")
+    ap.add_argument("--no-symmetry", action="store_true",
+                    help="deprecated; symmetry breaking is off by default")
     ap.add_argument("--no-redundant", action="store_true")
     ap.add_argument("--lb", type=int, default=-1, metavar="N",
                     help="require at least N blocks. Default: the greedy "
@@ -1147,7 +1193,7 @@ def main(argv=None):
 
     t0 = time.time()
     m, V = build(adj, loops, K, B, None,
-                 symmetry=not ns.no_symmetry,
+                 symmetry=ns.symmetry and not ns.no_symmetry,
                  redundant=not ns.no_redundant,
                  strategy=not ns.no_strategy)
     lb = ns.lb if ns.lb >= 0 else len(hint)
