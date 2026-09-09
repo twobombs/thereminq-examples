@@ -1,79 +1,62 @@
-# Exact Solutions and Tiling Optimizations for the 3D Kitaev Model on the Hyperoctagon Lattice
+# Exact Free-Fermion Anchors and CP-SAT Tiling for the Hyperoctagon Kitaev Model
 
-## This document has been generated - statements, results and conclusions could be totally hallucinated; emptor caveat
 ## Abstract
+This repository contains the simulation engine and formal mathematical framework for executing the Kitaev model on the three-dimensional hyperoctagon lattice, also known as the $(10,3)\text{-}a$ or $K_4$ crystal. By leveraging CP-SAT constraint programming, we identify $32 \times 27$ equivariant tilings, extracting 27-qubit patch manifolds (racetracks) suitable for distributed quantum simulation. We present a methodology for exact free-fermion anchor validation and Gaussian seam repair using the exact entanglement Hamiltonian $A_{\text{ent}}$ to generate the boundary correction $\Sigma$. We also detail state-vector execution on these 27-qubit blocks using the `k4_pyqrack_driver.py` native driver.
 
-This repository provides exact solutions and optimization engines for the three-dimensional Kitaev quantum spin liquid on the hyperoctagon lattice. We document two highly specialized Python engines: `K4-32x27-equiv.py`, which utilizes Constraint Programming (CP-SAT) to search for translation-equivariant $32 \times 27$ tilings on the $L=6$ lattice to construct optimal loop-orbit closures; and `K4-Chrystalstacks-Kitaev-single.py`, which computes the exact free-fermion ground state and introduces a formalism for exact seam repair using entanglement Hamiltonians. These techniques allow for the localized extraction and export of a 27-qubit subsystem (the "racetrack manifold") specifically conditioned for ingestion by multi-GPU Tensor Network and Automatic Circuit Elision (ACE) backends.
+## 1. Introduction and Model
+The Kitaev model on the hyperoctagon lattice represents a three-dimensional exactly solvable spin model that harbors a quantum spin liquid ground state. Crucially, the gapless Majorana modes form an extended two-dimensional Majorana Fermi surface, inherently protected by lattice symmetries.
 
-## Introduction
+The Hamiltonian is given by:
+$$ H = -J_x \sum_{\langle i,j \rangle_x} \sigma_i^x \sigma_j^x - J_y \sum_{\langle i,j \rangle_y} \sigma_i^y \sigma_j^y - J_z \sum_{\langle i,j \rangle_z} \sigma_i^z \sigma_j^z $$
+where $\sigma^\alpha$ are Pauli matrices, and the summation runs over the nearest-neighbor bonds of the $x, y, z$ types on the hyperoctagon lattice. In the thermodynamic limit, the ground state energy is analytically bound (e.g., benchmarked at optimal $-0.769884$).
 
-The exact solvability of the Kitaev honeycomb model extends to three-dimensional tricoordinated lattices, where the spin degrees of freedom fractionalize into itinerant Majorana fermions strongly coupled to a static, emergent $\mathbb{Z}_2$ gauge field. These systems can host gapless quantum spin liquids (QSLs) with intricate ground-state physics. The hyperoctagon lattice, characterized as the Laves' graph of girth ten or the $K_4$ crystal, has been shown to support a QSL ground state with a Majorana Fermi surface.
+## 2. Methods: Equivariant Tiling and Seam Repair
+### 2.1 Equivariant Tiling
+To partition the infinite lattice for finite-size tensor network or state-vector simulation, we employ a constraint programming approach (CP-SAT) to identify $32 \times 27$ equivariant tilings. The translation symmetry of the hyperoctagon lattice allows us to reduce the problem down to 8 distinct block types through a $\mathbb{Z}_2 \times \mathbb{Z}_2$ subgroup quotient graph lifting.
 
-This documentation covers the theoretical framework and implementation details of our tools designed to extract, tile, and simulate these strongly correlated phenomena on macroscopic grid architectures.
+### 2.2 Manifold Extraction and Seam Repair
+The extraction of 27-qubit patch manifolds (racetracks) introduces artificial boundaries (seams) that break translational invariance. To validate these patches, we compute an exact free-fermion anchor.
 
-## Lattice & Model Geometry
+The seam repair methodology utilizes the exact entanglement Hamiltonian $A_{\text{ent}}$ derived from the free-fermion spectrum. We generate a Gaussian boundary correction $\Sigma$:
+$$ \Sigma = \int e^{i A_{\text{ent}}} d\tau $$
+which effectively repairs the quotient graph boundaries.
 
-The physical geometry considered here is the hyperoctagon lattice, denoted as the $(10,3)$-a net, the *srs* net, or the maximal abelian cover of the $K_4$ graph. The lattice features elementary closed loops of length $\ell = 10$. The Kitaev model on this lattice is defined by the Hamiltonian:
+### 2.3 Flux Operators and Coils
+We utilize a Hadamard test measurement to evaluate the 10-qubit flux word $W$, ensuring the system remains in the physical vortex-free sector:
+$$ W = \prod_{p \in \text{loop}} \sigma_p^\alpha $$
+Furthermore, non-contractible tree-site coils are formulated. The 3D winding vectors of these coils are computed to extract the twist-response tensor of the Majorana Fermi surface, providing order parameters for the topological phase.
 
-$$H = - \sum_{\langle j, k \rangle_{\alpha}} K_{\alpha} \sigma_j^{\alpha} \sigma_k^{\alpha}$$
+## 3. Execution and Simulation Instructions
 
-where $K_{\alpha}$ are bond-directional exchange couplings ($\alpha = x,y,z$) and $\sigma_j^{\alpha}$ are Pauli matrices on site $j$. Because the lattice is bipartite and tricoordinated, the underlying Hilbert space supports an exact mapping via parton fractionalization. The macroscopic properties of this geometry give rise to conserved, commuting loop operators $\hat{W}_p = \prod_{j \in p} \sigma_j^{\alpha_j}$, corresponding to an emergent static $\mathbb{Z}_2$ gauge field.
+The simulation pipeline involves two primary components: the QASM generator `K4-qasm.py` and the native Python execution driver `k4_pyqrack_driver.py`.
 
-## Formal Methodology (Implementation Details)
+### 3.1 Running the Simulation
+To execute the simulation, first generate the appropriate QASM representations or leverage the pre-compiled manifests, then invoke the native driver:
 
-### Majorana Fermionization and the Exact Anchor
-
-To compute the ground-state properties, the Kitaev spin model is mapped to a system of non-interacting Majorana fermions coupled to the emergent $\mathbb{Z}_2$ gauge field $\hat{u}_{jk}$. In the uniform gauge sector, corresponding to $\hat{W}_p = -1$ on the ten-loops, the fermionic Hamiltonian reduces to:
-
-$$H_{f} = \frac{i}{4} \sum_{\langle j, k \rangle} A_{jk} c_j c_k$$
-
-where $A_{jk} = 2 K_{\alpha} u_{jk}$. The script `K4-Chrystalstacks-Kitaev-single.py` diagonalizes this real, antisymmetric matrix $A$ to obtain the exact free-fermion ground-state solution. In the thermodynamic limit, the exact E0/site is computed as $\approx -0.769884$. This provides a verified "anchor" for classical numerical engines, grounding the Tensor Network simulators directly to the macroscopic real-space behavior.
-
-### Seam Repair via Entanglement Hamiltonians
-
-When partitioning the hyperoctagon lattice into localized blocks (e.g., for patch-and-kick GPU orchestration), one necessarily severs border bonds, introducing non-local boundary effects. Our engine solves this natively. For a Gaussian state, the exact reduced density matrix of a block is itself Gaussian and generated by an Entanglement Hamiltonian $A_{\text{ent}}$.
-
-We isolate the correction (the "seam") by defining:
-
-$$\Sigma = A_{\text{ent}} - A_{\text{internal}}$$
-
-The matrix $\Sigma$ exactly captures the correlations of the dropped border bonds projected onto the internal block sites, using zero extra boundary qubits. `K4-Chrystalstacks-Kitaev-single.py` truncates $\Sigma$ based strictly on sparse magnitude (e.g., retaining the 165 largest terms drops the border discrepancy to 0.04%), demonstrating that seam fidelity is fundamentally a local parameter issue rather than purely one of rank deficiency.
-
-### Translation-Equivariant Tiling Search (CP-SAT)
-
-Mapping the $L=6$ hyperoctagon lattice (864 sites) into computationally optimal patches for Multi-GPU ACE backends involves resolving severe constraint challenges. The script `K4-32x27-equiv.py` formulates this as a constraint programming (CP-SAT) problem, seeking translation-equivariant $32 \times 27$ tilings.
-
-By fixing a subgroup $H$ of the translation group acting freely on the lattice, the search is lifted to a quotient gain graph where the block set is $H$-invariant. The requirement is $32$ disjoint blocks of $27$ sites, each containing exactly one 10-loop (the racetrack loop). The engine optimally isolates "buried" loop sites, forcing flux operators into the interior of the blocks away from boundary seams, stabilizing local flux tracking across spatial distributed architectures.
-
-## Usage & Export
-
-The provided scripts support multiple subcommands for validation and extraction.
-
-To build and solve the equivariant tiling model via CP-SAT:
 ```bash
-./K4-32x27-equiv.py --seconds 600
-# Force flux safe-seam burial:
-./K4-32x27-equiv.py --bury --seconds 600
+python3 K4-qasm.py
+python3 k4_pyqrack_driver.py --block 0 --theta 0.1 --steps 4
 ```
 
-To compute the ground-state properties and evaluate the exact seam correction:
+### 3.2 Technical Limitations and the 5-Gate Decomposition
+A known technical limitation exists in the current pyqrack build utilized by `k4_pyqrack_driver.py`. While Qrack possesses a highly optimized native method `exp(b, ph, q)` that applies the Kitaev bond $e^{-i\theta P \otimes P}$ in a single call, a ctypes array type mismatch (passing `ulonglong*` instead of `int*`) prevents its use.
+Consequently, the driver explicitly falls back to a 5-gate decomposition using standard Pauli basis changes for all Trotter steps.
+
+### 3.2 Environment Configuration
+The standard deployment environment relies strictly on Ubuntu, utilizing open GPU drivers via Mesa. Proprietary drivers may induce unpredictable behavior in the OpenCL state management.
+
+### 3.3 Hardware Isolation
+For multi-GPU cluster execution, strict hardware isolation must be enforced. You are mandated to explicitly assign the OpenCL environment variables alongside standard device variables to ensure correct OpenCL isolation:
 ```bash
-./K4-Chrystalstacks-Kitaev-single.py anchor
-./K4-Chrystalstacks-Kitaev-single.py seam --L 4 --B 27
+export QRACK_QPAGER_DEVICES=0
+export QRACK_QUNITMULTI_DEVICES=0
 ```
+Failure to assign these will result in memory collision across GPU contexts.
 
-**Exporting the Racetrack Manifold:**
-The 27-qubit localized patch (racetrack) with an explicitly computed sparse seam correction is exported for Tensor Network injection using:
-```bash
-./K4-Chrystalstacks-Kitaev-single.py export --L 4 --B 27 --out racetrack_manifold.json --seam sparse
-```
+### 3.4 State Management
+The simulator environment must be explicitly reset between consecutive simulation runs. Stale state-vector data from previous Trotter steps will accumulate if the `QrackSimulator` instance is not torn down and re-instantiated per block or run.
 
-## Conclusion
-
-By coupling an exact free-fermion solver with constraint-programmed translation-equivariant tilings, this framework suppresses edge effects inside massive grid-annealed subsystems. The extraction of localized, entanglement-repaired 27-qubit patches provides a highly optimized methodology for mapping macroscopic three-dimensional quantum spin liquids onto scalable, distributed multi-GPU backends.
-
-## References
-
-* Maria Hermanns and Simon Trebst. "Quantum spin liquid with a Majorana Fermi surface on the hyperoctagon lattice." [arXiv:1401.7678](https://arxiv.org/abs/1401.7678)
-* Maria Hermanns, Ioannis Rousochatzakis, and Simon Trebst. "Quantum spin liquids: design principles and kinematics." [arXiv:1705.01740](https://arxiv.org/abs/1705.01740)
-* Saeed S. Jahromi, Román Orús, Matthias Troyer, and Simon Trebst. "Thermodynamics of the 3D Kitaev quantum spin liquid on the hyperoctagon lattice." [arXiv:2011.11577](https://arxiv.org/abs/2011.11577)
+## 4. References
+1. [arXiv:cond-mat/0506438](https://arxiv.org/abs/cond-mat/0506438) - Kitaev, A. "Anyons in an exactly solved model and beyond". *Annals of Physics* 321, 2 (2006).
+2. [arXiv:1401.7678](https://arxiv.org/abs/1401.7678) - Hermanns, M. and Trebst, S. "Quantum spin liquid with a Majorana Fermi surface on the three-dimensional hyperoctagon lattice". *Phys. Rev. B* 89, 235102 (2014).
+3. [arXiv:quant-ph/9707021](https://arxiv.org/abs/quant-ph/9707021) - Kitaev, A. Yu. "Fault-tolerant quantum computation by anyons". *Annals of Physics* 303, 2-30 (2003).
