@@ -1,5 +1,6 @@
 # Exact Free-Fermion Anchors and CP-SAT Tiling for the Hyperoctagon Kitaev Model
 
+## ## This document has been generated - statements, results and conclusions could be totally hallucinated; emptor caveat
 ## Abstract
 This repository contains the simulation engine and formal mathematical framework for executing the Kitaev model on the three-dimensional hyperoctagon lattice, also known as the $(10,3)\text{-}a$ or $K_4$ crystal. By leveraging CP-SAT constraint programming, we identify $32 \times 27$ equivariant tilings, extracting 27-qubit patch manifolds (racetracks) suitable for distributed quantum simulation. We present a methodology for exact free-fermion anchor validation and Gaussian seam repair using the exact entanglement Hamiltonian $A_{\text{ent}}$ to generate the boundary correction $\Sigma$. We also detail state-vector execution on these 27-qubit blocks using the `k4_pyqrack_driver.py` native driver.
 
