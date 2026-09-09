@@ -52,6 +52,54 @@
 # looked for and what was examined instead of raising FileNotFoundError
 # from inside the import machinery.
 #
+# READ THE host COLUMN BEFORE THEORISING
+# =====================================================================
+# Round times on a six-V340 host went erratic -- 1.2s rounds becoming
+# 9s, 30s, then back -- and two plausible explanations both turned out
+# to be wrong:
+#
+#   - "the round barrier makes big rounds worse": no. Reverting
+#     --global-size from 4194304 to 1048576 changed nothing; the same
+#     degradation appeared at both sizes.
+#   - "the solvers are starving the host thread": no. Renicing 90
+#     CP-SAT workers to +10 and giving the host six reserved threads
+#     did not help either.
+#
+# So the round line now reports host time separately. prepare() for
+# round r+1 runs between submitting r and collecting it, which means
+# host cost lands INSIDE dt and masquerades as slow GPUs. If host
+# approaches dt, the cards are waiting on Python; if host is near zero
+# and dt is still large, they are not, and the variance is on the
+# device side. Measure before theorising -- this file has now cost two
+# wrong diagnoses that a single number would have settled.
+#
+# --precheck is off by default. It never reduced the zero rate (see
+# feasible()), so it was paying host cost for nothing, though measured
+# host time says it was not the cause of the stalls either.
+#
+# THE HOST WAS STARVING THE CARDS
+# =====================================================================
+# nvtop on six V340s showed 7-44 percent utilisation, memory clocks at
+# 9-74 MHz and 3-6 W drawn of 110 W available. The cards were idling
+# between bursts, and the reported candidates/sec -- measured over the
+# kernel window only -- was hiding it.
+#
+# Two host-side causes, both here:
+#
+#   1. The score histogram was a Python loop over every candidate.
+#      At 6.29M scores a round that is 1.8 seconds, against a 1.2
+#      second kernel window: the host spent longer counting than the
+#      GPUs spent computing. np.bincount does the same work in 0.044s,
+#      41x faster.
+#
+#   2. Nothing was in flight during host phases. Round r+1 is now
+#      prepared while round r is still running on the cards, and
+#      submitted the moment r is collected, so the only GPU-idle
+#      window is the collect-and-submit pair.
+#
+# Neither changes what is computed: replay still agrees work-item for
+# work-item and the score distributions are unchanged.
+#
 # SIX DEVICES WERE RUNNING NEARLY IN SERIES
 # =====================================================================
 # Measured on a six-die V340 host:
@@ -506,6 +554,10 @@ def main(argv=None):
     ap.add_argument("--L", type=int, default=6)
     ap.add_argument("--global-size", type=int, default=1 << 16)
     ap.add_argument("--rounds", type=int, default=8)
+    ap.add_argument("--seconds", type=float, default=0.0,
+                    help="stop after this many seconds regardless of "
+                         "--rounds. 0 = run all rounds. Lets the GPU job "
+                         "share a wall-clock budget with the solvers")
     ap.add_argument("--maxatt", type=int, default=20000)
     ap.add_argument("--cap", type=int, default=64)
     ap.add_argument("--local", type=int, default=64,
@@ -523,6 +575,13 @@ def main(argv=None):
                     help="hold most blocks of a packing fixed and sample "
                          "completions of the rest -- LNS repair, but by "
                          "brute force on the GPU instead of CP-SAT")
+    ap.add_argument("--precheck", action="store_true",
+                    help="reject tears that admit no completion before "
+                         "launching. OFF by default: it never reduced "
+                         "the zero rate and its failure path is a scan "
+                         "of every available loop, retried up to 64 "
+                         "times per device -- host cost that lands "
+                         "inside the round and stalls the cards")
     ap.add_argument("--tear", type=int, default=6,
                     help="blocks torn out of --fix each round. Larger is "
                          "fine here: sampling does not have to SOLVE the "
@@ -742,6 +801,8 @@ def main(argv=None):
         """Choose which blocks to hold fixed, and derive the masks."""
         if not base_blocks:
             return np.zeros(w, dtype=np.uint64), ones.copy(), [], 0
+        if not ns.precheck:
+            return _make_round(rng)[:4]
         for _ in range(tries):
             r = _make_round(rng)
             if feasible(r[4], K_TARGET - r[3]):
@@ -774,11 +835,11 @@ def main(argv=None):
     best, best_blocks = 0, []
     pool, pool_keys = [], set()
     total, elapsed = 0, 0.0
-    for rnd in range(ns.rounds):
-        # A tear PER DEVICE, not one shared by all of them. Six cards
-        # sampling six different neighbourhoods explores six times as
-        # much of the space as six cards re-sampling one; with a single
-        # device this is exactly the old behaviour.
+    def prepare(rnd):
+        """Host-side setup for one round: a tear PER DEVICE, not one
+        shared by all. Six cards sampling six different neighbourhoods
+        explores six times as much as six re-sampling one; with a
+        single device this is exactly the old behaviour."""
         jobs = []
         for u in units:
             bl, av, keep, nfix = make_round(rng)
@@ -796,22 +857,56 @@ def main(argv=None):
             sd = np.uint32((ns.seed + rnd * 7919 + u.idx * 104729)
                            & 0xFFFFFFFF)
             jobs.append((u, sd, bl, av, nfix, blmask, avb, keep))
+        return jobs
 
-        t0 = time.time()
+    def submit(jobs):
         for u, sd, bl, av, nfix, _, _, _ in jobs:
             u.enqueue(bl, av, nfix, sd)      # all devices run concurrently
+
+    # One round in flight while the host works on the next. Without
+    # this the cards idle through every host phase, which is what the
+    # 9 MHz clocks were showing.
+    pending = prepare(0)
+    submit(pending)
+    t0 = time.time()
+    wall0 = time.time()
+    host_t = 0.0
+    for rnd in range(ns.rounds):
+        if ns.seconds and time.time() - wall0 >= ns.seconds:
+            print("  budget of %.0fs reached after %d rounds"
+                  % (ns.seconds, rnd))
+            break
+        jobs = pending
+        th = time.time()
+        nxt = prepare(rnd + 1) if rnd + 1 < ns.rounds else None
+        host = time.time() - th
+        host_t += host
         results = [(u, sd, u.collect().copy(), bm, ab, kp)
                    for u, sd, _, _, _, bm, ab, kp in jobs]
         dt = time.time() - t0
+        if nxt is not None:
+            submit(nxt)                      # GPUs busy again immediately
+            pending = nxt
+        t0 = time.time()
         elapsed += dt
         total += total_items
         top = 0
         for _, _, sc, _, _, _ in results:
-            for v in sc:
-                hist[int(v)] += 1
+            # np.bincount, not a Python loop. Counting 6.29M scores one
+            # int at a time cost 1.8s per round against a 1.2s kernel
+            # window -- the GPUs sat at idle clocks (9-74 MHz, 3-6 W of
+            # 110 W) waiting for the host to finish counting.
+            bc = np.bincount(sc, minlength=K_TARGET + 1)
+            for v in np.nonzero(bc)[0]:
+                hist[int(v)] += int(bc[v])
             top = max(top, int(sc.max()))
-        print("  round %d: %d candidates in %.2fs = %.0f/sec, best %d"
-              % (rnd, total_items, dt, total_items / max(dt, 1e-9), top))
+        # host time is reported separately: it happens between submit
+        # and collect, so it lands inside dt and used to masquerade as
+        # slow GPUs. If host approaches dt, the cards are waiting on
+        # Python, not the other way round.
+        print("  round %d: %d candidates in %.2fs (host %.2fs) = %.0f/sec,"
+              " best %d" % (rnd, total_items, dt, host,
+                            total_items / max(dt, 1e-9), top))
         sys.stdout.flush()
 
         thr = ns.threshold or max(best, top) - 1
@@ -853,8 +948,9 @@ def main(argv=None):
         last = results
 
     print("")
-    print("%d candidates in %.1fs = %.0f/sec" % (total, elapsed,
-                                                 total / max(elapsed, 1e-9)))
+    print("%d candidates in %.1fs = %.0f/sec (host %.1fs, %.0f%%)"
+          % (total, elapsed, total / max(elapsed, 1e-9), host_t,
+             100 * host_t / max(elapsed, 1e-9)))
     print("score distribution: %s" % dict(sorted(hist.items())))
 
     if ns.validate:
