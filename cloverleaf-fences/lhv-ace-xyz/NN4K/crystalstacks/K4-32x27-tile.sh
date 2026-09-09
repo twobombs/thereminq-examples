@@ -18,8 +18,9 @@
 # Worker counts are derived from nproc unless you override them.
 #
 #   ./K4-32x27-tile.sh --plan                # show the split, run nothing
-#   ./K4-32x27-tile.sh                       # 12 hours
-#   SECS=3600 ./K4-32x27-tile.sh             # shorter
+#   ./K4-32x27-tile.sh                       # 3 hours
+#   SECS=43200 ./K4-32x27-tile.sh            # longer
+#   GSIZE=1048576 ./K4-32x27-tile.sh         # smaller GPU rounds
 #   MIXED_W=0 ./K4-32x27-tile.sh             # skip the mixed-cycle run
 #   PROOF2_W=0 ./K4-32x27-tile.sh            # one proof, not two
 #   DEVICES=0:0 ./K4-32x27-tile.sh           # one GPU instead of all
@@ -31,14 +32,22 @@ cd "$(dirname "$0")" || exit 1
 PY=${PY:-python3}
 CP=${CP:-./K4-32x27-tilecp.py}
 OCL=${OCL:-./K4-32x27-tileocl.py}
-SECS=${SECS:-43200}
+SECS=${SECS:-10800}
 TEAR=${TEAR:-6}
 # 'all' uses every GPU on every platform. Without this the OpenCL job
 # defaults to the first device and leaves the rest of the fleet idle --
 # on a six-die host that is five sixths of the throughput unused.
 DEVICES=${DEVICES:-all}
-GSIZE=${GSIZE:-1048576}
-ROUNDS=${ROUNDS:-5000}
+# 4194304 work-items per device = 25.2M candidates per round across six
+# dies. Measured: at 1048576 the six V340s ran 77-91 percent utilised at
+# the 110 W cap; four times the work per round dilutes the remaining
+# host time further, and the score buffer is still only 16.8 MB of the
+# 7.98 GB each die has.
+GSIZE=${GSIZE:-4194304}
+# Rounds is now just a ceiling: the GPU job also honours --seconds, so
+# it stops with the solvers instead of holding the launcher open for
+# hours after they finish.
+ROUNDS=${ROUNDS:-1000000}
 LOGDIR=${LOGDIR:-logs}
 DETACH=0
 PLAN_ONLY=0
@@ -62,7 +71,16 @@ detect_threads() {
 T=$(detect_threads)
 [ "$T" -lt 1 ] && T=1
 
-GPU_W=${GPU_W:-2}                       # host thread for the OpenCL job
+# The OpenCL host process must keep six queues fed. Starve it and the
+# cards idle: measured at GPU_W=2 with 94 solver workers, the host got
+# 3 percent CPU and round times went from 1.2s to 9s as soon as the
+# solvers left presolve and their search threads began spinning.
+GPU_W=${GPU_W:-6}                       # host threads for the OpenCL job
+# CP-SAT workers spin; the OpenCL host blocks on the GPU. At equal
+# priority the spinners win every scheduling decision and the cards go
+# idle. Niced down, the host thread preempts them -- it needs very
+# little CPU, just not to wait for it.
+SOLVER_NICE=${SOLVER_NICE:-10}
 [ "$T" -le 4 ] && GPU_W=1
 AVAIL=$((T - GPU_W))
 [ "$AVAIL" -lt 1 ] && AVAIL=1
@@ -95,12 +113,13 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 PIDS=()
 
 printf "=== %s threads detected ===\n" "$T"
-printf "  %-22s %s\n" "proof (symmetry)"    "$PROOF_W workers"
+printf "  %-22s %s\n" "proof (default)"     "$PROOF_W workers"
 [ "$PROOF2_W" -gt 0 ] && \
-printf "  %-22s %s\n" "proof (--no-symmetry)" "$PROOF2_W workers"
+printf "  %-22s %s\n" "proof (--no-redundant)" "$PROOF2_W workers"
 [ "$MIXED_W" -gt 0 ] && \
 printf "  %-22s %s\n" "mixed cycles 10,14"  "$MIXED_W workers"
 printf "  %-22s %s\n" "gpu repair (host)"   "$GPU_W thread(s), devices=$DEVICES"
+printf "  %-22s %s\n" "solver nice"         "+$SOLVER_NICE (gpu host runs at 0)"
 printf "  %-22s %s\n" "budget"              "${SECS}s"
 if [ "$PLAN_ONLY" = "1" ]; then exit 0; fi
 
@@ -114,43 +133,100 @@ cleanup() {
 }
 trap cleanup INT TERM
 
+die() {                          # die <message> <logfile>
+    echo ""
+    echo "FAILED: $1"
+    if [ -f "${2:-}" ]; then
+        echo "--- last 20 lines of $2 ---"
+        tail -20 "$2"
+    fi
+    exit 1
+}
+
+has_flag() {                     # has_flag <script> <--flag>
+    # Word boundary required: a bare substring match reports --warm
+    # present when the script only has --warmup, and the run then dies
+    # at the first step with no output.
+    $PY "$1" --help 2>/dev/null | grep -qE -- "(^|[^A-Za-z0-9-])$2([ ,=]|\$)"
+}
+
 launch() {
     local name=$1; shift
     local log="$LOGDIR/$name-$STAMP.log"
-    setsid "$@" > "$log" 2>&1 &
+    local pri=()
+    case "$name" in
+        proof*|mixed) pri=(nice -n "$SOLVER_NICE") ;;
+    esac
+    setsid ${pri[@]+"${pri[@]}"} "$@" > "$log" 2>&1 &
     PIDS+=("$!")
     printf "  %-6s pid %-8s -> %s\n" "$name" "$!" "$log"
 }
 
-echo "=== warming lattice caches (serial, so each is built once) ==="
-$PY "$CP" --warm > "$LOGDIR/warm-$STAMP.log" 2>&1 || exit 1
-if [ "$MIXED_W" -gt 0 ]; then
-    $PY "$CP" --cycles 10,14 --warm >> "$LOGDIR/warm-$STAMP.log" 2>&1 || exit 1
+# Capability probes. These scripts get edited often and it is easy to
+# update the launcher without updating what it launches; a missing flag
+# then killed the run at the first step with no output at all.
+WARMLOG="$LOGDIR/warm-$STAMP.log"
+if ! has_flag "$CP" "--warm"; then
+    echo "note: $CP has no --warm (older copy?); skipping the cache warm."
+    echo "      each job will build the lattice itself -- duplicated work,"
+    echo "      not fatal. Update $CP to avoid it."
+else
+    echo "=== warming lattice caches (serial, so each is built once) ==="
+    $PY "$CP" --warm > "$WARMLOG" 2>&1 || die "lattice warm failed" "$WARMLOG"
+    if [ "$MIXED_W" -gt 0 ]; then
+        $PY "$CP" --cycles 10,14 --warm >> "$WARMLOG" 2>&1 \
+            || die "mixed-cycle warm failed" "$WARMLOG"
+    fi
+    grep -h "cycles:" "$WARMLOG" | sed 's/^/  /'
 fi
-grep -h "cycles:" "$LOGDIR/warm-$STAMP.log" | sed 's/^/  /'
+
+if ! has_flag "$OCL" "--devices"; then
+    echo "note: $OCL has no --devices; it will use one GPU only."
+    DEVICES=""
+fi
+if [ "$MIXED_W" -gt 0 ] && ! has_flag "$CP" "--cycles"; then
+    echo "note: $CP has no --cycles; skipping the mixed-cycle job."
+    MIXED_W=0
+fi
 
 echo "=== building base.json (the GPU job depends on it) ==="
 $PY "$CP" --lns 1 --lns-seconds 10 --workers 2 --out base.json \
     > "$LOGDIR/base-$STAMP.log" 2>&1
-if [ ! -s base.json ]; then
-    echo "  base.json was not written; see $LOGDIR/base-$STAMP.log"
-    exit 1
-fi
+[ -s base.json ] || die "base.json was not written" "$LOGDIR/base-$STAMP.log"
 $PY -c 'import json;d=json.load(open("base.json"));print("  base.json: %d blocks, verified %s"%(d["n_blocks"],d["verified"]))'
 
 echo "=== launching ==="
 launch proof $PY "$CP" --lb 32 --seconds "$SECS" --workers "$PROOF_W" \
        --log --out proof.json
 if [ "$PROOF2_W" -gt 0 ]; then
+    # The symmetry question is settled (Rev 2.7: my value-precedence
+    # encoding was 440x worse per probe and closed zero subtrees in an
+    # hour, so it is off by default now). The second slot tests the
+    # next open encoding question instead: whether the redundant
+    # constraints -- loop sites per block, internal edge count -- earn
+    # their keep or obstruct presolve the same way.
     launch proof2 $PY "$CP" --lb 32 --seconds "$SECS" --workers "$PROOF2_W" \
-           --no-symmetry --log --out proof-nosym.json
+           --no-redundant --log --out proof-nored.json
 fi
 if [ "$MIXED_W" -gt 0 ]; then
     launch mixed $PY "$CP" --cycles 10,14 --lb 32 --seconds "$SECS" \
            --workers "$MIXED_W" --no-builtin --log --out proof-mixed.json
 fi
-launch gpu $PY "$OCL" --fix base.json --tear "$TEAR" --devices "$DEVICES" \
-       --global-size "$GSIZE" --rounds "$ROUNDS" --keep 64 --out rep.json
+if [ -n "$DEVICES" ]; then
+    launch gpu $PY "$OCL" --fix base.json --tear "$TEAR" --devices "$DEVICES" \
+           --global-size "$GSIZE" --rounds "$ROUNDS" --seconds "$SECS" \
+           --keep 64 --out rep.json
+else
+    launch gpu $PY "$OCL" --fix base.json --tear "$TEAR" \
+           --global-size "$GSIZE" --rounds "$ROUNDS" --seconds "$SECS" \
+           --keep 64 --out rep.json
+fi
+
+sleep 3
+for p in ${PIDS[@]+"${PIDS[@]}"}; do
+    kill -0 "$p" 2>/dev/null || echo "  WARNING: pid $p already exited --" \
+        "check its log above"
+done
 
 echo ""
 echo "monitor:  tail -f $LOGDIR/*-$STAMP.log"
