@@ -10,9 +10,13 @@
 #   4. SEAM SELFTEST     knit vs exact, truncation bound, ACE lowering
 #
 #   python3 qasm_qrack.py run   circuit.qasm --shots 4096      (part 1)
+#       --readout joint: one ProbAll over all measured qubits instead of
+#       a prob() per qubit -- more accurate, reproducible seeded shots;
+#       not a VRAM fix (see joint_probs)
 #   python3 qasm_qrack.py       circuit.qasm                   (same: 'run' is the default)
 #   python3 qasm_qrack.py seams circuit.qasm --pauli "ZZ@0,5"  (part 2)
-#   python3 qasm_qrack.py selftest [backend|seams|all] [-v|-q] (parts 3, 4)
+#   python3 qasm_qrack.py selftest [backend|seams|all] [-v|-q] [--gpu]
+#                                                              (parts 3, 4)
 #       progress on stderr: live line on a terminal, periodic lines in logs
 #
 # Runtime dependencies: pyqrack for part 1; pyqrack + numpy for part 2;
@@ -117,7 +121,7 @@ try:                                    # parts 2-4 only
 except ImportError:
     np = None
 
-__all__ = ["QasmError", "Program", "Result", "compile_qasm", "QrackBackend",
+__all__ = ["QasmError", "QrackError", "Program", "Result", "compile_qasm", "QrackBackend",
            "run_qasm", "SeamSplit", "knit", "AceRunner", "reference",
            "parse_pauli"]
 
@@ -1055,6 +1059,151 @@ class Result:
                 "gate_counts": self.gate_counts, "timings": self.timings}
 
 
+class QrackError(RuntimeError):
+    """A Qrack C++ exception, with the context pyqrack does not give."""
+
+
+# Simulators whose Qrack call raised. They are never destroyed: pyqrack's
+# __del__ calls Qrack's destroy(), and on a simulator in a failed state
+# that can crash natively -- which, the moment the exception is cleared,
+# killed the process before any result was written (the empty
+# '--json' file). They stay parked here; the CLI flushes its output and
+# leaves with os._exit() when any exist, so their destructors never run.
+BROKEN_SIMS = []
+
+
+def state_bytes(n):
+    """Bytes of a dense n-qubit state at the library's float width."""
+    try:
+        from pyqrack.qrack_system import Qrack
+        fp = Qrack.fppow
+    except Exception:
+        fp = 5
+    return (1 << n) * 2 * (1 << fp) // 8
+
+
+def joint_probs(sim, qubits):
+    """Exact joint distribution over 'qubits' from ONE Qrack ProbAll call,
+    written straight into a numpy buffer (pyqrack's prob_all would build
+    a Python list of 2^m floats -- ~8 GB of objects at 28 qubits).
+    Index bit j <-> qubits[j]. Measured benefits: accuracy (20 qubits,
+    CPU engine, vs a float64 reference: 1.9e-7 max marginal error, where
+    per-qubit prob() gave 1.0e-5) and reproducible seeded shots. It does
+    NOT lower peak VRAM on the default stack: on two 8 GB V340 dies a
+    28-qubit circuit peaked at ~15.4 GiB (dense state: 2 GiB) and failed
+    either way -- one ProbAll or 16 prob() calls. That is capacity: see
+    the host-pointer and QPager-device options, or use --cpu."""
+    if np is None:
+        raise QasmError("readout='joint' needs numpy")
+    import ctypes
+    from pyqrack.qrack_system import Qrack
+    single = Qrack.fppow <= 5
+    P = np.empty(1 << len(qubits), dtype=np.float32 if single else np.float64)
+    ctype = ctypes.c_float if single else ctypes.c_double
+    Qrack.qrack_lib.ProbAll(sim.sid, len(qubits),
+                            (ctypes.c_ulonglong * len(qubits))(*qubits),
+                            P.ctypes.data_as(ctypes.POINTER(ctype)))
+    sim._throw_if_error()
+    return P
+
+
+def sample_joint(P, shots, seed=None):
+    """Draw 'shots' outcome indices from the joint distribution P.
+
+    Not by inverting one running total: over 2^m entries, Qrack's tiny
+    run-to-run jitter in P (~1e-10 per entry) accumulates along the
+    total and moved ~1% of draws between identically seeded runs. Each
+    draw instead descends a binary tree of partial sums, deciding the
+    highest index bit first, so every comparison is against a single
+    conditional probability and jitter can only flip a draw that lands
+    within ~1e-10 of that threshold. Tree levels above P are float64:
+    ~2^m * 8 bytes extra host memory (2 GiB at 28 measured qubits).
+    """
+    rng = np.random.default_rng(seed)
+    levels = [P]
+    while len(levels[-1]) > 1:
+        levels.append(levels[-1].reshape(-1, 2).sum(axis=1, dtype=np.float64))
+    idx = np.zeros(shots, dtype=np.int64)
+    for L in range(len(levels) - 1, 0, -1):
+        node = levels[L][idx]
+        left = levels[L - 1][2 * idx].astype(np.float64)
+        idx = 2 * idx + (rng.random(shots) * node >= left)
+    return idx
+
+
+def fmt_bytes(b):
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if b < 1024 or unit == "TiB":
+            return "%.2f %s" % (b, unit) if unit != "B" else "%d B" % b
+        b /= 1024.0
+
+
+def route_native_stdout():
+    """Keep native chatter out of our results, for the whole run.
+
+    Qrack's C++ writes to file descriptor 1 whenever it likes: the
+    OpenCL banner, and error text when something fails. Anything on
+    fd 1 lands in 'run --json > out.json'. Here fd 1 is pointed at
+    stderr for the rest of the process (spawned workers inherit it),
+    and Python's sys.stdout gets a private, line-buffered duplicate of
+    the real stdout. Line buffering matters too: if Qrack later dies in
+    native code, every result line already written has reached the file.
+    """
+    try:
+        sys.stdout.flush()
+        real = os.dup(1)
+        os.dup2(sys.stderr.fileno(), 1)
+        sys.stdout = os.fdopen(real, "w", buffering=1)
+    except (AttributeError, ValueError, OSError):
+        pass                            # no real fds (embedded / captured)
+
+
+_WARMED = False
+
+
+def qrack_warmup(_init=None):
+    """Create one throwaway simulator with C-level stdout pointed at stderr.
+
+    Qrack's OpenCL build prints its device banner ("Building JIT",
+    "Default platform: ...") from C++ straight to file descriptor 1 on
+    the first simulator of each process -- even an is_gpu=False one.
+    Left alone it lands inside --json output and tears live progress
+    lines. Redirecting fd 1 (not sys.stdout, which C++ never sees) for
+    that one construction sends the banner to stderr, where it stays
+    visible. Idempotent per process; never fatal.
+    """
+    global _WARMED
+    if _WARMED:
+        return
+    _WARMED = True
+    try:
+        sys.stdout.flush()
+        fd = sys.stdout.fileno()
+    except (AttributeError, ValueError, OSError):
+        fd = None                       # no real fd (e.g. captured): skip
+    saved = None
+    try:
+        if fd is not None:
+            saved = os.dup(fd)
+            os.dup2(sys.stderr.fileno(), fd)
+        if _init is not None:
+            _init()
+        else:
+            from pyqrack import QrackSimulator
+            QrackSimulator(1, is_gpu=False)
+    except Exception:
+        pass
+    finally:
+        try:
+            import ctypes
+            ctypes.CDLL(None).fflush(None)  # drain C stdio before restoring
+        except Exception:
+            pass
+        if saved is not None:
+            os.dup2(saved, fd)
+            os.close(saved)
+
+
 class QrackBackend:
     """Run QASM on QrackSimulator.
 
@@ -1165,8 +1314,13 @@ class QrackBackend:
 
     # ---- public ------------------------------------------------------
     def run(self, program, shots=1024, seed=None, params=None,
-            statevector=False, path=None):
-        """program: Program, QASM text, or a path to a .qasm file."""
+            statevector=False, path=None, readout="prob"):
+        """program: Program, QASM text, or a path to a .qasm file.
+        readout: 'prob' (one prob() per measured qubit, then
+        measure_shots) or 'joint' (one ProbAll over all measured qubits;
+        marginals and shots from that array; needs numpy)."""
+        if readout not in ("prob", "joint"):
+            raise QasmError("readout must be 'prob' or 'joint'")
         res = Result()
         t0 = time.perf_counter()
         if not isinstance(program, Program):
@@ -1185,51 +1339,99 @@ class QrackBackend:
             split += 1
         prefix, tail = ops[:split], ops[split:]
 
-        rng = random.Random(seed) if seed is not None else None
-        sim = self._new_sim(prog.num_qubits)
-        self._exec(sim, prefix, None)
-        t2 = time.perf_counter()
-        res.simulator = sim
+        stage = "setup"
+        t2 = t1
+        try:
+            rng = random.Random(seed) if seed is not None else None
+            stage = "allocation"
+            sim = self._new_sim(prog.num_qubits)
+            stage = "unitary part (%d ops)" % len(prefix)
+            self._exec(sim, prefix, None)
+            t2 = time.perf_counter()
+            res.simulator = sim
 
-        terminal = all(op[0] == "m" for op in tail)
-        res.statevector_is_final = not tail
-        if statevector:
-            res.statevector = list(sim.out_ket())
+            terminal = all(op[0] == "m" for op in tail)
+            res.statevector_is_final = not tail
+            if statevector:
+                stage = "statevector readout"
+                res.statevector = list(sim.out_ket())
 
-        lab = self._labels(prog)
-        res.shots = shots
-        if terminal:
-            meas = [(q, c) for _, q, c in tail if c is not None]
-            last = {}
-            for q, c in meas:
-                last[c] = q                    # later measure wins
-            for c in sorted(last):
-                res.probabilities[lab[c]] = float(sim.prob(last[c]))
-            qubits = sorted(set(last.values()))
-            res.mode = "sampled"
-            if shots and qubits and len(qubits) <= 64 and rng is None:
+            lab = self._labels(prog)
+            res.shots = shots
+            if terminal:
+                meas = [(q, c) for _, q, c in tail if c is not None]
+                last = {}
+                for q, c in meas:
+                    last[c] = q                    # later measure wins
+                qubits = sorted(set(last.values()))
                 pos = {q: j for j, q in enumerate(qubits)}
-                cnt = Counter(sim.measure_shots(qubits, shots))
+                if readout == "joint" and qubits:
+                    stage = "joint readout, ProbAll over %d qubits" % len(qubits)
+                    P = joint_probs(sim, qubits)
+                    for c in sorted(last):
+                        j = pos[last[c]]
+                        res.probabilities[lab[c]] = float(
+                            P.reshape(-1, 2, 1 << j)[:, 1, :].sum())
+                    res.mode = "joint"
+                    if shots:
+                        stage = "sampling from the joint distribution"
+                        draws = sample_joint(P, shots, seed)
+                        counts = Counter()
+                        for perm, n in Counter(draws.tolist()).items():
+                            cb = [0] * prog.num_clbits
+                            for c, q in last.items():
+                                cb[c] = (perm >> pos[q]) & 1
+                            counts[self._key(prog, cb)] += n
+                        res.counts = dict(counts)
+                else:
+                    for k, c in enumerate(sorted(last)):
+                        stage = ("readout prob(q%d), %d of %d measured qubits "
+                                 "(first readout: %s)" % (
+                                     last[c], k + 1, len(last),
+                                     "yes" if k == 0 else "no"))
+                        res.probabilities[lab[c]] = float(sim.prob(last[c]))
+                    res.mode = "sampled"
+                    if shots and qubits and len(qubits) <= 64 and rng is None:
+                        stage = "sampling, measure_shots()"
+                        cnt = Counter(sim.measure_shots(qubits, shots))
+                        counts = Counter()
+                        for perm, n in cnt.items():
+                            cb = [0] * prog.num_clbits
+                            for c, q in last.items():
+                                cb[c] = (perm >> pos[q]) & 1
+                            counts[self._key(prog, cb)] += n
+                        res.counts = dict(counts)
+                    elif shots and qubits:
+                        terminal = False   # >64 bits or seeded: per-shot path
+                    elif shots:
+                        res.counts = {self._key(prog, [0] * prog.num_clbits):
+                                      shots}
+            if not terminal:
+                res.mode = "per-shot"
+                stage = "per-shot tail"
                 counts = Counter()
-                for perm, n in cnt.items():
+                for s in range(max(shots, 1)):
+                    w = sim.clone() if shots > 1 else sim
                     cb = [0] * prog.num_clbits
-                    for c, q in last.items():
-                        cb[c] = (perm >> pos[q]) & 1
-                    counts[self._key(prog, cb)] += n
-                res.counts = dict(counts)
-            elif shots and qubits:
-                terminal = False       # >64 bits or seeded: per-shot path
-            elif shots:
-                res.counts = {self._key(prog, [0] * prog.num_clbits): shots}
-        if not terminal:
-            res.mode = "per-shot"
-            counts = Counter()
-            for s in range(max(shots, 1)):
-                w = sim.clone() if shots > 1 else sim
-                cb = [0] * prog.num_clbits
-                self._exec(w, tail, cb, rng)
-                counts[self._key(prog, cb)] += 1
-            res.counts = dict(counts) if shots else {}
+                    self._exec(w, tail, cb, rng)
+                    counts[self._key(prog, cb)] += 1
+                res.counts = dict(counts) if shots else {}
+        except RuntimeError as e:
+            if isinstance(e, QrackError):
+                raise
+            for v in ("sim", "w"):
+                if v in locals():
+                    BROKEN_SIMS.append(locals()[v])
+            dev = ("device %d" % self.device if self.device is not None
+                   else "default device")
+            eng = ("CPU engine" if self.sim_kwargs.get("is_gpu") is False
+                   else "OpenCL allowed, " + dev)
+            raise QrackError(
+                "Qrack raised during %s: %d qubits, dense state %s, %s. "
+                "Qrack's default stack can defer gates, so a fault in the "
+                "unitary part may first surface at a readout."
+                % (stage, prog.num_qubits, fmt_bytes(state_bytes(
+                    prog.num_qubits)), eng)) from e
         t3 = time.perf_counter()
         res.timings = {"compile_s": t1 - t0, "unitary_s": t2 - t1,
                        "measure_s": t3 - t2}
@@ -1271,6 +1473,10 @@ def main_run(argv=None):
     ap.add_argument("--sim", action="append", default=[], metavar="K=V",
                     help="extra QrackSimulator kwarg, e.g. "
                          "is_stabilizer_hybrid=true")
+    ap.add_argument("--readout", choices=("prob", "joint"), default="prob",
+                    help="joint: one ProbAll over all measured qubits "
+                         "instead of a prob() per qubit (needs numpy; "
+                         "2^m floats of host memory)")
     ap.add_argument("--top", type=int, default=16,
                     help="show this many most frequent outcomes")
     ap.add_argument("--json", action="store_true")
@@ -1284,9 +1490,12 @@ def main_run(argv=None):
     out, rc = {}, 0
     for f in a.files:
         try:
-            r = be.run(f, shots=a.shots, seed=a.seed, params=params)
-        except QasmError as e:
+            r = be.run(f, shots=a.shots, seed=a.seed, params=params,
+                       readout=a.readout)
+        except (QasmError, QrackError) as e:
             print("%s: %s" % (f, e), file=sys.stderr)
+            if a.json:
+                out[f] = {"error": str(e), "error_type": type(e).__name__}
             rc = 1
             continue
         if a.json:
@@ -1305,6 +1514,12 @@ def main_run(argv=None):
     if a.json:
         json.dump(out, sys.stdout, indent=1)
         print()
+        sys.stdout.flush()
+    if BROKEN_SIMS:
+        # skip destructors of simulators Qrack left in a failed state
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(rc)
     return rc
 
 # =====================================================================
@@ -1995,6 +2210,7 @@ _W = {}
 
 
 def _winit(devq, sim_kwargs):
+    qrack_warmup()                      # each spawned worker has its own
     dev = devq.get() if devq is not None else None
     _W["be"] = QrackBackend(device=dev, **sim_kwargs)
     _W["dev"] = dev
@@ -2468,6 +2684,7 @@ def main_seams(argv=None):
         json.dump(report, sys.stdout, indent=1, default=lambda o: (
             o.tolist() if isinstance(o, np.ndarray) else str(o)))
         print()
+        sys.stdout.flush()
         return 0
 
     lab = QrackBackend.__new__(QrackBackend)._labels(prog)
@@ -2542,7 +2759,7 @@ def main_seams(argv=None):
 # =====================================================================
 
 
-def selftest_backend(verbose=False, quiet=False):
+def selftest_backend(verbose=False, quiet=False, gpu=False):
     """Backend vs Qiskit reference states. Returns 0 on success."""
     import numpy as np
     from qiskit import QuantumCircuit
@@ -2565,10 +2782,10 @@ def selftest_backend(verbose=False, quiet=False):
 
 
 
-    BE = QrackBackend(is_gpu=False)
+    BE = QrackBackend(**({} if gpu else {"is_gpu": False}))
     TOL = 2e-5            # pyqrack wheels run single precision
     fails = []
-    PR = Progress("backend", 6, fails, verbose, quiet)
+    PR = Progress("backend", 7, fails, verbose, quiet)
 
 
     def fid(a, b):
@@ -2889,12 +3106,48 @@ def selftest_backend(verbose=False, quiet=False):
         PR.step("register condition")
 
 
+    def t_joint(rng):
+        # one ProbAll readout must match per-qubit prob(), sample
+        # reproducibly, never draw an impossible outcome, and leave
+        # dynamic circuits on the per-shot path
+        PR.start("joint readout", 4)
+        pq, _ = prep(7, rng)
+        body = "".join("cx q[%d], q[%d]; ry(%r) q[%d];\n" % (
+            a, (a + 1) % 7, rng.uniform(0, 3), a) for a in range(7) for _ in (0, 1))
+        src = header(7) + "bit[7] c;\n" + pq + body + "c = measure q;\n"
+        rp = BE.run(src, shots=0, readout="prob")
+        rj = BE.run(src, shots=0, readout="joint")
+        d = max(abs(rp.probabilities[k] - rj.probabilities[k])
+                for k in rp.probabilities)
+        if d > 2e-5 or rj.mode != "joint":
+            fails.append("joint: marginals differ from prob() by %.1e" % d)
+        PR.step("marginals match prob()")
+        a = BE.run(src, shots=5000, seed=11, readout="joint").counts
+        b = BE.run(src, shots=5000, seed=11, readout="joint").counts
+        if a != b or sum(a.values()) != 5000:
+            fails.append("joint: seeded sampling not reproducible")
+        PR.step("seeded sampling reproducible")
+        ghz = header(3) + "bit[3] c;\nh q[0]; cx q[0], q[1]; cx q[1], q[2];\n" \
+            "c = measure q;\n"
+        g = BE.run(ghz, shots=4000, seed=2, readout="joint").counts
+        if set(g) - {"000", "111"}:
+            fails.append("joint: impossible GHZ outcomes %s" % g)
+        PR.step("no impossible outcomes")
+        tele = header(3) + "bit[2] m;\nbit out;\nx q[0];\nh q[1]; cx q[1], q[2];\n" \
+            "cx q[0], q[1]; h q[0];\nm[0] = measure q[0];\nm[1] = measure q[1];\n" \
+            "if (m[1] == 1) x q[2];\nif (m[0]) z q[2];\nout = measure q[2];\n"
+        t = BE.run(tele, shots=50, readout="joint")
+        if t.mode != "per-shot" or {k.split()[0] for k in t.counts} != {"1"}:
+            fails.append("joint: dynamic circuit mishandled (%s)" % t.mode)
+        PR.step("dynamic circuit stays per-shot")
+
     def main():
         rng = random.Random(12345)
         for t in (t_every_gate, t_modifiers, t_user_gates, t_syntax):
             t(rng)
         t_random(rng)
         t_dynamic()
+        t_joint(rng)
         el = PR.finish()
         if fails:
             print("%d FAILURES" % len(fails))
@@ -2902,14 +3155,14 @@ def selftest_backend(verbose=False, quiet=False):
                 print("  " + f)
             return 1
         print("all checks passed (%d gates, modifiers, user gates, syntax, "
-              "12 random circuits, dynamic circuits) in %s"
+              "12 random circuits, dynamic circuits, joint readout) in %s"
               % (len(GATES), fmt_s(el)))
         return 0
 
     return main()
 
 
-def selftest_seams(verbose=False, quiet=False):
+def selftest_seams(verbose=False, quiet=False, gpu=False):
     """Knit vs exact, truncation bound, ACE lowering. Returns 0 on success."""
     import numpy as np
 
@@ -2920,7 +3173,7 @@ def selftest_seams(verbose=False, quiet=False):
 
 
 
-    KW = {"is_gpu": False}
+    KW = {} if gpu else {"is_gpu": False}
     fails = []
     PR = Progress("seams", 3, fails, verbose, quiet)
 
@@ -3099,6 +3352,8 @@ def selftest_seams(verbose=False, quiet=False):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
+    route_native_stdout()
+    qrack_warmup()
     cmd = argv[0] if argv and argv[0] in ("run", "seams", "selftest") else None
     rest = argv[1:] if cmd else argv
     if cmd == "seams":
@@ -3108,18 +3363,21 @@ def main(argv=None):
         words = [x for x in rest if not x.startswith("-")]
         which = words[0] if words else "all"
         if which not in ("backend", "seams", "all") or len(words) > 1 or \
-                flags - {"-v", "--verbose", "-q", "--quiet"}:
+                flags - {"-v", "--verbose", "-q", "--quiet", "--gpu"}:
             raise SystemExit("selftest [backend|seams|all] [-v|--verbose] "
-                             "[-q|--quiet]")
+                             "[-q|--quiet] [--gpu]")
         v = bool(flags & {"-v", "--verbose"})
         q = bool(flags & {"-q", "--quiet"})
+        g = "--gpu" in flags
+        eng = ("Qrack default engine stack (OpenCL allowed)" if g else
+               "CPU engine (is_gpu=False); --gpu to test the OpenCL path")
         rc = 0
         if which in ("backend", "all"):
-            print("== backend selftest (vs Qiskit)", flush=True)
-            rc |= selftest_backend(v, q)
+            print("== backend selftest (vs Qiskit) -- %s" % eng, flush=True)
+            rc |= selftest_backend(v, q, g)
         if which in ("seams", "all"):
-            print("== seam selftest", flush=True)
-            rc |= selftest_seams(v, q)
+            print("== seam selftest -- %s" % eng, flush=True)
+            rc |= selftest_seams(v, q, g)
         return rc
     return main_run(rest)
 
