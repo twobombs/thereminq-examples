@@ -15,6 +15,8 @@
 #       not a VRAM fix (see joint_probs)
 #   python3 qasm_qrack.py       circuit.qasm                   (same: 'run' is the default)
 #   python3 qasm_qrack.py seams circuit.qasm --pauli "ZZ@0,5"  (part 2)
+#   python3 qasm_qrack.py batch out/qasm/type*-trotter.qasm --flux-pauli \
+#       --devices 0,1,2,3,4,5            (independent jobs, one worker/die)
 #   python3 qasm_qrack.py selftest [backend|seams|all] [-v|-q] [--gpu]
 #                                                              (parts 3, 4)
 #       progress on stderr: live line on a terminal, periodic lines in logs
@@ -2771,6 +2773,192 @@ def main_seams(argv=None):
     return 0
 
 
+
+# =====================================================================
+# =====================================================================
+# BATCH -- independent circuits, one worker process per OpenCL device
+# =====================================================================
+# =====================================================================
+#
+# A 27-qubit K4 block keeps one die busy with ~0.5 GB and one CPU
+# thread. The throughput win is running independent circuits (8 block
+# types, theta or step sweeps) side by side, one per die -- not paging
+# one state across dies, which only adds PCIe traffic (each V340 card's
+# two dies share one x8 link).
+#
+# Each worker is its own process, pinned before Qrack starts by
+#   QRACK_OCL_DEFAULT_DEVICE = QRACK_QPAGER_DEVICES = QRACK_QUNITMULTI_DEVICES = d
+# It builds its OpenCL kernels once and then takes jobs from a shared
+# queue. A worker that dies (a Qrack error, or a native crash) loses only
+# the job it was on -- reported as failed -- and a fresh worker replaces
+# it on the same device.
+#
+#   python3 qasm_qrack.py batch out/qasm/type*-trotter.qasm --flux-pauli \
+#       --devices 0,1,2,3,4,5 --shots 0
+#   python3 qasm_qrack.py batch a.qasm b.qasm --pauli "Z0 Z1" --per-device 2 --json
+
+_DEV_ENV = ("QRACK_OCL_DEFAULT_DEVICE", "QRACK_QPAGER_DEVICES",
+            "QRACK_QUNITMULTI_DEVICES")
+
+
+def flux_spec_for(path):
+    """typeN-{trotter,full}.qasm -> 'WORD@q,..' from the sibling
+    typeN-flux.qasm's 'W = ... over loop qubits ...' comment."""
+    m = re.match(r"(.*type\d+)-(?:trotter|full|flux)\.qasm$", path)
+    cands = [m.group(1) + "-flux.qasm"] if m else []
+    cands.append(path)
+    for c in cands:
+        if os.path.exists(c):
+            w = re.search(r"W = ([XYZ]+) over loop qubits ([0-9,]+)",
+                          open(c).read())
+            if w:
+                return "%s@%s" % (w.group(1), w.group(2))
+    return None
+
+
+def _batch_worker(slot, dev, jobq, resq, sim_kwargs, readout, shots, seed):
+    qrack_warmup()
+    be = QrackBackend(**sim_kwargs)
+    while True:
+        job = jobq.get()
+        if job is None:
+            break
+        jid, path, specs = job
+        resq.put(("start", slot, jid, os.getpid()))
+        t0 = time.perf_counter()
+        out = {"file": path, "device": dev, "pid": os.getpid(),
+               "pinned": {k: os.environ.get(k) for k in _DEV_ENV}}
+        try:
+            pl = {sp: parse_pauli(sp, 1 << 30) for sp in specs}
+            r = be.run(path, shots=shots, seed=seed, readout=readout,
+                       paulis=pl)
+            out.update(r.as_dict())
+        except (QasmError, QrackError) as e:
+            out["error"] = str(e)
+        out["wall_s"] = time.perf_counter() - t0
+        resq.put(("done", slot, jid, out))
+        if BROKEN_SIMS:                 # never reuse a failed Qrack state
+            os._exit(3)
+
+
+def main_batch(argv=None):
+    ap = argparse.ArgumentParser(prog="qasm_qrack.py batch",
+                                 description="Run independent QASM files in "
+                                 "parallel, one worker process per device")
+    ap.add_argument("files", nargs="+")
+    ap.add_argument("--devices", default="0",
+                    help="OpenCL device ids, e.g. 0,1,2,3,4,5")
+    ap.add_argument("--per-device", type=int, default=1,
+                    help="workers per device (a 27-qubit block uses ~0.5 GB)")
+    ap.add_argument("--pauli", action="append", default=[],
+                    help="observable for every file; repeatable")
+    ap.add_argument("--flux-pauli", action="store_true",
+                    help="add each file's flux word, read from the matching "
+                         "typeN-flux.qasm")
+    ap.add_argument("--shots", type=int, default=0)
+    ap.add_argument("--seed", type=int)
+    ap.add_argument("--readout", choices=("prob", "joint"), default="prob")
+    ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args(argv)
+
+    devices = [int(x) for x in a.devices.split(",")]
+    kw = {"is_gpu": False} if a.cpu else {}
+    jobs = []
+    for f in a.files:
+        specs = list(a.pauli)
+        if a.flux_pauli:
+            sp = flux_spec_for(f)
+            if sp:
+                specs.append(sp)
+            else:
+                print("%s: no flux word found (looked for its typeN-flux.qasm)"
+                      % f, file=sys.stderr)
+        jobs.append((len(jobs), f, specs))
+
+    ctx = mp.get_context("spawn")
+    jobq, resq = ctx.Queue(), ctx.Queue()
+    for j in jobs:
+        jobq.put(j)
+    slots = [d for d in devices for _ in range(max(1, a.per_device))]
+
+    def spawn(slot):
+        d = slots[slot]
+        saved = {k: os.environ.get(k) for k in _DEV_ENV}
+        for k in _DEV_ENV:
+            os.environ[k] = str(d)
+        try:
+            p = ctx.Process(target=_batch_worker, daemon=True,
+                            args=(slot, d, jobq, resq, kw, a.readout,
+                                  a.shots, a.seed))
+            p.start()
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        return p
+
+    t0 = time.perf_counter()
+    workers = [spawn(i) for i in range(len(slots))]
+    busy = {}                                  # slot -> job id
+    results = {}
+    print("batch: %d jobs on %d worker(s), devices %s" % (
+        len(jobs), len(slots), ",".join(map(str, devices))), file=sys.stderr)
+    import queue as _queue
+    while len(results) < len(jobs):
+        try:
+            msg = resq.get(timeout=1.0)
+        except _queue.Empty:
+            msg = None
+        if msg and msg[0] == "start":
+            busy[msg[1]] = msg[2]
+        elif msg and msg[0] == "done":
+            _, slot, jid, out = msg
+            busy.pop(slot, None)
+            results[jid] = out
+            vals = "  ".join("<%s>=%+.6f" % (k if len(k) <= 14 else
+                                              k[:11] + "...", v)
+                             for k, v in out.get("pauli", {}).items())
+            print("[dev %d] %-34s %s  %.1fs" % (
+                out["device"], os.path.basename(out["file"]),
+                "ERROR " + out["error"][:60] if "error" in out else vals,
+                out["wall_s"]), file=sys.stderr)
+        for slot, p in enumerate(workers):
+            if p.is_alive():
+                continue
+            if slot in busy:                   # died holding a job
+                jid = busy.pop(slot)
+                if jid not in results:
+                    results[jid] = {"file": jobs[jid][1],
+                                    "device": slots[slot],
+                                    "error": "worker died during this job "
+                                             "(exit code %s)" % p.exitcode}
+                    print("[dev %d] %-34s ERROR worker died (exit %s)" % (
+                        slots[slot], os.path.basename(jobs[jid][1]),
+                        p.exitcode), file=sys.stderr)
+            if len(results) + len(busy) < len(jobs):
+                workers[slot] = spawn(slot)    # replace on the same device
+    for _ in workers:
+        jobq.put(None)
+    for p in workers:
+        p.join(timeout=10)
+    wall = time.perf_counter() - t0
+    done = [results[j] for j in range(len(jobs))]
+    busy_s = sum(r.get("wall_s", 0.0) for r in done)
+    nerr = sum(1 for r in done if "error" in r)
+    print("batch: %d ok, %d failed in %s wall; job time %s total, "
+          "parallel speedup %.1fx" % (len(done) - nerr, nerr, fmt_s(wall),
+                                      fmt_s(busy_s),
+                                      busy_s / wall if wall else 0),
+          file=sys.stderr)
+    if a.json:
+        json.dump(done, sys.stdout, indent=1)
+        print()
+        sys.stdout.flush()
+    return 1 if nerr else 0
+
 # =====================================================================
 # =====================================================================
 # PARTS 3, 4 -- SELF-TESTS
@@ -3372,9 +3560,12 @@ def selftest_seams(verbose=False, quiet=False, gpu=False):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     route_native_stdout()
-    qrack_warmup()
-    cmd = argv[0] if argv and argv[0] in ("run", "seams", "selftest") else None
+    cmd = (argv[0] if argv and argv[0] in ("run", "seams", "selftest", "batch")
+           else None)
     rest = argv[1:] if cmd else argv
+    if cmd == "batch":
+        return main_batch(rest)       # workers warm up on their own device
+    qrack_warmup()
     if cmd == "seams":
         return main_seams(rest)
     if cmd == "selftest":
