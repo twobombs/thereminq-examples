@@ -12,7 +12,8 @@
 #   python3 qasm_qrack.py run   circuit.qasm --shots 4096      (part 1)
 #   python3 qasm_qrack.py       circuit.qasm                   (same: 'run' is the default)
 #   python3 qasm_qrack.py seams circuit.qasm --pauli "ZZ@0,5"  (part 2)
-#   python3 qasm_qrack.py selftest [backend|seams|all]         (parts 3, 4)
+#   python3 qasm_qrack.py selftest [backend|seams|all] [-v|-q] (parts 3, 4)
+#       progress on stderr: live line on a terminal, periodic lines in logs
 #
 # Runtime dependencies: pyqrack for part 1; pyqrack + numpy for part 2;
 # qiskit additionally for part 3. Missing optional packages only disable
@@ -106,6 +107,7 @@ import multiprocessing as mp
 import os
 import random
 import re
+import shutil
 import sys
 import time
 from collections import Counter, defaultdict, deque
@@ -1391,6 +1393,139 @@ def main_run(argv=None):
 #   python3 qasm_qrack.py seams c.qasm --lrc 2 --lrr 2 --emit chunks/ --json
 
 
+# ---------------------------------------------------------------------
+# PROGRESS  (selftest, and chunk dispatch in 'seams')
+# ---------------------------------------------------------------------
+
+def fmt_s(t):
+    return "%.1fs" % t if t < 60 else "%dm%02ds" % (t // 60, t % 60)
+
+
+class Progress:
+    """Progress on stderr, so stdout stays clean for results.
+
+    Terminal: one live line per group, rewritten in place (at most 10
+    updates/s), closed by a summary line. Pipe (logs, CI): groups that
+    finish within 2 s print only their summary; longer ones add a line
+    at every 10% and at least every 5 s, so a long case never leaves the
+    log silent. verbose: every step on its own line with its time.
+    quiet: group summaries only. Failures are counted live from the
+    suite's own 'fails' list.
+    """
+
+    def __init__(self, suite, n_groups=1, fails=None, verbose=False,
+                 quiet=False, stream=None):
+        self.out = stream or sys.stderr
+        self.tty = getattr(self.out, "isatty", lambda: False)()
+        self.suite, self.n_groups, self.gi = suite, n_groups, 0
+        self.fails = fails if fails is not None else []
+        self.verbose, self.quiet = verbose, quiet
+        self.t_suite = time.perf_counter()
+        self.name = None
+
+    def start(self, name, total):
+        if self.name:
+            self.end()
+        self.gi += 1
+        self.name, self.total, self.done = name, max(int(total), 1), 0
+        self.detail = self.sub = ""
+        self.t0 = self._t_step = self._last = time.perf_counter()
+        self._tick = -1
+        self.f0 = len(self.fails)
+        self._emit(force=True)
+
+    def step(self, detail="", n=1):
+        now = time.perf_counter()
+        self.done += n
+        self.detail, self.sub = detail, ""
+        if self.verbose and not self.quiet:
+            self._clear()
+            self._write("  %s %3d/%d  %-60s %7s%s\n" % (
+                self._tag(), self.done, self.total, detail[:60],
+                fmt_s(now - self._t_step),
+                "  FAILS %d" % self._nf() if self._nf() else ""))
+        self._t_step = now
+        self._emit()
+
+    def running(self, text):
+        """Label the step now in progress (replaces the last finished
+        step's label, so heartbeats never pair one case's label with
+        another case's counters)."""
+        self.detail, self.sub = "now: " + text, ""
+        self._emit()
+
+    def substep(self, text):
+        """Movement inside a slow step, e.g. chunk counts."""
+        self.sub = text
+        self._emit()
+
+    def note(self, text):
+        """A result line for stdout, without tearing the live line."""
+        self._clear()
+        print(text, flush=True)
+        self._emit(force=True)
+
+    def end(self):
+        if not self.name:
+            return
+        self._clear()
+        nf = self._nf()
+        self._write("%s %-22s %4d/%-4d %-10s %8s\n" % (
+            self._tag(), self.name, self.done, self.total,
+            "ok" if not nf else "%d FAILED" % nf,
+            fmt_s(time.perf_counter() - self.t0)))
+        self.name = None
+
+    def finish(self):
+        self.end()
+        return time.perf_counter() - self.t_suite
+
+    def _nf(self):
+        return len(self.fails) - self.f0
+
+    def _tag(self):
+        return "[%s %d/%d]" % (self.suite, self.gi, self.n_groups)
+
+    def _line(self):
+        el = time.perf_counter() - self.t0
+        eta = ("  eta %s" % fmt_s(el / self.done * (self.total - self.done))
+               if self.done and self.done < self.total else "")
+        d = " | ".join(x for x in (self.detail, self.sub) if x)
+        return "%s %s  %d/%d %3d%%  %s%s%s%s" % (
+            self._tag(), self.name, self.done, self.total,
+            100 * self.done // self.total, fmt_s(el), eta,
+            "  FAILS %d" % self._nf() if self._nf() else "",
+            "  | " + d if d else "")
+
+    def _emit(self, force=False):
+        if self.quiet or not self.name or (self.verbose and not force):
+            return
+        now = time.perf_counter()
+        if self.tty:
+            if not force and now - self._last < 0.1:
+                return
+            self._last = now
+            w = shutil.get_terminal_size((100, 20)).columns - 1
+            self._write("\r" + self._line()[:w] + "\x1b[K")
+        else:
+            # logs: fast groups get only their summary line; slow ones a
+            # line per 10% and a heartbeat at least every 5 s
+            if now - self.t0 < 2.0:
+                return
+            tick = 10 * self.done // self.total
+            if tick != self._tick or now - self._last >= 5:
+                self._tick, self._last = tick, now
+                self._write(self._line() + "\n")
+
+    def _clear(self):
+        if self.tty and not self.quiet:
+            self._write("\r\x1b[K")
+
+    def _write(self, text):
+        self.out.write(text)
+        self.out.flush()
+
+
 EPS = 1e-12
 # Outcomes below this are treated as impossible. In single precision a
 # repeated measurement's impossible outcome comes back as ~1e-6, and
@@ -1959,7 +2094,9 @@ def top_terms(cuts, budget):
                     heapq.heappush(heap, (-mag(nx), nx))
 
 
-def knit(split, paulis, budget, workers, devices, sim_kwargs, emit=None):
+def knit(split, paulis, budget, workers, devices, sim_kwargs, emit=None,
+         progress=None):
+    """progress(done, total) is called after every chunk instance."""
     t0 = time.perf_counter()
     cuts = split.cuts
     gamma = math.prod(c.gamma() for c in cuts) if cuts else 1.0
@@ -2006,6 +2143,8 @@ def knit(split, paulis, budget, workers, devices, sim_kwargs, emit=None):
                       initargs=(devq, sim_kwargs)) as pool:
             for k, v in pool.imap_unordered(run_chunk, jobs, chunksize=4):
                 res[k] = v
+                if progress:
+                    progress(len(res), len(jobs))
     else:
         _W["be"] = QrackBackend(device=devices[0] if devices else None,
                                    **sim_kwargs)
@@ -2013,6 +2152,8 @@ def knit(split, paulis, budget, workers, devices, sim_kwargs, emit=None):
         for job in jobs:
             k, v = run_chunk(job)
             res[k] = v
+            if progress:
+                progress(len(res), len(jobs))
     t2 = time.perf_counter()
 
     # synthesis
@@ -2274,6 +2415,8 @@ def main_seams(argv=None):
     ap.add_argument("--no-ref", action="store_true")
     ap.add_argument("--emit", help="write chunk QASM + seams.json here")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--quiet", action="store_true",
+                    help="no chunk progress on stderr")
     a = ap.parse_args(argv)
 
     kw = {"is_gpu": False} if a.cpu else {}
@@ -2290,7 +2433,16 @@ def main_seams(argv=None):
               "partition": part,
               "patch_sizes": [len(q) for q in split.qubits_of],
               "cuts": [c.describe() for c in split.cuts]}
-    kn = knit(split, paulis, a.max_terms, a.workers, devices, kw, a.emit)
+    pr = Progress("seams", 1, quiet=a.quiet)
+
+    def chunk_cb(done, total):
+        if pr.name is None:
+            pr.start("chunk instances", total)
+            pr.done = done - 1
+        pr.step("%d worker%s" % (a.workers, "s" if a.workers > 1 else ""))
+    kn = knit(split, paulis, a.max_terms, a.workers, devices, kw, a.emit,
+              progress=chunk_cb)
+    pr.finish()
     report["knit"] = kn
     ace = ref = None
     if not a.no_ace:
@@ -2390,7 +2542,7 @@ def main_seams(argv=None):
 # =====================================================================
 
 
-def selftest_backend():
+def selftest_backend(verbose=False, quiet=False):
     """Backend vs Qiskit reference states. Returns 0 on success."""
     import numpy as np
     from qiskit import QuantumCircuit
@@ -2416,6 +2568,7 @@ def selftest_backend():
     BE = QrackBackend(is_gpu=False)
     TOL = 2e-5            # pyqrack wheels run single precision
     fails = []
+    PR = Progress("backend", 6, fails, verbose, quiet)
 
 
     def fid(a, b):
@@ -2424,6 +2577,12 @@ def selftest_backend():
 
 
     def check(name, qasm, qc):
+        try:
+            _check(name, qasm, qc)
+        finally:
+            PR.step(name)
+
+    def _check(name, qasm, qc):
         try:
             r = BE.run(qasm, shots=0, statevector=True)
         except Exception as e:
@@ -2479,6 +2638,7 @@ def selftest_backend():
 
 
     def t_every_gate(rng):
+        PR.start("every gate", len(GATES))
         for name, (np_, nq, mk) in GATES.items():
             n = nq + 1
             pq, pc = prep(n, rng)
@@ -2531,6 +2691,7 @@ def selftest_backend():
             ("ctrl @ iswap q[3], q[1], q[0];", L.iSwapGate().control(1),
              [3, 1, 0]),
         ]
+        PR.start("modifiers", len(cases))
         for line, g, qs in cases:
             pq, pc = prep(4, rng)
             if g is None:                       # negctrl @ gphase == X P X
@@ -2543,6 +2704,7 @@ def selftest_backend():
 
 
     def t_user_gates(rng):
+        PR.start("user gates", 2)
         # A global phase inside a user gate must survive ctrl @.
         src = header(3) + """
     gate ph(t) a { gphase(t); rz(t) a; }
@@ -2575,6 +2737,7 @@ def selftest_backend():
 
 
     def t_syntax(rng):
+        PR.start("syntax", 7)
         pq, pc = prep(4, rng)
         src = ('OPENQASM 3.0;\ninclude "stdgates.inc";\n'
                "const float[64] th = pi / 7;\ninput float phi;\n"
@@ -2600,6 +2763,7 @@ def selftest_backend():
         f = fid(r.statevector, Statevector(pc).data)
         if f < 1 - TOL:
             fails.append("syntax: registers/slices/consts/input fidelity %.9f" % f)
+        PR.step("registers, slices, consts, input")
 
         q2 = ('OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[3];\ncreg c[3];\n'
               "gate maj a,b,c { cx c,b; cx c,a; ccx a,b,c; }\n"
@@ -2619,12 +2783,14 @@ def selftest_backend():
             except QasmError as e:
                 if why not in str(e):
                     fails.append("syntax: wrong error for %s: %s" % (why, e))
+            PR.step("rejects: " + why)
 
 
     POOL = [n for n in GATES if n not in ("c4x",)]
 
 
     def t_random(rng, trials=12, n=7, depth=250):
+        PR.start("random circuits", trials)
         for tr in range(trials):
             pq, pc = prep(n, rng)
             lines = []
@@ -2648,11 +2814,12 @@ def selftest_backend():
                     mods, name, "(%s)" % ",".join(map(repr, ps)) if ps else "",
                     ", ".join("q[%d]" % x for x in qs)))
                 pc.append(g, qs)
-            check("random circuit %d" % tr, header(n) + pq + "\n".join(lines)
+            check("circuit %d: %d qubits, %d gates" % (tr + 1, n, depth), header(n) + pq + "\n".join(lines)
                   + "\n", pc)
 
 
     def t_dynamic():
+        PR.start("dynamic circuits", 7)
         # Teleport |1>: the output qubit must read 1 on every shot.
         tele = header(3) + """bit[2] m;
     bit out;
@@ -2671,6 +2838,7 @@ def selftest_backend():
             fails.append("dynamic: teleport gave %s (%s)" % (r.counts, r.mode))
         if sum(r.counts.values()) != 200:
             fails.append("dynamic: teleport shot count")
+        PR.step("teleport")
 
         ghz = header(3) + "bit[3] c;\nh q[0]; cx q[0], q[1]; cx q[1], q[2];\n" \
             "c = measure q;\n"
@@ -2681,12 +2849,13 @@ def selftest_backend():
             fails.append("dynamic: GHZ imbalance %s" % r.counts)
         if any(abs(p - 0.5) > 1e-5 for p in r.probabilities.values()):
             fails.append("dynamic: GHZ exact marginals %s" % r.probabilities)
+        PR.step("GHZ, measure_shots path")
 
-        # bit ordering: c[0]=1, c[1]=0, c[2]=1  ->  "101"; second reg leftmost
         # seeded: reproducible, per-shot, same support
         r1, r2 = BE.run(ghz, shots=300, seed=3), BE.run(ghz, shots=300, seed=3)
         if r1.counts != r2.counts or set(r1.counts) - {"000", "111"}:
             fails.append("dynamic: seeded GHZ %s vs %s" % (r1.counts, r2.counts))
+        PR.step("seeded reproducibility")
 
         # c = [1,1,0] reads "011"; d (declared later) prints leftmost
         order = header(3) + "bit[3] c;\nbit[1] d;\nx q[0]; x q[1];\n" \
@@ -2694,12 +2863,14 @@ def selftest_backend():
         r = BE.run(order, shots=10)
         if r.counts != {"1 011": 10}:
             fails.append("dynamic: bit ordering %s" % r.counts)
+        PR.step("bit ordering")
 
         rst = header(1) + "bit c;\nx q[0];\nreset q[0];\nh q[0];\nh q[0];\n" \
             "c = measure q[0];\n"
         r = BE.run(rst, shots=50)
         if r.counts != {"0": 50}:
             fails.append("dynamic: reset %s" % r.counts)
+        PR.step("reset")
 
         ifelse = header(2) + "bit a;\nbit b;\nx q[0];\na = measure q[0];\n" \
             "if (a == 0) { z q[1]; } else { h q[1]; z q[1]; h q[1]; }\n" \
@@ -2707,6 +2878,7 @@ def selftest_backend():
         r = BE.run(ifelse, shots=20)
         if r.counts != {"1 1": 20}:
             fails.append("dynamic: if/else %s" % r.counts)
+        PR.step("if / else")
 
         # register-valued condition: r = [0,1] has value 2, not 1
         regcond = header(3) + "bit[2] r;\nbit f;\nx q[1];\nr = measure q[0:1];\n" \
@@ -2714,6 +2886,7 @@ def selftest_backend():
         r = BE.run(regcond, shots=20)
         if r.counts != {"1 10": 20}:
             fails.append("dynamic: register condition %s" % r.counts)
+        PR.step("register condition")
 
 
     def main():
@@ -2722,19 +2895,21 @@ def selftest_backend():
             t(rng)
         t_random(rng)
         t_dynamic()
+        el = PR.finish()
         if fails:
             print("%d FAILURES" % len(fails))
             for f in fails:
                 print("  " + f)
             return 1
         print("all checks passed (%d gates, modifiers, user gates, syntax, "
-              "12 random circuits, dynamic circuits)" % len(GATES))
+              "12 random circuits, dynamic circuits) in %s"
+              % (len(GATES), fmt_s(el)))
         return 0
 
     return main()
 
 
-def selftest_seams():
+def selftest_seams(verbose=False, quiet=False):
     """Knit vs exact, truncation bound, ACE lowering. Returns 0 on success."""
     import numpy as np
 
@@ -2747,6 +2922,10 @@ def selftest_seams():
 
     KW = {"is_gpu": False}
     fails = []
+    PR = Progress("seams", 3, fails, verbose, quiet)
+
+    def chunks(done, total):
+        PR.substep("chunks %d/%d" % (done, total))
 
     ONE = ["h q[{a}];", "x q[{a}];", "sx q[{a}];", "t q[{a}];",
            "rx({p}) q[{a}];", "ry({p}) q[{a}];", "rz({p}) q[{a}];",
@@ -2798,7 +2977,8 @@ def selftest_seams():
 
 
     def t_random(rng, trials=40):
-        done = refused = 0
+        PR.start("random cut circuits", trials)
+        done = refused = skipped = 0
         while done < trials:
             n = rng.randint(4, 7)
             k = rng.choice((2, 3))
@@ -2813,10 +2993,14 @@ def selftest_seams():
                 refused += 1
                 continue
             if not 1 <= len(sp.cuts) <= 5:
+                skipped += 1
                 continue
             ps = [rand_pauli(rng, n) for _ in range(2)]
             pl = [parse_pauli(s, n) for s in ps]
-            kn = knit(sp, pl, 10 ** 6, 1, None, KW)
+            PR.running("case %d: n=%d, %d patches, %d cuts, gamma %.1f"
+                       % (done + 1, n, k, len(sp.cuts),
+                          math.prod(c.gamma() for c in sp.cuts)))
+            kn = knit(sp, pl, 10 ** 6, 1, None, KW, progress=chunks)
             ref = reference(sp, pl, KW)
             tol = 2e-6 * kn["gamma"] + 2e-5
             err = max(np.abs(kn["marg"] - ref["marg"]).max(),
@@ -2827,6 +3011,9 @@ def selftest_seams():
                 fails.append("random n=%d cuts=%d gamma=%.1f: err %.2e (tol %.1e)"
                              "\n%s" % (n, len(sp.cuts), kn["gamma"], err, tol, src))
             done += 1
+            PR.step("case %d: %d cuts, %d chunks  [resampled: %d out of "
+                    "range, %d refused]" % (done, len(sp.cuts), kn["chunks"],
+                                            skipped, refused))
         return refused
 
 
@@ -2848,19 +3035,23 @@ def selftest_seams():
         prog = compile_qasm("\n".join(lines) + "\n")
         sp = SeamSplit(prog, part)
         pl = [parse_pauli("Z0 Z4 Z1 Z5", n)]
+        PR.start("truncation bound", 3)
         ref = reference(sp, pl, KW)
         for budget in (30, 300, 3000):
-            kn = knit(sp, pl, budget, 1, None, KW)
+            PR.running("budget %d" % budget)
+            kn = knit(sp, pl, budget, 1, None, KW, progress=chunks)
             err = max(np.abs(kn["marg"] - ref["marg"]).max(),
                       np.abs(kn["pauli"] - ref["pauli"]).max())
             if err > kn["excluded"] + 1e-4:
                 fails.append("truncation: budget %d err %.3e exceeds bound %.3e"
                              % (budget, err, kn["excluded"]))
-            print("  truncation: %d cuts, budget %5d -> err %.2e, bound %.2e"
-                  % (len(sp.cuts), budget, err, kn["excluded"]))
+            PR.note("  truncation: %d cuts, budget %5d -> err %.2e, bound %.2e"
+                    % (len(sp.cuts), budget, err, kn["excluded"]))
+            PR.step("budget %d" % budget)
 
 
     def t_ace_lowering(rng, trials=8):
+        PR.start("ACE lowering", trials)
         for tr in range(trials):
             n = 6
             part = [0] * n
@@ -2880,6 +3071,7 @@ def selftest_seams():
                       abs(out["pauli"][0] - ref["pauli"][0]))
             if err > 1e-4:
                 fails.append("ace lowering trial %d: err %.2e\n%s" % (tr, err, src))
+            PR.step("trial %d, seam-free layout" % (tr + 1))
 
 
     def main():
@@ -2887,13 +3079,15 @@ def selftest_seams():
         refused = t_random(rng)
         t_truncation(rng)
         t_ace_lowering(rng)
+        el = PR.finish()
         if fails:
             print("%d FAILURES" % len(fails))
             for f in fails[:6]:
                 print(" ", f)
             return 1
         print("all checks passed (40 random cut circuits, %d refused as "
-              "unsupported partitions; truncation bound; ACE lowering)" % refused)
+              "unsupported partitions; truncation bound; ACE lowering) in %s"
+              % (refused, fmt_s(el)))
         return 0
 
     return main()
@@ -2910,16 +3104,22 @@ def main(argv=None):
     if cmd == "seams":
         return main_seams(rest)
     if cmd == "selftest":
-        which = rest[0] if rest else "all"
-        if which not in ("backend", "seams", "all"):
-            raise SystemExit("selftest [backend|seams|all]")
+        flags = {x for x in rest if x.startswith("-")}
+        words = [x for x in rest if not x.startswith("-")]
+        which = words[0] if words else "all"
+        if which not in ("backend", "seams", "all") or len(words) > 1 or \
+                flags - {"-v", "--verbose", "-q", "--quiet"}:
+            raise SystemExit("selftest [backend|seams|all] [-v|--verbose] "
+                             "[-q|--quiet]")
+        v = bool(flags & {"-v", "--verbose"})
+        q = bool(flags & {"-q", "--quiet"})
         rc = 0
         if which in ("backend", "all"):
-            print("== backend selftest (vs Qiskit)")
-            rc |= selftest_backend()
+            print("== backend selftest (vs Qiskit)", flush=True)
+            rc |= selftest_backend(v, q)
         if which in ("seams", "all"):
-            print("== seam selftest")
-            rc |= selftest_seams()
+            print("== seam selftest", flush=True)
+            rc |= selftest_seams(v, q)
         return rc
     return main_run(rest)
 
