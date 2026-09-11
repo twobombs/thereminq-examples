@@ -1038,6 +1038,7 @@ class Result:
     def __init__(self):
         self.counts = {}
         self.probabilities = {}      # "c[0]" -> exact P(1), terminal only
+        self.pauli = {}              # spec -> exact <P> on the pre-measurement state
         self.statevector = None
         self.statevector_is_final = None
         self.shots = 0
@@ -1054,6 +1055,7 @@ class Result:
 
     def as_dict(self):
         return {"counts": self.counts, "probabilities": self.probabilities,
+                "pauli": self.pauli,
                 "expectation_z": self.expectation_z(), "shots": self.shots,
                 "mode": self.mode, "num_qubits": self.num_qubits,
                 "gate_counts": self.gate_counts, "timings": self.timings}
@@ -1314,13 +1316,14 @@ class QrackBackend:
 
     # ---- public ------------------------------------------------------
     def run(self, program, shots=1024, seed=None, params=None,
-            statevector=False, path=None, readout="prob"):
+            statevector=False, path=None, readout="prob", paulis=None):
         """program: Program, QASM text, or a path to a .qasm file.
         readout: 'prob' (one prob() per measured qubit, then
         measure_shots) or 'joint' (one ProbAll over all measured qubits;
         marginals and shots from that array; needs numpy)."""
         if readout not in ("prob", "joint"):
             raise QasmError("readout must be 'prob' or 'joint'")
+        paulis = dict(paulis or {})           # spec -> [(qubit, pauli int)]
         res = Result()
         t0 = time.perf_counter()
         if not isinstance(program, Program):
@@ -1352,6 +1355,15 @@ class QrackBackend:
 
             terminal = all(op[0] == "m" for op in tail)
             res.statevector_is_final = not tail
+            if paulis:
+                from pyqrack import Pauli
+                for spec, pl in paulis.items():
+                    if any(q >= prog.num_qubits for q, _ in pl):
+                        raise QasmError("pauli '%s' names a qubit beyond the "
+                                        "%d declared" % (spec, prog.num_qubits))
+                    stage = "pauli_expectation <%s>" % spec
+                    res.pauli[spec] = float(sim.pauli_expectation(
+                        [q for q, _ in pl], [Pauli(b) for _, b in pl]))
             if statevector:
                 stage = "statevector readout"
                 res.statevector = list(sim.out_ket())
@@ -1473,6 +1485,10 @@ def main_run(argv=None):
     ap.add_argument("--sim", action="append", default=[], metavar="K=V",
                     help="extra QrackSimulator kwarg, e.g. "
                          "is_stabilizer_hybrid=true")
+    ap.add_argument("--pauli", action="append", default=[],
+                    help="exact <P> on the state before measurement: "
+                         "WORD@q,q,.. or 'Z0 Y5 ..'; repeatable. Replaces a "
+                         "Hadamard-test ancilla (one qubit narrower)")
     ap.add_argument("--readout", choices=("prob", "joint"), default="prob",
                     help="joint: one ProbAll over all measured qubits "
                          "instead of a prob() per qubit (needs numpy; "
@@ -1490,8 +1506,9 @@ def main_run(argv=None):
     out, rc = {}, 0
     for f in a.files:
         try:
+            pl = {sp: parse_pauli(sp, 1 << 30) for sp in a.pauli}
             r = be.run(f, shots=a.shots, seed=a.seed, params=params,
-                       readout=a.readout)
+                       readout=a.readout, paulis=pl)
         except (QasmError, QrackError) as e:
             print("%s: %s" % (f, e), file=sys.stderr)
             if a.json:
@@ -1505,6 +1522,8 @@ def main_run(argv=None):
                     if k not in ("measure", "reset"))
         print("%s: %d qubits, %d gates, %s, %.3f s"
               % (f, r.num_qubits, gates, r.mode, sum(r.timings.values())))
+        for k, v in r.pauli.items():
+            print("  <%s> = %+.9f" % (k, v))
         for k, p in r.probabilities.items():
             print("  P(%s=1) = %.9f   <Z> = %+.9f" % (k, p, 1 - 2 * p))
         for k, n in sorted(r.counts.items(), key=lambda x: -x[1])[:a.top]:
