@@ -2796,9 +2796,27 @@ def main_seams(argv=None):
 #   python3 qasm_qrack.py batch out/qasm/type*-trotter.qasm --flux-pauli \
 #       --devices 0,1,2,3,4,5 --shots 0
 #   python3 qasm_qrack.py batch a.qasm b.qasm --pauli "Z0 Z1" --per-device 2 --json
+#   ... --isolate radeonsi     each worker sees only its own die (rusticl)
 
 _DEV_ENV = ("QRACK_OCL_DEFAULT_DEVICE", "QRACK_QPAGER_DEVICES",
-            "QRACK_QUNITMULTI_DEVICES")
+            "QRACK_QUNITMULTI_DEVICES", "RUSTICL_ENABLE")
+
+
+def device_env(dev, isolate=None):
+    """Environment that pins one worker to OpenCL device 'dev'.
+
+    Without isolation the Qrack variables pick the device, but OpenCL
+    still opens every device in the process: each worker built kernels
+    for all six V340 dies and held ~0.5 GB on each. With isolate=DRIVER
+    (e.g. 'radeonsi') Mesa's rusticl exposes only that device
+    (RUSTICL_ENABLE=radeonsi:3 -> the fourth radeonsi device), which the
+    process then sees as its device #0.
+    """
+    if isolate:
+        env = {k: "0" for k in _DEV_ENV[:3]}
+        env["RUSTICL_ENABLE"] = "%s:%d" % (isolate, dev)
+        return env
+    return {k: str(dev) for k in _DEV_ENV[:3]}
 
 
 def flux_spec_for(path):
@@ -2817,6 +2835,7 @@ def flux_spec_for(path):
 
 
 def _batch_worker(slot, dev, jobq, resq, sim_kwargs, readout, shots, seed):
+    # environment (device pinning) was set by the parent before spawn
     qrack_warmup()
     be = QrackBackend(**sim_kwargs)
     while True:
@@ -2852,6 +2871,11 @@ def main_batch(argv=None):
                     help="workers per device (a 27-qubit block uses ~0.5 GB)")
     ap.add_argument("--pauli", action="append", default=[],
                     help="observable for every file; repeatable")
+    ap.add_argument("--isolate", metavar="DRIVER",
+                    help="expose only the worker's own device through Mesa "
+                         "rusticl, e.g. --isolate radeonsi (sets "
+                         "RUSTICL_ENABLE=radeonsi:<d>): no kernels built or "
+                         "memory held on the other devices")
     ap.add_argument("--flux-pauli", action="store_true",
                     help="add each file's flux word, read from the matching "
                          "typeN-flux.qasm")
@@ -2885,8 +2909,8 @@ def main_batch(argv=None):
     def spawn(slot):
         d = slots[slot]
         saved = {k: os.environ.get(k) for k in _DEV_ENV}
-        for k in _DEV_ENV:
-            os.environ[k] = str(d)
+        for k, v in device_env(d, a.isolate).items():
+            os.environ[k] = v
         try:
             p = ctx.Process(target=_batch_worker, daemon=True,
                             args=(slot, d, jobq, resq, kw, a.readout,
@@ -2904,8 +2928,10 @@ def main_batch(argv=None):
     workers = [spawn(i) for i in range(len(slots))]
     busy = {}                                  # slot -> job id
     results = {}
-    print("batch: %d jobs on %d worker(s), devices %s" % (
-        len(jobs), len(slots), ",".join(map(str, devices))), file=sys.stderr)
+    print("batch: %d jobs on %d worker(s), devices %s%s" % (
+        len(jobs), len(slots), ",".join(map(str, devices)),
+        ", isolated via RUSTICL_ENABLE=%s:<d>" % a.isolate if a.isolate
+        else ""), file=sys.stderr)
     import queue as _queue
     while len(results) < len(jobs):
         try:
