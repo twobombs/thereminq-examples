@@ -119,6 +119,28 @@ HALF = {(0, 0): 2, (0, 1): 1, (0, 2): 0, (1, 3): 2, (1, 4): 0, (1, 5): 1,
 RADIAL_COLOUR = [0, 0, 2, 1, 2, 2, 1, 2, 1, 1, 0, 1, 2, 1, 2,
                  1, 0, 2, 1, 0, 0, 1, 2, 0, 0, 0, 2, 2, 0, 1]
 
+# THE CORE CAP
+# =====================================================================
+# Shell 0 has 15 inward connectors with nothing to bond to. A core site
+# must be degree 3 with one bond of each colour, so it takes exactly one
+# x, one y and one z connector -- and the 15 happen to split 5/5/5 by
+# colour, so the cap is 5 joints of 3 and the count is forced, not chosen.
+#
+# Each triple is (x-connector, y-connector, z-connector) by dodecahedron
+# edge index. Chosen to maximise the in-shell separation within a joint;
+# the best achievable is nearest-endpoint distance 1, which puts the two
+# connectors 4 apart in the shell and so closes a 6-loop through the
+# joint. Girth therefore drops from 8 to 6 at the core and nowhere else:
+# exactly 7 six-loops, all of them touching a joint. Those 7 are the
+# centre, in the only sense the lattice has -- they are the shortest
+# loops in the object and they exist only because the cap exists.
+#
+# 6 = 2 mod 4, the same residue as the in-shell 10-loops, so the core
+# plaquettes want the same flux sign as the shells and it is only the
+# radial 8-loops that disagree.
+CORE_JOINTS = [(1, 6, 12), (20, 9, 17), (23, 15, 14),
+               (24, 29, 22), (28, 18, 27)]
+
 
 # =====================================================================
 # PART 1 -- LATTICE
@@ -162,8 +184,14 @@ def dodecahedron():
     return V, E, adj, faces
 
 
-def build(nshell=4, closed=True):
-    """Site index, 3-space position, bonds as (i, j, colour), loops."""
+def build(nshell=4, closed=True, core=False):
+    """Site index, 3-space position, bonds as (i, j, colour), loops.
+
+    core=True caps the inner boundary with the five joints, which leaves
+    the outer surface as the only open boundary and so makes inward and
+    outward physically distinct. Implies closed=False."""
+    if core:
+        closed = False
     if closed and nshell % 2:
         raise SystemExit("a closed stack needs an even shell count "
                          "(the bipartite classes alternate by shell)")
@@ -189,6 +217,13 @@ def build(nshell=4, closed=True):
         for a, b in zip(U, BETA):
             bonds.append((idx[(s, "c", a)], idx[(t, "c", b)],
                           RADIAL_COLOUR[a]))
+    if core:
+        base = len(idx)
+        for k, trip in enumerate(CORE_JOINTS):
+            idx[("core", "j", k)] = base + k
+            pos.append(np.zeros(3))
+            for e in trip:
+                bonds.append((base + k, idx[(0, "c", e)], RADIAL_COLOUR[e]))
     loops = []
     for s in range(nshell):
         for f in faces:
@@ -235,8 +270,8 @@ def elementary_cycles(n, bonds, maxlen=10):
     return out
 
 
-def check(nshell=4, closed=True):
-    idx, pos, bonds, loops = build(nshell, closed)
+def check(nshell=4, closed=True, core=False):
+    idx, pos, bonds, loops = build(nshell, closed, core)
     n = len(idx)
     deg = collections.Counter()
     cols = collections.defaultdict(list)
@@ -247,9 +282,12 @@ def check(nshell=4, closed=True):
         cols[j].append(c)
     print("shells %d  sites %d  bonds %d  in-shell loops %d"
           % (nshell, n, len(bonds), len(loops)))
-    print("  degrees: %s" % sorted(set(deg.values())))
-    print("  one bond of each colour at every site: %s"
-          % all(sorted(v) == [0, 1, 2] for v in cols.values()))
+    print("  degrees: %s  (degree-2 = open surface: %d)"
+          % (sorted(set(deg.values())),
+             sum(1 for v in range(n) if deg[v] == 2)))
+    print("  one bond of each colour at every degree-3 site: %s"
+          % all(sorted(cols[v]) == [0, 1, 2]
+                for v in range(n) if deg[v] == 3))
     adj = neighbours(n, bonds)
     col = {0: 0}
     st = [0]
@@ -362,6 +400,8 @@ def main():
     ap.add_argument("--shells", type=int, default=4)
     ap.add_argument("--open", action="store_true",
                     help="ball with boundary instead of the closed S^2 x S^1")
+    ap.add_argument("--core", action="store_true",
+                    help="cap the inner boundary with the five core joints")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--anneal", type=int, default=0)
     ap.add_argument("--hyperoctagon", metavar="ENGINE")
@@ -372,7 +412,7 @@ def main():
         hyperoctagon(a.hyperoctagon)
         return
 
-    idx, pos, bonds, loops, cy = check(a.shells, not a.open)
+    idx, pos, bonds, loops, cy = check(a.shells, not a.open, a.core)
     n = len(idx)
     eu = energy(n, bonds)
     print("  uniform gauge E0/site = %.10f" % eu)
