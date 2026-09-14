@@ -1,6 +1,8 @@
 # Investigating the Kitaev Model and XYZ Hamiltonian Dynamics on Tricoordinated Spherical Shells within the Cloverleaf-Fences Topology
 
-**Authors:** ThereminQ Development Team / twobombs
+<img width="2816" height="1536" alt="Gemini_Generated_Image_tqdzautqdzautqdz" src="https://github.com/user-attachments/assets/bd0cea36-aa14-43c4-97e4-99aea16b3292" />
+
+**Authors:** ThereminQ Development Team / Ai generated
 
 **Abstract:**
 This module presents a high-throughput computational pipeline designed to simulate quantum spin models—specifically the Kitaev honeycomb model and the Heisenberg XYZ model—on a stack of closed spherical shells (dodecahedra). Operating within the "cloverleaf-fences" multi-boundary topology, the framework leverages Local Hidden Variable (LHV) approximations combined with a Neural Network (NN4K) ansatz to analyze strongly correlated quantum states across highly connected manifolds. The core implementation, `shell_dodec_kitaev.py`, constructs a robust tricoordinated, bipartite 3-space graph of arbitrary shell depths, orchestrating exact free-fermion diagonalization for any given gauge sector. Unlike the standard hyperoctagon lattice where an exact uniform anchor exists, the radial couplings in this spherical geometry induce geometric frustration in the flux sectors, necessitating stochastic annealing to estimate the true ground state. Powered by the ThereminQ ecosystem and PyQrack for GPU-accelerated tensor contraction and statevector scaling, this pipeline enables the exploration of loop-error suppression, Automatic Circuit Elision (ACE), and boundary mean-field constraints. The orchestrated shell scripts provide a reproducible benchmark suite for evaluating finite-size scaling, simulated annealing performance, and multi-GPU tensor network distributions.
@@ -58,5 +60,8 @@ To export the lattice and the optimized gauge configuration to a JSON manifest f
 python3 shell_dodec_kitaev.py --shells 6 --anneal 4000 -o output_lattice.json
 ```
 
+<img width="1544" height="666" alt="image" src="https://github.com/user-attachments/assets/5a9f0b9d-01d8-4775-80d9-1804d682dfdc" />
+
 ## 5. References
 [1] Carleo, G., & Troyer, M. "Solving the quantum many-body problem with artificial neural networks." *Science* 355.6325 (2017): 602-606. [arXiv:1606.02318](https://arxiv.org/abs/1606.02318)
+
