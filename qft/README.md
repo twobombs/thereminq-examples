@@ -1,6 +1,7 @@
 # High-Performance Quantum Fourier Transform Implementation in the ThereminQ Ecosystem
 
-**Authors:** ThereminQ Contributors (twobombs/thereminq-examples)
+**Authors:** ThereminQ Contributors (twobombs/thereminq-examples) - Ai generated; claims, methods and results could be false and should not be taken as anything other then a PoC at best - emptor caveat
+
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
