@@ -4,16 +4,18 @@
 #   * ONE control qubit, recycled 2n times with measurement + feed-forward.
 #     This is the semiclassical inverse QFT: the counting register never exists
 #     as a state vector and needs no seams or Bell pairs at all.
-#   * ONE work patch: n-qubit register q plus n-qubit scratch o (o is |0> between
-#     steps), held as a full state vector. This is the part that must stay
-#     "very close to a full SV": it holds a superposition over up to r values
-#     a^k mod N, and its entanglement across any cut can be ~n/2 ebits, so it
-#     cannot be split into classically seamed patches.
+#   * ONE work patch: n-qubit register q, held as a full state vector. This is
+#     the part that must stay "very close to a full SV": it holds a superposition
+#     over up to r values a^k mod N, and its entanglement across any cut can be
+#     ~n/2 ebits, so it cannot be split into classically seamed patches.
 #   * Controlled U^(2^j) = controlled in-place modular multiplication by
-#     A = a^(2^j) mod N, using Qrack's permutation-level arithmetic:
-#         mcmuln(A)  : o <- A*q mod N            (if control)
-#         cswap      : q <-> o                   (if control)
-#         mcdivn(A^-1): o <- o - A^-1 * q mod N  (if control)  -> o back to 0
+#     A = a^(2^j) mod N, applied as one exact permutation on (ctrl, q) via
+#     QrackSimulator.hash(): identity if ctrl=0, x -> A*x mod N if ctrl=1
+#     (x >= N left fixed). No scratch register, so 1 + n qubits total.
+#     (mcmuln/mcdivn were dropped: in pyqrack-cpu 2.10-2.25.2 muln does not
+#     return A*x mod N for many inputs, e.g. N=21, A=11, x=0 -> 11.)
+#   * Bit order: the step using U^(2^(t-1)) reads the LSB of m first, so the
+#     k-th measured bit has weight 2^k (same recurrence as chain_sample(inverse)).
 #
 # Every run is checked two ways:
 #   * classically: the order candidate r must satisfy a^r = 1 mod N, and any
@@ -25,6 +27,12 @@
 # Usage:
 #   python3 shor_semiclassical.py 15 21 35 143 221 --shots 32 [--no-gpu] [--seed 1]
 #   python3 shor_semiclassical.py 3127 --t 24 --shots 16
+
+import os
+
+QRACK_LIB_PATH = "/usr/local/lib/qrack/libqrack_pinvoke.so"
+if os.path.exists(QRACK_LIB_PATH):  # pyqrack reads this env var at import time
+    os.environ.setdefault("PYQRACK_SHARED_LIB_PATH", QRACK_LIB_PATH)
 
 import argparse, math, sys, time
 from fractions import Fraction
@@ -69,33 +77,38 @@ def sample_ideal_m(r, t, rng, shots):
     return out
 
 
-def run_once(N, a, t, rng, use_gpu):
+def ctrl_mul_table(A, N, n):
+    """Permutation on (ctrl, q), ctrl = LSB: identity if ctrl=0, x -> A*x mod N if ctrl=1.
+    Values x >= N are left fixed, so the table is a bijection."""
+    t = list(range(1 << (n + 1)))
+    for x in range(N):
+        t[1 | (x << 1)] = 1 | ((A * x % N) << 1)
+    return t
+
+
+def run_once(N, a, t, rng, use_gpu, tables):
     n = N.bit_length()
     ctrl = 0
-    q = list(range(1, 1 + n))
-    o = list(range(1 + n, 1 + 2 * n))
-    sim = QrackSimulator(1 + 2 * n, is_gpu=use_gpu)
-    sim.x(q[0])  # work register = |1>
+    reg = list(range(1 + n))            # ctrl + q; no scratch register needed
+    sim = QrackSimulator(1 + n, is_gpu=use_gpu)
+    sim.x(1)  # work register q = |1>
 
-    bits = {}
+    m = 0
     R = 0.0
-    for j in range(t - 1, -1, -1):  # largest power first
+    for step, j in enumerate(range(t - 1, -1, -1)):  # largest power first
         if sim.m(ctrl):             # recycle the control qubit
             sim.x(ctrl)
         sim.h(ctrl)
         A = pow(a, 1 << j, N)
         if A != 1:
-            Ainv = pow(A, -1, N)
-            sim.mcmuln(A, [ctrl], N, q, o)
-            sim.cswap([ctrl], q[0], o[0]) if n == 1 else [sim.cswap([ctrl], qi, oi) for qi, oi in zip(q, o)]
-            sim.mcdivn(Ainv, [ctrl], N, q, o)
+            sim.hash(reg, tables[A])
         if R:
             sim.u(ctrl, 0.0, 0.0, -2 * math.pi * R)  # semiclassical inverse-QFT correction
         sim.h(ctrl)
         b = sim.m(ctrl)
-        bits[j] = b
+        m |= b << step              # U^(2^(t-1)) reads the LSB of m first
         R = (R + b / 2) / 2
-    return sum(b << j for j, b in bits.items())
+    return m
 
 
 def order_from_m(m, t, N, a):
@@ -143,7 +156,12 @@ def main():
         r_true = order_classical(a, N)
 
         t0 = time.perf_counter()
-        ms = [run_once(N, a, t, rng, not args.no_gpu) for _ in range(args.shots)]
+        tables = {}
+        for j in range(t):
+            A = pow(a, 1 << j, N)
+            if A != 1 and A not in tables:
+                tables[A] = ctrl_mul_table(A, N, n)
+        ms = [run_once(N, a, t, rng, not args.no_gpu, tables) for _ in range(args.shots)]
         dt = time.perf_counter() - t0
 
         orders = [order_from_m(m, t, N, a) for m in ms]
@@ -161,7 +179,7 @@ def main():
         gap = lp_meas - lp_ideal
 
         print({
-            "N": N, "a": a, "qubits": 1 + 2 * n, "t": t, "shots": args.shots,
+            "N": N, "a": a, "qubits": 1 + n, "t": t, "shots": args.shots,
             "seconds_per_shot": round(dt / args.shots, 4),
             "true_order": r_true,
             "order_found_rate": round(len(found) / args.shots, 3),
