@@ -15,10 +15,17 @@
 #   * --check K runs K random patches per layer on Qrack (a p-qubit state
 #     vector per shot), feeds Qrack's outcomes into the condensate, and scores them;
 #   * --fault-rate injects a random RY error into checked patches to measure detection.
+#   * with --check 0 (the default) pyqrack is never imported: the run is pure numpy.
+#
+# Only checked patches are scored. Unchecked patches are sampled from the same exact
+# model that would score them, so any score over them measures the entropy of the
+# ideal distribution, not fidelity, and is identical for every correct sampler.
 #
 # Honest scope: the seams here are classical (measure -> re-prepare). That is exactly
 # what makes arbitrary width and depth checkable, and it also means the condensate as a
-# whole is classically easy. Coherent seams (no mid-layer measurement, or ebit
+# whole is classically easy. The patching itself buys nothing: QFT/IQFT on a product
+# state followed by a Z measurement is the Griffiths-Niu semiclassical QFT, O(p) per
+# patch for any p, so --patch equal to --width (no seams at all) is just as cheap. Coherent seams (no mid-layer measurement, or ebit
 # telegates between layers) make entanglement grow each layer; then exact checking is
 # limited to light-cone spot-checks whose reference size grows with depth.
 #
@@ -28,8 +35,8 @@
 #   U(th, ph, lm)|0> ~ [cos(th/2), e^{i ph} sin(th/2)],  U|1> ~ [-sin(th/2), e^{i ph} cos(th/2)]
 #
 # Usage:
-#   python3 qft_condensate.py --width 1000000 --patch 8 --layers 10 --shots 64
-#   python3 qft_condensate.py --width 96 --patch 8 --layers 6 --shots 256 --check 3 --fault-rate 0.5
+#   python3 qft-cosmos-classical-condensate.py --width 1000000 --patch 8 --layers 10 --shots 64
+#   python3 qft-cosmos-classical-condensate.py --width 96 --patch 8 --layers 6 --shots 256 --check 3 --fault-rate 0.5
 
 import os
 
@@ -118,8 +125,8 @@ def main():
     npatch = W // p
 
     y = np.zeros((W, a.shots), dtype=np.uint8)  # measured bits, fed forward
-    z_total = np.zeros(a.shots)                 # sum over all patches of (p ln2 + ln P)
     checks = {"clean": [], "faulty": []}
+    qrack_runs = 0
     t0 = time.perf_counter()
 
     for layer in range(L):
@@ -145,9 +152,9 @@ def main():
             bits, lnp = chain_sample(A, B, rng, kind)
             bits = bits.reshape(p, len(ms), -1).transpose(1, 0, 2).reshape(len(ms) * p, -1)
             new_y[q] = bits
-            z_total += (p * LN2 + lnp).reshape(len(ms), -1).sum(axis=0)
 
         for m in checked:
+            qrack_runs += 1
             q = idx[m * p:(m + 1) * p]
             bits, faults = run_on_qrack(y[q], th[q], ph[q], lm[q], inverse[m], rng, a.fault_rate)
             A, B = prepared_states(y[q], th[q], ph[q])
@@ -158,7 +165,6 @@ def main():
             for t in range(a.shots):
                 checks["faulty" if faults[t] else "clean"].append(z_meas[t] - z_ideal[t])
             new_y[q] = bits
-            z_total += z_meas
 
         y = new_y
 
@@ -166,8 +172,11 @@ def main():
     out = {
         "width": W, "patch": p, "layers": L, "shift": shift, "shots": a.shots,
         "patch_runs": npatch * L, "seconds": round(dt, 3),
-        "mean_total_log_gain_per_patch": float(z_total.mean() / (npatch * L)),
+        "sampler": "exact semiclassical chain (numpy)",
+        "qrack_checked_patches": qrack_runs,
     }
+    if not qrack_runs:
+        out["note"] = "no patch ran on Qrack; nothing was scored (use --check K)"
     for k, v in checks.items():
         if v:
             v = np.array(v)
