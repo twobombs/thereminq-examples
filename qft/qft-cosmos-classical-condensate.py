@@ -31,6 +31,12 @@
 #   python3 qft_condensate.py --width 1000000 --patch 8 --layers 10 --shots 64
 #   python3 qft_condensate.py --width 96 --patch 8 --layers 6 --shots 256 --check 3 --fault-rate 0.5
 
+import os
+
+QRACK_LIB_PATH = "/usr/local/lib/qrack/libqrack_pinvoke.so"
+if os.path.exists(QRACK_LIB_PATH):  # pyqrack reads this env var at import time
+    os.environ.setdefault("PYQRACK_SHARED_LIB_PATH", QRACK_LIB_PATH)
+
 import argparse, math, sys, time
 import numpy as np
 
@@ -178,4 +184,3 @@ USE_GPU = True
 
 if __name__ == "__main__":
     sys.exit(main())
-
