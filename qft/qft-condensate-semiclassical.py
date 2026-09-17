@@ -83,13 +83,24 @@ def is_prime(N):
     return True
 
 
+def iroot(N, k):
+    """floor(N ** (1/k)) in exact integer arithmetic."""
+    if N < 2:
+        return N
+    x = 1 << -(-N.bit_length() // k)  # >= the true root
+    while True:
+        y = ((k - 1) * x + N // x ** (k - 1)) // k
+        if y >= x:
+            return x
+        x = y
+
+
 def perfect_power(N):
     """Return (b, k) with b**k == N and k >= 2, or None."""
     for k in range(N.bit_length(), 1, -1):
-        b = round(N ** (1.0 / k))
-        for c in (b - 1, b, b + 1):
-            if c > 1 and c ** k == N:
-                return c, k
+        b = iroot(N, k)
+        if b > 1 and b ** k == N:
+            return b, k
     return None
 
 
@@ -139,6 +150,22 @@ def factors_from_order(a, r, N):
     if 1 < f < N:
         return sorted((f, N // f))
     return None
+
+
+def draw_base(rng, N):
+    """Uniform-ish a in [2, N-2] for arbitrary-size N."""
+    span = N - 3
+    if span < (1 << 62):
+        return int(rng.integers(2, N - 1))
+    nbytes = (span.bit_length() + 7) // 8 + 8  # 64 extra bits make the modulo bias negligible
+    return 2 + int.from_bytes(rng.bytes(nbytes), "little") % span
+
+
+def memory_estimate(n, bytes_per_amp=8):
+    """Rough dense-simulation footprint for the (1+n)-qubit register, as log2(bytes)."""
+    state = (n + 1) + math.log2(bytes_per_amp)            # one state vector
+    table = (n + 1) + math.log2(8 + ((n) // 8 + 1))       # one uint64 table + packed copy
+    return round(state, 1), round(table, 1)
 
 
 # ---------------------------------------------------------------- QPE statistics
@@ -342,6 +369,8 @@ def main():
     ap.add_argument("--shots", type=int, default=16)
     ap.add_argument("--t", type=int, default=None, help="phase bits (default 2n)")
     ap.add_argument("--max-a", type=int, default=8, help="bases to try per N before giving up")
+    ap.add_argument("--max-work-qubits", type=int, default=28,
+                    help="refuse N wider than this (dense state vector + oracle table must fit in memory)")
     ap.add_argument("--no-gpu", action="store_true")
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args()
@@ -355,11 +384,21 @@ def main():
             print(pre)
             continue
         n = N.bit_length()
+        if n > min(args.max_work_qubits, MAX_WORK_QUBITS):
+            state_l2, table_l2 = memory_estimate(n)
+            print({
+                "N": N, "work_qubits": n, "status": "skipped_too_wide",
+                "limit": min(args.max_work_qubits, MAX_WORK_QUBITS),
+                "note": (f"dense simulation needs ~2^{state_l2} bytes of state vector plus ~2^{table_l2} bytes "
+                         f"per oracle table, and the validator's classical order search is O(r) with r up to ~N; "
+                         f"raise --max-work-qubits only up to what the target device actually holds"),
+            })
+            continue
         t = args.t or 2 * n
         tries, tried, facs = [], set(), None
         gcd_hits = 0
         while len(tries) < args.max_a and len(tried) < N - 3:
-            a = int(rng.integers(2, N - 1))
+            a = draw_base(rng, N)
             if a in tried:
                 continue
             tried.add(a)
