@@ -3,8 +3,6 @@
 **Authors:** ThereminQ Contributors (twobombs/thereminq-examples) - Ai generated; claims, methods and results could be false and should not be taken as anything other then a PoC at best - emptor caveat
 
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
 ## Abstract
 This repository directory contains advanced, high-performance implementations of the Quantum Fourier Transform (QFT) and its semiclassical variants, built upon the ThereminQ simulation ecosystem and the PyQrack framework. The QFT is a fundamental primitive in quantum algorithms, enabling exponential speedups in applications such as integer factorization (Shor's algorithm) and Quantum Phase Estimation. However, classically simulating dense, highly entangled QFT circuits is notoriously challenging due to the exponential growth of the state vector. By leveraging ThereminQ's distributed architecture and PyQrack's GPU-accelerated state vector simulation, these implementations demonstrate state-of-the-art classical emulation. We provide a semiclassical Shor factoring engine that minimizes qubit requirements, and a novel "condensate" simulation engine that executes a massive circuit of circuits using rotating classical seams, circumventing the need for a full global state vector.
 
