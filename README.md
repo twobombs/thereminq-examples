@@ -17,9 +17,17 @@ This repository is a collection of experimental configurations and development e
 
 This directory contains a Python script (`gemini-query.py`) for interacting with the Gemini API. This script is designed to be used within the `thereminq-tensor` containers.
 
+### `bro`
+
+This directory contains the Doped Clifford Sampling (DCS) toolkit for Cross-Entropy Benchmarking (XEB) verification, following [arXiv:2607.25941](https://arxiv.org/abs/2607.25941). It includes post-selection and tensor-network sweep scripts, elision-fidelity checks, and interactive XEB dashboards and 3D viewers.
+
 ### `cloverleaf-fences`
 
 This directory contains distributed quantum simulation experiments, including `4x4x6.py` for holographic embedding of a 96-qubit system across six GPUs, and `import-clifford_vqe_entangled-mesa.py` which is a multi-GPU Clifford VQE implementation.
+
+### `er-epr`
+
+This directory contains a `pyqrack` simulation of the ER=EPR "wormhole teleportation" protocol: Thermofield Double preparation, Ising scrambling, message injection, a coupling shockwave, and decoding on the opposite boundary.
 
 ### `findafactor`
 
@@ -50,6 +58,14 @@ This directory contains benchmarks and experiments related to the Ising model, a
 
 This directory contains Python scripts for implementing Shor's algorithm for factoring integers, with a focus on running the algorithm in a simulated noisy environment.
 
+### `peaked`
+
+This directory contains tools to analyze, simulate, and visualize the `P1_little_dimple.qasm` peaked-circuit challenge. It includes brute-force `pyqrack`/QBDD simulation, 3D tensor visualization, circuit resizing and steering, solvers, and verification scripts.
+
+### `plans`
+
+This directory stores execution plans and automated reasoning outputs from agentic workflows, such as code-review recommendations and project-structure documentation.
+
 ### `positron`
 
 This directory contains an experiment related to simulating anti-qubits in a quantum circuit, inspired by the movie "Tenet".
@@ -66,9 +82,17 @@ This directory contains a shell script for running a quantum error correction (Q
 
 This directory contains a suite of scripts for simulating and analyzing Out-of-Time-Order Correlators (OTOCs), which are used to study quantum chaos and information scrambling.
 
+### `qft`
+
+This directory contains two self-checking programs built on the semiclassical Quantum Fourier Transform. `qft-condensate-semiclassical.py` is a Shor factoring engine that uses a single recycled control qubit with a `pyqrack` work register. `qft-cosmos-classical-condensate.py` samples a ring of QFT/IQFT patches joined by classical seams.
+
 ### `qhrf`
 
 This directory contains preliminary, highly experimental code for Quantum Harmonic Resonance Frequency (QHRF).
+
+### `qllm-audit`
+
+This directory contains experiments for auditing Large Language Models for cryptographic backdoors, combining quantum (Shor-based) and forensic/steganographic audits, an exploit kit with a vulnerable example model, and an LLM firewall.
 
 ### `qvml`
 
@@ -86,6 +110,14 @@ This directory contains Random Circuit Sampling (RCS) benchmarks, including scri
 
 This directory implements Random Circuit Sampling (RCS) benchmarks utilizing `pyqrack` for QBDD simulation, `quimb` for Matrix Product States (MPS), and `torch` for GPU-accelerated tensor operations.
 
+### `sdrp`
+
+This directory contains `sdrp_zne_batch.py`, which uses the SDRP setting of `QrackAceBackend` as a noise knob for zero-noise extrapolation (ZNE) with Mitiq. It measures the linear XEB of random circuits across patch geometries and extrapolates to `sdrp -> 0`.
+
+### `skqd`
+
+This directory contains Stochastic Krylov Quantum Dynamics (SKQD) pipelines that estimate TFIM ground-state energies. The system is cut into `pyqrack`-simulated subsystems, and ZeroMQ distributes the work across processes; results seed a classical subspace eigensolver. It also includes a 27x27 cloverfield variant with a dashboard.
+
 ### `vqe`
 
 This directory contains diverse implementations of Variational Quantum Eigensolver (VQE) examples.
@@ -101,6 +133,10 @@ This directory contains a Python script that demonstrates a technique for avoidi
 ### `vqls`
 
 This directory contains an experiment using Gemini 2.5 to generate Qiskit code from a PDF for the Variational Quantum Linear Solver (VQLS) algorithm.
+
+### `weed`
+
+This directory explores holographic (AdS/CFT-inspired) embedding of quantum states in tensor networks, with Python data generators and C++ ingestion and training-loop tools (`adscft-weed`, `weed-training`).
 
 ---
 
