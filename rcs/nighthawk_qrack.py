@@ -1,127 +1,866 @@
 #!/usr/bin/env python3
 """
-nighthawk_qrack.py -- PyQrack audit of the fidelity estimators behind arXiv:2609.28657
-(BlueQubit, random-circuit sampling on IBM Nighthawk r2 / ibm_phoenix), without a QPU.
+nighthawk_qrack.py -- clean-qubit PyQrack companion to arXiv:2609.28657
+(BlueQubit, random-circuit sampling on IBM Nighthawk r2 / ibm_phoenix, 61 qubits).
+
+No noise model. The simulator stands in for the QPU with ideal gates; the only
+error left in any number this script prints is shot noise and, for the ace
+backend, QrackAceBackend's own seam approximation. Everything else is aligned
+gate-for-gate with the paper and the BlueQubitDev/rcs-nighthawk release:
+
+  circuits   regenerated from data/layout.json exactly as rcs/circuits.py does:
+             SplitMix64 hash of (seed, instance, cycle, qubit, k) -> Haar angles,
+             applied as rz(phi) rx(theta) rz(lambda); colours A,B,C,D in the fixed
+             order; seeds 2025 + k*1000003 (full, patched) and 2025/instance k
+             (mirror); `verify` checks every one of the 233 released QASM files.
+  patches    the five released K=3 and K=4 partitions (layout.json), not re-searched.
+  mirror     forward d/2 cycles pseudo-patched through the five K=3 boundary sets,
+             advancing one partition per cycle (rotate_every=1), then the exact
+             inverse; the ten released input strings (char q -> logical qubit q);
+             shots split evenly over the inputs; optional Pauli-frame gate
+             twirling (64 randomisations in the paper). Twirling is a gate identity,
+             so it adds no noise: on the ace backend it only randomises ACE's
+             coherent seam error so the two mirror halves cannot cancel it.
+  patched    Eq. (1)-(2): per-patch linear XEB normalised by its ideal XEB, product
+             over patches, second-order delta-method standard error.
+  combine    inverse-variance mean over instances; unweighted log10 exponential fit
+             of the mirror points (analysis/fidelity_vs_depth.py).
 
 Subcommands
-  seamgap   data only (numpy): CZ counts of every released circuit family, the fit read
-            at depth vs at gate count, ln F regression on cycles and CZ count, and the
-            per-cycle error budget.  Run against a clone of BlueQubitDev/rcs-nighthawk.
-  run       statevector emulation on nested windows of the real 61-qubit coupler graph
-            (--layout data/layout.json) or of a synthetic grid (--grid 6x6).
-            One size (--sizes 36) is a single echo run; a range (--sizes 27-36) is a
-            scaling sweep.  Resumable JSONL; --summarize prints the tables.
-  selftest  the validation checks (noiseless exactness, Loschmidt echo vs explicit
-            overlap, twirl control, analytic vs hybrid vs trajectory stochastic noise,
-            native compilation at the poles, ACE).
+  verify    regenerate all circuits and compare with data/circuits/*.qasm (no Qrack).
+  hwxeb     re-score the measured ibm_phoenix bitstrings against PyQrack ideal patch
+            distributions and rebuild the paper's F(d) points, fit and collision
+            ratios; every number is checked against data/results/*.json.
+  run       clean-qubit emulation of the released circuits (--backend exact|ace),
+            scored with the same estimators; the summary sets the simulator's
+            per-cycle fidelity next to the device's 0.872. --sizes sweeps the
+            register (first-n truncation, the release's `e < n` convention),
+            resumable per (n, point), and fits b(N) = u*N + v*CZ/cycle to 61.
+  selftest  conventions and exactness checks (seconds).
+  seamgap   data-only analysis of the release (numpy), unchanged.
 
-Estimators per (window size N, depth d, instance)
-  fwd_full     noisy U_full(d), then IDEAL U_full(d)^dag, read P(input string)
-               = |<psi_ideal|psi_noisy>|^2 on ONE statevector: the truth for the circuit
-               that would be sampled
-  fwd_pp       same for the pseudo-patched (seam-thinned) circuit
-  mirror       noisy U_pp(d/2), NOISY U_pp(d/2)^dag; pseudo-patch rotates over the K
-               partitions every cycle (paper, Appendix C); random weight-N/2 inputs
-  mirror_full  same with U_full
-  patched      product over the K patches of the normalised patch XEB, Eq. (1)-(2), from
-               exact probabilities of each patch (small separate simulators)
-  ace          the SAME Haar/CZ mirror as mirror_full (same gates, same input string),
-               with IDEAL gates, run on QrackAceBackend(--lrc, --lrr) and read from shots,
-               as in vm6502q/pyqrack-examples rcs/mirror_nn_qab.py.  The exact noiseless
-               echo is 1, so 1 - fidelity_ace is ACE's own seam (elision) error.  Logged:
-               fidelity_ace, hamming_weight_ace (popcount, upstream-compatible),
-               hamming_dist_ace (distance from the input string; equal to the weight with
-               --zero-input), bulk_to_boundary (from the backend's private _unpack; NaN if
-               that API is gone), seam_cz (CZs touching an ACE boundary qubit), pyqrack
-               (installed version).  ACE lays window-local indices 0..N-1 on its own grid,
-               so couplers of --layout windows are placed where ACE puts those indices,
-               not where the device has them.  Needs qiskit (the circuit goes in through
-               run_qiskit_circuit, as upstream).  Not bound by QRACK_MAX_CPU_QB: ace alone
-               can run the full 61-qubit window.
+Backends
+  exact   QrackSimulator. Patched circuits factorise, and QUnit keeps the patches
+          separate, so 61-qubit patched circuits run exactly. Mirror circuits
+          entangle all 61 qubits after one ABCD sweep: use --n to truncate to the
+          first n logical qubits (the release's own `e < n` convention).
+  ace     QrackAceBackend, noise=0. The 61 logical qubits are placed at their true
+          positions on an 8x8 ACE register (rows 1-8, cols 2-9 of the device), so
+          every coupler is nearest-neighbour in ACE's grid; the three dropped sites
+          idle in |0>. is_torus=False (the device patch is not a torus).
 
-Geometry
-  Windows are grown from the centre of the base graph, so the N-window contains the
-  (N-1)-window.  The device (coherent errors, per-element error rates, readout) is drawn
-  once over the whole base graph and every window inherits its slice; Haar gates are
-  drawn once per instance over the whole base graph, so a qubit runs the same gates in
-  every window that contains it.  K-patch partitions: balanced to +/-1 qubit, connected,
-  minimum cut, five kept (the paper's Appendix B procedure).
-
-Noise (--preset r2, default; --preset ideal zeroes everything; flags override)
-  stochastic  RB error per gate converted to a Pauli channel by (d+1)/d:
-                CZ 1.9e-3 -> 2.375e-3; SU(2) = 2 SX x 2.5e-4 x 3/2 -> 7.5e-4
-              idle 6.34e-4 per qubit per cycle (residual of the paper's 0.872/cycle fit)
-              lognormal spread per qubit/coupler, sigma --spread
-  coherent    ASSUMED, not reported: CZ phase 0.02+/-0.01 rad, SX over-rotation
-              (2+/-1)e-3; optional idle ZZ on undriven couplers
-  native      every SU(2) runs as RZ.SX.RZ.SX.RZ with the device SX, forward and
-              recompiled inverse alike; every CZ is the same physical CZ.  Angles come
-              from u_angles, which is well defined at the poles (diagonal/antidiagonal)
-  twirl       --twirl none|mirror|all; frames are merged into the neighbouring SU(2)
-              BEFORE native compilation, as Qiskit does
-  readout     P(1->0) 1.3%, P(0->1) 0.2%, measurement-twirled (symmetrised) by default
-  --stochastic analytic (default): in a scrambling circuit any Pauli error sends the
-              overlap to ~0, so F = F_coherent (one deterministic run) x P(no error).
-              That fails near the circuit's ends, where an error has not yet spread
-              (fwd: the input side; mirror: both the input and the output side).
-              --edge-layers L samples the errors of those first/last L noisy cycles by
-              trajectory and keeps the analytic factor for the bulk only (--traj runs per
-              point).  Default 0 = the pure analytic model, so older JSONL files resume.
-              Pick L with selftest [4], which compares every L against full trajectories.
-              --stochastic trajectory samples the errors everywhere instead.
-  The ace mode ignores the device model: it isolates the simulator's approximation.
-
-Scaling summary: per-cycle decay b(N) per estimator is fitted as u*N + v*(CZ per cycle)
-(non-negative) and evaluated at the 61-qubit experiment's counts (layout base only).
-Seam table: ACE's seam loss b_ace next to the pseudo-patch's seam gain
-b_mirror_full - b_mirror (echo) and b_fwd_full - b_fwd_pp (forward), all per cycle.
-ACE points at or below 3/shots are dropped from its decay fit; a b fitted with dropped
-depths is marked *.
-
-Big states: --cpu (is_gpu=False); export QRACK_MAX_CPU_QB=36 and QRACK_MAX_ALLOC_MB;
-leave QRACK_QUNIT_SEPARABILITY_THRESHOLD unset.  No CUDA; OpenCL via
-QRACK_OCL_DEFAULT_DEVICE when not --cpu.
+Environment: no CUDA. OpenCL via QRACK_OCL_DEFAULT_DEVICE, or --cpu.
+For big exact states: QRACK_MAX_CPU_QB, QRACK_MAX_ALLOC_MB.
 
 Examples
-  python nighthawk_qrack.py seamgap --repo rcs-nighthawk
-  python nighthawk_qrack.py selftest --layout rcs-nighthawk/data/layout.json
-  QRACK_MAX_CPU_QB=36 python nighthawk_qrack.py run --cpu \
-      --layout rcs-nighthawk/data/layout.json --sizes 27-36 --depths 8 16 24 32 36 \
-      --instances 2 --twirl none --edge-layers 3 --out r2_scaling.jsonl
-  python nighthawk_qrack.py run --layout rcs-nighthawk/data/layout.json \
-      --sizes 27-36 --modes ace,mirror_full,mirror --lrc 4 --lrr 4 --out r2_scaling.jsonl
-  python nighthawk_qrack.py run --layout rcs-nighthawk/data/layout.json \
-      --summarize --out r2_scaling.jsonl
+  python nighthawk_qrack.py verify   --repo rcs-nighthawk
+  python nighthawk_qrack.py selftest --repo rcs-nighthawk
+  python nighthawk_qrack.py hwxeb    --repo rcs-nighthawk --cpu
+  python nighthawk_qrack.py run      --repo rcs-nighthawk --backend ace --families mirror \\
+         --depths 4 8 16 24 36 --out clean_ace.jsonl
+  python nighthawk_qrack.py run      --repo rcs-nighthawk --backend ace --families mirror \\
+         --sizes 27-36,61 --depths 4 6 8 12 --out clean_ace.jsonl
+  python nighthawk_qrack.py run      --repo rcs-nighthawk --backend exact --families patched \\
+         --depths 20 36 --out clean_exact.jsonl
+  python nighthawk_qrack.py run      --repo rcs-nighthawk --summarize --out clean_ace.jsonl
 """
+
 import os
 
 QRACK_LIB_PATH = "/usr/local/lib/qrack/libqrack_pinvoke.so"
-os.environ["PYQRACK_SHARED_LIB_PATH"] = QRACK_LIB_PATH
+if os.path.exists(QRACK_LIB_PATH):
+    os.environ["PYQRACK_SHARED_LIB_PATH"] = QRACK_LIB_PATH
 
 import argparse
 import collections
-import gc
 import hashlib
-import itertools
 import json
+import math
 import re
 import statistics as st
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 
-PRESETS = {
-    "r2": dict(cz_rb=1.9e-3, sx_rb=2.5e-4, idle=6.34e-4, ro10=0.013, ro01=0.002,
-               cz_phase=(0.02, 0.01), sx_overrot=(2e-3, 1e-3), zz_idle=(0.0, 0.0), spread=0.4),
-    "ideal": dict(cz_rb=0.0, sx_rb=0.0, idle=0.0, ro10=0.0, ro01=0.0,
-                  cz_phase=(0.0, 0.0), sx_overrot=(0.0, 0.0), zz_idle=(0.0, 0.0), spread=0.0),
-}
-MODES = ["fwd_full", "fwd_pp", "mirror", "mirror_full", "patched", "ace"]   # append only: index seeds
+# ================================================================== constants of the release
+BASE_SEED = 2025
+INSTANCE_SEED_STRIDE = 1000003
+MIRROR_SHOTS = {4: 30_000, 6: 30_000, 8: 30_000, 10: 45_000, 12: 45_000, 14: 45_000, 16: 60_000,
+                18: 60_000, 20: 72_000, 24: 96_000, 28: 120_000, 32: 120_000, 36: 240_000, 40: 360_000}
+PATCHED_SHOTS = {20: 2_400, 24: 4_800, 28: 12_000, 32: 24_000, 36: 36_000, 40: 54_000}
+GATE_TWIRLS = 64
+FULL_DEPTHS = list(range(4, 41, 4))
+_MASK64 = (1 << 64) - 1
 
 
-# ================================================================== seamgap (numpy only)
+# ================================================================== angle hash (rcs/circuits.py)
+def _splitmix64(x):
+    x = (int(x) + 0x9E3779B97F4A7C15) & _MASK64
+    z = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _MASK64
+    return (z ^ (z >> 31)) & _MASK64
+
+
+def u01_from_key(*parts):
+    x = 0
+    for p in parts:
+        x = _splitmix64(x ^ (int(p) & _MASK64))
+    return ((x >> 11) & ((1 << 53) - 1)) / float(1 << 53)
+
+
+def haar_angles(seed, instance, cycle, qubit):
+    """(phi, theta, lambda), applied as rz(phi), rx(theta), rz(lambda)."""
+    phi = 2.0 * math.pi * u01_from_key(seed, instance, cycle, qubit, 1)
+    z = 1.0 - 2.0 * u01_from_key(seed, instance, cycle, qubit, 2)
+    theta = math.acos(min(1.0, max(-1.0, z)))
+    lam = 2.0 * math.pi * u01_from_key(seed, instance, cycle, qubit, 3)
+    return phi, theta, lam
+
+
+def instance_seed(instance, kind, base=BASE_SEED):
+    return base + instance * INSTANCE_SEED_STRIDE if kind in ("full", "patched") else base
+
+
+# ================================================================== one-qubit algebra
+I2 = np.eye(2, dtype=complex)
+
+
+def rz(t):
+    return np.diag([np.exp(-0.5j * t), np.exp(0.5j * t)])
+
+
+def rx(t):
+    c, s = np.cos(t / 2), np.sin(t / 2)
+    return np.array([[c, -1j * s], [-1j * s, c]])
+
+
+def gate(ang):
+    phi, th, lam = ang
+    return rz(lam) @ rx(th) @ rz(phi)            # matrix of rz(phi) then rx then rz(lam)
+
+
+def u_angles(M, tol=1e-12):
+    """(theta, phi, lambda) of the U gate equal to M up to global phase; pole-safe."""
+    c, s = abs(M[0, 0]), abs(M[1, 0])
+    th = 2 * np.arctan2(s, c)
+    g = np.angle(M[0, 0]) if c > tol else np.angle(M[1, 0])
+    ph = np.angle(M[1, 0]) - g if s > tol else 0.0
+    la = np.angle(-M[0, 1]) - g if s > tol else np.angle(M[1, 1]) - g - ph
+    return float(th), float(ph), float(la)
+
+
+def flat(m):
+    return [complex(x) for x in m.reshape(-1)]
+
+
+# ================================================================== layout
+class Layout:
+    def __init__(self, repo):
+        self.repo = Path(repo)
+        L = json.loads((self.repo / "data/layout.json").read_text())
+        self.n = L["num_qubits"]
+        self.l2p = L["logical_to_physical"]
+        self.schedule = L["schedule"]
+        self.matchings = {k: [tuple(e) for e in v] for k, v in L["matchings"].items()}
+        self.base_seed = L["base_seed"]
+        self.instances = L["instances"]
+        self.depths = L["depths"]
+        self.inputs = L["mirror_input_strings"]
+        self.partitions = {}
+        for K, plist in L["partitions"].items():
+            self.partitions[int(K)] = [dict(
+                boundary=frozenset(tuple(sorted(e)) for e in p["boundary_edges"]),
+                patches=[sorted(v) for _, v in sorted(p["patch_qubits"].items(), key=lambda kv: int(kv[0]))])
+                for p in plist]
+        cols = L["device_lattice"]["cols"]
+        (r0, r1), (c0, c1) = L["subgrid"]["rows"], L["subgrid"]["cols"]
+        self.grid = (r1 - r0 + 1, c1 - c0 + 1)
+        self.pos = [(p // cols - r0, p % cols - c0) for p in self.l2p]
+        assert self.base_seed == BASE_SEED
+
+
+def build_cycles(lay, ncyc, seed, inst, removed=frozenset(), rotate=None, n=None):
+    """[(angles[q], cz_edges)] per cycle, as build_rcs_circuit with removed_edges /
+    make_pseudo_patch_edge_filter(rotate, rotate_every=1)."""
+    n = n or lay.n
+    out = []
+    for c in range(ncyc):
+        ang = [haar_angles(seed, inst, c, q) for q in range(n)]
+        col = lay.schedule[c % len(lay.schedule)]
+        es = [e for e in lay.matchings[col] if e[0] < n and e[1] < n and tuple(sorted(e)) not in removed]
+        if rotate:
+            cut = rotate[c % len(rotate)]
+            es = [e for e in es if tuple(sorted(e)) not in cut]
+        out.append((ang, es))
+    return out
+
+
+def mirror_cycles(lay, depth, inst, n=None):
+    rot = [p["boundary"] for p in lay.partitions[3]]
+    return build_cycles(lay, depth // 2, instance_seed(inst, "mirror"), inst, rotate=rot, n=n)
+
+
+def patched_cycles(lay, K, depth, j, inst):
+    return build_cycles(lay, depth, instance_seed(inst, "patched"), inst,
+                        removed=lay.partitions[K][j]["boundary"])
+
+
+def full_cycles(lay, depth):
+    return build_cycles(lay, depth, instance_seed(0, "full"), 0)
+
+
+# ================================================================== verify (no Qrack)
+_OP = re.compile(r"^\s*(rz|rx|cz)\s*(?:\(([^)]*)\))?\s+q\[(\d+)\](?:\s*,\s*q\[(\d+)\])?\s*;", re.M)
+
+
+def qasm_ops(text):
+    out = []
+    for g, arg, a, b in _OP.findall(text):
+        if g == "cz":
+            out.append(("cz", int(a), int(b)))
+        else:
+            try:
+                out.append((g, int(a), float(arg)))
+            except ValueError:           # rx(_theta_q_): mirror preparation parameter
+                continue
+    return out
+
+
+def ops_forward(cyc):
+    out = []
+    for ang, es in cyc:
+        for q, (phi, th, lam) in enumerate(ang):
+            out += [("rz", q, phi), ("rx", q, th), ("rz", q, lam)]
+        out += [("cz", a, b) for a, b in es]
+    return out
+
+
+def ops_inverse(cyc):
+    out = []
+    for g in reversed(ops_forward(cyc)):
+        out.append(g if g[0] == "cz" else (g[0], g[1], -g[2]))
+    return out
+
+
+def same_ops(A, B, tol):
+    if len(A) != len(B):
+        return False, f"length {len(A)} vs {len(B)}"
+    for i, (x, y) in enumerate(zip(A, B)):
+        if x[0] != y[0] or x[1] != y[1]:
+            return False, f"op {i}: {x} vs {y}"
+        if x[0] == "cz":
+            if x[2] != y[2]:
+                return False, f"op {i}: {x} vs {y}"
+        elif abs(math.remainder(x[2] - y[2], 2 * math.pi)) > tol:
+            return False, f"op {i}: angle {x[2]!r} vs {y[2]!r}"
+    return True, ""
+
+
+def released_circuits(lay):
+    for d in lay.depths["mirror"]:
+        for i in range(lay.instances):
+            cyc = mirror_cycles(lay, d, i)
+            yield f"mirror/d{d:02d}_instance{i}.qasm", ops_forward(cyc) + ops_inverse(cyc)
+    for K in (3, 4):
+        for d in lay.depths["patched"]:
+            for j in range(len(lay.partitions[K])):
+                for i in range(lay.instances):
+                    yield (f"patched/K{K}/d{d}/partition{j}_instance{i}.qasm",
+                           ops_forward(patched_cycles(lay, K, d, j, i)))
+    for d in FULL_DEPTHS:
+        yield f"full/d{d:02d}_logical.qasm", ops_forward(full_cycles(lay, d))
+
+
+def cmd_verify(a):
+    lay = Layout(a.repo)
+    root = lay.repo / "data/circuits"
+    man = {c["qasm3"]: c for c in json.loads((root / "manifest.json").read_text())["circuits"]}
+    n_ok = n_bad = 0
+    for rel, mine in released_circuits(lay):
+        theirs = qasm_ops((root / rel).read_text())
+        ok, why = same_ops(mine, theirs, a.tol)
+        ncz = sum(1 for g in mine if g[0] == "cz")
+        if ok and rel in man and man[rel]["cz"] != ncz:
+            ok, why = False, f"CZ count {ncz} vs manifest {man[rel]['cz']}"
+        n_ok += ok
+        n_bad += not ok
+        if not ok:
+            print(f"DIFFERENT {rel}: {why}")
+    in_repo = {k for k in man if not k.endswith("_executed.qasm")}
+    missed = in_repo - {rel for rel, _ in released_circuits(lay)}
+    print(f"{n_ok} identical, {n_bad} different (angle tol {a.tol:g} rad)"
+          + (f"; not regenerated: {sorted(missed)}" if missed else ""))
+    raise SystemExit(1 if n_bad or missed else 0)
+
+
+# ================================================================== engines
+PAULIS = ("i", "x", "y", "z")
+
+
+class ExactEngine:
+    """QrackSimulator on the logical register."""
+
+    def __init__(self, n, cpu):
+        from pyqrack import QrackSimulator
+        self.n = n
+        self.sim = QrackSimulator(n, is_gpu=not cpu)
+
+    def reset(self):
+        self.sim.reset_all()
+
+    def g1(self, q, M):
+        self.sim.mtrx(flat(M), q)
+
+    def pauli(self, p, q):
+        if p != "i":
+            getattr(self.sim, p)(q)
+
+    def cz(self, a, b):
+        self.sim.mcz([a], b)
+
+    def shots(self, s):
+        return np.array(self.sim.measure_shots(list(range(self.n)), s), dtype=np.uint64)
+
+    def prob_bits(self, bits):
+        return float(self.sim.prob_perm(list(range(self.n)), [bool(b) for b in bits]))
+
+
+class AceEngine:
+    """QrackAceBackend on the device geometry: logical q -> its (row, col) of the 8x8
+    subgrid, so couplers are nearest-neighbour in ACE's grid. Fresh backend per run."""
+
+    def __init__(self, lay, n, a):
+        self.lay, self.n, self.a = lay, n, a
+        R, C = lay.grid
+        self.idx = [r * C + c for r, c in lay.pos[:n]]
+        self.size = R * C
+        self.sim = None
+        self.reset()
+        rl, cl = self.sim.get_row_length(), self.sim.get_column_length()
+        if {rl, cl} != {R, C}:
+            raise SystemExit(f"ACE chose a {rl}x{cl} grid for {self.size} qubits, expected {R}x{C}")
+
+    def reset(self):
+        from pyqrack import QrackAceBackend
+        self.sim = QrackAceBackend(self.size, long_range_columns=self.a.lrc, long_range_rows=self.a.lrr,
+                                   is_torus=False, is_gpu=not self.a.cpu)
+
+    def g1(self, q, M):
+        self.sim.u(self.idx[q], *u_angles(M))
+
+    def pauli(self, p, q):
+        if p != "i":
+            getattr(self.sim, p)(self.idx[q])
+
+    def cz(self, a, b):
+        self.sim.cz(self.idx[a], self.idx[b])
+
+    def shots(self, s):
+        return np.array(self.sim.measure_shots(self.idx, s), dtype=np.uint64)
+
+    prob_bits = None
+
+
+def make_engine(lay, n, a):
+    return AceEngine(lay, n, a) if a.backend == "ace" else ExactEngine(n, a.cpu)
+
+
+def cz_layer(eng, es, rng):
+    """CZ layer, Pauli-frame twirled when rng is given: P_a x P_b before, and after it
+    CZ (P_a x P_b) CZ = (P_a Z^[P_b in XY]) x (P_b Z^[P_a in XY]) up to phase. Exact."""
+    for a_, b_ in es:
+        if rng is None:
+            eng.cz(a_, b_)
+            continue
+        pa, pb = PAULIS[rng.integers(4)], PAULIS[rng.integers(4)]
+        eng.pauli(pa, a_)
+        eng.pauli(pb, b_)
+        eng.cz(a_, b_)
+        eng.pauli(pa, a_)
+        eng.pauli(pb, b_)
+        if pb in "xy":
+            eng.pauli("z", a_)
+        if pa in "xy":
+            eng.pauli("z", b_)
+
+
+def apply_forward(eng, cyc, rng=None):
+    for ang, es in cyc:
+        for q, t in enumerate(ang):
+            eng.g1(q, gate(t))
+        cz_layer(eng, es, rng)
+
+
+def apply_inverse(eng, cyc, rng=None):
+    for ang, es in reversed(cyc):
+        cz_layer(eng, list(reversed(es)), rng)
+        for q in reversed(range(len(ang))):
+            eng.g1(q, gate(ang[q]).conj().T)
+
+
+# ================================================================== estimators (rcs/estimators.py)
+def extract_bits(shots, qubits):
+    shots = np.asarray(shots, dtype=np.uint64)
+    out = np.zeros(shots.shape, dtype=np.int64)
+    for j, q in enumerate(qubits):
+        out |= ((shots >> np.uint64(q)) & np.uint64(1)).astype(np.int64) << j
+    return out
+
+
+def ideal_xeb(p):
+    return float(p.size * np.dot(p, p) - 1.0)
+
+
+def _delta_se(means, cov):
+    k = len(means)
+    grad = np.array([np.prod(np.delete(means, i)) for i in range(k)])
+    hess = np.zeros((k, k))
+    for i in range(k):
+        for j in range(i + 1, k):
+            hess[i, j] = hess[j, i] = np.prod(np.delete(means, [i, j]))
+    a = cov @ hess
+    return math.sqrt(max(float(grad @ cov @ grad) + 0.5 * float(np.trace(a @ a)), 0.0))
+
+
+def patched_xeb(shots, probs, patches):
+    """Eq. (1)-(2): prod_r mean_s[(2^n_r p_r(x_r) - 1) / (2^n_r sum p_r^2 - 1)]."""
+    if len(shots) < 2:
+        raise ValueError("need at least two shots")
+    norms = [ideal_xeb(p) for p in probs]
+    scores = np.array([(p.size * p[extract_bits(shots, qs)] - 1.0) / nz
+                       for p, qs, nz in zip(probs, patches, norms)])
+    means = scores.mean(axis=1)
+    cov = np.atleast_2d(np.cov(scores, bias=True)) / len(shots)
+    return dict(fidelity=float(np.prod(means)), se=_delta_se(means, cov),
+                patch_fidelity=[float(m) for m in means], patch_ideal_xeb=norms, shots=int(len(shots)))
+
+
+def inverse_variance_mean(v, se):
+    v, se = np.asarray(v, float), np.maximum(np.asarray(se, float), 1e-12)
+    w = 1 / se ** 2
+    return float(np.sum(w * v) / np.sum(w)), float(math.sqrt(1 / np.sum(w)))
+
+
+def fit_exp(depths, F):
+    s, i = np.polyfit(np.asarray(depths, float), np.log10(np.asarray(F, float)), 1)
+    return float(10 ** i), float(10 ** s)
+
+
+# ================================================================== ideal patch distributions
+def patch_probs(cyc, patches, cpu):
+    """Exact distribution of every patch sub-circuit (qubit j of patch = sorted[j]),
+    little-endian as Qiskit / out_probs; renormalised in float64."""
+    from pyqrack import QrackSimulator
+    out = []
+    for qs in patches:
+        loc = {q: j for j, q in enumerate(qs)}
+        sim = QrackSimulator(len(qs), is_gpu=not cpu)
+        for ang, es in cyc:
+            for q in qs:
+                sim.mtrx(flat(gate(ang[q])), loc[q])
+            for a_, b_ in es:
+                if a_ in loc and b_ in loc:
+                    sim.mcz([loc[a_]], loc[b_])
+                elif (a_ in loc) != (b_ in loc):
+                    raise RuntimeError(f"CZ {a_}-{b_} crosses a patch boundary")
+        p = np.asarray(sim.out_probs(), dtype=np.float64)
+        out.append(p / p.sum())
+        del sim
+    return out
+
+
+def cached_patch_probs(cache, key, cyc, patches, cpu):
+    if cache:
+        f = Path(cache) / (key.replace("/", "_") + ".npz")
+        if f.exists():
+            with np.load(f) as z:
+                return [z[f"p{r}"].astype(np.float64) for r in range(len(patches))]
+    probs = patch_probs(cyc, patches, cpu)
+    if cache:
+        Path(cache).mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(f, **{f"p{r}": p.astype(np.float32) for r, p in enumerate(probs)})
+    return probs
+
+
+# ================================================================== hwxeb: the paper's numbers, Qrack as reference
+def cmd_hwxeb(a):
+    lay = Layout(a.repo)
+    ref = {(r["K"], r["depth"], r["partition"], r["instance"]): r
+           for r in json.loads((lay.repo / "data/results/patch_xeb.json").read_text())}
+    fvd = json.loads((lay.repo / "data/results/fidelity_vs_depth.json").read_text())
+    depths = a.depths or lay.depths["patched"]
+    recs, worst_f, worst_i, t0 = [], 0.0, 0.0, time.time()
+    for K in a.K:
+        for d in depths:
+            shots = np.load(lay.repo / f"data/counts/patched_K{K}_d{d}.npz")
+            done = []
+            for j, part in enumerate(lay.partitions[K]):
+                for i in range(lay.instances):
+                    if a.limit and len(recs) >= a.limit:
+                        break
+                    probs = cached_patch_probs(a.cache, f"K{K}_d{d}_p{j}_i{i}", patched_cycles(lay, K, d, j, i),
+                                               part["patches"], a.cpu)
+                    r = patched_xeb(shots[f"partition{j}_instance{i}"], probs, part["patches"])
+                    rr = ref.get((K, d, j, i))
+                    if rr:
+                        worst_f = max(worst_f, abs(r["fidelity"] - rr["fidelity"]) / max(rr["se"], 1e-12))
+                        ideal_ref = sorted(rr["patch_ideal_xeb"][str(k)] for k in range(K))
+                        worst_i = max(worst_i, max(abs(x - y) for x, y in zip(sorted(r["patch_ideal_xeb"]), ideal_ref)))
+                    rec = dict(K=K, depth=d, partition=j, instance=i, **r)
+                    recs.append(rec)
+                    done.append(rec)
+            if done:
+                F, se = inverse_variance_mean([r["fidelity"] for r in done], [r["se"] for r in done])
+                cr = np.mean([x for r in done for x in r["patch_ideal_xeb"]])
+                pr = fvd["points"][f"{K}-patch"].get(str(d), {})
+                print(f"K={K} d={d:>2}: {len(done):>2} circuits  F = {F:.3e} +/- {se:.1e}"
+                      f"  (release {pr.get('fidelity', float('nan')):.3e})  collision ratio {cr:.4f}"
+                      f"  (release {fvd['collision_ratio'][f'K{K}'].get(str(d), float('nan')):.4f})"
+                      f"  [{time.time() - t0:.0f}s]", flush=True)
+    print(f"\nworst |F_qrack - F_release| = {worst_f:.3f} sigma; worst |ideal XEB diff| = {worst_i:.2e}"
+          f"  (PyQrack float32 wheels agree to ~1e-5; {'OK' if worst_f < 0.05 and worst_i < 1e-3 else 'CHECK'})")
+
+    ms = json.loads((lay.repo / "data/counts/mirror_survival.json").read_text())["depths"]
+    pts = {}
+    for d, e in ms.items():
+        h, s = np.asarray(e["hits"], float).sum(-1), np.asarray(e["shots"], float).sum(-1)
+        p = h / s
+        pts[int(d)] = inverse_variance_mean(p, np.sqrt(np.maximum(p * (1 - p), 1e-12) / s))
+    dd = sorted(pts)
+    A, f = fit_exp(dd, [pts[d][0] for d in dd])
+    print(f"\nmirror fit from the hardware counts: F(d) = {A:.4f} x {f:.4f}^d "
+          f"(release {fvd['fit']['prefactor']:.4f} x {fvd['fit']['fidelity_per_cycle']:.4f}^d); "
+          f"F(36) = {A * f ** 36:.3e}; error/qubit/cycle {-math.log(f) / lay.n:.2e}")
+    if a.out:
+        Path(a.out).write_text(json.dumps(recs, indent=1))
+        print("wrote", a.out)
+
+
+# ================================================================== run: clean-qubit emulation
+def cfg_tag(a):
+    """Everything but the register size: records of every n share one tag, so a sweep
+    can be extended with more sizes and resumes per (n, point)."""
+    keys = dict(backend=a.backend, shots=a.shots, twirls=a.twirls,
+                lrc=a.lrc if a.backend == "ace" else None, lrr=a.lrr if a.backend == "ace" else None,
+                exact_probs=a.exact_probs and a.backend == "exact")
+    return a.backend + "-" + hashlib.sha1(json.dumps(keys, sort_keys=True).encode()).hexdigest()[:8]
+
+
+def parse_sizes(s):
+    """'36', '27-36', '27,30,33-36' -> sorted unique sizes."""
+    out = set()
+    for part in str(s).split(","):
+        lo, _, hi = part.strip().partition("-")
+        out.update(range(int(lo), int(hi) + 1) if hi else [int(lo)])
+    return sorted(out)
+
+
+def mirror_czpc(lay, n, d):
+    """CZ gates per cycle of the truncated pseudo-patched mirror (both halves)."""
+    cyc = mirror_cycles(lay, d, 0, n=n)
+    return sum(len(es) for _, es in cyc) / max(len(cyc), 1)
+
+
+def n_shots(a, family, d):
+    if a.shots == "paper":
+        return (MIRROR_SHOTS if family == "mirror" else PATCHED_SHOTS)[d]
+    return int(a.shots)
+
+
+def run_mirror(lay, eng, d, inst, a):
+    """Survival over the ten released inputs, shots split evenly; twirled runs split
+    each input's shots further over the randomisations (as SamplerV2 does)."""
+    n = eng.n
+    cyc = mirror_cycles(lay, d, inst, n=n)
+    per_input = max(1, n_shots(a, "mirror", d) // len(lay.inputs))
+    R = a.twirls if a.backend == "ace" else 0       # twirling is an identity for exact gates
+    hits, shots = [], []
+    for s, string in enumerate(lay.inputs):
+        bits = [int(c) for c in string[:n]]
+        target = sum(b << q for q, b in enumerate(bits))
+        h = tot = 0
+        pr = 0.0
+        for r in range(max(R, 1)):
+            rng = np.random.default_rng([BASE_SEED, d, inst, s, r]) if R else None
+            k = per_input // max(R, 1) + (1 if r < per_input % max(R, 1) else 0)
+            if k == 0:
+                continue
+            eng.reset()
+            for q, b in enumerate(bits):
+                if b:
+                    eng.pauli("x", q)
+            apply_forward(eng, cyc, rng)
+            apply_inverse(eng, cyc, rng)
+            if eng.prob_bits and a.exact_probs:
+                pr += eng.prob_bits(bits) / max(R, 1)
+            else:
+                sh = eng.shots(k)
+                h += int(np.count_nonzero(sh == np.uint64(target)))
+                tot += k
+        if eng.prob_bits and a.exact_probs:
+            hits.append(pr)
+            shots.append(0)
+        else:
+            hits.append(h)
+            shots.append(tot)
+    if eng.prob_bits and a.exact_probs:
+        return dict(fidelity=float(np.mean(hits)), se=0.0, survival=hits, shots=0)
+    p = sum(hits) / sum(shots)
+    return dict(fidelity=p, se=math.sqrt(max(p * (1 - p), 1e-12) / sum(shots)),
+                hits=hits, shots=int(sum(shots)))
+
+
+def run_patched(lay, eng, K, d, j, inst, a):
+    part = lay.partitions[K][j]
+    cyc = patched_cycles(lay, K, d, j, inst)
+    probs = cached_patch_probs(a.cache, f"K{K}_d{d}_p{j}_i{inst}", cyc, part["patches"], a.cpu)
+    eng.reset()
+    apply_forward(eng, cyc)
+    return patched_xeb(eng.shots(n_shots(a, "patched", d)), probs, part["patches"])
+
+
+def load_jsonl(path, tag, n_default):
+    recs = {}
+    if path and os.path.exists(path):
+        for line in open(path):
+            r = json.loads(line)
+            if r.get("cfg") == tag:
+                r.setdefault("n", n_default)
+                recs[(r["n"], r["family"], r["K"], r["depth"], r["partition"], r["instance"])] = r
+    return recs
+
+
+def _point(v):
+    """Inverse-variance mean of (F, se) pairs; plain mean if any se is 0 (exact probs)."""
+    if all(s > 0 for _, s in v):
+        return inverse_variance_mean(*zip(*v))
+    return float(np.mean([x for x, _ in v])), 0.0
+
+
+def _decay(pts, floor):
+    """Per-cycle decay b = -dlnF/dd from a log-linear fit over depths with F > floor.
+    Returns (b or None, prefactor, number of depths dropped)."""
+    good = [(d, F) for d, F in sorted(pts.items()) if F > floor]
+    dropped = len(pts) - len(good)
+    if len(good) < 2:
+        return None, None, dropped
+    A, f = fit_exp([d for d, _ in good], [F for _, F in good])
+    return -math.log(f), A, dropped
+
+
+def summarize(recs, lay, a):
+    fvd = json.loads((lay.repo / "data/results/fidelity_vs_depth.json").read_text())
+    by = defaultdict(list)
+    min_shots = {}
+    for r in recs.values():
+        fam = "mirror" if r["family"] == "mirror" else f"{r['K']}-patch"
+        by[(r["n"], fam, r["depth"])].append((r["fidelity"], r["se"]))
+        if r["family"] == "mirror" and r.get("shots"):
+            min_shots[r["n"]] = min(min_shots.get(r["n"], r["shots"]), r["shots"])
+    sizes = sorted({k[0] for k in by})
+    b_rows, fit_depths = [], set()
+    for n in sizes:
+        fams = [f for f in ("mirror", "3-patch", "4-patch") if any(k[0] == n and k[1] == f for k in by)]
+        full = n == lay.n
+        print(f"\n== clean-qubit emulation ({a.backend}), n = {n}"
+              + (" -- the experiment's register, compared with ibm_phoenix ==" if full else " (first-n truncation) =="))
+        print("family    d   F_sim" + ("            F_hardware     F_sim/F_hw" if full else ""))
+        mpts = {}
+        for fam in fams:
+            for d in sorted(k[2] for k in by if k[0] == n and k[1] == fam):
+                F, se = _point(by[(n, fam, d)])
+                if fam == "mirror":
+                    mpts[d] = F
+                hw = fvd["points"][fam].get(str(d), {}).get("fidelity") if full else None
+                print(f"{fam:8s} {d:>3}  {F:.5f}+/-{se:.1e}  " + (f"{hw:.3e}      {F / hw:10.1f}" if hw else ""))
+        floor = 3.0 / min_shots[n] if n in min_shots else 0.0
+        b, A, dropped = _decay(mpts, floor)
+        if b is not None:
+            czpc = float(np.mean([mirror_czpc(lay, n, d) for d in mpts]))
+            fit_depths.update(mpts)
+            b_rows.append((n, czpc, b, dropped))
+            print(f"mirror fit F(d) = {A:.4f} x {math.exp(-b):.5f}^d"
+                  + (f"  vs device {fvd['fit']['prefactor']:.4f} x {fvd['fit']['fidelity_per_cycle']:.4f}^d" if full else "")
+                  + (f"  ({dropped} depth(s) at or below 3/shots dropped)" if dropped else ""))
+
+    if not b_rows:
+        return
+    b_dev = -math.log(fvd["fit"]["fidelity_per_cycle"])
+    print(f"\n== per-cycle decay b(N) of the {a.backend} simulator (mirror) ==")
+    print("N    CZ/cycle   b(N)       per-cycle F   err/qubit/cycle")
+    for n, c, b, dr in b_rows:
+        print(f"{n:<4} {c:8.2f}   {b:9.5f}{'*' if dr else ' '} {math.exp(-b):10.5f}    {b / n:.2e}")
+    print(f"device (ibm_phoenix, N=61): b = {b_dev:.5f}, per-cycle {math.exp(-b_dev):.4f}, err/qubit/cycle {b_dev / lay.n:.2e}")
+    if any(dr for *_, dr in b_rows):
+        print("(* fitted with deep depths dropped at or below 3/shots: shallow depths only)")
+    if a.backend == "exact":
+        print("(exact backend: b = 0 up to shot noise by construction -- a pipeline control)")
+        return
+    if len(b_rows) >= 2:
+        X = np.array([[n, c] for n, c, _, _ in b_rows])
+        y = np.array([b for _, _, b, _ in b_rows])
+        (u, v), *_ = np.linalg.lstsq(X, y, rcond=None)
+        if u < 0 or v < 0:                      # non-negative: best single-term fit
+            cands = []
+            for col in (0, 1):
+                cj = max(float(X[:, col] @ y / (X[:, col] @ X[:, col])), 0.0)
+                cands.append((float(np.sum((y - cj * X[:, col]) ** 2)), col, cj))
+            _, col, cj = min(cands)
+            u, v = (cj, 0.0) if col == 0 else (0.0, cj)
+        c61 = float(np.mean([mirror_czpc(lay, lay.n, d) for d in sorted(fit_depths)]))
+        b61 = u * lay.n + v * c61
+        meas = next((b for n, _, b, _ in b_rows if n == lay.n), None)
+        print(f"\nfit b = u*N + v*CZpc (non-negative): u {u:.3e}/qubit, v {v:.3e}/CZ"
+              "  (N and CZ/cycle are nearly collinear: trust b(61), not u and v separately)")
+        print(f"at N=61 ({c61:.2f} CZ/cycle): b {b61:.5f}, per-cycle {math.exp(-b61):.5f}, "
+              f"F(36) {math.exp(-36 * b61):.3e}" + (f"; measured at 61: b {meas:.5f}" if meas is not None else "")
+              + f";  sim/device decay ratio {b61 / b_dev:.2f} ({'cleaner' if b61 < b_dev else 'noisier'} than ibm_phoenix)")
+        if len(b_rows) < 5 or max(n for n, *_ in b_rows) - min(n for n, *_ in b_rows) < 6:
+            print("(few or narrowly spaced sizes: the 61-qubit numbers are indicative only)")
+
+
+def cmd_run(a):
+    lay = Layout(a.repo)
+    tag = cfg_tag(a)
+    recs = load_jsonl(a.out, tag, lay.n)
+    if a.summarize:
+        summarize(recs, lay, a)
+        return
+    if a.sizes and a.n:
+        raise SystemExit("give --sizes or --n, not both")
+    sizes = parse_sizes(a.sizes) if a.sizes else [a.n or lay.n]
+    if not all(2 <= n <= lay.n for n in sizes):
+        raise SystemExit(f"sizes must lie in 2..{lay.n}")
+    fams = a.families.split(",")
+    if "patched" in fams and any(n != lay.n for n in sizes):
+        print("# note: patched circuits use the released 61-qubit partitions; run only at n = 61")
+    fh = open(a.out, "a")
+    print(f"# cfg {tag}: backend {a.backend}, sizes {sizes}, shots {a.shots}, "
+          f"twirls {a.twirls if a.backend == 'ace' else 0}"
+          f"{', lrc/lrr ' + str(a.lrc) + '/' + str(a.lrr) if a.backend == 'ace' else ''}")
+    insts = range(a.instances if a.instances is not None else lay.instances)
+    for n in sizes:
+        jobs = []
+        for fam in fams:
+            if fam == "patched" and n != lay.n:
+                continue
+            ds = a.depths or lay.depths["mirror" if fam == "mirror" else "patched"]
+            for d in ds:
+                if fam == "mirror":
+                    jobs += [("mirror", 0, d, 0, i) for i in insts]
+                else:
+                    for K in a.K:
+                        parts = range(len(lay.partitions[K])) if a.partitions is None else range(a.partitions)
+                        jobs += [("patched", K, d, j, i) for j in parts for i in insts]
+        todo = [jb for jb in jobs if (n,) + jb not in recs]
+        print(f"\n# n = {n}: {len(jobs) - len(todo)} of {len(jobs)} points already in {a.out}", flush=True)
+        if not todo:
+            continue
+        try:
+            eng = make_engine(lay, n, a)
+        except Exception as err:                 # e.g. exact backend beyond QRACK_MAX_CPU_QB
+            print(f"# n = {n}: cannot build the {a.backend} engine ({err}); skipped")
+            continue
+        for fam, K, d, j, i in todo:
+            t0 = time.time()
+            try:
+                r = run_mirror(lay, eng, d, i, a) if fam == "mirror" else run_patched(lay, eng, K, d, j, i, a)
+            except Exception as err:
+                print(f"# n = {n} {fam} d{d} inst {i}: failed ({err}); left for a rerun")
+                continue
+            rec = dict(cfg=tag, n=n, family=fam, K=K, depth=d, partition=j, instance=i,
+                       seconds=round(time.time() - t0, 2), **r)
+            fh.write(json.dumps(rec) + "\n")
+            fh.flush()
+            recs[(n, fam, K, d, j, i)] = rec
+            print(f"n {n:>2} {fam:7s} K{K} d{d:>3} part {j} inst {i}  F {r['fidelity']:.5f} +/- {r['se']:.1e}"
+                  f"  ({rec['seconds']}s)", flush=True)
+        del eng
+    summarize(recs, lay, a)
+
+
+# ================================================================== selftest
+def cmd_selftest(a):
+    from pyqrack import QrackSimulator
+    lay = Layout(a.repo)
+    ok = True
+
+    def report(name, good, msg):
+        nonlocal ok
+        ok &= bool(good)
+        print(f"{name}: {msg}  {'OK' if good else 'FAIL'}")
+
+    rel = "mirror/d08_instance1.qasm"
+    cyc = mirror_cycles(lay, 8, 1)
+    good, why = same_ops(ops_forward(cyc) + ops_inverse(cyc),
+                         qasm_ops((lay.repo / "data/circuits" / rel).read_text()), 1e-9)
+    report("[1] angle hash + pseudo-patch rotation vs released " + rel, good, why or "identical")
+
+    th, ph, la = 0.7, 1.3, -2.1
+    s1, s2 = QrackSimulator(1, is_gpu=False), QrackSimulator(1, is_gpu=False)
+    s1.u(0, th, ph, la)
+    M = gate(haar_angles(BASE_SEED, 0, 0, 0))
+    s2.mtrx(flat(M), 0)
+    s1.reset_all()
+    s1.u(0, *u_angles(M))
+    ov = abs(np.vdot(np.array(s1.out_ket()), np.array(s2.out_ket())))
+    report("[2] u_angles -> Qrack u == Haar matrix", abs(1 - ov) < 1e-5, f"overlap {ov:.7f}")
+
+    ns = argparse.Namespace(backend="exact", cpu=True, exact_probs=True, shots="1000", twirls=0, n=a.n)
+    eng = ExactEngine(a.n, True)
+    F = run_mirror(lay, eng, 12, 0, ns)["fidelity"]
+    report(f"[3] exact mirror, first {a.n} logical qubits, d=12, 10 inputs", abs(1 - F) < 1e-4, f"F = {F:.7f}")
+
+    eng.reset()
+    rng = np.random.default_rng(3)
+    bits = [int(c) for c in lay.inputs[0][:a.n]]
+    for q, b in enumerate(bits):
+        if b:
+            eng.pauli("x", q)
+    cyc = mirror_cycles(lay, 12, 0, n=a.n)
+    apply_forward(eng, cyc, rng)
+    apply_inverse(eng, cyc, rng)
+    F = eng.prob_bits(bits)
+    report("[4] Pauli-frame twirl is an identity (exact)", abs(1 - F) < 1e-4, f"F = {F:.7f}")
+
+    K, d, j, i = 3, 20, 0, 0
+    part = lay.partitions[K][j]
+    probs = patch_probs(patched_cycles(lay, K, d, j, i), part["patches"], True)
+    rr = next(r for r in json.loads((lay.repo / "data/results/patch_xeb.json").read_text())
+              if (r["K"], r["depth"], r["partition"], r["instance"]) == (K, d, j, i))
+    mine, theirs = sorted(ideal_xeb(p) for p in probs), sorted(rr["patch_ideal_xeb"].values())
+    diff = max(abs(x - y) for x, y in zip(mine, theirs))
+    report("[5] PyQrack patch ideal XEB vs release (Aer, double)", diff < 1e-3, f"max diff {diff:.1e}")
+
+    shots = np.load(lay.repo / f"data/counts/patched_K{K}_d{d}.npz")[f"partition{j}_instance{i}"]
+    r = patched_xeb(shots, probs, part["patches"])
+    report("[6] Eq.(1)-(2) on the hardware counts vs release", abs(r["fidelity"] - rr["fidelity"]) < 0.05 * rr["se"],
+           f"{r['fidelity']:.5f} vs {rr['fidelity']:.5f} (se {rr['se']:.1e})")
+
+    samp = np.zeros(4000, dtype=np.uint64)
+    g = np.random.default_rng(9)
+    for qs, p in zip(part["patches"], probs):
+        x = g.choice(p.size, size=samp.size, p=p)
+        for jj, q in enumerate(qs):
+            samp |= ((x >> jj) & 1).astype(np.uint64) << np.uint64(q)
+    r = patched_xeb(samp, probs, part["patches"])
+    report("[7] ideal samples score F = 1 within 4 se", abs(1 - r["fidelity"]) < 4 * r["se"],
+           f"F = {r['fidelity']:.4f} +/- {r['se']:.4f}")
+
+    try:
+        ae = AceEngine(lay, lay.n, argparse.Namespace(lrc=a.lrc, lrr=a.lrr, cpu=True))
+        print(f"[8] ACE register {ae.size} qubits, grid {ae.sim.get_row_length()}x{ae.sim.get_column_length()}, "
+              f"is_torus=False; logical->ACE map is nearest-neighbour for all couplers: "
+              f"{all(abs(lay.pos[u][0] - lay.pos[v][0]) + abs(lay.pos[u][1] - lay.pos[v][1]) == 1 for es in lay.matchings.values() for u, v in es)}")
+    except ImportError as err:
+        print(f"[8] ACE not available: {err}")
+    print("ALL OK" if ok else "SOME CHECKS FAILED")
+    raise SystemExit(0 if ok else 1)
+
+
+# ================================================================== seamgap (numpy only, unchanged)
 def cmd_seamgap(a):
     MED_CZ = 1.9e-3 * 5 / 4          # RB -> Pauli channel, (d+1)/d with d = 4
     MED_SX = 2.5e-4 * 3 / 2          # d = 2
@@ -185,919 +924,7 @@ def cmd_seamgap(a):
           f"unexplained {dec - bcz - b1q:.4f} ({(dec - bcz - b1q) / dec:.0%})")
 
 
-# ================================================================== one-qubit algebra
-I2 = np.eye(2, dtype=complex)
-PX = np.array([[0, 1], [1, 0]], dtype=complex)
-PY = np.array([[0, -1j], [1j, 0]], dtype=complex)
-PZ = np.diag([1, -1]).astype(complex)
-PAULI = {"i": I2, "x": PX, "y": PY, "z": PZ}
-P1 = ("x", "y", "z")
-P2 = [p for p in itertools.product("ixyz", repeat=2) if p != ("i", "i")]
-
-
-def rz(t):
-    return np.diag([np.exp(-0.5j * t), np.exp(0.5j * t)])
-
-
-def rx(t):
-    c, s = np.cos(t / 2), np.sin(t / 2)
-    return np.array([[c, -1j * s], [-1j * s, c]])
-
-
-def haar_su2(rng):
-    phi, lam = rng.uniform(0, 2 * np.pi, 2)
-    return rz(phi) @ rx(np.arccos(rng.uniform(-1, 1))) @ rz(lam)
-
-
-def u_angles(M, tol=1e-12):
-    """(theta, phi, lambda) of Qiskit's U gate equal to M up to global phase.
-    Robust at the poles, where an angle of a zero entry would be arbitrary."""
-    c, s = abs(M[0, 0]), abs(M[1, 0])
-    th = 2 * np.arctan2(s, c)
-    g = np.angle(M[0, 0]) if c > tol else np.angle(M[1, 0])
-    ph = np.angle(M[1, 0]) - g if s > tol else 0.0
-    la = np.angle(-M[0, 1]) - g if s > tol else np.angle(M[1, 1]) - g - ph
-    return float(th), float(ph), float(la)
-
-
-def native(M, sx):
-    """Device realisation of target SU(2) M: RZ(ph+pi).SX.RZ(th+pi).SX.RZ(la),
-    with the angles of u_angles (well defined at the poles)."""
-    th, ph, la = u_angles(M)
-    return rz(ph + np.pi) @ sx @ rz(th + np.pi) @ sx @ rz(la)
-
-
-def flat(m):
-    return [complex(m[0, 0]), complex(m[0, 1]), complex(m[1, 0]), complex(m[1, 1])]
-
-
-def same_up_to_phase(A, B):
-    return 1 - abs(np.trace(A.conj().T @ B)) / 2
-
-
-# ================================================================== graphs
-class BaseGraph:
-    """The graph windows are cut from: the released 61-qubit layout or a synthetic grid."""
-
-    def __init__(self, layout=None, grid=None, K=3):
-        if layout:
-            L = json.load(open(layout))
-            self.n = L["num_qubits"]
-            self.colours = {k: [tuple(e) for e in L["matchings"][k]] for k in L["schedule"]}
-            cols = L["device_lattice"]["cols"]
-            self.labels = L["logical_to_physical"]
-            rr, cc = L["subgrid"]["rows"], L["subgrid"]["cols"]
-            cen = ((rr[0] + rr[1]) / 2, (cc[0] + cc[1]) / 2)
-            self.dist = np.array([np.hypot(p // cols - cen[0], p % cols - cen[1]) for p in self.labels])
-            if str(K) not in L["partitions"]:
-                raise SystemExit(f"layout has no K={K} partitions (has {sorted(L['partitions'])})")
-            bnd = [len(p["boundary_edges"]) for p in L["partitions"][str(K)]]
-            ncoup = sum(len(v) for v in self.colours.values())
-            self.czpc_full = ncoup / 4
-            self.czpc_pp = (ncoup - np.mean(bnd)) / 4
-            self.is_layout = True
-        else:
-            R, C = (int(x) for x in grid.lower().split("x"))
-            self.n = R * C
-            col = {k: [] for k in "ABCD"}
-            for r in range(R):
-                for c in range(C - 1):
-                    col["A" if c % 2 == 0 else "B"].append((r * C + c, r * C + c + 1))
-            for r in range(R - 1):
-                for c in range(C):
-                    col["C" if r % 2 == 0 else "D"].append((r * C + c, (r + 1) * C + c))
-            self.colours = col
-            self.labels = list(range(self.n))
-            self.dist = np.array([np.hypot(q // C - (R - 1) / 2, q % C - (C - 1) / 2) for q in range(self.n)])
-            self.is_layout = False
-        self.adj = defaultdict(set)
-        for es in self.colours.values():
-            for u, v in es:
-                self.adj[u].add(v)
-                self.adj[v].add(u)
-
-    def window(self, N):
-        if N > self.n:
-            raise SystemExit(f"window {N} larger than base graph ({self.n})")
-        start = int(np.argmin(self.dist))
-        win, inside = [start], {start}
-        while len(win) < N:
-            front = {v for u in win for v in self.adj[u] if v not in inside}
-            v = min(front, key=lambda x: (round(self.dist[x], 6), x))
-            win.append(v)
-            inside.add(v)
-        win = sorted(win)
-        new = {q: i for i, q in enumerate(win)}
-        colours = {k: [(new[u], new[v]) for u, v in es if u in new and v in new]
-                   for k, es in self.colours.items()}
-        return win, colours
-
-
-def connected(nodes, adj):
-    nodes = set(int(x) for x in nodes)
-    if not nodes:
-        return False
-    s = next(iter(nodes))
-    seen, stack = {s}, [s]
-    while stack:
-        for v in adj[stack.pop()]:
-            if v in nodes and v not in seen:
-                seen.add(v)
-                stack.append(v)
-    return len(seen) == len(nodes)
-
-
-def dcut(lab, u, v, adj):
-    """Change in cut size if u and v (in different parts) swap labels.  The u-v edge
-    itself stays cut either way, so it is skipped."""
-    pu, pv, d = lab[u], lab[v], 0
-    for w in adj[u]:
-        if w != v:
-            d += int(lab[w] != pv) - int(lab[w] != pu)
-    for w in adj[v]:
-        if w != u:
-            d += int(lab[w] != pu) - int(lab[w] != pv)
-    return d
-
-
-def partitions(n, edges, K, rng, keep=5, restarts=600):
-    """Balanced (+/-1), connected K-partitions of minimum cut: random growth + swap search.
-    Swaps are scored incrementally (dcut); acceptance is the same as recomputing the cut,
-    so a given rng gives the same partitions as before."""
-    adj = defaultdict(set)
-    for u, v in edges:
-        adj[u].add(v)
-        adj[v].add(u)
-    sizes = [n // K + (1 if i < n % K else 0) for i in range(K)]
-    cut = lambda lab: sum(lab[u] != lab[v] for u, v in edges)
-    found = {}
-    for _ in range(restarts):
-        lab = -np.ones(n, dtype=int)
-        seeds = rng.choice(n, K, replace=False)
-        members = [[int(s)] for s in seeds]
-        for p, s in enumerate(seeds):
-            lab[s] = p
-        while (lab < 0).any():
-            grew = False
-            for p in rng.permutation(K):
-                if len(members[p]) >= sizes[p]:
-                    continue
-                front = {v for u in members[p] for v in adj[u] if lab[v] < 0}
-                if not front:
-                    continue
-                v = max(front, key=lambda x: (sum(lab[y] == p for y in adj[x]), rng.random()))
-                lab[v] = p
-                members[p].append(v)
-                grew = True
-            if not grew:
-                break
-        if (lab < 0).any():
-            continue
-        best, improved = cut(lab), True
-        while improved:
-            improved = False
-            bnd = [u for u in range(n) if any(lab[v] != lab[u] for v in adj[u])]
-            rng.shuffle(bnd)
-            for u, v in itertools.product(bnd, bnd):
-                if lab[u] == lab[v]:
-                    continue
-                dc = dcut(lab, u, v, adj)
-                if dc >= 0:
-                    continue
-                pu, pv = lab[u], lab[v]
-                lab[u], lab[v] = pv, pu
-                if connected(np.flatnonzero(lab == pu), adj) and connected(np.flatnonzero(lab == pv), adj):
-                    best, improved = best + dc, True
-                    break
-                lab[u], lab[v] = pu, pv
-        if all(connected(np.flatnonzero(lab == p), adj) for p in range(K)):
-            key = frozenset(frozenset(np.flatnonzero(lab == p).tolist()) for p in range(K))
-            found[key] = best
-    out = []
-    for key, c in sorted(found.items(), key=lambda kv: kv[1])[:keep]:
-        patches = sorted(sorted(s) for s in key)
-        lab = np.zeros(n, dtype=int)
-        for p, s in enumerate(patches):
-            lab[s] = p
-        out.append(dict(patches=patches, cut=int(c), boundary={e for e in edges if lab[e[0]] != lab[e[1]]}))
-    return out
-
-
-# ================================================================== device
-class Device:
-    """Static device: coherent parameters (statevector engine), per-element stochastic
-    Pauli rates and readout.  Draw once over the base graph, then window()/patch()."""
-
-    def __init__(self, n, colours, a, rng):
-        self.n = n
-        self.edges = sorted({e for es in colours.values() for e in es})
-        s = a.spread
-        ln = lambda med, size: med * np.exp(rng.normal(0, s, size) - s * s / 2)
-        (ms, ss), (md, sd), (mz, sz) = a.sx_overrot, a.cz_phase, a.zz_idle
-        kap = rng.normal(ms, ss, n) if (ms or ss) else np.zeros(n)
-        self.sx = [rx(np.pi / 2 * (1 + k)) for k in kap]
-        self.cz_diag = {e: ([1, 0, 0, -np.exp(1j * rng.normal(md, sd))] if (md or sd) else None)
-                        for e in self.edges}
-        self.zz_diag = ({e: [1, 0, 0, np.exp(1j * rng.normal(mz, sz))] for e in self.edges}
-                        if (mz or sz) else {})
-        self.e_cz = dict(zip(self.edges, ln(a.cz_rb * 5 / 4, len(self.edges))))
-        self.e_1q = ln(2 * a.sx_rb * 3 / 2, n)
-        self.e_idle = ln(a.idle, n)
-        self.ro10, self.ro01 = ln(a.ro10, n), ln(a.ro01, n)
-        self.meas_twirl = a.meas_twirl
-        self.traj = False                 # sample stochastic errors everywhere in the engine?
-
-    def _slice(self, qubits, colours):
-        new = {q: i for i, q in enumerate(qubits)}
-        rm = lambda d: {(new[u], new[v]): x for (u, v), x in d.items() if u in new and v in new}
-        v = Device.__new__(Device)
-        v.n = len(qubits)
-        v.edges = sorted({e for es in colours.values() for e in es}) if colours else sorted(rm(self.e_cz))
-        v.sx = [self.sx[q] for q in qubits]
-        v.cz_diag, v.zz_diag, v.e_cz = rm(self.cz_diag), rm(self.zz_diag), rm(self.e_cz)
-        v.e_1q, v.e_idle = self.e_1q[qubits], self.e_idle[qubits]
-        v.ro10, v.ro01 = self.ro10[qubits], self.ro01[qubits]
-        v.meas_twirl, v.traj = self.meas_twirl, self.traj
-        return v
-
-    window = _slice
-    patch = _slice
-
-    def ro_err(self, x0=None):
-        if self.meas_twirl or x0 is None:
-            return (self.ro10 + self.ro01) / 2
-        return np.where(np.asarray(x0) == 1, self.ro10, self.ro01)
-
-    def p_noerr(self, cycles, n_layers):
-        lnp = sum(np.log1p(-self.e_cz[e]) for _, czs in cycles for e in czs)
-        return float(np.exp(lnp + n_layers * np.sum(np.log1p(-self.e_1q) + np.log1p(-self.e_idle))))
-
-
-# ================================================================== circuits
-def cycles_for(gates, colours, drop):
-    return [(layer, [e for e in colours["ABCD"[t % 4]] if e not in drop(t)]) for t, layer in enumerate(gates)]
-
-
-def forward_steps(cyc):
-    out = []
-    for layer, czs in cyc:
-        out += [("u", layer), ("cz", czs), ("cycle", None)]
-    return out
-
-
-def inverse_steps(cyc):
-    out = []
-    for layer, czs in reversed(cyc):
-        out += [("cz", czs), ("u", [m.conj().T for m in layer]), ("cycle", None)]
-    return out
-
-
-def edge_set(n_noisy, L):
-    """Global indices of the first and last L noisy cycles (only the first L are 'edge' in
-    the forward modes, whose last noisy cycle is followed by an ideal inverse)."""
-    L = max(0, min(L, n_noisy))
-    return frozenset(range(L)) | frozenset(range(n_noisy - L, n_noisy))
-
-
-# ================================================================== engine
-class Runner:
-    """One QrackSimulator, reset between runs.  halves = [(steps, noisy, twirl), ...].
-    Stochastic Pauli errors are sampled on noisy steps when dev.traj is set, or when the
-    step's global cycle index (counted across halves) is in `edge`."""
-
-    def __init__(self, n, dev, cpu):
-        from pyqrack import QrackSimulator
-        self.n, self.dev = n, dev
-        self.sim = QrackSimulator(n, is_gpu=not cpu)
-        self.n_fold = 0
-
-    def _pauli(self, p, q):
-        if p != "i":
-            getattr(self.sim, p)(q)
-
-    def run(self, x0, halves, rng, want="survival", edge=frozenset()):
-        sim, n, dev = self.sim, self.n, self.dev
-        sim.reset_all()
-        self.n_fold = 0                        # CZs twirled by an explicit (unmerged) frame
-        pending = [I2] * n                     # post-CZ twirl correction, folded forward
-        prep = [PX if b else I2 for b in x0]   # input string, folded into the first layer
-        first = True
-        c_glob = 0                             # cycle index across all halves
-        for steps, noisy, twirl in halves:
-            pre = None
-            for i, (kind, pay) in enumerate(steps):
-                stoch = noisy and (dev.traj or c_glob in edge)
-                if kind == "u":
-                    frame = [I2] * n
-                    # next CZ layer, skipping "cycle" markers: inverse halves run
-                    # cz, u, cycle, cz, ... so steps[i+1] after a u is never the cz
-                    nxt = next((st_ for st_ in steps[i + 1:] if st_[0] != "cycle"), None)
-                    if noisy and twirl and nxt is not None and nxt[0] == "cz":
-                        pre = {}
-                        for u, v in nxt[1]:
-                            pa = P1[rng.integers(3)] if rng.random() < 0.75 else "i"
-                            pb = P1[rng.integers(3)] if rng.random() < 0.75 else "i"
-                            pre[(u, v)] = (pa, pb)
-                            frame[u], frame[v] = PAULI[pa], PAULI[pb]
-                    for q in range(n):
-                        t = frame[q] @ pay[q] @ pending[q]
-                        if first:
-                            t = t @ prep[q]
-                        pending[q] = I2
-                        sim.mtrx(flat(native(t, dev.sx[q]) if noisy else t), q)
-                        if stoch and rng.random() < dev.e_1q[q]:
-                            self._pauli(P1[rng.integers(3)], q)
-                    first = False
-                elif kind == "cz":
-                    if first:
-                        for q in range(n):
-                            if x0[q]:
-                                sim.x(q)
-                        first = False
-                    for u, v in pay:
-                        pa = pb = "i"
-                        if noisy and twirl:
-                            if pre is not None and (u, v) in pre:
-                                pa, pb = pre[(u, v)]
-                            else:                   # fold point: explicit ideal pre-frame
-                                self.n_fold += 1
-                                pa = P1[rng.integers(3)] if rng.random() < 0.75 else "i"
-                                pb = P1[rng.integers(3)] if rng.random() < 0.75 else "i"
-                                self._pauli(pa, u)
-                                self._pauli(pb, v)
-                        diag = dev.cz_diag.get((u, v)) if noisy else None
-                        if diag is None:
-                            sim.mcz([u], v)
-                        else:
-                            sim.mcmtrx([u], diag, v)
-                        if noisy and twirl:         # CZ (Pa x Pb) CZ, up to phase
-                            pending[u] = pending[u] @ PAULI[pa] @ (PZ if pb in "xy" else I2)
-                            pending[v] = pending[v] @ PAULI[pb] @ (PZ if pa in "xy" else I2)
-                        if stoch and rng.random() < dev.e_cz[(u, v)]:
-                            qa, qb = P2[rng.integers(15)]
-                            self._pauli(qa, u)
-                            self._pauli(qb, v)
-                    pre = None
-                    if noisy and dev.zz_diag:
-                        driven = set(pay)
-                        for e in dev.edges:
-                            if e not in driven:
-                                sim.mcmtrx([e[0]], dev.zz_diag[e], e[1])
-                else:
-                    if stoch:
-                        for q in np.flatnonzero(rng.random(n) < dev.e_idle):
-                            self._pauli(P1[rng.integers(3)], int(q))
-                    c_glob += 1
-            for q in range(n):
-                if not np.allclose(pending[q], I2):
-                    sim.mtrx(flat(pending[q]), q)
-                    pending[q] = I2
-        if want == "probs":
-            return np.array(sim.out_probs(), dtype=np.float64)
-        if want == "ket":
-            return np.array(sim.out_ket())
-        return float(sim.prob_perm(list(range(n)), [bool(b) for b in x0]))
-
-
-# ================================================================== ACE (QrackAceBackend)
-def pyqrack_version():
-    try:
-        import importlib.metadata as im
-        for dist in ("pyqrack", "pyqrack-cpu", "pyqrack-complex128", "pyqrack-cpu-complex128"):
-            try:
-                return im.version(dist)
-            except im.PackageNotFoundError:
-                continue
-    except ImportError:
-        pass
-    try:
-        import pyqrack
-        return str(getattr(pyqrack, "__version__", "unknown"))
-    except ImportError:
-        return "unknown"
-
-
-def ace_kwargs(a):
-    kw = dict(long_range_columns=a.lrc, long_range_rows=a.lrr)
-    if a.ace_torus:
-        kw["is_torus"] = True
-    return kw
-
-
-def ace_shots(a, N):
-    return a.ace_shots or (1 << min(13, N + 2))       # upstream default
-
-
-def ace_cfg(cfg, a):
-    return f"{cfg}/ace-{a.lrc}x{a.lrr}{'-torus' if a.ace_torus else ''}-s{a.ace_shots or 'auto'}"
-
-
-def ace_mirror(N, x0, steps, a, shots):
-    """Ideal circuit on QrackAceBackend via run_qiskit_circuit (the path mirror_nn_qab.py
-    uses), sampled with measure_shots.  Returns the logged ACE fields."""
-    from pyqrack import QrackAceBackend
-    from qiskit import QuantumCircuit
-    qc = QuantumCircuit(N)
-    for q in np.flatnonzero(x0):
-        qc.x(int(q))
-    czs = []
-    for kind, pay in steps:
-        if kind == "u":
-            for q, m in enumerate(pay):
-                qc.u(*u_angles(m), q)
-        elif kind == "cz":
-            for u, v in pay:
-                qc.cz(int(u), int(v))
-                czs.append((u, v))
-    sim = QrackAceBackend(N, **ace_kwargs(a))
-    n = sim.num_qubits()
-    try:                                  # private API: degrade to NaN if it changes
-        bnd = {lq for lq in range(n) if len(sim._unpack(lq)) > 1}
-        b2b = (n - len(bnd)) / len(bnd) if bnd else float("inf")
-        n_bnd, seam = len(bnd), sum(1 for u, v in czs if u in bnd or v in bnd)
-    except (AttributeError, TypeError):
-        b2b, n_bnd, seam = float("nan"), None, None
-    sim.run_qiskit_circuit(qc, shots=0)
-    counts = Counter(int(s) for s in sim.measure_shots(list(range(N)), shots))
-    x0i = sum(1 << int(q) for q in np.flatnonzero(x0))
-    F = counts.get(x0i, 0) / shots
-    return dict(fidelity_ace=F, se_ace=float(np.sqrt(F * (1 - F) / shots)),
-                hamming_weight_ace=sum(s.bit_count() * c for s, c in counts.items()) / shots,
-                hamming_dist_ace=sum((s ^ x0i).bit_count() * c for s, c in counts.items()) / shots,
-                bulk_to_boundary=b2b, ace_boundary_qubits=n_bnd, seam_cz=seam,
-                lrc=a.lrc, lrr=a.lrr, ace_torus=bool(a.ace_torus), shots=shots,
-                pyqrack=pyqrack_version())
-
-
-# ================================================================== estimators
-def norm_xeb(p, q):
-    D = p.size
-    return (D * np.dot(p, q) - 1) / (D * np.dot(p, p) - 1)
-
-
-def confuse(probs, dev):
-    """Per-qubit readout channel on a little-endian probability vector (qubit q = bit q)."""
-    k = dev.n
-    t = probs.reshape([2] * k)
-    e_sym = (dev.ro10 + dev.ro01) / 2
-    for q in range(k):
-        e10, e01 = (e_sym[q], e_sym[q]) if dev.meas_twirl else (dev.ro10[q], dev.ro01[q])
-        M = np.array([[1 - e01, e10], [e01, 1 - e10]])
-        ax = k - 1 - q
-        t = np.moveaxis(np.tensordot(M, t, axes=([1], [ax])), 0, ax)
-    return t.reshape(-1)
-
-
-def measure_point(mode, N, d, inst, tj, ctx, a):
-    """One (mode, depth, instance, trajectory) point.  Returns the JSONL record."""
-    dev, gates, colours, parts, bnds = ctx["dev"], ctx["gates"], ctx["colours"], ctx["parts"], ctx["bnds"]
-    # ace shares mirror_full's seed, hence its input string: the two are paired
-    seed_mode = "mirror_full" if mode == "ace" else mode
-    trng = np.random.default_rng([a.seed, N, inst, d, MODES.index(seed_mode), tj])
-    full = cycles_for(gates[:d], colours, lambda t: set())
-    pp = cycles_for(gates[:d], colours, lambda t: bnds[t % len(bnds)])
-    h = d // 2
-    L = 0 if dev.traj else int(getattr(a, "edge_layers", 0) or 0)
-    rec = dict(N=N, instance=inst, depth=d, mode=mode, traj=tj, cfg=ctx["cfg"])
-    x0 = np.zeros(N, dtype=int)
-    if not a.zero_input:
-        x0[trng.choice(N, N // 2, replace=False)] = 1
-    tw_f, tw_m = a.twirl == "all", a.twirl in ("all", "mirror")
-    if mode in ("fwd_full", "fwd_pp"):
-        cyc = full if mode == "fwd_full" else pp
-        edge = frozenset(range(min(L, len(cyc))))           # input side only
-        Fc = ctx["big"].run(x0, [(forward_steps(cyc), True, tw_f), (inverse_steps(cyc), False, False)],
-                            trng, edge=edge)
-        bulk = [c for i, c in enumerate(cyc) if i not in edge]
-        P = 1.0 if dev.traj else dev.p_noerr(bulk, len(bulk))
-        ro = float(np.prod(1 - dev.ro_err()))
-        rec.update(F_coh=Fc, P_noerr=P, F=Fc * P, F_ro=Fc * P * ro, cz=sum(len(c) for _, c in cyc))
-    elif mode in ("mirror", "mirror_full"):
-        half = (cycles_for(gates[:h], colours, lambda t: bnds[t % len(bnds)]) if mode == "mirror"
-                else cycles_for(gates[:h], colours, lambda t: set()))
-        edge = edge_set(2 * h, L)                            # input and output side
-        Fc = ctx["big"].run(x0, [(forward_steps(half), True, tw_m), (inverse_steps(half), True, tw_m)],
-                            trng, edge=edge)
-        bulk = [half[i] for i in range(h) if i not in edge] + \
-               [half[h - 1 - j] for j in range(h) if h + j not in edge]
-        P = 1.0 if dev.traj else dev.p_noerr(bulk, len(bulk))
-        ro = float(np.prod(1 - dev.ro_err(x0)))
-        rec.update(F_coh=Fc, P_noerr=P, F=Fc * P, F_ro=Fc * P * ro, cz=2 * sum(len(c) for _, c in half))
-    elif mode == "ace":
-        half = cycles_for(gates[:h], colours, lambda t: set())
-        r = ace_mirror(N, x0, forward_steps(half) + inverse_steps(half), a, ace_shots(a, N))
-        rec.update(r)
-        rec.update(F=r["fidelity_ace"], F_ro=r["fidelity_ace"], cz=2 * sum(len(c) for _, c in half),
-                   cfg=ctx["ace_cfg"])
-    else:
-        part = parts[(inst + tj) % len(parts)]
-        Fh, czs = 1.0, 0
-        for qs in part["patches"]:
-            new = {q: i for i, q in enumerate(qs)}
-            pcol = {k: [(new[u], new[v]) for u, v in es if u in new and v in new] for k, es in colours.items()}
-            pdev = dev.patch(qs, pcol)
-            pcyc = cycles_for([[layer[q] for q in qs] for layer in gates[:d]], pcol, lambda t: set())
-            key = tuple(qs)
-            if key not in ctx["patch_runners"]:
-                ctx["patch_runners"][key] = Runner(len(qs), pdev, cpu=True)
-            pr = ctx["patch_runners"][key]
-            pr.dev = pdev
-            zero = np.zeros(len(qs), dtype=int)
-            p_id = pr.run(zero, [(forward_steps(pcyc), False, False)], trng, want="probs")
-            p_no = pr.run(zero, [(forward_steps(pcyc), True, False)], trng, want="probs")
-            P = 1.0 if dev.traj else pdev.p_noerr(pcyc, len(pcyc))
-            q_meas = confuse(P * p_no + (1 - P) / p_no.size, pdev)
-            Fh *= norm_xeb(p_id, q_meas)
-            czs += sum(len(c) for _, c in pcyc)
-        rec.update(F=Fh, F_ro=Fh, cz=czs, cut=part["cut"], K=len(part["patches"]))
-    if mode not in ("ace", "patched") and L:
-        rec["edge_layers"] = L
-    return rec
-
-
-# ================================================================== run / summarize
-def fill_preset(a):
-    for k, v in PRESETS[a.preset].items():
-        if getattr(a, k) is None:
-            setattr(a, k, v)
-
-
-def cfg_hash(a):
-    # ACE settings are deliberately NOT hashed here (they go in the ace records' own cfg
-    # tag), so JSONL files written before the ace mode existed still resume.
-    keys = ["layout", "grid", "preset", "cz_rb", "sx_rb", "idle", "ro10", "ro01", "cz_phase",
-            "sx_overrot", "zz_idle", "spread", "meas_twirl", "twirl", "stochastic", "patches",
-            "seed", "device_seed", "zero_input"]
-    d = {k: getattr(a, k) for k in keys}
-    if a.twirl != "none":
-        d["engine"] = "twirl-lookahead-2"   # inverse-half frames now merged: new numbers
-    if getattr(a, "edge_layers", 0) and a.stochastic == "analytic":
-        d["edge_layers"] = a.edge_layers    # only when set: L=0 keeps the old hashes
-    blob = json.dumps(d, sort_keys=True, default=str)
-    return hashlib.sha1(blob.encode()).hexdigest()[:10]
-
-
-def parse_sizes(s):
-    out = []
-    for part in s.split(","):
-        lo, _, hi = part.partition("-")
-        out += list(range(int(lo), int(hi) + 1)) if hi else [int(lo)]
-    return out
-
-
-def load_records(path, cfgs):
-    recs, other = {}, 0
-    if path and os.path.exists(path):
-        for line in open(path):
-            r = json.loads(line)
-            if r.get("cfg") not in cfgs:
-                other += 1
-                continue
-            recs[(r["N"], r["instance"], r["depth"], r["mode"], r["traj"])] = r
-    if other:
-        print(f"# note: {other} records in {path} belong to another configuration and are ignored")
-    return recs
-
-
-def _decay(by, N, e, floor=0.0):
-    """Per-cycle decay from a log-linear fit over depths whose mean F exceeds floor.
-    Returns (b or None, number of depths dropped)."""
-    pts = sorted((d, float(np.mean(v))) for (n_, d, e_), v in by.items() if n_ == N and e_ == e)
-    good = [(d, np.log(m)) for d, m in pts if m > floor]
-    dropped = len(pts) - len(good)
-    if len(good) < 2:
-        return None, dropped
-    dd, yy = np.array(good).T
-    return float(-np.polyfit(dd, yy, 1)[0]), dropped
-
-
-def summarize(recs, base, K):
-    lab = lambda m: f"K{K}" if m == "patched" else m
-    by = defaultdict(list)
-    czpc = defaultdict(list)
-    b2b = {}
-    shots = {}
-    versions = set()
-    for r in recs.values():
-        by[(r["N"], r["depth"], r["mode"])].append(r["F_ro"])
-        czpc[(r["N"], r["mode"])].append(r["cz"] / r["depth"])
-        if r["mode"] == "ace":
-            b2b[r["N"]] = r["bulk_to_boundary"]
-            shots[r["N"]] = min(shots.get(r["N"], r["shots"]), r["shots"])
-            versions.add(r.get("pyqrack", "unrecorded"))
-    if len(versions) > 1:
-        print(f"# WARNING: ace records come from several PyQrack versions: {sorted(versions)}")
-    Ns = sorted({k[0] for k in by})
-    ests = [m for m in MODES if any(k[2] == m for k in by)]
-    rat_ests = [e for e in ests if e not in ("fwd_full", "ace")]    # ace is ideal: no ratio to noisy truth
-    print("\n== means per point (readout included; readout-free F in the JSONL; ace is noiseless) ==")
-    for N in Ns:
-        print(f"\nN = {N}" + (f"   ACE bulk/boundary {b2b[N]:.3g}" if N in b2b else ""))
-        print("d    " + "".join(f"{lab(e):>13s}" for e in ests) +
-              "".join(f"{lab(e) + '/full':>18s}" for e in rat_ests))
-        for d in sorted({k[1] for k in by if k[0] == N}):
-            m = {e: np.mean(by[(N, d, e)]) for e in ests if by.get((N, d, e))}
-            row = "".join(f"{m[e]:13.5f}" if e in m else f"{'-':>13s}" for e in ests)
-            rat = "".join(f"{m[e] / m['fwd_full']:18.3f}" if e in m and m.get("fwd_full") else f"{'-':>18s}"
-                          for e in rat_ests)
-            print(f"{d:<4} {row}{rat}")
-    if len(Ns) < 2 and "ace" not in ests:
-        return
-    print("\n== per-cycle decay b(N) = -dlnF/dd  /  CZ per cycle ==")
-    print("N    " + "".join(f"{lab(e):>20s}" for e in ests))
-    rows = defaultdict(list)
-    bmap, dropmap = {}, {}
-    for N in Ns:
-        cells = []
-        for e in ests:
-            floor = 3.0 / shots[N] if e == "ace" and N in shots else 0.0
-            bN, drop = _decay(by, N, e, floor)
-            if bN is not None:
-                c = float(np.mean(czpc[(N, e)]))
-                rows[e].append((N, c, bN))
-                bmap[(N, e)], dropmap[(N, e)] = bN, drop
-                cells.append(f"{bN:9.4f}{'*' if drop else ' '}/ {c:6.2f}  ")
-            else:
-                cells.append(f"{'-':>20s}")
-        print(f"{N:<4} " + "".join(cells))
-    if any(dropmap.values()):
-        print("(* fitted with depths dropped at or below 3/shots; the fit covers shallow depths only)")
-    if "ace" in ests:
-        g = lambda N, x, y: (f"{bmap[(N, x)] - bmap[(N, y)]:+14.4f}"
-                             if (N, x) in bmap and (N, y) in bmap else f"{'-':>14s}")
-        print("\n== seam terms, per cycle: ACE elision loss vs pseudo-patch thinning gain ==")
-        print("(b_ace > 0: ACE under-reports; gains > 0: pseudo-patch over-reports)")
-        print(f"N    {'bulk/bnd':>9s}{'b_ace':>11s}{'mfull-mirror':>14s}{'ffull-fwd_pp':>14s}{'F_ace(dmax)':>13s}")
-        for N in Ns:
-            ds = [d for (n_, d, e) in by if n_ == N and e == "ace"]
-            fa = f"{np.mean(by[(N, max(ds), 'ace')]):13.4f}" if ds else f"{'-':>13s}"
-            ba = (f"{bmap[(N, 'ace')]:10.4f}{'*' if dropmap[(N, 'ace')] else ' '}"
-                  if (N, "ace") in bmap else f"{'-':>11s}")
-            bb = f"{b2b[N]:9.3g}" if N in b2b else f"{'-':>9s}"
-            print(f"{N:<4} {bb}{ba}{g(N, 'mirror_full', 'mirror')}{g(N, 'fwd_full', 'fwd_pp')}{fa}")
-    if len(Ns) < 2 or not base.is_layout:
-        return
-    print("\n== fitted b = u*N + v*CZpc (non-negative), evaluated at the 61-qubit experiment ==")
-    target = {"fwd_full": base.czpc_full, "mirror_full": base.czpc_full,
-              "fwd_pp": base.czpc_pp, "mirror": base.czpc_pp, "patched": base.czpc_pp}
-    pred = {}
-    for e in ests:
-        if e not in target or len(rows[e]) < 2:
-            continue
-        A = np.array([[N, c] for N, c, _ in rows[e]])
-        y = np.array([b for *_, b in rows[e]])
-        (u, v), *_ = np.linalg.lstsq(A, y, rcond=None)
-        if u < 0 or v < 0:
-            cand = []
-            for j in (0, 1):
-                cj = max(float(A[:, j] @ y / (A[:, j] @ A[:, j])), 0.0)
-                cand.append((np.sum((y - cj * A[:, j]) ** 2), j, cj))
-            _, j, cj = min(cand)
-            u, v = (cj, 0.0) if j == 0 else (0.0, cj)
-        pred[e] = u * 61 + v * target[e]
-        print(f"{lab(e):12s} u {u:.3e}/qubit  v {v:.3e}/CZ  b(61) {pred[e]:.4f}  "
-              f"per-cycle {np.exp(-pred[e]):.4f}   (paper fit 0.8717)")
-    if "fwd_full" in pred:
-        for e in ests:
-            if e != "fwd_full" and e in pred:
-                print(f"{lab(e):12s} / truth at 61 qubits, d=36: {np.exp(-36 * (pred[e] - pred['fwd_full'])):.3f}")
-    if len(Ns) < 5 or max(Ns) - min(Ns) < 6:
-        print("(few or narrowly spaced sizes: the 61-qubit numbers are indicative only)")
-
-
-def build_ctx(base, dev_base, N, a, cfg, need_big):
-    win, colours = base.window(N)
-    edges = sorted({e for es in colours.values() for e in es})
-    parts = partitions(N, edges, a.patches, np.random.default_rng([a.seed, N]))
-    if not parts:
-        raise SystemExit(f"no connected balanced K={a.patches} partition for N={N}")
-    dev = dev_base.window(win, colours)
-    ctx = dict(win=win, colours=colours, parts=parts, bnds=[p["boundary"] for p in parts],
-               dev=dev, cfg=cfg, ace_cfg=ace_cfg(cfg, a), patch_runners={},
-               big=Runner(N, dev, a.cpu) if need_big else None)
-    return ctx
-
-
-def cmd_run(a):
-    fill_preset(a)
-    a.stochastic = a.stochastic or "analytic"
-    cfg = cfg_hash(a)
-    base = BaseGraph(a.layout, a.grid, a.patches)
-    recs = load_records(a.out, {cfg, ace_cfg(cfg, a)})
-    if a.summarize:
-        summarize(recs, base, a.patches)
-        return
-    modes = a.modes.split(",")
-    bad = set(modes) - set(MODES)
-    if bad:
-        raise SystemExit(f"unknown modes {bad}; choose from {MODES}")
-    if "ace" in modes:
-        try:
-            from pyqrack import QrackAceBackend  # noqa: F401
-            import qiskit  # noqa: F401
-        except ImportError as err:
-            raise SystemExit(f"ace mode needs QrackAceBackend and qiskit: {err}")
-    dev_base = Device(base.n, base.colours, a, np.random.default_rng(a.device_seed))
-    dev_base.traj = a.stochastic == "trajectory"
-    hybrid = bool(a.edge_layers) and not dev_base.traj
-    fh = open(a.out, "a")
-    dmax = max(a.depths)
-    print(f"# config {cfg}: preset {a.preset}, twirl {a.twirl}, stochastic {a.stochastic}"
-          f"{f' (edge layers {a.edge_layers})' if hybrid else ''}, K={a.patches}")
-    if "ace" in modes:
-        print(f"# ace tag {ace_cfg(cfg, a)}, pyqrack {pyqrack_version()}")
-    for N in parse_sizes(a.sizes):
-        ctx = build_ctx(base, dev_base, N, a, cfg, any(m not in ("patched", "ace") for m in modes))
-        print(f"\n# N={N}: base labels {[base.labels[q] for q in ctx['win']]}")
-        print(f"# {len(ctx['dev'].edges)} couplers; K={a.patches} cuts {[p['cut'] for p in ctx['parts']]}, "
-              f"patch sizes {[len(s) for s in ctx['parts'][0]['patches']]}")
-        for inst in range(a.instances):
-            irng = np.random.default_rng([a.seed, inst])
-            gb = [[haar_su2(irng) for _ in range(base.n)] for _ in range(dmax)]
-            ctx["gates"] = [[layer[q] for q in ctx["win"]] for layer in gb]
-            for d in a.depths:
-                for mode in modes:
-                    twirled = (mode.startswith("fwd") and a.twirl == "all") or \
-                              (mode.startswith("mirror") and a.twirl in ("all", "mirror"))
-                    sampled = dev_base.traj or twirled or (hybrid and mode not in ("patched", "ace"))
-                    ntraj = 1 if mode == "ace" else (a.traj if sampled else 1)
-                    for tj in range(ntraj):
-                        key = (N, inst, d, mode, tj)
-                        if key in recs:
-                            continue
-                        t0 = time.time()
-                        rec = measure_point(mode, N, d, inst, tj, ctx, a)
-                        rec["seconds"] = round(time.time() - t0, 3)
-                        fh.write(json.dumps(rec, default=float) + "\n")
-                        fh.flush()
-                        recs[key] = rec
-                        extra = (f" hw {rec['hamming_weight_ace']:.2f} hd {rec['hamming_dist_ace']:.2f} "
-                                 f"b/b {rec['bulk_to_boundary']:.3g} seamCZ {rec['seam_cz']}"
-                                 if mode == "ace" else "")
-                        print(f"N {N} inst {inst} d {d:>3} {mode:<11s} traj {tj:<3} CZ {rec['cz']:>5} "
-                              f"F {rec['F']:.6f} F_ro {rec['F_ro']:.6f}{extra} ({rec['seconds']:.1f}s)",
-                              flush=True)
-        del ctx
-        gc.collect()
-    summarize(recs, base, a.patches)
-
-
-# ================================================================== selftest
-def cmd_selftest(a):
-    base = BaseGraph(a.layout, a.grid)
-    N = min(a.n, base.n)
-    ok = True
-
-    def mk(preset, **over):
-        ns = argparse.Namespace(**{k: None for k in PRESETS["r2"]}, preset=preset, meas_twirl=True,
-                                twirl="none", patches=3, seed=7, cpu=True, zero_input=False,
-                                stochastic="analytic", traj=1, layout=a.layout, grid=a.grid, device_seed=5,
-                                lrc=4, lrr=4, ace_torus=False, ace_shots=None, edge_layers=0)
-        fill_preset(ns)
-        for k, v in over.items():
-            setattr(ns, k, v)
-        return ns
-
-    def ctx_for(ns, traj_mode=False, modes_big=True):
-        dev_base = Device(base.n, base.colours, ns, np.random.default_rng(ns.device_seed))
-        dev_base.traj = traj_mode
-        c = build_ctx(base, dev_base, N, ns, "selftest", modes_big)
-        irng = np.random.default_rng([ns.seed, 0])
-        gb = [[haar_su2(irng) for _ in range(base.n)] for _ in range(24)]
-        c["gates"] = [[layer[q] for q in c["win"]] for layer in gb]
-        return c
-
-    print(f"[1] noiseless exactness, N={N}, statevector modes, twirl all")
-    ns = mk("ideal", twirl="all")
-    c = ctx_for(ns)
-    worst = 0.0
-    for mode in MODES:
-        if mode == "ace":
-            continue
-        for d in (4, 8):
-            for tj in range(2):
-                worst = max(worst, abs(1 - measure_point(mode, N, d, 0, tj, c, ns)["F"]))
-    print(f"    max |1 - F| = {worst:.2e}  {'OK' if worst < 1e-4 else 'FAIL'}")
-    ok &= worst < 1e-4
-
-    print("[2] Loschmidt echo vs explicit two-ket overlap (coherent device)")
-    ns = mk("r2", cz_phase=(0.08, 0.04), sx_overrot=(0.02, 0.01), zz_idle=(0.02, 0.01))
-    c = ctx_for(ns)
-    cyc = cycles_for(c["gates"][:12], c["colours"], lambda t: set())
-    x0 = np.zeros(N, dtype=int)
-    x0[::3] = 1
-    r, rng = c["big"], np.random.default_rng(1)
-    F_l = r.run(x0, [(forward_steps(cyc), True, False), (inverse_steps(cyc), False, False)], rng)
-    k1 = r.run(x0, [(forward_steps(cyc), False, False)], rng, want="ket")
-    k2 = r.run(x0, [(forward_steps(cyc), True, False)], rng, want="ket")
-    F_e = abs(np.vdot(k1, k2)) ** 2
-    print(f"    echo {F_l:.8f}  overlap {F_e:.8f}  diff {abs(F_l - F_e):.1e}  "
-          f"{'OK' if abs(F_l - F_e) < 1e-5 else 'FAIL'}")
-    ok &= abs(F_l - F_e) < 1e-5
-
-    print("[3] twirl control: CZ phase only, twirl all -> mirror tracks forward")
-    ns = mk("ideal", cz_phase=(0.15, 0.0), twirl="all")
-    c = ctx_for(ns)
-    fw = np.mean([measure_point("fwd_pp", N, 12, 0, t, c, ns)["F"] for t in range(a.traj)])
-    mi = np.mean([measure_point("mirror", N, 12, 0, t, c, ns)["F"] for t in range(a.traj)])
-    print(f"    fwd_pp {fw:.4f}  mirror {mi:.4f}  ratio {mi / fw:.3f}  {'OK' if abs(mi / fw - 1) < 0.08 else 'CHECK'}")
-    half = cycles_for(c["gates"][:6], c["colours"], lambda t: c["bnds"][t % len(c["bnds"])])
-    measure_point("mirror", N, 12, 0, 0, c, ns)
-    want = len(half[-1][1])                  # only the first inverse CZ layer lacks a u before it
-    print(f"    unmerged frames {c['big'].n_fold} (fold layer has {want} CZ)  "
-          f"{'OK' if c['big'].n_fold == want else 'FAIL'}")
-    ok &= c["big"].n_fold == want
-
-    print(f"[4] stochastic model vs per-element Pauli trajectories (r2 rates, no coherent), "
-          f"d={a.d4}, {a.traj4} runs")
-    print("    (edge layers L: errors of the first/last L noisy cycles sampled, bulk analytic;"
-          " L=0 is the pure analytic model)")
-    ns = mk("r2", cz_phase=(0.0, 0.0), sx_overrot=(0.0, 0.0))
-    ca, ct = ctx_for(ns, False), ctx_for(ns, True)
-    for mode in ("fwd_full", "mirror"):
-        tr = np.array([measure_point(mode, N, a.d4, 0, t, ct, ns)["F"] for t in range(a.traj4)])
-        se_t = tr.std(ddof=1) / np.sqrt(len(tr))
-        print(f"    {mode:9s} full trajectories {tr.mean():.4f} +/- {se_t:.4f}")
-        pick = None
-        for L in range(0, a.max_edge + 1):
-            ns.edge_layers = L
-            runs = 1 if L == 0 else a.traj4
-            hy = np.array([measure_point(mode, N, a.d4, 0, t, ca, ns)["F"] for t in range(runs)])
-            se_h = hy.std(ddof=1) / np.sqrt(len(hy)) if len(hy) > 1 else 0.0
-            se = np.hypot(se_t, se_h)
-            z = (tr.mean() - hy.mean()) / max(se, 1e-12)
-            if pick is None and abs(z) < 1:
-                pick = L
-            print(f"      L={L}  {hy.mean():.4f} +/- {se_h:.4f}   traj - model {z:+.1f} sigma   "
-                  f"(model/traj {hy.mean() / tr.mean():.3f})")
-        ns.edge_layers = 0
-        print(f"      smallest L within 1 sigma: {pick if pick is not None else f'> {a.max_edge}'}")
-
-    print("[5] native compilation and U(theta,phi,lambda) conversion, including the poles")
-    rng = np.random.default_rng(3)
-    poles = [I2, PX, PY, PZ, rz(0.7), rz(-2.9), rx(np.pi) @ rz(0.3), PX @ rz(1.1), 1j * PZ]
-    mats = [haar_su2(rng) for _ in range(200)] + poles
-    worst_u, worst_n = 0.0, 0.0
-    sx_ideal = rx(np.pi / 2)
-    for M in mats:
-        th, ph, la = u_angles(M)
-        U = np.array([[np.cos(th / 2), -np.exp(1j * la) * np.sin(th / 2)],
-                      [np.exp(1j * ph) * np.sin(th / 2), np.exp(1j * (ph + la)) * np.cos(th / 2)]])
-        worst_u = max(worst_u, same_up_to_phase(U, M))
-        worst_n = max(worst_n, same_up_to_phase(native(M, sx_ideal), M))
-    print(f"    u_angles: max 1 - |tr(U^dag M)|/2 = {worst_u:.1e}  {'OK' if worst_u < 1e-10 else 'FAIL'}")
-    print(f"    native (ideal SX): max 1 - |tr(N^dag M)|/2 = {worst_n:.1e}  {'OK' if worst_n < 1e-10 else 'FAIL'}")
-    ok &= worst_u < 1e-10 and worst_n < 1e-10
-
-    print("[6] partitions: incremental swap score vs recomputed cut")
-    prng = np.random.default_rng(11)
-    edges6 = sorted({e for es in base.window(N)[1].values() for e in es})
-    adj6 = defaultdict(set)
-    for u, v in edges6:
-        adj6[u].add(v)
-        adj6[v].add(u)
-    cut6 = lambda lab: sum(lab[u] != lab[v] for u, v in edges6)
-    bad6 = 0
-    for _ in range(300):
-        lab = prng.integers(0, 3, N)
-        u, v = prng.choice(N, 2, replace=False)
-        if lab[u] == lab[v]:
-            continue
-        before = cut6(lab)
-        dc = dcut(lab, u, v, adj6)
-        lab[u], lab[v] = lab[v], lab[u]
-        bad6 += (cut6(lab) - before) != dc
-    print(f"    mismatches {bad6}  {'OK' if bad6 == 0 else 'FAIL'}")
-    ok &= bad6 == 0
-
-    print("[7] ACE mirror on QrackAceBackend")
-    try:
-        from pyqrack import QrackAceBackend  # noqa: F401
-        import qiskit  # noqa: F401
-    except ImportError as err:
-        print(f"    skipped: {err}")
-    else:
-        c = ctx_for(mk("ideal"), modes_big=False)
-        print(f"    pyqrack {pyqrack_version()}")
-        for lr in (N, 4, 2):
-            ns = mk("ideal", lrc=lr, lrr=lr, ace_shots=1024)
-            rec = measure_point("ace", N, 12, 0, 0, dict(c, ace_cfg="selftest"), ns)
-            print(f"    lrc=lrr={lr:<3} bulk/boundary {rec['bulk_to_boundary']:.3g}  "
-                  f"fidelity_ace {rec['fidelity_ace']:.4f}  hamming dist {rec['hamming_dist_ace']:.2f}  "
-                  f"seam CZ {rec['seam_cz']}")
-            if rec["ace_boundary_qubits"] == 0:     # no seams: ACE must be exact, bit order included
-                good = rec["fidelity_ace"] > 0.99
-                print(f"    boundary-free echo {'OK' if good else 'FAIL'}")
-                ok &= good
-    print("selftest", "PASSED" if ok else "FAILED")
-
-
 # ================================================================== CLI
-def pair(s):
-    x, y = (float(v) for v in s.split(","))
-    return x, y
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1106,51 +933,49 @@ def main():
     s.add_argument("--repo", default=".")
     s.add_argument("--dmin", type=int, default=20)
 
-    def geometry(p):
-        g = p.add_mutually_exclusive_group(required=True)
-        g.add_argument("--layout", help="data/layout.json of the BlueQubit release")
-        g.add_argument("--grid", help="synthetic RxC lattice, e.g. 6x6")
+    v = sub.add_parser("verify", help="regenerate all circuits and compare with the released QASM")
+    v.add_argument("--repo", default=".")
+    v.add_argument("--tol", type=float, default=1e-9, help="angle tolerance, rad")
 
-    r = sub.add_parser("run", help="statevector emulation (echo run or scaling sweep)")
-    geometry(r)
-    r.add_argument("--sizes", default="27-36", help="e.g. 36, 27-36 or 27,30,33,36")
-    r.add_argument("--depths", type=int, nargs="+", default=[8, 16, 24, 32, 36])
-    r.add_argument("--instances", type=int, default=2)
-    r.add_argument("--modes", default="fwd_full,fwd_pp,mirror,patched",
-                   help=f"comma list from {MODES}")
-    r.add_argument("--patches", type=int, default=3, help="K for the patched estimator and pseudo-patch")
-    r.add_argument("--preset", choices=list(PRESETS), default="r2")
-    for k in ("cz_rb", "sx_rb", "idle", "ro10", "ro01", "spread"):
-        r.add_argument("--" + k.replace("_", "-"), type=float, default=None)
-    for k in ("cz_phase", "sx_overrot", "zz_idle"):
-        r.add_argument("--" + k.replace("_", "-"), type=pair, default=None, help="mean,std")
-    r.add_argument("--no-meas-twirl", dest="meas_twirl", action="store_false")
-    r.add_argument("--twirl", choices=["none", "mirror", "all"], default="mirror")
-    r.add_argument("--stochastic", choices=["analytic", "trajectory"], default="analytic")
-    r.add_argument("--edge-layers", type=int, default=0,
-                   help="analytic mode: sample errors of the first/last L noisy cycles (selftest [4] picks L)")
-    r.add_argument("--traj", type=int, default=8, help="runs per point when twirled, hybrid or trajectory")
-    r.add_argument("--zero-input", action="store_true", help="all-zeros input instead of weight N/2")
-    r.add_argument("--lrc", type=int, default=4, help="ace: QrackAceBackend long_range_columns")
-    r.add_argument("--lrr", type=int, default=4, help="ace: QrackAceBackend long_range_rows")
-    r.add_argument("--ace-torus", action="store_true", help="ace: pass is_torus=True")
-    r.add_argument("--ace-shots", type=int, default=None, help="ace: shots (default 2^min(13, N+2))")
-    r.add_argument("--cpu", action="store_true", help="is_gpu=False, for big states")
-    r.add_argument("--seed", type=int, default=2609)
-    r.add_argument("--device-seed", type=int, default=120)
-    r.add_argument("--out", default="nighthawk_qrack.jsonl")
+    h = sub.add_parser("hwxeb", help="re-score the ibm_phoenix bitstrings with PyQrack ideal patches")
+    h.add_argument("--repo", default=".")
+    h.add_argument("--K", type=int, nargs="+", default=[3, 4])
+    h.add_argument("--depths", type=int, nargs="+", default=None)
+    h.add_argument("--limit", type=int, default=0, help="stop after this many circuits (0 = all 180)")
+    h.add_argument("--cache", default=None, help="directory for ideal patch distributions (float32 npz)")
+    h.add_argument("--cpu", action="store_true")
+    h.add_argument("--out", default=None, help="write per-circuit records (patch_xeb.json format)")
+
+    r = sub.add_parser("run", help="clean-qubit emulation of the released circuits")
+    r.add_argument("--repo", default=".")
+    r.add_argument("--backend", choices=["exact", "ace"], default="ace")
+    r.add_argument("--families", default="mirror,patched", help="mirror, patched or both")
+    r.add_argument("--depths", type=int, nargs="+", default=None, help="default: the release's depths")
+    r.add_argument("--K", type=int, nargs="+", default=[3, 4])
+    r.add_argument("--instances", type=int, default=None, help="default 3, as released")
+    r.add_argument("--partitions", type=int, default=None, help="use the first j partitions (default all 5)")
+    r.add_argument("--shots", default="paper", help="'paper' (Appendix D budgets) or shots per circuit")
+    r.add_argument("--twirls", type=int, default=GATE_TWIRLS, help="ace mirror Pauli-frame randomisations")
+    r.add_argument("--exact-probs", dest="exact_probs", action=argparse.BooleanOptionalAction, default=True,
+                   help="exact backend mirror: read survival with prob_perm instead of sampling")
+    r.add_argument("--sizes", default=None,
+                   help="register sizes to sweep, first-n truncation: 36, 27-36 or 20,27-36 (mirror; patched at 61 only)")
+    r.add_argument("--n", type=int, default=None, help="single size, same as --sizes n")
+    r.add_argument("--lrc", type=int, default=4, help="ace: long_range_columns")
+    r.add_argument("--lrr", type=int, default=4, help="ace: long_range_rows")
+    r.add_argument("--cache", default=None, help="directory for ideal patch distributions")
+    r.add_argument("--cpu", action="store_true", help="is_gpu=False")
+    r.add_argument("--out", default="nighthawk_clean.jsonl")
     r.add_argument("--summarize", action="store_true")
 
-    t = sub.add_parser("selftest", help="validation checks at small size")
-    geometry(t)
-    t.add_argument("--n", type=int, default=12)
-    t.add_argument("--traj", type=int, default=40)
-    t.add_argument("--d4", type=int, default=12, help="depth for the stochastic-model check [4]")
-    t.add_argument("--traj4", type=int, default=400, help="runs per point in [4] (needs many: F is near-binary per run)")
-    t.add_argument("--max-edge", type=int, default=4, help="largest L tried in [4]")
+    t = sub.add_parser("selftest", help="conventions and exactness checks")
+    t.add_argument("--repo", default=".")
+    t.add_argument("--n", type=int, default=14, help="register for the exact mirror checks")
+    t.add_argument("--lrc", type=int, default=4)
+    t.add_argument("--lrr", type=int, default=4)
 
     a = ap.parse_args()
-    {"seamgap": cmd_seamgap, "run": cmd_run, "selftest": cmd_selftest}[a.cmd](a)
+    dict(seamgap=cmd_seamgap, verify=cmd_verify, hwxeb=cmd_hwxeb, run=cmd_run, selftest=cmd_selftest)[a.cmd](a)
 
 
 if __name__ == "__main__":
