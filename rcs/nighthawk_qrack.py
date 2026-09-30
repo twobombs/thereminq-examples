@@ -36,6 +36,10 @@ Subcommands
             per-cycle fidelity next to the device's 0.872. --sizes sweeps the
             register (first-n truncation, the release's `e < n` convention),
             resumable per (n, point), and fits b(N) = u*N + v*CZ/cycle to 61.
+            Every bitstring drawn is kept: one npz per point under
+            <out>_shots/<cfg>/points, merged after each run into .../release/ in the release's data/
+            layout, so BlueQubit's analysis scripts read it unchanged. --families full
+            draws the 10 x 100k samples of the d36 circuit (stored, not scorable).
   selftest  conventions and exactness checks (seconds).
   seamgap   data-only analysis of the release (numpy), unchanged.
 
@@ -89,6 +93,7 @@ BASE_SEED = 2025
 INSTANCE_SEED_STRIDE = 1000003
 MIRROR_SHOTS = {4: 30_000, 6: 30_000, 8: 30_000, 10: 45_000, 12: 45_000, 14: 45_000, 16: 60_000,
                 18: 60_000, 20: 72_000, 24: 96_000, 28: 120_000, 32: 120_000, 36: 240_000, 40: 360_000}
+SAMPLE_PUBS, SAMPLE_SHOTS_PER_PUB = 10, 100_000
 PATCHED_SHOTS = {20: 2_400, 24: 4_800, 28: 12_000, 32: 24_000, 36: 36_000, 40: 54_000}
 GATE_TWIRLS = 64
 FULL_DEPTHS = list(range(4, 41, 4))
@@ -576,12 +581,13 @@ def run_mirror(lay, eng, d, inst, a):
     cyc = mirror_cycles(lay, d, inst, n=n)
     per_input = max(1, n_shots(a, "mirror", d) // len(lay.inputs))
     R = a.twirls if a.backend == "ace" else 0       # twirling is an identity for exact gates
-    hits, shots = [], []
+    hits, shots, keep = [], [], {}
     for s, string in enumerate(lay.inputs):
         bits = [int(c) for c in string[:n]]
         target = sum(b << q for q, b in enumerate(bits))
         h = tot = 0
         pr = 0.0
+        got, tw = [], []
         for r in range(max(R, 1)):
             rng = np.random.default_rng([BASE_SEED, d, inst, s, r]) if R else None
             k = per_input // max(R, 1) + (1 if r < per_input % max(R, 1) else 0)
@@ -597,6 +603,8 @@ def run_mirror(lay, eng, d, inst, a):
                 pr += eng.prob_bits(bits) / max(R, 1)
             else:
                 sh = eng.shots(k)
+                got.append(sh)
+                tw.append(np.full(k, r, dtype=np.uint16))
                 h += int(np.count_nonzero(sh == np.uint64(target)))
                 tot += k
         if eng.prob_bits and a.exact_probs:
@@ -605,11 +613,13 @@ def run_mirror(lay, eng, d, inst, a):
         else:
             hits.append(h)
             shots.append(tot)
+            keep[f"input{s}"] = np.concatenate(got) if got else np.zeros(0, np.uint64)
+            keep[f"input{s}_twirl"] = np.concatenate(tw) if tw else np.zeros(0, np.uint16)
     if eng.prob_bits and a.exact_probs:
         return dict(fidelity=float(np.mean(hits)), se=0.0, survival=hits, shots=0)
     p = sum(hits) / sum(shots)
     return dict(fidelity=p, se=math.sqrt(max(p * (1 - p), 1e-12) / sum(shots)),
-                hits=hits, shots=int(sum(shots)))
+                hits=hits, shots=int(sum(shots)), shots_per_input=shots, _shots=keep)
 
 
 def run_patched(lay, eng, K, d, j, inst, a):
@@ -618,7 +628,99 @@ def run_patched(lay, eng, K, d, j, inst, a):
     probs = cached_patch_probs(a.cache, f"K{K}_d{d}_p{j}_i{inst}", cyc, part["patches"], a.cpu)
     eng.reset()
     apply_forward(eng, cyc)
-    return patched_xeb(eng.shots(n_shots(a, "patched", d)), probs, part["patches"])
+    sh = eng.shots(n_shots(a, "patched", d))
+    return dict(**patched_xeb(sh, probs, part["patches"]), _shots={"shots": sh})
+
+
+def run_full(lay, eng, d, pub, a):
+    """One pub of the unpatched forward circuit (release seed 2025, instance 0), as the
+    10 x 100k-shot pubs of the 10^6-sample run. Not scorable at 61 qubits: stored only."""
+    cyc = build_cycles(lay, d, instance_seed(0, "full"), 0, n=eng.n)
+    eng.reset()
+    apply_forward(eng, cyc)
+    k = SAMPLE_SHOTS_PER_PUB if a.shots == "paper" else int(a.shots)
+    sh = eng.shots(k)
+    return dict(fidelity=None, se=None, shots=int(k), _shots={"shots": sh})
+
+
+# ================================================================== bitstring storage
+def shots_root(a):
+    """<shots-dir or out stem_shots>/<cfg tag>: configurations never mix in one release/."""
+    base = Path(a.shots_dir) if a.shots_dir else Path(a.out).with_name(Path(a.out).stem + "_shots")
+    return base / cfg_tag(a)
+
+
+def point_file(a, n, fam, K, d, j, i):
+    return shots_root(a) / "points" / f"n{n}" / f"{fam}_K{K}_d{d:02d}_p{j}_i{i}.npz"
+
+
+def save_point(path, arrays):
+    """Atomic write, so an interrupted run never leaves a half file behind a record."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.stem + ".tmp.npz")
+    np.savez_compressed(tmp, **{k: np.asarray(v) for k, v in arrays.items()})
+    os.replace(tmp, path)
+
+
+def pack_shots(recs, lay, a):
+    """Merge the per-point files into the release's data/ layout under <shots>/release:
+    counts/patched_K{K}_d{d}.npz (partition{j}_instance{i}, sorted uint64),
+    counts/mirror_survival.json (hits[i][s] / shots[i][s]) plus mirror_shots.npz with every
+    raw mirror shot and its twirl index, samples/full_d{d}.npz (shots, sorted).
+    Truncated registers get an _n{n} suffix; bit q is logical qubit q throughout."""
+    rel = shots_root(a) / "release"
+    groups, missing = defaultdict(dict), 0
+    for (n, fam, K, d, j, i), r in sorted(recs.items(), key=lambda kv: kv[0]):
+        f = point_file(a, n, fam, K, d, j, i)
+        if not f.exists():
+            missing += fam != "mirror" or not a.exact_probs or a.backend == "ace"
+            continue
+        groups[(n, fam, K, d)][(j, i)] = (f, r)
+    written = []
+    for (n, fam, K, d), pts in groups.items():
+        sfx = "" if n == lay.n else f"_n{n}"
+        if fam == "patched":
+            out = rel / "counts" / f"patched_K{K}_d{d}{sfx}.npz"
+            arrays = {}
+            for (j, i), (f, _) in pts.items():
+                with np.load(f) as z:
+                    arrays[f"partition{j}_instance{i}"] = np.sort(z["shots"].astype(np.uint64))
+        elif fam == "full":
+            out = rel / "samples" / f"full_d{d}{sfx}.npz"
+            parts = []
+            for _, (f, _) in sorted(pts.items()):
+                with np.load(f) as z:
+                    parts.append(z["shots"].astype(np.uint64))
+            arrays = {"shots": np.sort(np.concatenate(parts))}
+        else:
+            out = rel / "counts" / f"mirror_shots_d{d:02d}{sfx}.npz"
+            arrays = {}
+            for (_, i), (f, _) in pts.items():
+                with np.load(f) as z:
+                    arrays.update({f"instance{i}_{k}": z[k] for k in z.files})
+        save_point(out, arrays)
+        written.append(out)
+    mirror = defaultdict(dict)
+    for (n, fam, K, d), pts in groups.items():
+        if fam == "mirror":
+            for (_, i), (_, r) in sorted(pts.items()):
+                mirror[n].setdefault(str(d), {"instances": [], "hits": [], "shots": []})
+                e = mirror[n][str(d)]
+                e["instances"].append(i)
+                e["hits"].append(r["hits"])
+                e["shots"].append(r["shots_per_input"])
+    for n, depths in mirror.items():
+        sfx = "" if n == lay.n else f"_n{n}"
+        out = rel / "counts" / f"mirror_survival{sfx}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"description": "Clean-qubit emulation (" + a.backend + "): hits[i][s] of "
+                                   "shots[i][s] executions of instance instances[i] prepared in input string s "
+                                   "returned that string. Depth = cycles of U U^dagger.", "depths": depths}, indent=1))
+        written.append(out)
+    if written:
+        print(f"# bitstrings: {len(written)} release-format files under {rel}")
+    if missing:
+        print(f"# note: {missing} records have no stored bitstrings (written before storage existed)")
 
 
 def load_jsonl(path, tag, n_default):
@@ -654,11 +756,17 @@ def summarize(recs, lay, a):
     fvd = json.loads((lay.repo / "data/results/fidelity_vs_depth.json").read_text())
     by = defaultdict(list)
     min_shots = {}
+    n_full = defaultdict(int)
     for r in recs.values():
+        if r["family"] == "full":
+            n_full[(r["n"], r["depth"])] += r["shots"]
+            continue
         fam = "mirror" if r["family"] == "mirror" else f"{r['K']}-patch"
         by[(r["n"], fam, r["depth"])].append((r["fidelity"], r["se"]))
         if r["family"] == "mirror" and r.get("shots"):
             min_shots[r["n"]] = min(min_shots.get(r["n"], r["shots"]), r["shots"])
+    for (n, d), k in sorted(n_full.items()):
+        print(f"full circuit n={n} d={d}: {k:,} stored samples (no score: not verifiable at this size)")
     sizes = sorted({k[0] for k in by})
     b_rows, fit_depths = [], set()
     for n in sizes:
@@ -725,8 +833,11 @@ def cmd_run(a):
     lay = Layout(a.repo)
     tag = cfg_tag(a)
     recs = load_jsonl(a.out, tag, lay.n)
-    if a.summarize:
-        summarize(recs, lay, a)
+    if a.summarize or a.pack:
+        if a.pack:
+            pack_shots(recs, lay, a)
+        if a.summarize:
+            summarize(recs, lay, a)
         return
     if a.sizes and a.n:
         raise SystemExit("give --sizes or --n, not both")
@@ -734,6 +845,9 @@ def cmd_run(a):
     if not all(2 <= n <= lay.n for n in sizes):
         raise SystemExit(f"sizes must lie in 2..{lay.n}")
     fams = a.families.split(",")
+    if a.backend == "exact" and a.exact_probs and "mirror" in fams:
+        print("# note: exact mirror reads survival with prob_perm, so it draws no bitstrings; "
+              "--no-exact-probs samples (and stores) them")
     if "patched" in fams and any(n != lay.n for n in sizes):
         print("# note: patched circuits use the released 61-qubit partitions; run only at n = 61")
     fh = open(a.out, "a")
@@ -746,9 +860,11 @@ def cmd_run(a):
         for fam in fams:
             if fam == "patched" and n != lay.n:
                 continue
-            ds = a.depths or lay.depths["mirror" if fam == "mirror" else "patched"]
+            ds = a.depths or lay.depths[{"mirror": "mirror", "patched": "patched", "full": "full_sampled"}[fam]]
             for d in ds:
-                if fam == "mirror":
+                if fam == "full":
+                    jobs += [("full", 0, d, p, 0) for p in range(a.pubs)]
+                elif fam == "mirror":
                     jobs += [("mirror", 0, d, 0, i) for i in insts]
                 else:
                     for K in a.K:
@@ -766,18 +882,25 @@ def cmd_run(a):
         for fam, K, d, j, i in todo:
             t0 = time.time()
             try:
-                r = run_mirror(lay, eng, d, i, a) if fam == "mirror" else run_patched(lay, eng, K, d, j, i, a)
+                r = (run_mirror(lay, eng, d, i, a) if fam == "mirror" else
+                     run_full(lay, eng, d, j, a) if fam == "full" else run_patched(lay, eng, K, d, j, i, a))
             except Exception as err:
                 print(f"# n = {n} {fam} d{d} inst {i}: failed ({err}); left for a rerun")
                 continue
+            arrays = r.pop("_shots", None)
+            if arrays:                            # bitstrings first, record second
+                f = point_file(a, n, fam, K, d, j, i)
+                save_point(f, arrays)
+                r["shots_file"] = str(f)
             rec = dict(cfg=tag, n=n, family=fam, K=K, depth=d, partition=j, instance=i,
                        seconds=round(time.time() - t0, 2), **r)
             fh.write(json.dumps(rec) + "\n")
             fh.flush()
             recs[(n, fam, K, d, j, i)] = rec
-            print(f"n {n:>2} {fam:7s} K{K} d{d:>3} part {j} inst {i}  F {r['fidelity']:.5f} +/- {r['se']:.1e}"
-                  f"  ({rec['seconds']}s)", flush=True)
+            score = f"F {r['fidelity']:.5f} +/- {r['se']:.1e}" if r["fidelity"] is not None else f"{r['shots']:,} samples"
+            print(f"n {n:>2} {fam:7s} K{K} d{d:>3} part {j} inst {i}  {score}  ({rec['seconds']}s)", flush=True)
         del eng
+    pack_shots(recs, lay, a)
     summarize(recs, lay, a)
 
 
@@ -949,12 +1072,18 @@ def main():
     r = sub.add_parser("run", help="clean-qubit emulation of the released circuits")
     r.add_argument("--repo", default=".")
     r.add_argument("--backend", choices=["exact", "ace"], default="ace")
-    r.add_argument("--families", default="mirror,patched", help="mirror, patched or both")
+    r.add_argument("--families", default="mirror,patched",
+                   help="comma list of mirror, patched, full (full: unscored samples of the d36 circuit)")
+    r.add_argument("--pubs", type=int, default=SAMPLE_PUBS, help="full: pubs of --shots each (paper 10 x 100k)")
+    r.add_argument("--shots-dir", dest="shots_dir", default=None,
+                   help="where bitstrings go (default: <out stem>_shots/); a <cfg> subfolder holds points/ + release/")
+    r.add_argument("--pack", action="store_true", help="only rebuild the release-format files from stored points")
     r.add_argument("--depths", type=int, nargs="+", default=None, help="default: the release's depths")
     r.add_argument("--K", type=int, nargs="+", default=[3, 4])
     r.add_argument("--instances", type=int, default=None, help="default 3, as released")
     r.add_argument("--partitions", type=int, default=None, help="use the first j partitions (default all 5)")
-    r.add_argument("--shots", default="paper", help="'paper' (Appendix D budgets) or shots per circuit")
+    r.add_argument("--shots", default="paper",
+                   help="'paper' (Appendix D budgets; full: 100k per pub) or shots per circuit / pub")
     r.add_argument("--twirls", type=int, default=GATE_TWIRLS, help="ace mirror Pauli-frame randomisations")
     r.add_argument("--exact-probs", dest="exact_probs", action=argparse.BooleanOptionalAction, default=True,
                    help="exact backend mirror: read survival with prob_perm instead of sampling")
