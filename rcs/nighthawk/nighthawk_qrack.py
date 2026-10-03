@@ -1006,6 +1006,43 @@ def summarize(recs, lay, a):
             print("(few or narrowly spaced sizes: the 61-qubit numbers are indicative only)")
 
 
+_WATCH = {"claim": None}
+
+
+def start_rss_watchdog(limit_gb, period=2.0):
+    """Real memory cap: a daemon thread reads this process's resident set from
+    /proc/self/status; above limit_gb it marks the point being worked on as failed and
+    exits, before the kernel OOM killer picks a victim. Unlike ulimit -v it does not
+    count the address space Qrack's thread pool reserves but never touches."""
+    import threading
+
+    def rss_gb():
+        try:
+            for line in open("/proc/self/status"):
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1048576
+        except OSError:
+            pass
+        return 0.0
+
+    def loop():
+        while True:
+            time.sleep(period)
+            r = rss_gb()
+            if r > limit_gb:
+                cf = _WATCH["claim"]
+                msg = f"failed: resident memory {r:.2f} GB above --max-rss-gb {limit_gb:g}"
+                if cf is not None:
+                    try:
+                        _write_atomic(cf, msg)
+                    except OSError:
+                        pass
+                print(f"# {msg}; worker exits", flush=True)
+                os._exit(3)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def parse_gpus(s):
     return parse_sizes(s) if s else []
 
@@ -1127,6 +1164,8 @@ def cmd_run(a):
     out_file = out.with_name(f"{out.stem}.w{os.getpid()}.jsonl") if a.worker else out
     fh = open(out_file, "a")
     _GATE["a"] = a
+    if a.max_rss_gb:
+        start_rss_watchdog(a.max_rss_gb)
     engines, fails, remaining = {}, 0, list(todo)
     while remaining:
         cur = next(iter(engines), None)          # stay on the current size: no re-initialisation
@@ -1139,6 +1178,7 @@ def cmd_run(a):
         if key in load_jsonl(a.out, tag, lay.n):   # finished by another worker since we started
             mark_done(cf)
             continue
+        _WATCH["claim"] = cf
         if n not in engines:
             engines.clear()                         # one engine alive per worker
             try:
@@ -1389,6 +1429,9 @@ def main():
                    help="workers that may die on one point before it is marked failed (default 2)")
     r.add_argument("--retry-failed", dest="retry_failed", action="store_true",
                    help="try points marked failed again")
+    r.add_argument("--max-rss-gb", dest="max_rss_gb", type=float, default=0,
+                   help="per-worker resident-memory cap: above it the point is marked failed and the worker "
+                        "exits (0 = off). Use this instead of ulimit -v or QRACK_MAX_CPU_QB")
     r.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
 
     t = sub.add_parser("selftest", help="conventions and exactness checks")
