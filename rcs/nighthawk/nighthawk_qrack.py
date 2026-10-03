@@ -77,6 +77,7 @@ if os.path.exists(QRACK_LIB_PATH):
 
 import argparse
 import collections
+import sys
 import hashlib
 import json
 import math
@@ -161,9 +162,37 @@ def flat(m):
 
 
 # ================================================================== layout
+REPO_NAME = "rcs-nighthawk"
+REPO_URL = "https://github.com/BlueQubitDev/rcs-nighthawk"
+
+
+def _is_repo(p):
+    return p is not None and (Path(p) / "data/layout.json").is_file()
+
+
+def find_repo(repo=None):
+    """--repo if given; else $NIGHTHAWK_REPO; else a folder holding data/layout.json, or an
+    rcs-nighthawk clone, in the working dir, next to this script, or up to 3 parents up."""
+    if repo:
+        if _is_repo(repo):
+            return Path(repo)
+        raise SystemExit(f"--repo {repo}: no data/layout.json there. Clone it with\n  git clone {REPO_URL} {repo}")
+    here, script = Path.cwd(), Path(__file__).resolve().parent
+    cands = [os.environ.get("NIGHTHAWK_REPO")]
+    for base in (here, script):
+        for p in [base, *list(base.parents)[:3]]:
+            cands += [p, p / REPO_NAME]
+    for c in cands:
+        if _is_repo(c):
+            return Path(c)
+    raise SystemExit(f"cannot find the BlueQubit release (data/layout.json). Either clone it next to this script:\n"
+                     f"  git clone {REPO_URL} {script / REPO_NAME}\n"
+                     f"or pass --repo /path/to/{REPO_NAME}, or set NIGHTHAWK_REPO.")
+
+
 class Layout:
     def __init__(self, repo):
-        self.repo = Path(repo)
+        self.repo = find_repo(repo)
         L = json.loads((self.repo / "data/layout.json").read_text())
         self.n = L["num_qubits"]
         self.l2p = L["logical_to_physical"]
@@ -987,7 +1016,7 @@ def cmd_selftest(a):
 def cmd_seamgap(a):
     MED_CZ = 1.9e-3 * 5 / 4          # RB -> Pauli channel, (d+1)/d with d = 4
     MED_SX = 2.5e-4 * 3 / 2          # d = 2
-    repo = Path(a.repo)
+    repo = find_repo(a.repo)
     man = json.loads((repo / "data/circuits/manifest.json").read_text())["circuits"]
     tab = collections.defaultdict(list)
     for c in man:
@@ -1053,15 +1082,15 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("seamgap", help="data-only analysis of the released repo")
-    s.add_argument("--repo", default=".")
+    s.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
     s.add_argument("--dmin", type=int, default=20)
 
     v = sub.add_parser("verify", help="regenerate all circuits and compare with the released QASM")
-    v.add_argument("--repo", default=".")
+    v.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
     v.add_argument("--tol", type=float, default=1e-9, help="angle tolerance, rad")
 
     h = sub.add_parser("hwxeb", help="re-score the ibm_phoenix bitstrings with PyQrack ideal patches")
-    h.add_argument("--repo", default=".")
+    h.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
     h.add_argument("--K", type=int, nargs="+", default=[3, 4])
     h.add_argument("--depths", type=int, nargs="+", default=None)
     h.add_argument("--limit", type=int, default=0, help="stop after this many circuits (0 = all 180)")
@@ -1070,7 +1099,7 @@ def main():
     h.add_argument("--out", default=None, help="write per-circuit records (patch_xeb.json format)")
 
     r = sub.add_parser("run", help="clean-qubit emulation of the released circuits")
-    r.add_argument("--repo", default=".")
+    r.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
     r.add_argument("--backend", choices=["exact", "ace"], default="ace")
     r.add_argument("--families", default="mirror,patched",
                    help="comma list of mirror, patched, full (full: unscored samples of the d36 circuit)")
@@ -1098,11 +1127,24 @@ def main():
     r.add_argument("--summarize", action="store_true")
 
     t = sub.add_parser("selftest", help="conventions and exactness checks")
-    t.add_argument("--repo", default=".")
+    t.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
     t.add_argument("--n", type=int, default=14, help="register for the exact mirror checks")
     t.add_argument("--lrc", type=int, default=4)
     t.add_argument("--lrr", type=int, default=4)
 
+    if len(sys.argv) == 1:
+        ap.print_help()
+        print("""
+quick start (the BlueQubit release is found next to this script, in the working dir,
+up to 3 parents up, via $NIGHTHAWK_REPO or --repo):
+  git clone https://github.com/BlueQubitDev/rcs-nighthawk
+  python3 nighthawk_qrack.py verify                                 # circuits vs released QASM
+  python3 nighthawk_qrack.py selftest                               # conventions, ~1 min
+  python3 nighthawk_qrack.py hwxeb    --cache xeb_cache
+  python3 nighthawk_qrack.py run      --backend ace --families mirror \\
+          --sizes 27-36,61 --depths 4 6 8 12 --out clean_ace.jsonl
+help per command: python3 nighthawk_qrack.py <command> -h""")
+        return
     a = ap.parse_args()
     dict(seamgap=cmd_seamgap, verify=cmd_verify, hwxeb=cmd_hwxeb, run=cmd_run, selftest=cmd_selftest)[a.cmd](a)
 
