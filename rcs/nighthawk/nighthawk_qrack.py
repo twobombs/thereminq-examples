@@ -40,6 +40,9 @@ Subcommands
             <out>_shots/<cfg>/points, merged after each run into .../release/ in the release's data/
             layout, so BlueQubit's analysis scripts read it unchanged. --families full
             draws the 10 x 100k samples of the d36 circuit (stored, not scorable).
+            --gpus 0-5 --per-gpu 3 spreads the points over 18 workers through a
+            claim-file queue (QRACK_OCL_DEFAULT_DEVICE per worker); a killed worker's
+            point is taken over, and the same command resumes.
   selftest  conventions and exactness checks (seconds).
   seamgap   data-only analysis of the release (numpy), unchanged.
 
@@ -363,23 +366,29 @@ class ExactEngine:
 
 class AceEngine:
     """QrackAceBackend on the device geometry: logical q -> its (row, col) of the 8x8
-    subgrid, so couplers are nearest-neighbour in ACE's grid. Fresh backend per run."""
+    subgrid, so couplers are nearest-neighbour in ACE's grid. One backend per worker and
+    size, reset in place between runs."""
 
     def __init__(self, lay, n, a):
         self.lay, self.n, self.a = lay, n, a
         R, C = lay.grid
         self.idx = [r * C + c for r, c in lay.pos[:n]]
         self.size = R * C
-        self.sim = None
-        self.reset()
+        from pyqrack import QrackAceBackend
+        # ACE on rusticl/Vega10 hung compute rings and forced GPU resets: CPU unless --ace-gpu
+        self.sim = QrackAceBackend(self.size, long_range_columns=a.lrc, long_range_rows=a.lrr,
+                                   is_torus=False, is_gpu=(not a.cpu) and getattr(a, "ace_gpu", False))
         rl, cl = self.sim.get_row_length(), self.sim.get_column_length()
         if {rl, cl} != {R, C}:
             raise SystemExit(f"ACE chose a {rl}x{cl} grid for {self.size} qubits, expected {R}x{C}")
 
     def reset(self):
-        from pyqrack import QrackAceBackend
-        self.sim = QrackAceBackend(self.size, long_range_columns=self.a.lrc, long_range_rows=self.a.lrr,
-                                   is_torus=False, is_gpu=not self.a.cpu)
+        """Back to |0...0> in place: measure all, flip the ones. No reallocation, so no
+        new device buffers or uploads per twirl (checked exact: every P(1) = 0 after)."""
+        v = self.sim.m_all()
+        for q in range(self.size):
+            if (v >> q) & 1:
+                self.sim.x(q)
 
     def g1(self, q, M):
         self.sim.u(self.idx[q], *u_angles(M))
@@ -397,8 +406,39 @@ class AceEngine:
     prob_bits = None
 
 
+_GATE = {"a": None}
+
+
+def gated(fn):
+    """Run an OpenCL initialisation (first context + JIT, backend allocation) under one
+    machine-wide lock, at least --init-gap seconds after the previous one finished, so
+    workers never initialise at the same time over the cards' shared PCIe links."""
+    a = _GATE["a"]
+    if a is None or a.cpu or not a.init_gap:
+        return fn()
+    import fcntl
+    lock = shots_root(a) / "initgate.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, "a+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fh.seek(0)
+            txt = fh.read().strip()
+            wait = (float(txt) if txt else 0.0) + a.init_gap - time.time()
+            if wait > 0:
+                time.sleep(wait)
+            out = fn()
+            fh.seek(0)
+            fh.truncate()
+            fh.write(f"{time.time():.3f}")
+            fh.flush()
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+    return out
+
+
 def make_engine(lay, n, a):
-    return AceEngine(lay, n, a) if a.backend == "ace" else ExactEngine(n, a.cpu)
+    return gated(lambda: AceEngine(lay, n, a) if a.backend == "ace" else ExactEngine(n, a.cpu))
 
 
 def cz_layer(eng, es, rng):
@@ -490,7 +530,11 @@ def patch_probs(cyc, patches, cpu):
     out = []
     for qs in patches:
         loc = {q: j for j, q in enumerate(qs)}
-        sim = QrackSimulator(len(qs), is_gpu=not cpu)
+        if _GATE.get("warm"):
+            sim = QrackSimulator(len(qs), is_gpu=not cpu)
+        else:
+            sim = gated(lambda: QrackSimulator(len(qs), is_gpu=not cpu))
+            _GATE["warm"] = True
         for ang, es in cyc:
             for q in qs:
                 sim.mtrx(flat(gate(ang[q])), loc[q])
@@ -752,15 +796,71 @@ def pack_shots(recs, lay, a):
         print(f"# note: {missing} records have no stored bitstrings (written before storage existed)")
 
 
+def record_files(out):
+    """The main --out file plus every worker's <stem>.w<pid>.jsonl beside it."""
+    o = Path(out)
+    return [o] + sorted(o.parent.glob(o.stem + ".w*.jsonl"))
+
+
 def load_jsonl(path, tag, n_default):
     recs = {}
-    if path and os.path.exists(path):
-        for line in open(path):
-            r = json.loads(line)
+    for f in record_files(path) if path else []:
+        if not f.exists():
+            continue
+        for line in open(f):
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:          # a line cut by a killed worker
+                continue
             if r.get("cfg") == tag:
                 r.setdefault("n", n_default)
                 recs[(r["n"], r["family"], r["K"], r["depth"], r["partition"], r["instance"])] = r
     return recs
+
+
+# ================================================================== work queue (claim files)
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def claim_file(a, key):
+    n, fam, K, d, j, i = key
+    return shots_root(a) / "claims" / f"n{n}_{fam}_K{K}_d{d:02d}_p{j}_i{i}"
+
+
+def try_claim(path, retry=True):
+    """O_EXCL claim holding our pid; a claim whose pid is dead (killed worker) is taken over;
+    'done' claims are final. Lets any number of workers share one point list."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            txt = path.read_text().strip()
+        except FileNotFoundError:
+            return try_claim(path, False) if retry else False
+        if txt == "done" or not txt.isdigit() or _pid_alive(int(txt)):
+            return False
+        try:
+            os.rename(path, path.with_name(path.name + f".stale{os.getpid()}"))
+        except FileNotFoundError:
+            pass
+        return try_claim(path, False) if retry else False
+
+
+def mark_done(path):
+    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    tmp.write_text("done")
+    os.replace(tmp, path)
 
 
 def _point(v):
@@ -858,6 +958,91 @@ def summarize(recs, lay, a):
             print("(few or narrowly spaced sizes: the 61-qubit numbers are indicative only)")
 
 
+def parse_gpus(s):
+    return parse_sizes(s) if s else []
+
+
+def build_jobs(lay, a, sizes, fams):
+    insts = range(a.instances if a.instances is not None else lay.instances)
+    jobs = []
+    for n in sizes:
+        for fam in fams:
+            if fam == "patched" and n != lay.n:
+                continue
+            ds = a.depths or lay.depths[{"mirror": "mirror", "patched": "patched", "full": "full_sampled"}[fam]]
+            for d in ds:
+                if fam == "full":
+                    jobs += [(n, "full", 0, d, p, 0) for p in range(a.pubs)]
+                elif fam == "mirror":
+                    jobs += [(n, "mirror", 0, d, 0, i) for i in insts]
+                else:
+                    for K in a.K:
+                        parts = range(len(lay.partitions[K])) if a.partitions is None else range(a.partitions)
+                        jobs += [(n, "patched", K, d, j, i) for j in parts for i in insts]
+    # longest first, so the big points do not end up as a lone tail
+    return sorted(jobs, key=lambda k: -(k[0] * k[3] * (MIRROR_SHOTS.get(k[3], 1) if k[1] == "mirror" else 1)))
+
+
+def _strip_launch_args(argv):
+    out, skip = [], False
+    for t in argv:
+        if skip:
+            skip = False
+            continue
+        if t in ("--gpus", "--per-gpu"):
+            skip = True
+            continue
+        if t.startswith("--gpus=") or t.startswith("--per-gpu="):
+            continue
+        out.append(t)
+    return out
+
+
+def launch(a, lay, tag, jobs, recs):
+    """Spawn len(gpus) x per_gpu workers (QRACK_OCL_DEFAULT_DEVICE per worker), watch the
+    record files, then pack the bitstrings and summarise once they are all done."""
+    import subprocess
+    gpus = parse_gpus(a.gpus)
+    logdir = Path(a.out).with_name(Path(a.out).stem + "_logs")
+    logdir.mkdir(parents=True, exist_ok=True)
+    child = [sys.executable, os.path.abspath(__file__)] + _strip_launch_args(sys.argv[1:]) + ["--worker"]
+    procs = []
+    order = [(g, k) for k in range(a.per_gpu) for g in gpus]      # round-robin over the cards
+    print(f"# launching {len(order)} workers (GPUs {gpus} x {a.per_gpu}), one every {a.stagger:g} s; "
+          f"OpenCL inits serialised {a.init_gap:g} s apart; logs in {logdir}/", flush=True)
+    for idx, (g, k) in enumerate(order):
+        if idx:
+            time.sleep(a.stagger)
+        env = dict(os.environ, QRACK_OCL_DEFAULT_DEVICE=str(g))
+        log = open(logdir / f"gpu{g}_job{k}.txt", "a")
+        procs.append((g, k, subprocess.Popen(child, env=env, stdout=log, stderr=subprocess.STDOUT)))
+        print(f"#   started gpu{g} job{k}", flush=True)
+    total = len(jobs)
+    t0, last = time.time(), -1
+    try:
+        while any(p.poll() is None for *_, p in procs):
+            time.sleep(30)
+            done = sum(1 for k in jobs if k in load_jsonl(a.out, tag, lay.n))
+            if done != last:
+                el = time.time() - t0
+                new = done - len([k for k in jobs if k in recs])
+                eta = f", ~{(total - done) * el / new / 3600:.1f} h left" if new > 0 else ""
+                print(f"# {done}/{total} points done, {sum(p.poll() is None for *_, p in procs)} workers alive"
+                      f" [{el / 60:.0f} min{eta}]", flush=True)
+                last = done
+    except KeyboardInterrupt:
+        print("# stopping workers (finished points are kept; rerun the same command to resume)")
+        for *_, p in procs:
+            p.terminate()
+        raise SystemExit(130)
+    bad = [(g, k, p.returncode) for g, k, p in procs if p.returncode]
+    if bad:
+        print(f"# workers with errors (see logs): {bad}")
+    recs = load_jsonl(a.out, tag, lay.n)
+    pack_shots(recs, lay, a)
+    summarize(recs, lay, a)
+
+
 def cmd_run(a):
     lay = Layout(a.repo)
     tag = cfg_tag(a)
@@ -874,61 +1059,80 @@ def cmd_run(a):
     if not all(2 <= n <= lay.n for n in sizes):
         raise SystemExit(f"sizes must lie in 2..{lay.n}")
     fams = a.families.split(",")
-    if a.backend == "exact" and a.exact_probs and "mirror" in fams:
-        print("# note: exact mirror reads survival with prob_perm, so it draws no bitstrings; "
-              "--no-exact-probs samples (and stores) them")
-    if "patched" in fams and any(n != lay.n for n in sizes):
-        print("# note: patched circuits use the released 61-qubit partitions; run only at n = 61")
-    fh = open(a.out, "a")
-    print(f"# cfg {tag}: backend {a.backend}, sizes {sizes}, shots {a.shots}, "
-          f"twirls {a.twirls if a.backend == 'ace' else 0}"
-          f"{', lrc/lrr ' + str(a.lrc) + '/' + str(a.lrr) if a.backend == 'ace' else ''}")
-    insts = range(a.instances if a.instances is not None else lay.instances)
-    for n in sizes:
-        jobs = []
-        for fam in fams:
-            if fam == "patched" and n != lay.n:
-                continue
-            ds = a.depths or lay.depths[{"mirror": "mirror", "patched": "patched", "full": "full_sampled"}[fam]]
-            for d in ds:
-                if fam == "full":
-                    jobs += [("full", 0, d, p, 0) for p in range(a.pubs)]
-                elif fam == "mirror":
-                    jobs += [("mirror", 0, d, 0, i) for i in insts]
-                else:
-                    for K in a.K:
-                        parts = range(len(lay.partitions[K])) if a.partitions is None else range(a.partitions)
-                        jobs += [("patched", K, d, j, i) for j in parts for i in insts]
-        todo = [jb for jb in jobs if (n,) + jb not in recs]
-        print(f"\n# n = {n}: {len(jobs) - len(todo)} of {len(jobs)} points already in {a.out}", flush=True)
-        if not todo:
+    jobs = build_jobs(lay, a, sizes, fams)
+    todo = [k for k in jobs if k not in recs]
+    if not a.worker:
+        if a.backend == "exact" and a.exact_probs and "mirror" in fams:
+            print("# note: exact mirror reads survival with prob_perm, so it draws no bitstrings; "
+                  "--no-exact-probs samples (and stores) them")
+        if "patched" in fams and any(n != lay.n for n in sizes):
+            print("# note: patched circuits use the released 61-qubit partitions; run only at n = 61")
+        print(f"# cfg {tag}: backend {a.backend}, sizes {sizes}, shots {a.shots}, "
+              f"twirls {a.twirls if a.backend == 'ace' else 0}"
+              f"{', lrc/lrr ' + str(a.lrc) + '/' + str(a.lrr) if a.backend == 'ace' else ''}")
+        print(f"# {len(jobs) - len(todo)} of {len(jobs)} points already done", flush=True)
+        if a.gpus:
+            if todo:
+                return launch(a, lay, tag, jobs, recs)
+            return summarize(recs, lay, a)
+    out = Path(a.out)
+    out_file = out.with_name(f"{out.stem}.w{os.getpid()}.jsonl") if a.worker else out
+    fh = open(out_file, "a")
+    _GATE["a"] = a
+    engines, fails, remaining = {}, 0, list(todo)
+    while remaining:
+        cur = next(iter(engines), None)          # stay on the current size: no re-initialisation
+        key = next((k for k in remaining if k[0] == cur), remaining[0])
+        remaining.remove(key)
+        n, fam, K, d, j, i = key
+        cf = claim_file(a, key)
+        if not try_claim(cf):
             continue
-        try:
-            eng = make_engine(lay, n, a)
-        except Exception as err:                 # e.g. exact backend beyond QRACK_MAX_CPU_QB
-            print(f"# n = {n}: cannot build the {a.backend} engine ({err}); skipped")
+        if key in load_jsonl(a.out, tag, lay.n):   # finished by another worker since we started
+            mark_done(cf)
             continue
-        for fam, K, d, j, i in todo:
-            t0 = time.time()
+        if n not in engines:
+            engines.clear()                         # one engine alive per worker
             try:
-                r = (run_mirror(lay, eng, d, i, a) if fam == "mirror" else
-                     run_full(lay, eng, d, j, a) if fam == "full" else run_patched(lay, eng, K, d, j, i, a))
-            except Exception as err:
-                print(f"# n = {n} {fam} d{d} inst {i}: failed ({err}); left for a rerun")
+                engines[n] = make_engine(lay, n, a)
+            except Exception as err:                # e.g. exact backend beyond QRACK_MAX_CPU_QB
+                print(f"# n = {n}: cannot build the {a.backend} engine ({err}); skipped", flush=True)
+                cf.unlink(missing_ok=True)
+                fails += 1
+                if a.worker and fails >= 3:
+                    raise SystemExit(f"# worker stops after {fails} failures in a row (GPU state?)")
                 continue
-            arrays = r.pop("_shots", None)
-            if arrays:                            # bitstrings first, record second
-                f = point_file(a, n, fam, K, d, j, i)
-                save_point(f, arrays)
-                r["shots_file"] = str(f)
-            rec = dict(cfg=tag, n=n, family=fam, K=K, depth=d, partition=j, instance=i,
-                       seconds=round(time.time() - t0, 2), **r)
-            fh.write(json.dumps(rec) + "\n")
-            fh.flush()
-            recs[(n, fam, K, d, j, i)] = rec
-            score = f"F {r['fidelity']:.5f} +/- {r['se']:.1e}" if r["fidelity"] is not None else f"{r['shots']:,} samples"
-            print(f"n {n:>2} {fam:7s} K{K} d{d:>3} part {j} inst {i}  {score}  ({rec['seconds']}s)", flush=True)
-        del eng
+        eng = engines[n]
+        t0 = time.time()
+        try:
+            r = (run_mirror(lay, eng, d, i, a) if fam == "mirror" else
+                 run_full(lay, eng, d, j, a) if fam == "full" else run_patched(lay, eng, K, d, j, i, a))
+        except Exception as err:
+            print(f"# n = {n} {fam} d{d} inst {i}: failed ({err}); left for a rerun", flush=True)
+            cf.unlink(missing_ok=True)
+            engines.clear()                         # do not reuse a backend that failed mid-run
+            fails += 1
+            if a.worker and fails >= 3:
+                raise SystemExit(f"# worker stops after {fails} failures in a row (GPU state?)")
+            continue
+        fails = 0
+        arrays = r.pop("_shots", None)
+        if arrays:                                  # bitstrings first, record second, claim last
+            f = point_file(a, n, fam, K, d, j, i)
+            save_point(f, arrays)
+            r["shots_file"] = str(f)
+        rec = dict(cfg=tag, n=n, family=fam, K=K, depth=d, partition=j, instance=i,
+                   seconds=round(time.time() - t0, 2), **r)
+        fh.write(json.dumps(rec) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+        mark_done(cf)
+        recs[key] = rec
+        score = f"F {r['fidelity']:.5f} +/- {r['se']:.1e}" if r["fidelity"] is not None else f"{r['shots']:,} samples"
+        print(f"n {n:>2} {fam:7s} K{K} d{d:>3} part {j} inst {i}  {score}  ({rec['seconds']}s)", flush=True)
+    if a.worker:
+        return
+    recs = load_jsonl(a.out, tag, lay.n)
     pack_shots(recs, lay, a)
     summarize(recs, lay, a)
 
@@ -1122,9 +1326,18 @@ def main():
     r.add_argument("--lrc", type=int, default=4, help="ace: long_range_columns")
     r.add_argument("--lrr", type=int, default=4, help="ace: long_range_rows")
     r.add_argument("--cache", default=None, help="directory for ideal patch distributions")
-    r.add_argument("--cpu", action="store_true", help="is_gpu=False")
+    r.add_argument("--cpu", action="store_true", help="is_gpu=False everywhere")
+    r.add_argument("--ace-gpu", dest="ace_gpu", action="store_true",
+                   help="run QrackAceBackend on OpenCL too (off by default: it wedged Vega10/rusticl cards)")
     r.add_argument("--out", default="nighthawk_clean.jsonl")
     r.add_argument("--summarize", action="store_true")
+    r.add_argument("--gpus", default=None,
+                   help="launch workers on these OpenCL devices, e.g. 0-5 or 0,2,4; pairs with --per-gpu")
+    r.add_argument("--per-gpu", dest="per_gpu", type=int, default=3, help="workers per GPU (default 3)")
+    r.add_argument("--stagger", type=float, default=20.0, help="seconds between worker starts (default 20)")
+    r.add_argument("--init-gap", dest="init_gap", type=float, default=10.0,
+                   help="min seconds between any two OpenCL initialisations, machine-wide (default 10; 0 = off)")
+    r.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
 
     t = sub.add_parser("selftest", help="conventions and exactness checks")
     t.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
