@@ -129,9 +129,6 @@ SCRIPT="${SCRIPT:-./nn_qab.py}"
 # a 1-D topology unlike every other row (B-to-B 13.5 / 14.5). Left out for
 # the same reason 11, 13, 17, 19 and 23 are; uncomment to add them anyway.
 SERIES=(
-    "10 2 2"
-    "14 3 2"
-    "22 5 2"
     "26 6 2"
     "27 4 3"
     "28 3 4"
