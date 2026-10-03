@@ -6,14 +6,16 @@
 #   lrc,lrr in {4,5,6}, any depth up to 20 ......... ~40 MB, no growth over many twirls
 #   lrc or lrr = 7, depth >= 8 ...................... dense units of many GB (the OOM)
 #
-# Memory rule: BUDGET_GB (default 300) divided by the number of workers running at once
+# Memory rule: BUDGET_GB (default 330) divided by the number of workers running at once
 # is each worker's --max-rss-gb. A watchdog in each worker reads its resident memory;
 # above the cap the point is marked failed (with the GB figure) and the worker exits,
 # before the kernel OOM killer acts.
 #
 #   phase 1  cheap 5:5 6:6 (18 workers each) + heavy 7:7 7:4 4:7 (1 each) = 39 workers
-#            -> 300/39 = 7.7 GB each
-#   phase 2  heavy points that failed in phase 1, alone: 3 workers -> 100 GB each
+#            -> 330/39 = 8.5 GB each
+#   phase 2  heavy points that failed in phase 1, alone: 3 workers -> 110 GB each
+# GB here is GiB (the watchdog reads /proc in kB / 1024^2). 3 x 110 GiB is more than the
+# 310 GiB of RAM: past that the kernel swaps, and the OOM killer acts if swap runs out.
 # A heavy point that still fails in phase 2 marks where that seam budget stops fitting
 # in memory, which is itself a result. A heavy worker spreads one dense unit over 10-36
 # cores on its own, so one worker per heavy setting is enough.
@@ -27,6 +29,7 @@
 #
 # Rerun to resume. Retry every failed point with: EXTRA=--retry-failed ./nighthawk_fullsweep.sh
 # Other budget: BUDGET_GB=250 ./nighthawk_fullsweep.sh
+# Only phase 2 (the heavy settings at the large cap): PHASES=2 ./nighthawk_fullsweep.sh
 set -u
 cd "$(dirname "$0")"
 
@@ -48,15 +51,18 @@ launch() {
   sleep 10
 }
 
-BUDGET_GB=${BUDGET_GB:-300}
+BUDGET_GB=${BUDGET_GB:-330}
+PHASES=${PHASES:-1 2}
 CHEAP="5:5 6:6";      CHEAP_DEPTHS="4 6 8 12 16 20"; CHEAP_W=18
 HEAVY="7:7 7:4 4:7";  HEAVY_DEPTHS="4 6 8 12";       HEAVY_W=1
 
 n1=$(( $(echo $CHEAP | wc -w) * CHEAP_W + $(echo $HEAVY | wc -w) * HEAVY_W ))
 cap1=$(awk -v b="$BUDGET_GB" -v n="$n1" 'BEGIN{printf "%.1f", b/n}')
-echo "== phase 1: $n1 workers, $BUDGET_GB GB / $n1 = $cap1 GB resident each =="
-for st in $CHEAP; do launch "$st" "$CHEAP_DEPTHS" "$CHEAP_W" "$cap1"; done
-for st in $HEAVY; do launch "$st" "$HEAVY_DEPTHS" "$HEAVY_W" "$cap1"; done
+if [[ " $PHASES " == *" 1 "* ]]; then
+  echo "== phase 1: $n1 workers, $BUDGET_GB GB / $n1 = $cap1 GB resident each =="
+  for st in $CHEAP; do launch "$st" "$CHEAP_DEPTHS" "$CHEAP_W" "$cap1"; done
+  for st in $HEAVY; do launch "$st" "$HEAVY_DEPTHS" "$HEAVY_W" "$cap1"; done
+fi
 
 [ -s hwxeb.json ] || nohup python3 nighthawk_qrack.py hwxeb --cpu \
     --out hwxeb.json --cache xeb_cache > hwxeb.txt 2>&1 &
@@ -65,10 +71,12 @@ wait
 
 n2=$(( $(echo $HEAVY | wc -w) * HEAVY_W ))
 cap2=$(awk -v b="$BUDGET_GB" -v n="$n2" 'BEGIN{printf "%.1f", b/n}')
-echo "== phase 2: failed heavy points alone, $n2 workers, $BUDGET_GB GB / $n2 = $cap2 GB each =="
-EXTRA="$EXTRA --retry-failed"
-for st in $HEAVY; do launch "$st" "$HEAVY_DEPTHS" "$HEAVY_W" "$cap2"; done
-wait
+if [[ " $PHASES " == *" 2 "* ]]; then
+  echo "== phase 2: failed heavy points alone, $n2 workers, $BUDGET_GB GB / $n2 = $cap2 GB each =="
+  EXTRA="$EXTRA --retry-failed"
+  for st in $HEAVY; do launch "$st" "$HEAVY_DEPTHS" "$HEAVY_W" "$cap2"; done
+  wait
+fi
 echo "== all settings finished =="
 for st in $CHEAP $HEAVY; do
   c=${st%:*}; r=${st#*:}; out=$(name "$c" "$r")
