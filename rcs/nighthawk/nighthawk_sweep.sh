@@ -8,7 +8,10 @@
 #
 # So two pools:
 #   cheap  5:5 6:6           depths 4 6 8 12 16 20   18 workers each
-#   heavy  7:7 7:4 4:7       depths 4 6 8 12          2 workers each, capped
+#   heavy  7:7 7:4 4:7       depths 4 6 8 12          1 worker each, capped
+# A heavy worker already spreads one dense unit over 10-36 cores on its own (seen in
+# btop: ~230 threads, 1000-3600% CPU), so a second worker per setting only adds
+# contention. Stop any older sweep yourself before starting this one.
 # A capped worker that needs more than QRACK_MAX_CPU_QB qubits in one dense unit gets
 # a clean Qrack error and the point is marked failed (not retried): that marks where
 # a seam budget stops fitting in memory, which is itself a result.
@@ -17,10 +20,6 @@
 # Rerun to resume. Retry failed points with: EXTRA=--retry-failed ./nighthawk_fullsweep.sh
 set -u
 cd "$(dirname "$0")"
-
-pkill -f "nighthawk_sweep.sh" 2>/dev/null
-pkill -f "nighthawk_qrack.py run" 2>/dev/null
-sleep 5
 
 mkdir -p /tmp/no-icd
 export OCL_ICD_VENDORS=/tmp/no-icd           # no GPU contexts in any process
@@ -46,11 +45,11 @@ launch() {
 #        setting depths               workers max_qb mem_gb
 launch   5:5     "4 6 8 12 16 20"     18      28     8
 launch   6:6     "4 6 8 12 16 20"     18      28     8
-launch   7:7     "4 6 8 12"           2       31     40
-launch   7:4     "4 6 8 12"           2       31     40
-launch   4:7     "4 6 8 12"           2       31     40
-# worst case: 36 x 8 GB + 6 x 40 GB = 528 GB of *limits*; real use of the cheap pool is
-# ~40 MB/worker, so the heavy pool's 240 GB is the actual budget.
+launch   7:7     "4 6 8 12"           1       31     40
+launch   7:4     "4 6 8 12"           1       31     40
+launch   4:7     "4 6 8 12"           1       31     40
+# limits: 36 x 8 GB + 3 x 40 GB; real use is ~40 MB per cheap worker and 5-9 GB per
+# heavy worker (measured), so about 30-40 GB in practice on the 330 GB box.
 
 [ -s hwxeb.json ] || ( ulimit -v $(( 16 * 1024 * 1024 )); nohup python3 nighthawk_qrack.py hwxeb --cpu \
     --out hwxeb.json --cache xeb_cache > hwxeb.txt 2>&1 ) &
