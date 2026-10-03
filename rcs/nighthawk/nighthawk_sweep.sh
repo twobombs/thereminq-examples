@@ -6,16 +6,18 @@
 #   lrc,lrr in {4,5,6}, any depth up to 20 ......... ~40 MB, no growth over many twirls
 #   lrc or lrr = 7, depth >= 8 ...................... dense units of many GB (the OOM)
 #
-# So two pools:
-#   cheap  5:5 6:6           depths 4 6 8 12 16 20   18 workers each, 4 GB each
-#   heavy  7:7 7:4 4:7       depths 4 6 8 12          1 worker each, 50 GB each
-# A heavy worker already spreads one dense unit over 10-36 cores on its own (btop:
-# ~230 threads, 1000-3600% CPU), so a second worker per setting only adds contention.
-#
-# Memory control is --max-rss-gb: a watchdog in each worker reads its resident memory;
+# Memory rule: BUDGET_GB (default 300) divided by the number of workers running at once
+# is each worker's --max-rss-gb. A watchdog in each worker reads its resident memory;
 # above the cap the point is marked failed (with the GB figure) and the worker exits,
-# before the kernel OOM killer acts. A failed heavy point marks where that seam budget
-# stops fitting, which is itself a result. Worst case 36 x 4 + 3 x 50 = 294 GB.
+# before the kernel OOM killer acts.
+#
+#   phase 1  cheap 5:5 6:6 (18 workers each) + heavy 7:7 7:4 4:7 (1 each) = 39 workers
+#            -> 300/39 = 7.7 GB each
+#   phase 2  heavy points that failed in phase 1, alone: 3 workers -> 100 GB each
+# A heavy point that still fails in phase 2 marks where that seam budget stops fitting
+# in memory, which is itself a result. A heavy worker spreads one dense unit over 10-36
+# cores on its own, so one worker per heavy setting is enough.
+#
 # Not used, and why:
 #   ulimit -v         caps reserved address space; Qrack's thread pool reserves far
 #                     more than it touches -> std::future_error, failures at d=4
@@ -23,7 +25,8 @@
 #                     on points that need ~40 MB -> RuntimeError on seam 5 and 6
 # Stop any older sweep yourself before starting this one.
 #
-# Rerun to resume. Retry failed points with: EXTRA=--retry-failed ./nighthawk_fullsweep.sh
+# Rerun to resume. Retry every failed point with: EXTRA=--retry-failed ./nighthawk_fullsweep.sh
+# Other budget: BUDGET_GB=250 ./nighthawk_fullsweep.sh
 set -u
 cd "$(dirname "$0")"
 
@@ -45,19 +48,29 @@ launch() {
   sleep 10
 }
 
-#        setting depths               workers max_rss_gb
-launch   5:5     "4 6 8 12 16 20"     18      4
-launch   6:6     "4 6 8 12 16 20"     18      4
-launch   7:7     "4 6 8 12"           1       50
-launch   7:4     "4 6 8 12"           1       50
-launch   4:7     "4 6 8 12"           1       50
+BUDGET_GB=${BUDGET_GB:-300}
+CHEAP="5:5 6:6";      CHEAP_DEPTHS="4 6 8 12 16 20"; CHEAP_W=18
+HEAVY="7:7 7:4 4:7";  HEAVY_DEPTHS="4 6 8 12";       HEAVY_W=1
+
+n1=$(( $(echo $CHEAP | wc -w) * CHEAP_W + $(echo $HEAVY | wc -w) * HEAVY_W ))
+cap1=$(awk -v b="$BUDGET_GB" -v n="$n1" 'BEGIN{printf "%.1f", b/n}')
+echo "== phase 1: $n1 workers, $BUDGET_GB GB / $n1 = $cap1 GB resident each =="
+for st in $CHEAP; do launch "$st" "$CHEAP_DEPTHS" "$CHEAP_W" "$cap1"; done
+for st in $HEAVY; do launch "$st" "$HEAVY_DEPTHS" "$HEAVY_W" "$cap1"; done
 
 [ -s hwxeb.json ] || nohup python3 nighthawk_qrack.py hwxeb --cpu \
     --out hwxeb.json --cache xeb_cache > hwxeb.txt 2>&1 &
 
 wait
+
+n2=$(( $(echo $HEAVY | wc -w) * HEAVY_W ))
+cap2=$(awk -v b="$BUDGET_GB" -v n="$n2" 'BEGIN{printf "%.1f", b/n}')
+echo "== phase 2: failed heavy points alone, $n2 workers, $BUDGET_GB GB / $n2 = $cap2 GB each =="
+EXTRA="$EXTRA --retry-failed"
+for st in $HEAVY; do launch "$st" "$HEAVY_DEPTHS" "$HEAVY_W" "$cap2"; done
+wait
 echo "== all settings finished =="
-for st in 5:5 6:6 7:7 7:4 4:7; do
+for st in $CHEAP $HEAVY; do
   c=${st%:*}; r=${st#*:}; out=$(name "$c" "$r")
   python3 nighthawk_qrack.py run --backend ace --lrc "$c" --lrr "$r" --out "$out.jsonl" --summarize \
       > "$out.summary.txt" 2>&1
