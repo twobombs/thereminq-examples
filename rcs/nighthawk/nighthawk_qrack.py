@@ -57,7 +57,9 @@ Backends
   ace     QrackAceBackend, noise=0. The 61 logical qubits are placed at their true
           positions on an 8x8 ACE register (rows 1-8, cols 2-9 of the device), so
           every coupler is nearest-neighbour in ACE's grid; the three dropped sites
-          idle in |0>. is_torus=False (the device patch is not a torus).
+          idle in |0>. Default is_torus=False (the device patch is not a torus).
+          --ace-torus, and --geometry nnqab (nn_qab.py's rule), switch to
+          is_torus=True; the run header and every record say which was used.
 
 Environment: no CUDA. OpenCL via QRACK_OCL_DEFAULT_DEVICE, or --cpu.
 For big exact states: QRACK_MAX_CPU_QB, QRACK_MAX_ALLOC_MB.
@@ -358,6 +360,9 @@ class ExactEngine:
         self.n = n
         self.sim = QrackSimulator(n, is_gpu=not cpu)
 
+    def geometry(self):
+        return {}
+
     def reset(self):
         self.sim.reset_all()
 
@@ -422,7 +427,8 @@ class AceEngine:
     --ace-layout strip  the smallest R x 8 strip of the subgrid holding the first n
                         logical qubits (R >= 4, so ACE lays it out as 8 columns), the
                         register nn_qab.py would use for that width
-    --lrc/--lrr auto    nn_qab.py's two-patch rule for that register"""
+    --lrc/--lrr auto    nn_qab.py's two-patch rule for that register
+    is_torus            False unless --ace-torus or --geometry nnqab"""
 
     def __init__(self, lay, n, a):
         self.lay, self.n, self.a = lay, n, a
@@ -431,7 +437,7 @@ class AceEngine:
             R = max(4, max(r for r, _ in lay.pos[:n]) + 1)
         self.idx = [r * C + c for r, c in lay.pos[:n]]
         self.size = R * C
-        torus = getattr(a, "ace_torus", False)
+        self.torus = torus = getattr(a, "ace_torus", False)
         lrc, lrr = a.lrc, a.lrr
         if "auto" in (str(lrc), str(lrr)):
             alrc, alrr, *_ = two_patch_config(self.size, torus)
@@ -448,8 +454,9 @@ class AceEngine:
             raise SystemExit(f"ACE chose a {rl}x{cl} grid for {self.size} qubits, expected {C} columns x {R} rows")
 
     def geometry(self):
-        return dict(ace_register=self.size, ace_lrc=self.lrc, ace_lrr=self.lrr, ace_patches=self.patches,
-                    ace_boundary=self.boundary, ace_b2b=round(self.b2b, 3) if self.boundary else None)
+        return dict(ace_register=self.size, ace_lrc=self.lrc, ace_lrr=self.lrr, ace_torus=bool(self.torus),
+                    ace_patches=self.patches, ace_boundary=self.boundary,
+                    ace_b2b=round(self.b2b, 3) if self.boundary else None)
 
     def reset(self):
         """Back to |0...0> in place: measure all, flip the ones. No reallocation, so no
@@ -619,11 +626,18 @@ def patch_probs(cyc, patches, cpu):
 
 
 def cached_patch_probs(cache, key, cyc, patches, cpu):
+    """Ideal patch distributions, from the float32 cache when present. Cached arrays are
+    renormalised in float64 on load, exactly as freshly computed ones are, so a cached
+    and an uncached run score identically."""
     if cache:
         f = Path(cache) / (key.replace("/", "_") + ".npz")
         if f.exists():
+            out = []
             with np.load(f) as z:
-                return [z[f"p{r}"].astype(np.float64) for r in range(len(patches))]
+                for r in range(len(patches)):
+                    p = z[f"p{r}"].astype(np.float64)
+                    out.append(p / p.sum())
+            return out
     probs = patch_probs(cyc, patches, cpu)
     if cache:
         Path(cache).mkdir(parents=True, exist_ok=True)
@@ -739,7 +753,12 @@ def resolve_geometry(lay, a):
 
 def cfg_tag(a):
     """Everything but the register size: records of every n share one tag, so a sweep
-    can be extended with more sizes and resumes per (n, point)."""
+    can be extended with more sizes and resumes per (n, point).
+
+    With --lrc/--lrr auto the tag holds the literal 'auto' (kept that way so existing
+    runs still resume); the lrc/lrr actually used are written into every record
+    (ace_lrc, ace_lrr, ace_torus, ...) and summarize() warns if records under one tag
+    and one size disagree, e.g. after a change to two_patch_config()."""
     keys = dict(backend=a.backend, shots=a.shots, twirls=a.twirls,
                 **({"theta": a.theta} if getattr(a, "theta", "haar") != "haar" else {}),
                 lrc=a.lrc if a.backend == "ace" else None, lrr=a.lrr if a.backend == "ace" else None,
@@ -766,10 +785,27 @@ def mirror_czpc(lay, n, d):
     return sum(len(es) for _, es in cyc) / max(len(cyc), 1)
 
 
+SHOT_TABLES = {"mirror": MIRROR_SHOTS, "patched": PATCHED_SHOTS}
+
+
 def n_shots(a, family, d):
     if a.shots == "paper":
-        return (MIRROR_SHOTS if family == "mirror" else PATCHED_SHOTS)[d]
+        table = SHOT_TABLES[family]
+        if d not in table:
+            raise SystemExit(f"--shots paper has no {family} budget for depth {d} "
+                             f"(Appendix D lists {sorted(table)}); pass --shots N for other depths")
+        return table[d]
     return int(a.shots)
+
+
+def check_shot_budgets(a, jobs):
+    """Fail before any worker starts, not on the first unbudgeted point mid-run."""
+    if a.shots != "paper":
+        return
+    bad = sorted({(fam, d) for _, fam, _, d, _, _ in jobs if fam in SHOT_TABLES and d not in SHOT_TABLES[fam]})
+    if bad:
+        lines = "\n".join(f"  {fam} d={d}: Appendix D budgets exist for {sorted(SHOT_TABLES[fam])}" for fam, d in bad)
+        raise SystemExit(f"--shots paper has no budget for:\n{lines}\npass --shots N, or use the listed depths")
 
 
 def run_mirror(lay, eng, d, inst, a):
@@ -984,19 +1020,40 @@ def record_files(out):
     return [o] + sorted(o.parent.glob(o.stem + ".w*.jsonl"))
 
 
+_JSONL = {}     # (file, tag) -> [byte offset read so far, inode, {key: record}]
+
+
 def load_jsonl(path, tag, n_default):
+    """All records of this cfg tag across the main and worker files. Incremental: each
+    file is read only from where the previous call stopped, and only up to its last
+    complete line, so polling every point (worker loop) or every 30 s (launcher) costs
+    the new bytes, not the whole history. A file that shrank or was replaced is re-read
+    from the start. Returns a fresh dict each call; callers may modify it."""
     recs = {}
     for f in record_files(path) if path else []:
-        if not f.exists():
+        try:
+            stt = f.stat()
+        except FileNotFoundError:
             continue
-        for line in open(f):
-            try:
-                r = json.loads(line)
-            except json.JSONDecodeError:          # a line cut by a killed worker
-                continue
-            if r.get("cfg") == tag:
-                r.setdefault("n", n_default)
-                recs[(r["n"], r["family"], r["K"], r["depth"], r["partition"], r["instance"])] = r
+        ck = (str(f), tag)
+        ent = _JSONL.get(ck)
+        if ent is None or stt.st_size < ent[0] or stt.st_ino != ent[1]:
+            ent = _JSONL[ck] = [0, stt.st_ino, {}]
+        if stt.st_size > ent[0]:
+            with open(f, "rb") as fh:
+                fh.seek(ent[0])
+                chunk = fh.read()
+            end = chunk.rfind(b"\n") + 1            # an unfinished last line waits for next time
+            for line in chunk[:end].splitlines():
+                try:
+                    r = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError):   # a line cut by a killed worker
+                    continue
+                if r.get("cfg") == tag:
+                    r.setdefault("n", n_default)
+                    ent[2][(r["n"], r["family"], r["K"], r["depth"], r["partition"], r["instance"])] = r
+            ent[0] += end
+        recs.update(ent[2])
     return recs
 
 
@@ -1110,8 +1167,29 @@ def report_failed(a):
             print(f"#   {name}: {why}")
 
 
+GEO_KEYS = ("ace_register", "ace_lrc", "ace_lrr", "ace_torus")
+
+
+def report_geometry(recs, a):
+    """ACE geometry actually used, per size, from the records. More than one under a tag
+    means the auto rule (or Qrack's layout) changed between runs: those points mix
+    different seam placements and should not be fitted together."""
+    if a.backend != "ace":
+        return
+    seen = defaultdict(set)
+    for r in recs.values():
+        if "ace_lrc" in r:
+            seen[r["n"]].add(tuple(r.get(k) for k in GEO_KEYS))
+    for n in sorted(seen):
+        if len(seen[n]) > 1:
+            opts = "; ".join(", ".join(f"{k[4:]}={v}" for k, v in zip(GEO_KEYS, g)) for g in sorted(seen[n], key=str))
+            print(f"# WARNING n={n}: records under this tag used {len(seen[n])} ACE geometries ({opts}). "
+                  f"Use a fresh --out, or explicit --lrc/--lrr, to keep them apart.")
+
+
 def summarize(recs, lay, a):
     report_failed(a)
+    report_geometry(recs, a)
     fvd = json.loads((lay.repo / "data/results/fidelity_vs_depth.json").read_text())
     by = defaultdict(list)
     min_shots = {}
@@ -1308,9 +1386,8 @@ def launch(a, lay, tag, jobs, recs):
     total = len(jobs)
     t0, last, respawns = time.time(), -1, 0
 
-    def open_points():
+    def open_points(have):
         """Points neither recorded nor marked done/failed: still worth a worker."""
-        have = load_jsonl(a.out, tag, lay.n)
         out = []
         for k in jobs:
             if k in have:
@@ -1326,11 +1403,12 @@ def launch(a, lay, tag, jobs, recs):
 
     try:
         while True:
+            have = load_jsonl(a.out, tag, lay.n)
             alive = [p for *_, p in procs if p.poll() is None]
             # a worker the memory watchdog stopped (exit 3) is replaced while points remain;
             # other exits (crash loops, 3 failures in a row) are not
             for idx, (g, k, p) in enumerate(procs):
-                if p.poll() == 3 and respawns < total and open_points():
+                if p.poll() == 3 and respawns < total and open_points(have):
                     env = dict(os.environ, QRACK_OCL_DEFAULT_DEVICE=str(g))
                     log = open(logdir / f"gpu{g}_job{k}.txt", "a")
                     procs[idx] = (g, k, subprocess.Popen(child, env=env, stdout=log, stderr=subprocess.STDOUT))
@@ -1340,7 +1418,8 @@ def launch(a, lay, tag, jobs, recs):
             if not alive:
                 break
             time.sleep(30)
-            done = sum(1 for k in jobs if k in load_jsonl(a.out, tag, lay.n))
+            have = load_jsonl(a.out, tag, lay.n)
+            done = sum(1 for k in jobs if k in have)
             if done != last:
                 el = time.time() - t0
                 new = done - len([k for k in jobs if k in recs])
@@ -1388,6 +1467,7 @@ def cmd_run(a):
     if "fxeb" in fams and max(sizes) > 36:
         raise SystemExit("fxeb needs an exact 2^n reference: sizes up to ~34-36 (memory), not 61")
     jobs = build_jobs(lay, a, sizes, fams)
+    check_shot_budgets(a, jobs)
     todo = [k for k in jobs if k not in recs]
     if a.retry_failed and not a.worker:            # once, here; workers never retry failed points
         cleared = 0
@@ -1408,7 +1488,8 @@ def cmd_run(a):
             print("# note: patched circuits use the released 61-qubit partitions; run only at n = 61")
         print(f"# cfg {tag}: backend {a.backend}, sizes {sizes}, shots {a.shots}, "
               f"twirls {a.twirls if a.backend == 'ace' else 0}"
-              f"{', lrc/lrr ' + str(a.lrc) + '/' + str(a.lrr) if a.backend == 'ace' else ''}")
+              f"{', lrc/lrr ' + str(a.lrc) + '/' + str(a.lrr) if a.backend == 'ace' else ''}"
+              f"{(', is_torus ' + str(bool(getattr(a, 'ace_torus', False)))) if a.backend == 'ace' else ''}")
         print(f"# {len(jobs) - len(todo)} of {len(jobs)} points already done", flush=True)
         if a.gpus:
             if todo:
@@ -1465,7 +1546,7 @@ def cmd_run(a):
             save_point(f, arrays)
             r["shots_file"] = str(f)
         rec = dict(cfg=tag, n=n, family=fam, K=K, depth=d, partition=j, instance=i,
-                   seconds=round(time.time() - t0, 2), **r)
+                   seconds=round(time.time() - t0, 2), **eng.geometry(), **r)
         fh.write(json.dumps(rec) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
@@ -1497,13 +1578,10 @@ def cmd_selftest(a):
                          qasm_ops((lay.repo / "data/circuits" / rel).read_text()), 1e-9)
     report("[1] angle hash + pseudo-patch rotation vs released " + rel, good, why or "identical")
 
-    th, ph, la = 0.7, 1.3, -2.1
-    s1, s2 = QrackSimulator(1, is_gpu=False), QrackSimulator(1, is_gpu=False)
-    s1.u(0, th, ph, la)
     M = gate(haar_angles(BASE_SEED, 0, 0, 0))
-    s2.mtrx(flat(M), 0)
-    s1.reset_all()
+    s1, s2 = QrackSimulator(1, is_gpu=False), QrackSimulator(1, is_gpu=False)
     s1.u(0, *u_angles(M))
+    s2.mtrx(flat(M), 0)
     ov = abs(np.vdot(np.array(s1.out_ket()), np.array(s2.out_ket())))
     report("[2] u_angles -> Qrack u == Haar matrix", abs(1 - ov) < 1e-5, f"overlap {ov:.7f}")
 
@@ -1551,7 +1629,7 @@ def cmd_selftest(a):
     try:
         ae = AceEngine(lay, lay.n, argparse.Namespace(lrc=a.lrc, lrr=a.lrr, cpu=True))
         print(f"[8] ACE register {ae.size} qubits, grid {ae.sim.get_row_length()}x{ae.sim.get_column_length()}, "
-              f"is_torus=False; logical->ACE map is nearest-neighbour for all couplers: "
+              f"is_torus={ae.torus}; logical->ACE map is nearest-neighbour for all couplers: "
               f"{all(abs(lay.pos[u][0] - lay.pos[v][0]) + abs(lay.pos[u][1] - lay.pos[v][1]) == 1 for es in lay.matchings.values() for u, v in es)}")
     except ImportError as err:
         print(f"[8] ACE not available: {err}")
@@ -1665,7 +1743,8 @@ def main():
     r.add_argument("--instances", type=int, default=None, help="default 3, as released")
     r.add_argument("--partitions", type=int, default=None, help="use the first j partitions (default all 5)")
     r.add_argument("--shots", default="paper",
-                   help="'paper' (Appendix D budgets; full: 100k per pub) or shots per circuit / pub")
+                   help="'paper' (Appendix D budgets, listed depths only; full: 100k per pub) "
+                        "or shots per circuit / pub")
     r.add_argument("--twirls", type=int, default=GATE_TWIRLS, help="ace mirror Pauli-frame randomisations")
     r.add_argument("--exact-probs", dest="exact_probs", action=argparse.BooleanOptionalAction, default=True,
                    help="exact backend mirror: read survival with prob_perm instead of sampling")
@@ -1674,7 +1753,8 @@ def main():
     r.add_argument("--n", type=int, default=None, help="single size, same as --sizes n")
     r.add_argument("--geometry", choices=["manual", "nnqab"], default="manual",
                    help="ace: manual = --lrc/--lrr as given, not a torus (default); nnqab = nn_qab.py's "
-                        "rule: rows whole, two patches, highest bulk-to-boundary, torus (overrides --lrc/--lrr)")
+                        "rule: rows whole, two patches, highest bulk-to-boundary, torus (overrides --lrc/--lrr "
+                        "and sets is_torus=True)")
     r.add_argument("--ace-torus", dest="ace_torus", action="store_true", help="ace: is_torus=True")
     r.add_argument("--lrc", default=4, type=lambda v: v if v == "auto" else int(v),
                    help="ace: long_range_columns, or auto (nn_qab.py two-patch rule)")
