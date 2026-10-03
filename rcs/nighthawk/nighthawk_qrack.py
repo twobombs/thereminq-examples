@@ -1077,8 +1077,8 @@ def _strip_launch_args(argv):
         if t in ("--gpus", "--per-gpu"):
             skip = True
             continue
-        if t.startswith("--gpus=") or t.startswith("--per-gpu="):
-            continue
+        if t.startswith("--gpus=") or t.startswith("--per-gpu=") or t == "--retry-failed":
+            continue                                # the launcher clears failed marks once
         out.append(t)
     return out
 
@@ -1103,9 +1103,39 @@ def launch(a, lay, tag, jobs, recs):
         procs.append((g, k, subprocess.Popen(child, env=env, stdout=log, stderr=subprocess.STDOUT)))
         print(f"#   started gpu{g} job{k}", flush=True)
     total = len(jobs)
-    t0, last = time.time(), -1
+    t0, last, respawns = time.time(), -1, 0
+
+    def open_points():
+        """Points neither recorded nor marked done/failed: still worth a worker."""
+        have = load_jsonl(a.out, tag, lay.n)
+        out = []
+        for k in jobs:
+            if k in have:
+                continue
+            try:
+                t = claim_file(a, k).read_text().strip()
+            except OSError:
+                t = ""
+            if t == "done" or t.startswith("failed"):
+                continue
+            out.append(k)
+        return out
+
     try:
-        while any(p.poll() is None for *_, p in procs):
+        while True:
+            alive = [p for *_, p in procs if p.poll() is None]
+            # a worker the memory watchdog stopped (exit 3) is replaced while points remain;
+            # other exits (crash loops, 3 failures in a row) are not
+            for idx, (g, k, p) in enumerate(procs):
+                if p.poll() == 3 and respawns < total and open_points():
+                    env = dict(os.environ, QRACK_OCL_DEFAULT_DEVICE=str(g))
+                    log = open(logdir / f"gpu{g}_job{k}.txt", "a")
+                    procs[idx] = (g, k, subprocess.Popen(child, env=env, stdout=log, stderr=subprocess.STDOUT))
+                    respawns += 1
+                    print(f"#   gpu{g} job{k} stopped by the memory watchdog; replacement started", flush=True)
+                    alive.append(procs[idx][2])
+            if not alive:
+                break
             time.sleep(30)
             done = sum(1 for k in jobs if k in load_jsonl(a.out, tag, lay.n))
             if done != last:
@@ -1120,7 +1150,7 @@ def launch(a, lay, tag, jobs, recs):
         for *_, p in procs:
             p.terminate()
         raise SystemExit(130)
-    bad = [(g, k, p.returncode) for g, k, p in procs if p.returncode]
+    bad = [(g, k, p.returncode) for g, k, p in procs if p.returncode and p.returncode != 3]
     if bad:
         print(f"# workers with errors (see logs): {bad}")
     recs = load_jsonl(a.out, tag, lay.n)
@@ -1146,6 +1176,17 @@ def cmd_run(a):
     fams = a.families.split(",")
     jobs = build_jobs(lay, a, sizes, fams)
     todo = [k for k in jobs if k not in recs]
+    if a.retry_failed and not a.worker:            # once, here; workers never retry failed points
+        cleared = 0
+        for k in todo:
+            cf = claim_file(a, k)
+            try:
+                if cf.read_text().strip().startswith("failed"):
+                    os.rename(cf, cf.with_name(cf.name + f".stale{os.getpid()}"))
+                    cleared += 1
+            except OSError:
+                pass
+        print(f"# --retry-failed: {cleared} failed point(s) cleared for another attempt", flush=True)
     if not a.worker:
         if a.backend == "exact" and a.exact_probs and "mirror" in fams:
             print("# note: exact mirror reads survival with prob_perm, so it draws no bitstrings; "
@@ -1173,7 +1214,7 @@ def cmd_run(a):
         remaining.remove(key)
         n, fam, K, d, j, i = key
         cf = claim_file(a, key)
-        if not try_claim(cf, a.max_attempts, a.retry_failed):
+        if not try_claim(cf, a.max_attempts):
             continue
         if key in load_jsonl(a.out, tag, lay.n):   # finished by another worker since we started
             mark_done(cf)
