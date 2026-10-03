@@ -15,7 +15,10 @@
 # A capped worker that needs more than QRACK_MAX_CPU_QB qubits in one dense unit gets
 # a clean Qrack error and the point is marked failed (not retried): that marks where
 # a seam budget stops fitting in memory, which is itself a result.
-# ulimit -v is the hard backstop per worker, so one runaway cannot take the host down.
+# No ulimit -v: it caps reserved address space, and Qrack's ~230-thread pool per worker
+# on a 96-thread host reserves far more than it uses; under the limit threads failed to
+# start (std::future_error) and allocations failed even at d=4. The qubit cap is the
+# memory control: 2^31 amplitudes x 8 B = 16 GB per dense unit at most.
 #
 # Rerun to resume. Retry failed points with: EXTRA=--retry-failed ./nighthawk_fullsweep.sh
 set -u
@@ -28,31 +31,28 @@ EXTRA=${EXTRA:-}
 
 name() { [ "$1" = "$2" ] && echo "clean_ace_seam$1" || echo "clean_ace_c$1r$2"; }
 
-# launch SETTING DEPTHS WORKERS MAX_QB MEM_GB
+# launch SETTING DEPTHS WORKERS MAX_QB
 launch() {
   local c=${1%:*} r=${1#*:} out
   out=$(name "$c" "$r")
-  (
-    ulimit -v $(( $5 * 1024 * 1024 ))
-    QRACK_MAX_CPU_QB=$4 nohup python3 nighthawk_qrack.py run --backend ace --families mirror \
-        --sizes 61 --depths $2 --lrc "$c" --lrr "$r" --cpu $EXTRA \
-        --out "$out.jsonl" --gpus 0 --per-gpu "$3" --stagger 2 > "$out.txt" 2>&1
-  ) &
-  echo "lrc=$c lrr=$r: $3 workers, depths [$2], cap ${4} qubits / ${5} GB each -> $out.txt"
+  QRACK_MAX_CPU_QB=$4 nohup python3 nighthawk_qrack.py run --backend ace --families mirror \
+      --sizes 61 --depths $2 --lrc "$c" --lrr "$r" --cpu $EXTRA \
+      --out "$out.jsonl" --gpus 0 --per-gpu "$3" --stagger 2 > "$out.txt" 2>&1 &
+  echo "lrc=$c lrr=$r: $3 workers, depths [$2], cap ${4} qubits per dense unit -> $out.txt"
   sleep 10
 }
 
-#        setting depths               workers max_qb mem_gb
-launch   5:5     "4 6 8 12 16 20"     18      28     8
-launch   6:6     "4 6 8 12 16 20"     18      28     8
-launch   7:7     "4 6 8 12"           1       31     40
-launch   7:4     "4 6 8 12"           1       31     40
-launch   4:7     "4 6 8 12"           1       31     40
-# limits: 36 x 8 GB + 3 x 40 GB; real use is ~40 MB per cheap worker and 5-9 GB per
-# heavy worker (measured), so about 30-40 GB in practice on the 330 GB box.
+#        setting depths               workers max_qb
+launch   5:5     "4 6 8 12 16 20"     18      28
+launch   6:6     "4 6 8 12 16 20"     18      28
+launch   7:7     "4 6 8 12"           1       31
+launch   7:4     "4 6 8 12"           1       31
+launch   4:7     "4 6 8 12"           1       31
+# worst case: 36 x 2 GB + 3 x 16 GB dense units = ~120 GB; measured use is ~40 MB per
+# cheap worker and 5-9 GB per heavy worker.
 
-[ -s hwxeb.json ] || ( ulimit -v $(( 16 * 1024 * 1024 )); nohup python3 nighthawk_qrack.py hwxeb --cpu \
-    --out hwxeb.json --cache xeb_cache > hwxeb.txt 2>&1 ) &
+[ -s hwxeb.json ] || nohup python3 nighthawk_qrack.py hwxeb --cpu \
+    --out hwxeb.json --cache xeb_cache > hwxeb.txt 2>&1 &
 
 wait
 echo "== all settings finished =="
