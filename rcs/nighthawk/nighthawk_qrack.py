@@ -40,6 +40,9 @@ Subcommands
             <out>_shots/<cfg>/points, merged after each run into .../release/ in the release's data/
             layout, so BlueQubit's analysis scripts read it unchanged. --families full
             draws the 10 x 100k samples of the d36 circuit (stored, not scorable).
+            --families fxeb scores the backend's samples of the unpatched forward
+            circuit against an exact 2^n reference (nn_qab.py's estimator), for
+            first-n truncations small enough to simulate exactly.
             --gpus 0-5 --per-gpu 3 spreads the points over 18 workers through a
             claim-file queue (QRACK_OCL_DEFAULT_DEVICE per worker); a killed worker's
             point is taken over, and the same command resumes.
@@ -119,10 +122,21 @@ def u01_from_key(*parts):
     return ((x >> 11) & ((1 << 53) - 1)) / float(1 << 53)
 
 
+THETA_DIST = {"mode": "haar"}
+
+
 def haar_angles(seed, instance, cycle, qubit):
-    """(phi, theta, lambda), applied as rz(phi), rx(theta), rz(lambda)."""
+    """(phi, theta, lambda), applied as rz(phi), rx(theta), rz(lambda).
+    haar (the paper): cos(theta) uniform on [-1, 1], theta in [0, pi].
+    nnqab (variant, --theta nnqab): sin(theta) uniform on [-1, 1] as nn_qab.py draws it,
+    theta in [-pi/2, pi/2]: weaker rotations, outputs far from Porter-Thomas. Same hash
+    stream, so a variant circuit differs from the released one only in theta."""
     phi = 2.0 * math.pi * u01_from_key(seed, instance, cycle, qubit, 1)
     z = 1.0 - 2.0 * u01_from_key(seed, instance, cycle, qubit, 2)
+    if THETA_DIST["mode"] == "nnqab":
+        theta = math.asin(min(1.0, max(-1.0, z)))
+        lam = 2.0 * math.pi * u01_from_key(seed, instance, cycle, qubit, 3)
+        return phi, theta, lam
     theta = math.acos(min(1.0, max(-1.0, z)))
     lam = 2.0 * math.pi * u01_from_key(seed, instance, cycle, qubit, 3)
     return phi, theta, lam
@@ -364,23 +378,78 @@ class ExactEngine:
         return float(self.sim.prob_perm(list(range(self.n)), [bool(b) for b in bits]))
 
 
+_TWO_PATCH = {}
+
+
+def ace_register_geometry(size, lrc, lrr, torus):
+    """(row_length, column_length, patch sizes, boundary sites, bulk/boundary) of an ACE
+    register, read from its own _unpack() like nn_qab.py's bulk_to_boundary_ratio()."""
+    from collections import Counter
+    from pyqrack import QrackAceBackend
+    s = QrackAceBackend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False)
+    sizes = Counter(sid for lq in range(s.num_qubits()) for sid, _ in s._unpack(lq))
+    bnd = sum(1 for lq in range(s.num_qubits()) if len(s._unpack(lq)) > 1)
+    patches = sorted(v for k, v in sizes.items() if not (bnd and k == max(sizes)))
+    return (s.get_row_length(), s.get_column_length(), patches, bnd,
+            (size - bnd) / bnd if bnd else float("inf"))
+
+
+def two_patch_config(size, torus):
+    """nn_qab.py's rule: exactly two patches at the highest finite bulk-to-boundary
+    ratio, ties broken toward the most balanced patch sizes, then the smallest lrc/lrr."""
+    key = (size, torus)
+    if key not in _TWO_PATCH:
+        best = None
+        for lrr in range(0, 9):
+            for lrc in range(0, 9):
+                R, C, p, b, ratio = ace_register_geometry(size, lrc, lrr, torus)
+                if len(p) == 2 and b:
+                    score = (ratio, -abs(p[0] - p[1]), -lrc, -lrr)
+                    if best is None or score > best[0]:
+                        best = (score, lrc, lrr, p, b, ratio)
+        if best is None:
+            raise SystemExit(f"no two-patch ACE configuration for a {size}-site register (torus={torus})")
+        _TWO_PATCH[key] = best[1:]
+    return _TWO_PATCH[key]
+
+
 class AceEngine:
-    """QrackAceBackend on the device geometry: logical q -> its (row, col) of the 8x8
+    """QrackAceBackend on the device geometry: logical q -> its (row, col) of the
     subgrid, so couplers are nearest-neighbour in ACE's grid. One backend per worker and
-    size, reset in place between runs."""
+    size, reset in place between runs.
+
+    --ace-layout grid   the full 8x8 subgrid for every size (the original layout)
+    --ace-layout strip  the smallest R x 8 strip of the subgrid holding the first n
+                        logical qubits (R >= 4, so ACE lays it out as 8 columns), the
+                        register nn_qab.py would use for that width
+    --lrc/--lrr auto    nn_qab.py's two-patch rule for that register"""
 
     def __init__(self, lay, n, a):
         self.lay, self.n, self.a = lay, n, a
         R, C = lay.grid
+        if getattr(a, "ace_layout", "grid") == "strip":
+            R = max(4, max(r for r, _ in lay.pos[:n]) + 1)
         self.idx = [r * C + c for r, c in lay.pos[:n]]
         self.size = R * C
+        torus = getattr(a, "ace_torus", False)
+        lrc, lrr = a.lrc, a.lrr
+        if "auto" in (str(lrc), str(lrr)):
+            alrc, alrr, *_ = two_patch_config(self.size, torus)
+            lrc = alrc if str(lrc) == "auto" else int(lrc)
+            lrr = alrr if str(lrr) == "auto" else int(lrr)
+        self.lrc, self.lrr = int(lrc), int(lrr)
+        _, _, self.patches, self.boundary, self.b2b = ace_register_geometry(self.size, self.lrc, self.lrr, torus)
         from pyqrack import QrackAceBackend
         # ACE on rusticl/Vega10 hung compute rings and forced GPU resets: CPU unless --ace-gpu
-        self.sim = QrackAceBackend(self.size, long_range_columns=a.lrc, long_range_rows=a.lrr,
-                                   is_torus=False, is_gpu=(not a.cpu) and getattr(a, "ace_gpu", False))
+        self.sim = QrackAceBackend(self.size, long_range_columns=self.lrc, long_range_rows=self.lrr,
+                                   is_torus=torus, is_gpu=(not a.cpu) and getattr(a, "ace_gpu", False))
         rl, cl = self.sim.get_row_length(), self.sim.get_column_length()
-        if {rl, cl} != {R, C}:
-            raise SystemExit(f"ACE chose a {rl}x{cl} grid for {self.size} qubits, expected {R}x{C}")
+        if (rl, cl) != (C, R):
+            raise SystemExit(f"ACE chose a {rl}x{cl} grid for {self.size} qubits, expected {C} columns x {R} rows")
+
+    def geometry(self):
+        return dict(ace_register=self.size, ace_lrc=self.lrc, ace_lrr=self.lrr, ace_patches=self.patches,
+                    ace_boundary=self.boundary, ace_b2b=round(self.b2b, 3) if self.boundary else None)
 
     def reset(self):
         """Back to |0...0> in place: measure all, flip the ones. No reallocation, so no
@@ -617,12 +686,68 @@ def cmd_hwxeb(a):
 
 
 # ================================================================== run: clean-qubit emulation
+def ace_geometry(lay, lrc, lrr, torus):
+    """Boundary qubits, bulk components and bulk-to-boundary ratio of the ACE register
+    as built, read from QrackAceBackend._unpack() the way nn_qab.py measures it."""
+    from pyqrack import QrackAceBackend
+    R, C = lay.grid
+    sim = QrackAceBackend(R * C, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False)
+    bnd = {q for q in range(R * C) if len(sim._unpack(q)) > 1}
+    del sim
+    bulk, seen, comps = set(range(R * C)) - bnd, set(), []
+    for s0 in sorted(bulk):
+        if s0 in seen:
+            continue
+        stack, size = [s0], 0
+        seen.add(s0)
+        while stack:
+            v = stack.pop()
+            size += 1
+            r, c = divmod(v, C)
+            for rr, cc in ((r, c + 1), (r + 1, c), (r, c - 1), (r - 1, c)):
+                w = rr * C + cc
+                if 0 <= rr < R and 0 <= cc < C and w in bulk and w not in seen:
+                    seen.add(w)
+                    stack.append(w)
+        comps.append(size)
+    ratio = len(bulk) / len(bnd) if bnd else float("inf")
+    return dict(boundary=len(bnd), patches=sorted(comps, reverse=True), b_to_b=ratio)
+
+
+def resolve_geometry(lay, a):
+    """--geometry nnqab: nn_qab.py's rule on this register. Rows left whole (lrr = column
+    length), lrc chosen for exactly two patches at the highest finite bulk-to-boundary
+    ratio, ties broken toward the most balanced patches, torus. On the 8x8 Nighthawk
+    window this is lrc=3, lrr=8: seam columns 3 and 7, two 24-qubit patches, B-to-B 3."""
+    if getattr(a, "geometry", "manual") != "nnqab" or a.backend != "ace":
+        return None
+    R, C = lay.grid
+    best = None
+    for lrc in range(1, C):
+        g = ace_geometry(lay, lrc, R, True)
+        if len(g["patches"]) != 2 or g["b_to_b"] == float("inf"):
+            continue
+        key = (g["b_to_b"], -abs(g["patches"][0] - g["patches"][1]))
+        if best is None or key > best[0]:
+            best = (key, lrc, g)
+    if best is None:
+        raise SystemExit("nnqab geometry: no lrc gives exactly two patches on this register")
+    _, a.lrc, g = best
+    a.lrr, a.ace_torus = R, True
+    return g
+
+
 def cfg_tag(a):
     """Everything but the register size: records of every n share one tag, so a sweep
     can be extended with more sizes and resumes per (n, point)."""
     keys = dict(backend=a.backend, shots=a.shots, twirls=a.twirls,
+                **({"theta": a.theta} if getattr(a, "theta", "haar") != "haar" else {}),
                 lrc=a.lrc if a.backend == "ace" else None, lrr=a.lrr if a.backend == "ace" else None,
                 exact_probs=a.exact_probs and a.backend == "exact")
+    if getattr(a, "ace_torus", False) and a.backend == "ace":
+        keys["torus"] = True                     # absent for the original non-torus runs
+    if getattr(a, "ace_layout", "grid") != "grid" and a.backend == "ace":
+        keys["layout"] = a.ace_layout             # absent for the original 8x8 runs
     return a.backend + "-" + hashlib.sha1(json.dumps(keys, sort_keys=True).encode()).hexdigest()[:8]
 
 
@@ -703,6 +828,63 @@ def run_patched(lay, eng, K, d, j, inst, a):
     apply_forward(eng, cyc)
     sh = eng.shots(n_shots(a, "patched", d))
     return dict(**patched_xeb(sh, probs, part["patches"]), _shots={"shots": sh})
+
+
+FXEB_SHOTS = 4096
+
+
+def out_probs_np(sim):
+    """All 2^n probabilities straight into one numpy buffer of Qrack's real1 type
+    (as in nn_qab.py): no Python float list, so 34 qubits needs 64 GiB, not ~10x that."""
+    import ctypes
+    from pyqrack.qrack_system import Qrack
+    c_type, np_type = (ctypes.c_float, np.float32) if Qrack.fppow < 6 else (ctypes.c_double, np.float64)
+    buf = np.empty(1 << sim.num_qubits(), dtype=np_type)
+    Qrack.qrack_lib.OutProbs(sim.sid, buf.ctypes.data_as(ctypes.POINTER(c_type)))
+    sim._throw_if_error()
+    return buf
+
+
+def fxeb_cycles(lay, d, inst, n):
+    """The unpatched forward circuit on the first n logical qubits, release seed
+    convention for full circuits (2025 + k*1000003, instance k)."""
+    return build_cycles(lay, d, instance_seed(inst, "full"), inst, n=n)
+
+
+def run_fxeb(lay, eng, d, inst, a):
+    """Forward XEB of the backend's samples against the exact reference, as nn_qab.py
+    does: (N sum_s q p - 1) / (N sum p^2 - 1), which is Eq. (1) with the whole register
+    as one patch. No twirling: the samples come from one plain forward run, so a
+    structured (coherent) approximation keeps whatever XEB it earns. The reference is
+    an exact QrackSimulator of the same gates; its 2^n probabilities live in one
+    float buffer (n=34: 128 GiB state + 64 GiB probabilities)."""
+    from pyqrack import QrackSimulator
+    n = eng.n
+    cyc = fxeb_cycles(lay, d, inst, n)
+    eng.reset()
+    apply_forward(eng, cyc)
+    k = FXEB_SHOTS if a.shots == "paper" else int(a.shots)
+    sh = eng.shots(k)
+
+    ref = QrackSimulator(n, is_gpu=not a.cpu and a.ref_gpu)
+    for ang, es in cyc:
+        for q, t in enumerate(ang):
+            ref.mtrx(flat(gate(t)), q)
+        for a_, b_ in es:
+            ref.mcz([a_], b_)
+    p = out_probs_np(ref)
+    del ref
+    N = float(p.size)
+    sum_p = float(p.sum(dtype=np.float64))
+    sum_sq = float(np.einsum("i,i->", p, p, dtype=np.float64)) / (sum_p * sum_p)
+    ps = p[sh.astype(np.int64)].astype(np.float64) / sum_p
+    del p
+    norm = N * sum_sq - 1.0                      # ideal XEB (collision ratio), ~1 if Porter-Thomas
+    x = N * ps - 1.0
+    xeb = float(x.mean() / norm)
+    se = float(x.std(ddof=1) / math.sqrt(len(x)) / norm)
+    return dict(fidelity=xeb, se=se, xeb_linear=float(x.mean()), ideal_xeb=norm,
+                hog=float(np.mean(ps > math.log(2.0) / N)), shots=int(len(x)), _shots={"shots": sh})
 
 
 def run_full(lay, eng, d, pub, a):
@@ -934,7 +1116,11 @@ def summarize(recs, lay, a):
     by = defaultdict(list)
     min_shots = {}
     n_full = defaultdict(int)
+    fx = defaultdict(list)
     for r in recs.values():
+        if r["family"] == "fxeb":
+            fx[(r["n"], r["depth"])].append(r)
+            continue
         if r["family"] == "full":
             n_full[(r["n"], r["depth"])] += r["shots"]
             continue
@@ -944,6 +1130,20 @@ def summarize(recs, lay, a):
             min_shots[r["n"]] = min(min_shots.get(r["n"], r["shots"]), r["shots"])
     for (n, d), k in sorted(n_full.items()):
         print(f"full circuit n={n} d={d}: {k:,} stored samples (no score: not verifiable at this size)")
+    if fx:
+        A_hw, f_hw = fvd["fit"]["prefactor"], fvd["fit"]["fidelity_per_cycle"]
+        print(f"\n== forward XEB of the {a.backend} samples vs the exact reference (nn_qab estimator)"
+              f"{', theta ' + a.theta + ' VARIANT' if getattr(a, 'theta', 'haar') != 'haar' else ''} ==")
+        print("(ideal XEB = collision ratio of the exact output: 1 = Porter-Thomas, as the paper's circuits;"
+              " large = concentrated output, easier to score on)")
+        print("n    d   XEB (Eq.1, one patch)   linear XEB   HOG     ideal XEB   instances"
+              "   [ibm_phoenix 61q fit at d]")
+        for (n, d) in sorted(fx):
+            v = fx[(n, d)]
+            F, se = inverse_variance_mean([r["fidelity"] for r in v], [r["se"] for r in v])
+            print(f"{n:<4} {d:>2}  {F:8.5f} +/- {se:.1e}      {np.mean([r['xeb_linear'] for r in v]):8.5f}"
+                  f"   {np.mean([r['hog'] for r in v]):.3f}   {np.mean([r['ideal_xeb'] for r in v]):.4f}"
+                  f"      {len(v)}          [{A_hw * f_hw ** d:.3e}]")
     sizes = sorted({k[0] for k in by})
     b_rows, fit_depths = [], set()
     for n in sizes:
@@ -1054,9 +1254,12 @@ def build_jobs(lay, a, sizes, fams):
         for fam in fams:
             if fam == "patched" and n != lay.n:
                 continue
-            ds = a.depths or lay.depths[{"mirror": "mirror", "patched": "patched", "full": "full_sampled"}[fam]]
+            ds = a.depths or ([d for d in FULL_DEPTHS if d <= 20] if fam == "fxeb" else
+                              lay.depths[{"mirror": "mirror", "patched": "patched", "full": "full_sampled"}[fam]])
             for d in ds:
-                if fam == "full":
+                if fam == "fxeb":
+                    jobs += [(n, "fxeb", 0, d, 0, i) for i in insts]
+                elif fam == "full":
                     jobs += [(n, "full", 0, d, p, 0) for p in range(a.pubs)]
                 elif fam == "mirror":
                     jobs += [(n, "mirror", 0, d, 0, i) for i in insts]
@@ -1159,7 +1362,12 @@ def launch(a, lay, tag, jobs, recs):
 
 
 def cmd_run(a):
+    THETA_DIST["mode"] = a.theta
     lay = Layout(a.repo)
+    geo = resolve_geometry(lay, a)
+    if geo and not a.worker:
+        print(f"# nnqab geometry: lrc={a.lrc} lrr={a.lrr} torus, {geo['boundary']} boundary qubits, "
+              f"patches {geo['patches']}, bulk-to-boundary {geo['b_to_b']:.2f}")
     tag = cfg_tag(a)
     recs = load_jsonl(a.out, tag, lay.n)
     if a.summarize or a.pack:
@@ -1170,10 +1378,15 @@ def cmd_run(a):
         return
     if a.sizes and a.n:
         raise SystemExit("give --sizes or --n, not both")
+    if a.theta != "haar" and not a.worker:
+        print(f"# VARIANT: single-qubit theta drawn as {a.theta}, not Haar -- these are not the paper's "
+              f"circuits (records kept under their own config tag)", flush=True)
     sizes = parse_sizes(a.sizes) if a.sizes else [a.n or lay.n]
     if not all(2 <= n <= lay.n for n in sizes):
         raise SystemExit(f"sizes must lie in 2..{lay.n}")
     fams = a.families.split(",")
+    if "fxeb" in fams and max(sizes) > 36:
+        raise SystemExit("fxeb needs an exact 2^n reference: sizes up to ~34-36 (memory), not 61")
     jobs = build_jobs(lay, a, sizes, fams)
     todo = [k for k in jobs if k not in recs]
     if a.retry_failed and not a.worker:            # once, here; workers never retry failed points
@@ -1235,6 +1448,7 @@ def cmd_run(a):
         t0 = time.time()
         try:
             r = (run_mirror(lay, eng, d, i, a) if fam == "mirror" else
+                 run_fxeb(lay, eng, d, i, a) if fam == "fxeb" else
                  run_full(lay, eng, d, j, a) if fam == "full" else run_patched(lay, eng, K, d, j, i, a))
         except Exception as err:                    # deterministic (e.g. QRACK_MAX_CPU_QB): do not retry
             print(f"# n = {n} {fam} d{d} inst {i}: failed ({err}); marked failed", flush=True)
@@ -1435,7 +1649,13 @@ def main():
     r.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
     r.add_argument("--backend", choices=["exact", "ace"], default="ace")
     r.add_argument("--families", default="mirror,patched",
-                   help="comma list of mirror, patched, full (full: unscored samples of the d36 circuit)")
+                   help="comma list of mirror, patched, full, fxeb (full: unscored d36 samples; "
+                        "fxeb: forward XEB vs an exact reference, n <= ~34)")
+    r.add_argument("--theta", choices=["haar", "nnqab"], default="haar",
+                   help="single-qubit theta: haar (the paper) or nnqab (sin(theta) uniform, as nn_qab.py; "
+                        "a variant, not the released circuits)")
+    r.add_argument("--ref-gpu", dest="ref_gpu", action="store_true",
+                   help="fxeb: exact reference on OpenCL (default CPU)")
     r.add_argument("--pubs", type=int, default=SAMPLE_PUBS, help="full: pubs of --shots each (paper 10 x 100k)")
     r.add_argument("--shots-dir", dest="shots_dir", default=None,
                    help="where bitstrings go (default: <out stem>_shots/); a <cfg> subfolder holds points/ + release/")
@@ -1452,8 +1672,17 @@ def main():
     r.add_argument("--sizes", default=None,
                    help="register sizes to sweep, first-n truncation: 36, 27-36 or 20,27-36 (mirror; patched at 61 only)")
     r.add_argument("--n", type=int, default=None, help="single size, same as --sizes n")
-    r.add_argument("--lrc", type=int, default=4, help="ace: long_range_columns")
-    r.add_argument("--lrr", type=int, default=4, help="ace: long_range_rows")
+    r.add_argument("--geometry", choices=["manual", "nnqab"], default="manual",
+                   help="ace: manual = --lrc/--lrr as given, not a torus (default); nnqab = nn_qab.py's "
+                        "rule: rows whole, two patches, highest bulk-to-boundary, torus (overrides --lrc/--lrr)")
+    r.add_argument("--ace-torus", dest="ace_torus", action="store_true", help="ace: is_torus=True")
+    r.add_argument("--lrc", default=4, type=lambda v: v if v == "auto" else int(v),
+                   help="ace: long_range_columns, or auto (nn_qab.py two-patch rule)")
+    r.add_argument("--lrr", default=4, type=lambda v: v if v == "auto" else int(v),
+                   help="ace: long_range_rows, or auto")
+    r.add_argument("--ace-layout", dest="ace_layout", choices=["grid", "strip"], default="grid",
+                   help="grid: full 8x8 subgrid for every size; strip: smallest R x 8 strip holding "
+                        "the first n qubits (nn_qab-style register)")
     r.add_argument("--cache", default=None, help="directory for ideal patch distributions")
     r.add_argument("--cpu", action="store_true", help="is_gpu=False everywhere")
     r.add_argument("--ace-gpu", dest="ace_gpu", action="store_true",
