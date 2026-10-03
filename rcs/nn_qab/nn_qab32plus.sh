@@ -48,7 +48,7 @@
 # at 36 first (SEEDS=0 ./sweep.sh 36) and compare swap_out_gib against the
 # drives' rated TBW before launching more.
 #
-# nn_qab.py refuses up front (exit 2) when a width won't fit at all; the
+# nn_qab.py refuses up front (exit 3) when a width won't fit at all; the
 # series is then skipped, but its ACE pass still runs to completion. Each
 # ace/*.json holds the full circuit plus counts, so a reference can be
 # produced for it later.
@@ -129,6 +129,9 @@ SCRIPT="${SCRIPT:-./nn_qab.py}"
 # a 1-D topology unlike every other row (B-to-B 13.5 / 14.5). Left out for
 # the same reason 11, 13, 17, 19 and 23 are; uncomment to add them anyway.
 SERIES=(
+    "10 2 2"
+    "14 3 2"
+    "22 5 2"
     "26 6 2"
     "27 4 3"
     "28 3 4"
@@ -246,6 +249,15 @@ ideal_profile() {
 }
 
 # ---------------------------------------------------------------------------
+# Preflight: this script passes --stats / --allow-swap, which only the
+# matching nn_qab.py understands. An older copy would fail every seed on a
+# usage error, so check once here instead.
+if ! "$PY" "$SCRIPT" ideal --help 2>/dev/null | grep -q -- '--allow-swap'; then
+    echo "error: $SCRIPT is older than this sweep script (no --stats /" \
+         "--allow-swap). Copy the matching nn_qab.py next to it." >&2
+    exit 1
+fi
+
 log "sweep: ${#SERIES[@]} series x $N_SEEDS seeds, depth $DEPTH"
 log "ace -> devices $ACE_DEVICES ($ACE_JOBS jobs)   ideal <= $SMALL_MAX -> devices $IDEAL_DEVICES ($IDEAL_JOBS jobs)"
 START=$(date +%s)
@@ -286,7 +298,7 @@ for cfg in "${SERIES[@]}"; do
         done
         for pid in "${ipids[@]}"; do
             rc=0; wait "$pid" || rc=$?
-            [ "$rc" -eq 2 ] && refused=1
+            [ "$rc" -eq 3 ] && refused=1      # EXIT_REFUSED in nn_qab.py
         done
 
         if [ "$refused" -eq 1 ]; then
