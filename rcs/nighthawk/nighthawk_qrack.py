@@ -834,33 +834,72 @@ def claim_file(a, key):
     return shots_root(a) / "claims" / f"n{n}_{fam}_K{K}_d{d:02d}_p{j}_i{i}"
 
 
-def try_claim(path, retry=True):
-    """O_EXCL claim holding our pid; a claim whose pid is dead (killed worker) is taken over;
-    'done' claims are final. Lets any number of workers share one point list."""
+def _write_atomic(path, text):
+    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def try_claim(path, max_attempts=2, retry_failed=False):
+    """O_EXCL claim holding 'pid:attempt'. 'done' claims are final. A claim whose worker
+    died (OOM kill, memory cap, segfault) is taken over, up to max_attempts workers in
+    total; after that the point is marked 'failed: ...' so the remaining workers do not
+    crash on it one after another. --retry-failed clears that."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
-        return True
-    except FileExistsError:
+    for _ in range(3):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{os.getpid()}:{getattr(try_claim, 'next_attempt', 1)}".encode())
+            os.close(fd)
+            try_claim.next_attempt = 1
+            return True
+        except FileExistsError:
+            pass
         try:
             txt = path.read_text().strip()
         except FileNotFoundError:
-            return try_claim(path, False) if retry else False
-        if txt == "done" or not txt.isdigit() or _pid_alive(int(txt)):
+            continue
+        if txt == "done":
             return False
+        if txt.startswith("failed"):
+            if not retry_failed:
+                return False
+            att = 0
+        else:
+            pid_s, _, att_s = txt.partition(":")
+            if not pid_s.isdigit():
+                return False                        # being written right now
+            if _pid_alive(int(pid_s)):
+                return False
+            att = int(att_s) if att_s.isdigit() else 1
+            if att >= max_attempts:
+                _write_atomic(path, f"failed: {att} worker(s) died on this point (memory cap, OOM or crash)")
+                return False
         try:
             os.rename(path, path.with_name(path.name + f".stale{os.getpid()}"))
         except FileNotFoundError:
             pass
-        return try_claim(path, False) if retry else False
+        try_claim.next_attempt = att + 1
+    return False
+
+
+def failed_points(a):
+    root = shots_root(a) / "claims"
+    out = []
+    if root.exists():
+        for f in sorted(root.iterdir()):
+            if f.is_file() and "." not in f.name:
+                try:
+                    t = f.read_text().strip()
+                except OSError:
+                    continue
+                if t.startswith("failed"):
+                    out.append((f.name, t))
+    return out
 
 
 def mark_done(path):
-    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
-    tmp.write_text("done")
-    os.replace(tmp, path)
+    _write_atomic(path, "done")
 
 
 def _point(v):
@@ -881,7 +920,16 @@ def _decay(pts, floor):
     return -math.log(f), A, dropped
 
 
+def report_failed(a):
+    bad = failed_points(a)
+    if bad:
+        print(f"\n# {len(bad)} point(s) marked failed (rerun with --retry-failed to try again):")
+        for name, why in bad:
+            print(f"#   {name}: {why}")
+
+
 def summarize(recs, lay, a):
+    report_failed(a)
     fvd = json.loads((lay.repo / "data/results/fidelity_vs_depth.json").read_text())
     by = defaultdict(list)
     min_shots = {}
@@ -1086,7 +1134,7 @@ def cmd_run(a):
         remaining.remove(key)
         n, fam, K, d, j, i = key
         cf = claim_file(a, key)
-        if not try_claim(cf):
+        if not try_claim(cf, a.max_attempts, a.retry_failed):
             continue
         if key in load_jsonl(a.out, tag, lay.n):   # finished by another worker since we started
             mark_done(cf)
@@ -1107,9 +1155,9 @@ def cmd_run(a):
         try:
             r = (run_mirror(lay, eng, d, i, a) if fam == "mirror" else
                  run_full(lay, eng, d, j, a) if fam == "full" else run_patched(lay, eng, K, d, j, i, a))
-        except Exception as err:
-            print(f"# n = {n} {fam} d{d} inst {i}: failed ({err}); left for a rerun", flush=True)
-            cf.unlink(missing_ok=True)
+        except Exception as err:                    # deterministic (e.g. QRACK_MAX_CPU_QB): do not retry
+            print(f"# n = {n} {fam} d{d} inst {i}: failed ({err}); marked failed", flush=True)
+            _write_atomic(cf, f"failed: {type(err).__name__}: {err}"[:500])
             engines.clear()                         # do not reuse a backend that failed mid-run
             fails += 1
             if a.worker and fails >= 3:
@@ -1337,6 +1385,10 @@ def main():
     r.add_argument("--stagger", type=float, default=20.0, help="seconds between worker starts (default 20)")
     r.add_argument("--init-gap", dest="init_gap", type=float, default=10.0,
                    help="min seconds between any two OpenCL initialisations, machine-wide (default 10; 0 = off)")
+    r.add_argument("--max-attempts", dest="max_attempts", type=int, default=2,
+                   help="workers that may die on one point before it is marked failed (default 2)")
+    r.add_argument("--retry-failed", dest="retry_failed", action="store_true",
+                   help="try points marked failed again")
     r.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
 
     t = sub.add_parser("selftest", help="conventions and exactness checks")
