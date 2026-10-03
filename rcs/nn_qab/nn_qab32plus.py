@@ -616,6 +616,8 @@ def calc_stats_linear(p_s, counts_in_order, shots, width):
 # GPU engine keeps the state on the card and needs no large host buffer.
 # These are estimates; --no-mem-check disables the guard.
 
+EXIT_REFUSED = 3                   # memory guard refused; see nn_qab.sh
+
 MEM_BASE_BYTES = 1 << 30           # interpreter, numpy, Qrack, driver
 
 
@@ -988,10 +990,11 @@ def run_ideal(args):
         except MemoryError as e:
             # Every seed in this directory has the same width, so this will
             # not get better on the next one. Stop instead of spinning.
+            # Exit code 3, not 2: argparse already uses 2 for usage errors.
             release(lock)
             print(f"ideal seed={seed} REFUSED: {e}", file=sys.stderr,
                   flush=True)
-            return 2
+            return EXIT_REFUSED
         except Exception as e:
             release(lock)
             print(f"ideal seed={seed} FAILED: {type(e).__name__}: {e}",
