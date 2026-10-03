@@ -305,6 +305,12 @@ A clean-qubit simulator whose mirror decay is *slower* than the device's is a lo
 
 ---
 
+verification and simulation at runtime:
+
+<img width="970" height="403" alt="image" src="https://github.com/user-attachments/assets/717d8289-2a12-4de4-892d-77d5a161f955" />
+<img width="1114" height="327" alt="image" src="https://github.com/user-attachments/assets/b84b32ce-4fae-434b-b06a-62b38d32c4b2" />
+
+
 ## 9. Limitations
 
 - The `full` family cannot be scored at 61 qubits; samples are stored for downstream use only.
