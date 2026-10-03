@@ -16,6 +16,18 @@ seam -- is the point that breaks the collinearity. If ratio is what
 matters, those two series means sit at the same height, and the dashed
 connector between them is flat.
 
+The 30-36 extension adds three more equal-ratio groups (2.0: 30/36,
+2.5: 14/28/35, 4.5: 22/33) and drops corr(ratio, width) across all twelve
+series to about 0.28, so the plane fit's width term becomes identifiable.
+
+Metrics: xeb / hog are whatever estimator each row was scored with
+(stats_mode: exact full-vector, or linear Porter-Thomas). xeb_linear /
+hog_linear are the linear estimator at every width -- the one to use when
+comparing across a series that fell back to linear. Series scored with
+linear stats are drawn as hollow markers, and a mixed set is warned about.
+Rows from before the update have no xeb_linear; those series are skipped
+for the linear metrics, not plotted as zero.
+
 Interactive: drag inside the plot to rotate, scroll to zoom. The panel on
 the right toggles layers, switches metric, sets the viewpoint, and writes
 the CSVs and a PNG.
@@ -58,7 +70,23 @@ PREFERRED = [
     "xeb_ace", "hog_ace",
     "ace_seconds", "ideal_seconds", "stats_seconds",
     "qrack_lib", "qrack_device_ace", "qrack_device_ideal",
+    "stats_mode", "xeb_linear", "hog_linear",
+    "swap_in_gib", "swap_out_gib",
 ]
+
+METRICS = {                 # UI / CLI name -> CSV column
+    "xeb":        "xeb_ace",
+    "hog":        "hog_ace",
+    "xeb_linear": "xeb_linear",
+    "hog_linear": "hog_linear",
+}
+
+
+def _f(row, key):
+    try:
+        return float(row.get(key) or "nan")
+    except ValueError:
+        return float("nan")
 
 
 # ---------------------------------------------------------------------------
@@ -69,17 +97,20 @@ def load(runs_dir):
     """One entry per series, keeping the raw rows so export stays lossless."""
     series = []
     for path in sorted(glob.glob(os.path.join(runs_dir, "w*.csv"))):
-        rows, xebs, hogs, ratios = [], [], [], []
+        rows, ratios, modes = [], [], set()
+        vals = {m: [] for m in METRICS}
         with open(path, newline="") as f:
             for row in csv.DictReader(f):
                 try:
-                    xeb = float(row["xeb_ace"])
+                    float(row["xeb_ace"])
                     ratio = float(row["bulk_to_boundary"])
                 except (KeyError, ValueError):
                     continue
-                hogs.append(float(row.get("hog_ace", "nan") or "nan"))
-                xebs.append(xeb)
+                for m, col in METRICS.items():
+                    vals[m].append(_f(row, col))
                 ratios.append(ratio)
+                # rows from before stats_mode existed were all exact
+                modes.add(row.get("stats_mode") or "exact")
                 rows.append(row)
         if not rows:
             continue
@@ -91,15 +122,18 @@ def load(runs_dir):
             "lrc": int(rows[0]["long_range_columns"]),
             "lrr": int(rows[0]["long_range_rows"]),
             "ratio": float(np.mean(ratios)),
-            "xeb": np.asarray(xebs),
-            "hog": np.asarray(hogs),
+            "stats_mode": modes.pop() if len(modes) == 1 else "mixed",
+            **{m: np.asarray(v) for m, v in vals.items()},
         })
     series.sort(key=lambda s: (s["ratio"], s["width"]))
     return series
 
 
-def stats_for(series, metric):
-    """Attach mean/sd/se for the selected metric, in place."""
+def stats_for(series, metric, min_n=1):
+    """Attach mean/sd/se for the selected metric; return only the series
+    that have at least min_n finite values for it. A series with too few
+    seeds (e.g. a one-seed probe at width 36) would otherwise pull the fit
+    as hard as a 100-seed series."""
     for s in series:
         v = s[metric]
         v = v[np.isfinite(v)]
@@ -108,7 +142,20 @@ def stats_for(series, metric):
         s["mean"] = float(v.mean()) if n else float("nan")
         s["sd"] = float(v.std(ddof=1)) if n > 1 else 0.0
         s["se"] = s["sd"] / np.sqrt(n) if n > 1 else 0.0
-    return series
+    return [s for s in series if s["n"] >= max(1, min_n)]
+
+
+def check_estimators(series, metric):
+    """Warn when the plotted metric mixes exact and linear estimators."""
+    if metric.endswith("_linear"):
+        return None
+    modes = {s["stats_mode"] for s in series}
+    if len(modes) > 1:
+        lin = [f"w{s['width']}" for s in series if s["stats_mode"] != "exact"]
+        return (f"warning: {metric} mixes estimators ({', '.join(sorted(modes))});"
+                f" non-exact: {' '.join(lin)} -- compare with "
+                f"--metric {metric}_linear")
+    return None
 
 
 def loocv(x_cols, y):
@@ -175,7 +222,7 @@ def export_runs(series, path):
 
 def export_summary(series, fit, metric, path):
     head = ["width", "long_range_columns", "long_range_rows",
-            "bulk_to_boundary", "n", f"mean_{metric}", f"sd_{metric}",
+            "bulk_to_boundary", "n", "stats_mode", f"mean_{metric}", f"sd_{metric}",
             "se", "ci95_lo", "ci95_hi",
             "fit_ratio_pred", "fit_ratio_resid",
             "fit_plane_pred", "fit_plane_resid"]
@@ -187,7 +234,7 @@ def export_summary(series, fit, metric, path):
             lo = s["mean"] - 1.96 * s["se"]
             hi = s["mean"] + 1.96 * s["se"]
             row = [s["width"], s["lrc"], s["lrr"], f"{s['ratio']:.6f}",
-                   s["n"], f"{s['mean']:.10f}", f"{s['sd']:.10f}",
+                   s["n"], s["stats_mode"], f"{s['mean']:.10f}", f"{s['sd']:.10f}",
                    f"{s['se']:.10f}", f"{lo:.10f}", f"{hi:.10f}"]
 
             if fit["line"] is not None:
@@ -211,10 +258,14 @@ def export_summary(series, fit, metric, path):
 def report(series, fit, metric):
     label = metric.upper()
     print(f"{'width':>6} {'lrc':>4} {'lrr':>4} {'B-to-B':>7} "
-          f"{'n':>5} {'mean ' + label:>12} {'sd':>10} {'SE':>10}")
+          f"{'n':>5} {'stats':>7} {'mean ' + label:>16} {'sd':>10} {'SE':>10}")
     for s in series:
         print(f"{s['width']:6d} {s['lrc']:4d} {s['lrr']:4d} {s['ratio']:7.2f} "
-              f"{s['n']:5d} {s['mean']:12.6f} {s['sd']:10.6f} {s['se']:10.6f}")
+              f"{s['n']:5d} {s['stats_mode']:>7} {s['mean']:16.6f} "
+              f"{s['sd']:10.6f} {s['se']:10.6f}")
+    warn = check_estimators(series, metric)
+    if warn:
+        print(warn)
 
     if fit["line"] is not None:
         b, cv = fit["line"]
@@ -237,8 +288,10 @@ def report(series, fit, metric):
 class Explorer:
     LAYERS = ["runs", "plane", "error bars", "labels", "equal-ratio"]
 
-    def __init__(self, series, metric, elev, azim, interactive):
-        self.series = series
+    def __init__(self, series, metric, elev, azim, interactive, min_n=1):
+        self.all_series = series
+        self.min_n = min_n
+        self.series = stats_for(series, metric, min_n)
         self.metric = metric
         self.visible = {k: True for k in self.LAYERS}
         self.interactive = interactive
@@ -258,9 +311,15 @@ class Explorer:
         ax = self.ax
         ax.clear()
 
-        series = stats_for(self.series, self.metric)
-        self.fit = fit_models(series)
+        series = self.series = stats_for(self.all_series, self.metric,
+                                         self.min_n)
         label = self.metric.upper()
+        if not series:
+            ax.set_title(f"no series with >= {self.min_n} {label} values")
+            self.fit = fit_models([])
+            self.fig.canvas.draw_idle()
+            return
+        self.fit = fit_models(series)
 
         colors = plt.cm.viridis(np.linspace(0.08, 0.92, len(series)))
         ratio = self.fit["ratio"]
@@ -296,10 +355,15 @@ class Explorer:
 
             ax.plot([s["ratio"]] * 2, [s["width"]] * 2, [zfloor, s["mean"]],
                     color=c, lw=0.8, alpha=0.45, ls=":")
-            ax.scatter([s["ratio"]], [s["width"]], [s["mean"]], s=95, color=c,
-                       edgecolors="black", linewidths=0.8, depthshade=False,
+            exact = (s["stats_mode"] == "exact"
+                     or self.metric.endswith("_linear"))
+            ax.scatter([s["ratio"]], [s["width"]], [s["mean"]], s=95,
+                       color=c if exact else "none",
+                       edgecolors=("black" if exact else c),
+                       linewidths=(0.8 if exact else 2.0), depthshade=False,
                        zorder=6,
-                       label=f"w{s['width']}  B/B {s['ratio']:.1f}  n={s['n']}")
+                       label=f"w{s['width']}  B/B {s['ratio']:.1f}  n={s['n']}"
+                             + ("" if exact else f"  [{s['stats_mode']}]"))
 
             if self.visible["labels"]:
                 ax.text(s["ratio"], s["width"], s["mean"] + s["se"] + 0.012,
@@ -343,10 +407,11 @@ class Explorer:
         self.w_layers.on_clicked(self._toggle_layer)
 
         f.text(0.755, 0.735, "metric", fontsize=9, weight="bold")
-        ax_metric = f.add_axes([0.755, 0.640, 0.20, 0.085])
+        ax_metric = f.add_axes([0.755, 0.610, 0.20, 0.115])
         ax_metric.set_frame_on(False)
-        self.w_metric = RadioButtons(ax_metric, ("xeb", "hog"),
-                                     active=0 if self.metric == "xeb" else 1)
+        names = tuple(METRICS)
+        self.w_metric = RadioButtons(ax_metric, names,
+                                     active=names.index(self.metric))
         self.w_metric.on_clicked(self._set_metric)
 
         f.text(0.755, 0.590, "viewpoint", fontsize=9, weight="bold")
@@ -378,6 +443,8 @@ class Explorer:
     def _set_metric(self, label):
         self.metric = label
         self.draw()
+        warn = check_estimators(self.series, label) if self.series else None
+        self._say(warn or "")
 
     def _set_view(self, _val):
         self.elev = self.s_elev.val
@@ -416,7 +483,10 @@ def main():
                    help="output prefix for .png / -runs.csv / -summary.csv")
     p.add_argument("--show", action="store_true",
                    help="open the interactive window")
-    p.add_argument("--metric", default="xeb", choices=("xeb", "hog"))
+    p.add_argument("--metric", default="xeb", choices=tuple(METRICS))
+    p.add_argument("--min-n", type=int, default=1,
+                   help="leave out series with fewer seeds than this "
+                        "(e.g. a 1-seed probe run at width 36)")
     p.add_argument("--elev", type=float, default=24.0)
     p.add_argument("--azim", type=float, default=-58.0)
     p.add_argument("--dpi", type=int, default=160)
@@ -432,10 +502,15 @@ def main():
               file=sys.stderr)
         return 1
 
-    ex = Explorer(series, args.metric, args.elev, args.azim, args.show)
+    ex = Explorer(series, args.metric, args.elev, args.azim, args.show,
+                  args.min_n)
     ex.prefix = args.prefix
+    if not ex.series:
+        print(f"no series has >= {args.min_n} finite {args.metric} values",
+              file=sys.stderr)
+        return 1
 
-    report(stats_for(series, args.metric), ex.fit, args.metric)
+    report(ex.series, ex.fit, args.metric)
     print()
     ex._save_csv()
 
