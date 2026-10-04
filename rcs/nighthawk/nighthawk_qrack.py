@@ -723,7 +723,8 @@ class AceEngine:
         from pyqrack import QrackAceBackend
         # ACE on rusticl/Vega10 hung compute rings and forced GPU resets: CPU unless --ace-gpu
         self.sim = QrackAceBackend(self.size, long_range_columns=self.lrc, long_range_rows=self.lrr,
-                                   is_torus=torus, is_gpu=(not a.cpu) and getattr(a, "ace_gpu", False))
+                                   is_torus=torus, is_gpu=(not a.cpu) and getattr(a, "ace_gpu", False),
+                                   is_host_pointer=getattr(a, "ace_host_pointer", False))
         rl, cl = self.sim.get_row_length(), self.sim.get_column_length()
         if (rl, cl) != (C, R):
             raise SystemExit(f"ACE chose a {rl}x{cl} grid for {self.size} qubits, expected {C} columns x {R} rows")
@@ -2155,6 +2156,9 @@ def main():
     r.add_argument("--cpu", action="store_true", help="is_gpu=False everywhere")
     r.add_argument("--ace-gpu", dest="ace_gpu", action="store_true",
                    help="run QrackAceBackend on OpenCL too (off by default: it wedged Vega10/rusticl cards)")
+    r.add_argument("--ace-host-pointer", dest="ace_host_pointer", action="store_true",
+                   help="ace with --ace-gpu: keep simulator states in host RAM, read by the GPU over PCIe "
+                        "(GTT) instead of VRAM; same numbers, so not part of the config tag")
     r.add_argument("--out", default="nighthawk_clean.jsonl")
     r.add_argument("--summarize", action="store_true")
     r.add_argument("--gpus", default=None,
