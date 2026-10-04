@@ -566,7 +566,7 @@ TILING_VERSION = 3          # default for --ace-tiling; --ace-tiling-version 2 k
 #     qubit on a seam site + 2 per simulator holding bulk qubits; three restarts, one from
 #     the device grid and two from the best (n-1)-qubit tiling extended by one qubit, so
 #     adding a qubit never starts from scratch; results cached on disk
-#     (~/.cache/nighthawk_qrack/tiles.json, or $NIGHTHAWK_TILE_CACHE).
+#     (nighthawk_tiles.json next to this script, or $NIGHTHAWK_TILE_CACHE).
 #     Seam qubits dominate: in the 4/4 tiled big run XEB at d=12 fell monotonically with
 #     seam qubits used (3, 5, 6, 8 -> 0.158, 0.101, 0.069, -0.015), and a trial weighting
 #     that traded seam qubits for fewer simulators (n=18: 4 seam / 1 simulator against
@@ -620,7 +620,7 @@ def placement_stats(row, site, couplers):
 
 def _tile_cache_path():
     p = os.environ.get("NIGHTHAWK_TILE_CACHE")
-    return Path(p) if p else Path.home() / ".cache" / "nighthawk_qrack" / "tiles.json"
+    return Path(p) if p else Path(__file__).resolve().parent / "nighthawk_tiles.json"
 
 
 def _tile_cache_get(key):
@@ -1996,6 +1996,193 @@ def ace_preflight(lay, a, sizes):
               "(fp32) will not fit on one", flush=True)
 
 
+# ================================================================== memory-aware scheduling
+def mem_available_gb():
+    try:
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / 1048576
+    except OSError:
+        pass
+    return None
+
+
+def rss_gb_of(pid):
+    try:
+        for line in open(f"/proc/{pid}/status"):
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) / 1048576
+    except OSError:
+        pass
+    return 0.0
+
+
+_ENGINE_GB = {}
+
+
+def engine_gb(lay, n, a):
+    """Worst-case memory of one simulation engine at size n, in GiB."""
+    key = (n, a.backend, str(a.lrc), str(a.lrr), bool(getattr(a, "ace_torus", False)),
+           getattr(a, "ace_layout", "grid"), getattr(a, "ace_max_width", None))
+    if key in _ENGINE_GB:
+        return _ENGINE_GB[key]
+    amp, gib = amp_bytes(), 2 ** 30
+    full = 2.0 ** n * amp / gib
+    if a.backend != "ace":
+        gb = full
+    elif getattr(a, "ace_max_width", None) or "auto" in (str(a.lrc), str(a.lrr)):
+        gb = min(full, 4 * 2.0 ** (getattr(a, "ace_max_width", None) or 33) * amp / gib)
+    else:
+        size = ace_register(lay, n, getattr(a, "ace_layout", "grid"))[0]
+        widths = layout_row(size, int(a.lrc), int(a.lrr), bool(getattr(a, "ace_torus", False)))["widths"]
+        gb = min(dense_gb(widths), 2 * full)      # only n of the register's sites are ever entangled
+    _ENGINE_GB[key] = gb
+    return gb
+
+
+def point_mem_gb(lay, a, key, variants=None):
+    """Estimated peak resident memory of one point, in GiB: 1 GiB of process overhead, the
+    engine(s), and for fxeb the exact reference (state + probability buffer, 1.5 x 2^n
+    amplitudes). Patched points at 61 qubits keep their patches apart (QUnit), so only
+    their largest patch counts."""
+    n, fam, K, d, j, i = key
+    amp, gib = amp_bytes(), 2 ** 30
+    if fam == "patched":
+        return 1.0 + 2 * 2.0 ** max(len(p) for p in lay.partitions[K][j]["patches"]) * amp / gib
+    engines = sum(engine_gb(lay, n, v) for v in (variants or [a]))
+    ref = 1.5 * 2.0 ** n * amp / gib if fam == "fxeb" else 0.0
+    return 1.0 + engines + ref
+
+
+class MemLedger:
+    """Machine-wide memory reservations: one file per worker pid holding the GiB its
+    current point needs, in a directory every run on this machine shares (default
+    /tmp/nighthawk_mem_ledger, or --mem-ledger / $NIGHTHAWK_MEM_LEDGER). A point is
+    taken only if (a) all reservations plus it stay within --mem-budget-gb and (b) it fits
+    in MemAvailable after the part of other reservations not yet allocated -- so
+    processes outside the ledger (an older run, the OS) are respected through (b).
+    Dead workers' reservations are dropped automatically."""
+
+    def __init__(self, budget_gb, path=None):
+        self.budget = float(budget_gb)
+        self.dir = Path(path or os.environ.get("NIGHTHAWK_MEM_LEDGER") or "/tmp/nighthawk_mem_ledger")
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.mine = self.dir / str(os.getpid())
+        self.noted = False
+
+    def _entries(self):
+        out = {}
+        for f in self.dir.iterdir():
+            if not f.name.isdigit():
+                continue
+            pid = int(f.name)
+            if not _pid_alive(pid):
+                f.unlink(missing_ok=True)
+                continue
+            try:
+                out[pid] = float(f.read_text())
+            except (OSError, ValueError):
+                pass
+        return out
+
+    def reserve(self, gb):
+        import fcntl
+        with open(self.dir / ".lock", "a+") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                ent = self._entries()
+                ent.pop(os.getpid(), None)
+                pending = sum(max(0.0, g - rss_gb_of(pid)) for pid, g in ent.items())
+                avail = mem_available_gb()
+                if sum(ent.values()) + gb > self.budget:
+                    return False
+                if avail is not None and gb + pending > 0.95 * avail:
+                    return False
+                _write_atomic(self.mine, f"{gb:.3f}")
+                return True
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+
+    def release(self):
+        self.mine.unlink(missing_ok=True)
+
+
+def make_ledger(a):
+    if not getattr(a, "mem_budget_gb", 0):
+        return None
+    import atexit
+    led = MemLedger(a.mem_budget_gb, getattr(a, "mem_ledger", None))
+    atexit.register(led.release)
+    return led
+
+
+def claim_peek(cf):
+    """False if this point is done, failed, or held by a live worker."""
+    try:
+        t = cf.read_text().strip()
+    except OSError:
+        return True
+    if t == "done" or t.startswith("failed"):
+        return False
+    pid_s = t.partition(":")[0]
+    return not (pid_s.isdigit() and _pid_alive(int(pid_s)))
+
+
+def next_point(a, remaining, cur, est, ledger):
+    """Claim the next point: the current size first, else queue order (longest first).
+    With a ledger only points whose memory estimate fits are taken -- a big point that does
+    not fit right now is passed over for smaller ones and retried later; if nothing fits,
+    the worker waits. Returns (key, claim file) or None when nothing is left for it."""
+    while remaining:
+        waiting = False
+        for key in sorted(remaining, key=lambda k: k[0] != cur):
+            cf = claim_file(a, key)
+            if ledger is None:
+                remaining.remove(key)
+                if try_claim(cf, a.max_attempts):
+                    return key, cf
+                continue
+            if not claim_peek(cf):
+                remaining.remove(key)
+                continue
+            need = est(key)
+            if need > ledger.budget:
+                remaining.remove(key)
+                if try_claim(cf, a.max_attempts):
+                    _write_atomic(cf, f"failed: needs ~{need:.0f} GiB, above --mem-budget-gb {ledger.budget:g}")
+                    print(f"# n = {key[0]} {key[1]} d{key[3]}: needs ~{need:.0f} GiB > budget; marked failed",
+                          flush=True)
+                continue
+            if not ledger.reserve(need):
+                waiting = True
+                continue
+            remaining.remove(key)
+            if try_claim(cf, a.max_attempts):
+                ledger.noted = False
+                return key, cf
+            ledger.release()
+        if waiting and remaining:
+            if not ledger.noted:
+                print(f"# waiting for memory (budget {ledger.budget:g} GiB, available "
+                      f"{mem_available_gb() or 0:.0f} GiB)", flush=True)
+                ledger.noted = True
+            time.sleep(15)
+    return None
+
+
+def mem_preflight(lay, a, jobs, variants=None):
+    if not getattr(a, "mem_budget_gb", 0):
+        return
+    per = {}
+    for k in jobs:
+        per.setdefault(k[0], point_mem_gb(lay, a, k, variants))
+    print(f"# memory budget {a.mem_budget_gb:g} GiB (ledger {getattr(a, 'mem_ledger', None) or '/tmp/nighthawk_mem_ledger'}); "
+          f"per-point estimate: " + ", ".join(f"n={n} {g:.1f}" for n, g in sorted(per.items())) + " GiB", flush=True)
+    over = [n for n, g in per.items() if g > a.mem_budget_gb]
+    if over:
+        print(f"# WARNING: sizes {sorted(over)} exceed the budget and will be marked failed", flush=True)
+
+
 def parse_variant(spec, a):
     """'4/4:t3', '4/4:t2', '4/3:tiled', '2/7:torus:t3', '4/4:untiled' -> run namespace."""
     import copy
@@ -2087,6 +2274,7 @@ def cmd_run_group(a, lay):
             if v.ace_tiling:
                 ace_preflight(lay, v, sizes)
         print(f"# {len(jobs) - len(todo)} of {len(jobs)} points done for every variant", flush=True)
+        mem_preflight(lay, a, jobs, vas)
         if a.gpus:
             return launch(a, lay, None, jobs, done, done_keys, finish) if todo else finish()
     out = Path(a.out)
@@ -2094,14 +2282,16 @@ def cmd_run_group(a, lay):
     _GATE["a"] = a
     if a.max_rss_gb:
         start_rss_watchdog(a.max_rss_gb)
+    ledger = make_ledger(a)
     engines, cur, fails, remaining = {}, None, 0, list(todo)
     while remaining:
-        key = next((k for k in remaining if k[0] == cur), remaining[0])
-        remaining.remove(key)
+        if ledger:
+            ledger.release()
+        got = next_point(a, remaining, cur, lambda k: point_mem_gb(lay, a, k, vas), ledger)
+        if got is None:
+            break
+        key, cf = got
         n, fam, K, d, j, i = key
-        cf = claim_file(a, key)
-        if not try_claim(cf, a.max_attempts):
-            continue
         need = [vi for vi, t in enumerate(tags) if key not in load_jsonl(a.out, t, lay.n)]
         if not need:
             mark_done(cf)
@@ -2141,6 +2331,8 @@ def cmd_run_group(a, lay):
         fh.flush()
         os.fsync(fh.fileno())
         mark_done(cf)
+    if ledger:
+        ledger.release()
     if not a.worker:
         finish()
 
@@ -2209,6 +2401,7 @@ def cmd_run(a):
               f"{(', is_torus ' + str(bool(getattr(a, 'ace_torus', False)))) if a.backend == 'ace' and not a.ace_max_width else ''}"
               f"{(', max width ' + str(a.ace_max_width) + ' (layout per size above)') if a.backend == 'ace' and a.ace_max_width else ''}")
         print(f"# {len(jobs) - len(todo)} of {len(jobs)} points already done", flush=True)
+        mem_preflight(lay, a, jobs)
         if a.gpus:
             if todo:
                 return launch(a, lay, tag, jobs, recs)
@@ -2219,15 +2412,17 @@ def cmd_run(a):
     _GATE["a"] = a
     if a.max_rss_gb:
         start_rss_watchdog(a.max_rss_gb)
+    ledger = make_ledger(a)
     engines, fails, remaining = {}, 0, list(todo)
     while remaining:
+        if ledger:
+            ledger.release()                        # the previous point's reservation
         cur = next(iter(engines), None)          # stay on the current size: no re-initialisation
-        key = next((k for k in remaining if k[0] == cur), remaining[0])
-        remaining.remove(key)
+        got = next_point(a, remaining, cur, lambda k: point_mem_gb(lay, a, k), ledger)
+        if got is None:
+            break
+        key, cf = got
         n, fam, K, d, j, i = key
-        cf = claim_file(a, key)
-        if not try_claim(cf, a.max_attempts):
-            continue
         if key in load_jsonl(a.out, tag, lay.n):   # finished by another worker since we started
             mark_done(cf)
             continue
@@ -2272,6 +2467,8 @@ def cmd_run(a):
         recs[key] = rec
         score = f"F {r['fidelity']:.5f} +/- {r['se']:.1e}" if r["fidelity"] is not None else f"{r['shots']:,} samples"
         print(f"n {n:>2} {fam:7s} K{K} d{d:>3} part {j} inst {i}  {score}  ({rec['seconds']}s)", flush=True)
+    if ledger:
+        ledger.release()
     if a.worker:
         return
     recs = load_jsonl(a.out, tag, lay.n)
@@ -2548,6 +2745,13 @@ def main():
     r.add_argument("--max-rss-gb", dest="max_rss_gb", type=float, default=0,
                    help="per-worker resident-memory cap: above it the point is marked failed and the worker "
                         "exits (0 = off). Use this instead of ulimit -v or QRACK_MAX_CPU_QB")
+    r.add_argument("--mem-budget-gb", dest="mem_budget_gb", type=float, default=0,
+                   help="machine-wide memory budget (GiB) shared by every worker and run using the same "
+                        "ledger: a worker takes a point only if its estimated peak fits, else it takes a "
+                        "smaller one or waits (0 = off: workers take points regardless of memory)")
+    r.add_argument("--mem-ledger", dest="mem_ledger", default=None,
+                   help="reservation directory shared by all runs on this machine "
+                        "(default /tmp/nighthawk_mem_ledger, or $NIGHTHAWK_MEM_LEDGER)")
     r.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
 
     p = sub.add_parser("aceplan", help="list ACE layouts: seams, simulator widths, memory")
