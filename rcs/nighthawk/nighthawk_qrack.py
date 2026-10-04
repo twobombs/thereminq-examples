@@ -47,6 +47,8 @@ Subcommands
             claim-file queue (QRACK_OCL_DEFAULT_DEVICE per worker); a killed worker's
             point is taken over, and the same command resumes.
   selftest  conventions and exactness checks (seconds).
+  aceplan   every distinct ACE layout of the register: seams, simulator widths and
+            worst-case dense memory, ranked as --ace-max-width ranks them.
   seamgap   data-only analysis of the release (numpy), unchanged.
 
 Backends
@@ -60,6 +62,21 @@ Backends
           idle in |0>. Default is_torus=False (the device patch is not a torus).
           --ace-torus, and --geometry nnqab (nn_qab.py's rule), switch to
           is_torus=True; the run header and every record say which was used.
+          --ace-max-width W: bigger patches. Of every distinct ACE layout of the
+          register (all lrc, lrr; non-torus only by default, as the device patch is
+          not a torus -- --ace-torus-search torus|any widens it), take the one that puts the
+          fewest of this circuit's CZ couplers on a seam (the only gates ACE
+          approximates) while its widest internal simulator has at most W qubits,
+          i.e. the least approximation that still fits in memory. Widths are read from the
+          installed QrackAceBackend itself (patch bulk + boundary replicas + crossbar),
+          so the choice follows whatever your Qrack build does. `aceplan` lists them.
+          --ace-tiling: ACE numbers its chunks along a folded 1D chain, so on the
+          device grid a chunk is strips of different rows and most vertical couplers
+          cross simulators. Tiling instead searches (deterministic annealing) for the
+          placement of logical qubits on ACE sites that keeps the most couplers inside
+          one simulator: compact tiles on the device grid, the same simulators and
+          memory. Couplers are then no longer ACE-grid neighbours; ACE still applies
+          them (exactly inside a simulator, through its seam machinery otherwise).
 
 Environment: no CUDA. OpenCL via QRACK_OCL_DEFAULT_DEVICE, or --cpu.
 For big exact states: QRACK_MAX_CPU_QB, QRACK_MAX_ALLOC_MB.
@@ -75,6 +92,9 @@ Examples
   python nighthawk_qrack.py run      --repo rcs-nighthawk --backend exact --families patched \\
          --depths 20 36 --out clean_exact.jsonl
   python nighthawk_qrack.py run      --repo rcs-nighthawk --summarize --out clean_ace.jsonl
+  python nighthawk_qrack.py aceplan  --repo rcs-nighthawk --max-width 33
+  python nighthawk_qrack.py run      --repo rcs-nighthawk --backend ace --families fxeb \
+         --sizes 27-34 --ace-max-width 33 --out big_ace.jsonl
 """
 
 import os
@@ -418,6 +438,250 @@ def two_patch_config(size, torus):
     return _TWO_PATCH[key]
 
 
+def ace_sim_widths(s):
+    """Qubit width of every simulator inside a QrackAceBackend, widest first: the patch
+    simulators (bulk + boundary replicas) and, on builds with crossbars, the shared
+    boundary simulator. Falls back to counting _unpack() entries per simulator."""
+    sims = getattr(s, "sim", None)
+    if sims:
+        try:
+            return sorted((int(x.num_qubits()) for x in sims), reverse=True)
+        except Exception:
+            pass
+    return sorted(collections.Counter(sid for lq in range(s.num_qubits()) for sid, _ in s._unpack(lq)).values(),
+                  reverse=True)
+
+
+def amp_bytes():
+    """Bytes per complex amplitude of this Qrack build (fp16 4, fp32 8, fp64 16)."""
+    from pyqrack.qrack_system import Qrack
+    return 2 ** (Qrack.fppow - 2)
+
+
+def dense_gb(widths):
+    """Worst-case memory if every simulator were one dense state vector. QUnit keeps
+    unentangled qubits apart, so shallow or truncated points use far less."""
+    return sum(2.0 ** w for w in widths) * amp_bytes() / 2 ** 30
+
+
+_ACE_PLAN = {}
+
+
+def ace_plan(size, toruses=(False, True)):
+    """Every distinct ACE layout of a size-site register over lrc = 0..row length,
+    lrr = 0..column length and the given torus settings. Layouts that place every
+    qubit identically are listed once, under the smallest lrc + lrr."""
+    key = (size, tuple(toruses))
+    if key in _ACE_PLAN:
+        return _ACE_PLAN[key]
+    from pyqrack import QrackAceBackend
+    probe = QrackAceBackend(size, is_gpu=False)
+    C, R = probe.get_row_length(), probe.get_column_length()
+    del probe
+    cands = sorted(((t, lrc, lrr) for t in toruses for lrr in range(R + 1) for lrc in range(C + 1)),
+                   key=lambda x: (x[1] + x[2], x[1], x[0]))
+    rows, seen = [], set()
+    for torus, lrc, lrr in cands:
+        s = QrackAceBackend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False)
+        unpack = [tuple(tuple(e) for e in s._unpack(q)) for q in range(s.num_qubits())]
+        sig = (torus, tuple(unpack))
+        if sig not in seen:
+            seen.add(sig)
+            widths = ace_sim_widths(s)
+            rows.append(dict(torus=torus, lrc=lrc, lrr=lrr, boundary=sum(1 for u in unpack if len(u) > 1),
+                             sims=len(widths), widths=widths, max_width=widths[0], unpack=unpack))
+        del s
+    _ACE_PLAN[key] = rows
+    return rows
+
+
+def circuit_couplers(lay, n, layout):
+    """The circuit's CZ couplers among the first n logical qubits, in ACE register indices
+    (every colour is used equally often, so each coupler counts once)."""
+    _, _, C = ace_register(lay, n, layout)
+    idx = [r * C + c for r, c in lay.pos[:n]]
+    return sorted({tuple(sorted((idx[u], idx[v]))) for es in lay.matchings.values() for u, v in es if u < n and v < n})
+
+
+def seam_couplers(r, couplers):
+    """Couplers ACE cannot apply inside one simulator: either end is a seam (replicated)
+    qubit, or the two ends live in different simulators. These are where ACE
+    approximates; every other CZ is exact."""
+    un = r["unpack"]
+    return sum(1 for u, v in couplers if len(un[u]) > 1 or len(un[v]) > 1 or un[u][0][0] != un[v][0][0])
+
+
+def with_seams(rows, couplers, tiling=None):
+    """Layout rows (with seams) annotated with their seam-coupler count for this circuit;
+    layouts with identical numbers listed once, under the smallest lrc + lrr.
+    tiling = (lay, n, start sites): count after ace_tiling instead of on the device grid."""
+    out, seen = [], set()
+    for r in rows:
+        if not r["boundary"]:
+            continue
+        if tiling:
+            lay, n, start = tiling
+            lc = logical_couplers(lay, n)
+            site = ace_tiling(r, start, lc, len(r["unpack"]))
+            sids = [frozenset(sid for sid, _ in u) for u in r["unpack"]]
+            ex, rp, cr = coupler_classes(sids, site, lc)
+            r = dict(r, seam_cz=rp + cr, cross_cz=cr)
+        else:
+            sids = [frozenset(sid for sid, _ in u) for u in r["unpack"]]
+            ex, rp, cr = coupler_classes(sids, list(range(len(sids))), couplers)
+            r = dict(r, seam_cz=rp + cr, cross_cz=cr)
+        sig = (r["torus"], r["boundary"], r["seam_cz"], r["cross_cz"], tuple(r["widths"]))
+        if sig not in seen:
+            seen.add(sig)
+            out.append(r)
+    return out
+
+
+def ace_rank(r):
+    """Fewest couplers across simulators first (ends that share no simulator: the n=27
+    fxeb layout scan showed these, not seam-replica couplers, track the XEB loss),
+    then fewest couplers on a seam, then fewest simulators, seam qubits, footprint;
+    a non-torus layout wins a tie (the device patch is not a torus)."""
+    return (r["cross_cz"], r["seam_cz"], r["sims"], r["boundary"], r["max_width"],
+            sum(2 ** w for w in r["widths"]), r["torus"], r["lrc"] + r["lrr"], r["lrc"])
+
+
+def widest_ace_config(size, max_width, couplers, torus=None, tiling=None):
+    """The --ace-max-width pick: the layout that approximates the fewest of this circuit's
+    couplers with no internal simulator wider than max_width. Layouts without seams
+    (one simulator, i.e. exact) are left to --backend exact."""
+    toruses = (False, True) if torus is None else (bool(torus),)
+    rows = with_seams(ace_plan(size, toruses), couplers, tiling)
+    ok = [r for r in rows if r["max_width"] <= max_width]
+    if not ok:
+        narrow = min((r["max_width"] for r in rows), default=None)
+        raise SystemExit(f"no ACE layout of a {size}-site register has all simulators <= {max_width} qubits"
+                         + (f" (narrowest with seams: {narrow})" if narrow else ""))
+    return min(ok, key=ace_rank)
+
+
+TILING_VERSION = 2          # 2: crossings weighted 10x seam-replica couplers (was 4:3)
+
+
+def coupler_classes(sids, site, couplers):
+    """(exact, replica, cross) counts for logical couplers placed on ACE sites:
+    exact   both ends bulk qubits of the same simulator (applied exactly)
+    replica a seam qubit is involved, but the two ends share a simulator
+    cross   the two ends share no simulator at all"""
+    ex = rp = cr = 0
+    for u, v in couplers:
+        a, b = sids[site[u]], sids[site[v]]
+        if len(a) == 1 and len(b) == 1 and a == b:
+            ex += 1
+        elif a & b:
+            rp += 1
+        else:
+            cr += 1
+    return ex, rp, cr
+
+
+_TILES = {}
+
+
+def ace_tiling(row, start, couplers, size, iters=200_000, seed=TILING_VERSION):
+    """Placement of logical qubits 0..n-1 on ACE sites minimising 10 x (couplers across
+    simulators) + (couplers through a seam replica), by simulated annealing over swaps and moves
+    to free sites. Starts from `start` (the device-geometry placement), so it is never
+    worse than that; deterministic for a given layout, circuit and seed."""
+    key = (row["torus"], row["lrc"], row["lrr"], size, tuple(start), tuple(couplers), iters, seed)
+    if key in _TILES:
+        return _TILES[key]
+    import random
+    sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
+    n = len(start)
+    site = list(start)
+    used = set(site)
+    free = [x for x in range(size) if x not in used]
+    adj = [[] for _ in range(n)]
+    for u, v in couplers:
+        adj[u].append(v)
+        adj[v].append(u)
+
+    def w(su, sv):
+        a, b = sids[su], sids[sv]
+        if len(a) == 1 and len(b) == 1 and a == b:
+            return 0
+        return 1 if a & b else 10
+
+    def local(q, sq, skip=-1):
+        return sum(w(sq, site[x]) for x in adj[q] if x != skip)
+
+    c = sum(w(site[u], site[v]) for u, v in couplers)
+    best_c, best = c, site[:]
+    rng = random.Random(seed)
+    T0, T1 = 8.0, 0.1
+    for it in range(iters):
+        T = T0 * (T1 / T0) ** (it / iters)
+        if free and rng.random() < 0.1:
+            q, k = rng.randrange(n), rng.randrange(len(free))
+            sq, sf = site[q], free[k]
+            d = local(q, sf) - local(q, sq)
+            if d <= 0 or rng.random() < math.exp(-d / T):
+                site[q], free[k] = sf, sq
+                c += d
+        elif n > 1:
+            a_, b_ = rng.sample(range(n), 2)
+            sa, sb = site[a_], site[b_]
+            before = local(a_, sa, b_) + local(b_, sb, a_)
+            after = local(a_, sb, b_) + local(b_, sa, a_)
+            d = after - before
+            if d <= 0 or rng.random() < math.exp(-d / T):
+                site[a_], site[b_] = sb, sa
+                c += d
+        if c < best_c:
+            best_c, best = c, site[:]
+    _TILES[key] = best
+    return best
+
+
+def place(lay, n, a, row, size):
+    """ACE site of each of the first n logical qubits: the device geometry, or with
+    --ace-tiling the annealed tiling of that geometry for this layout."""
+    _, _, C = ace_register(lay, n, getattr(a, "ace_layout", "grid"))
+    start = [r * C + c for r, c in lay.pos[:n]]
+    if not getattr(a, "ace_tiling", False):
+        return start
+    return ace_tiling(row, start, logical_couplers(lay, n), size)
+
+
+def logical_couplers(lay, n):
+    return sorted({tuple(sorted(e)) for es in lay.matchings.values() for e in es if e[0] < n and e[1] < n})
+
+
+def layout_row(size, lrc, lrr, torus):
+    """ace_plan's entry for one layout (the identical layout with the smallest lrc+lrr
+    if this one was folded into it)."""
+    from pyqrack import QrackAceBackend
+    s = QrackAceBackend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False)
+    unpack = [tuple(tuple(e) for e in s._unpack(q)) for q in range(s.num_qubits())]
+    widths = ace_sim_widths(s)
+    del s
+    return dict(torus=torus, lrc=lrc, lrr=lrr, boundary=sum(1 for u in unpack if len(u) > 1),
+                sims=len(widths), widths=widths, max_width=widths[0], unpack=unpack)
+
+
+def torus_search(a):
+    """Torus settings the --ace-max-width search may use: False (non-torus, the default,
+    as the Nighthawk patch is not a torus), True, or None for both."""
+    mode = getattr(a, "ace_torus_search", "flat")
+    if getattr(a, "ace_torus", False):
+        mode = "torus"
+    return {"flat": False, "torus": True, "any": None}[mode]
+
+
+def ace_register(lay, n, layout):
+    """(sites, rows, cols) of the ACE register holding the first n logical qubits."""
+    R, C = lay.grid
+    if layout == "strip":
+        R = max(4, max(r for r, _ in lay.pos[:n]) + 1)
+    return R * C, R, C
+
+
 class AceEngine:
     """QrackAceBackend on the device geometry: logical q -> its (row, col) of the
     subgrid, so couplers are nearest-neighbour in ACE's grid. One backend per worker and
@@ -428,23 +692,34 @@ class AceEngine:
                         logical qubits (R >= 4, so ACE lays it out as 8 columns), the
                         register nn_qab.py would use for that width
     --lrc/--lrr auto    nn_qab.py's two-patch rule for that register
-    is_torus            False unless --ace-torus or --geometry nnqab"""
+    --ace-max-width W   fewest seam couplers with every internal simulator <= W qubits,
+                        over the torus settings --ace-torus-search allows (default: non-torus)
+    is_torus            False unless --ace-torus, --geometry nnqab or --ace-torus-search torus|any"""
 
     def __init__(self, lay, n, a):
         self.lay, self.n, self.a = lay, n, a
-        R, C = lay.grid
-        if getattr(a, "ace_layout", "grid") == "strip":
-            R = max(4, max(r for r, _ in lay.pos[:n]) + 1)
-        self.idx = [r * C + c for r, c in lay.pos[:n]]
-        self.size = R * C
+        self.size, R, C = ace_register(lay, n, getattr(a, "ace_layout", "grid"))
+        grid_idx = [r * C + c for r, c in lay.pos[:n]]
+        self.idx = grid_idx
         self.torus = torus = getattr(a, "ace_torus", False)
         lrc, lrr = a.lrc, a.lrr
-        if "auto" in (str(lrc), str(lrr)):
+        mw = getattr(a, "ace_max_width", None)
+        tiling = (lay, n, grid_idx) if getattr(a, "ace_tiling", False) else None
+        if mw:
+            pick = widest_ace_config(self.size, mw, circuit_couplers(lay, n, getattr(a, "ace_layout", "grid")),
+                                     torus_search(a), tiling)
+            lrc, lrr, torus = pick["lrc"], pick["lrr"], pick["torus"]
+            self.torus = torus
+        elif "auto" in (str(lrc), str(lrr)):
             alrc, alrr, *_ = two_patch_config(self.size, torus)
             lrc = alrc if str(lrc) == "auto" else int(lrc)
             lrr = alrr if str(lrr) == "auto" else int(lrr)
         self.lrc, self.lrr = int(lrc), int(lrr)
         _, _, self.patches, self.boundary, self.b2b = ace_register_geometry(self.size, self.lrc, self.lrr, torus)
+        row = layout_row(self.size, self.lrc, self.lrr, torus)
+        self.idx = place(lay, n, a, row, self.size)
+        sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
+        self.coupler_classes = coupler_classes(sids, self.idx, logical_couplers(lay, n))
         from pyqrack import QrackAceBackend
         # ACE on rusticl/Vega10 hung compute rings and forced GPU resets: CPU unless --ace-gpu
         self.sim = QrackAceBackend(self.size, long_range_columns=self.lrc, long_range_rows=self.lrr,
@@ -452,11 +727,15 @@ class AceEngine:
         rl, cl = self.sim.get_row_length(), self.sim.get_column_length()
         if (rl, cl) != (C, R):
             raise SystemExit(f"ACE chose a {rl}x{cl} grid for {self.size} qubits, expected {C} columns x {R} rows")
+        self.widths = ace_sim_widths(self.sim)
 
     def geometry(self):
         return dict(ace_register=self.size, ace_lrc=self.lrc, ace_lrr=self.lrr, ace_torus=bool(self.torus),
                     ace_patches=self.patches, ace_boundary=self.boundary,
-                    ace_b2b=round(self.b2b, 3) if self.boundary else None)
+                    ace_b2b=round(self.b2b, 3) if self.boundary else None, ace_widths=self.widths,
+                    ace_couplers=dict(zip(("exact", "replica", "cross"), self.coupler_classes)),
+                    ace_tiling=bool(getattr(self.a, "ace_tiling", False)),
+                    ace_map=hashlib.sha1(json.dumps(self.idx).encode()).hexdigest()[:10])
 
     def reset(self):
         """Back to |0...0> in place: measure all, flip the ones. No reallocation, so no
@@ -767,6 +1046,12 @@ def cfg_tag(a):
         keys["torus"] = True                     # absent for the original non-torus runs
     if getattr(a, "ace_layout", "grid") != "grid" and a.backend == "ace":
         keys["layout"] = a.ace_layout             # absent for the original 8x8 runs
+    if getattr(a, "ace_max_width", None) and a.backend == "ace":
+        keys["max_width"] = a.ace_max_width       # absent unless --ace-max-width; lrc/lrr then unused
+        if getattr(a, "ace_torus_search", "flat") != "any":
+            keys["torus_search"] = a.ace_torus_search   # 'any' keeps the tag of the first runs
+    if getattr(a, "ace_tiling", False) and a.backend == "ace":
+        keys["tiling"] = TILING_VERSION           # absent for device-geometry placement
     return a.backend + "-" + hashlib.sha1(json.dumps(keys, sort_keys=True).encode()).hexdigest()[:8]
 
 
@@ -1167,7 +1452,7 @@ def report_failed(a):
             print(f"#   {name}: {why}")
 
 
-GEO_KEYS = ("ace_register", "ace_lrc", "ace_lrr", "ace_torus")
+GEO_KEYS = ("ace_register", "ace_lrc", "ace_lrr", "ace_torus", "ace_map")
 
 
 def report_geometry(recs, a):
@@ -1440,6 +1725,60 @@ def launch(a, lay, tag, jobs, recs):
     summarize(recs, lay, a)
 
 
+def mem_total_gb():
+    try:
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) / 1048576
+    except OSError:
+        pass
+    return None
+
+
+def ace_preflight(lay, a, sizes):
+    """--ace-max-width: print the layout each register size gets and check the
+    worst-case dense memory of all workers against this machine's RAM.
+    --ace-tiling with fixed lrc/lrr: print the coupler counts the tiling reaches."""
+    if a.backend != "ace":
+        return
+    if getattr(a, "ace_tiling", False) and not a.ace_max_width:
+        for n in sizes:
+            size, _, C = ace_register(lay, n, a.ace_layout)
+            row = layout_row(size, int(a.lrc), int(a.lrr), bool(a.ace_torus))
+            sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
+            start = [r_ * C + c_ for r_, c_ in lay.pos[:n]]
+            lc = logical_couplers(lay, n)
+            g = coupler_classes(sids, start, lc)
+            t = coupler_classes(sids, ace_tiling(row, start, lc, size), lc)
+            print(f"# ace tiling n={n}, lrc {a.lrc} lrr {a.lrr}: couplers exact/replica/cross "
+                  f"{g[0]}/{g[1]}/{g[2]} on the device grid -> {t[0]}/{t[1]}/{t[2]} tiled", flush=True)
+        return
+    if not getattr(a, "ace_max_width", None):
+        return
+    workers = len(parse_gpus(a.gpus)) * a.per_gpu if a.gpus else 1
+    worst = 0.0
+    for n in sizes:
+        size, _, C = ace_register(lay, n, a.ace_layout)
+        cp = circuit_couplers(lay, n, a.ace_layout)
+        tiling = (lay, n, [r_ * C + c_ for r_, c_ in lay.pos[:n]]) if a.ace_tiling else None
+        r = widest_ace_config(size, a.ace_max_width, cp, torus_search(a), tiling)
+        gb = dense_gb(r["widths"])
+        worst = max(worst, gb)
+        print(f"# ace n={n} ({size} sites), max width {a.ace_max_width}: lrc={r['lrc']} lrr={r['lrr']} "
+              f"torus={r['torus']}, {r['cross_cz']}/{len(cp)} couplers across simulators, "
+              f"{r['seam_cz']} on a seam, {r['boundary']} seam qubits, "
+              f"simulator widths {r['widths']}, dense worst case {gb:,.1f} GB per worker", flush=True)
+    ram = mem_total_gb()
+    if ram and worst * workers > 0.85 * ram:
+        print(f"# WARNING: {workers} worker(s) x {worst:,.1f} GB dense worst case > 85% of {ram:,.0f} GB RAM. "
+              f"Shallow and truncated points stay far smaller (QUnit keeps unentangled qubits apart), "
+              f"but deep full-register ones will not: lower --per-gpu, or set --max-rss-gb so an "
+              f"oversized point is marked failed instead of tripping the OOM killer.", flush=True)
+    if a.ace_gpu:
+        print("# note: --ace-gpu with wide patches: each V340 die has 8 GB; patches over ~29 qubits "
+              "(fp32) will not fit on one", flush=True)
+
+
 def cmd_run(a):
     THETA_DIST["mode"] = a.theta
     lay = Layout(a.repo)
@@ -1457,6 +1796,14 @@ def cmd_run(a):
         return
     if a.sizes and a.n:
         raise SystemExit("give --sizes or --n, not both")
+    if a.ace_max_width and (a.geometry == "nnqab" or "auto" in (str(a.lrc), str(a.lrr))):
+        raise SystemExit("--ace-max-width picks lrc/lrr itself: drop --geometry nnqab and --lrc/--lrr auto")
+    if a.ace_torus and a.ace_torus_search != "flat":
+        raise SystemExit("give --ace-torus or --ace-torus-search, not both")
+    if a.ace_torus:
+        a.ace_torus_search = "torus"
+    if a.ace_tiling and ("auto" in (str(a.lrc), str(a.lrr)) or a.geometry == "nnqab"):
+        raise SystemExit("--ace-tiling needs explicit --lrc/--lrr or --ace-max-width")
     if a.theta != "haar" and not a.worker:
         print(f"# VARIANT: single-qubit theta drawn as {a.theta}, not Haar -- these are not the paper's "
               f"circuits (records kept under their own config tag)", flush=True)
@@ -1468,6 +1815,8 @@ def cmd_run(a):
         raise SystemExit("fxeb needs an exact 2^n reference: sizes up to ~34-36 (memory), not 61")
     jobs = build_jobs(lay, a, sizes, fams)
     check_shot_budgets(a, jobs)
+    if not a.worker:
+        ace_preflight(lay, a, sizes)
     todo = [k for k in jobs if k not in recs]
     if a.retry_failed and not a.worker:            # once, here; workers never retry failed points
         cleared = 0
@@ -1489,7 +1838,8 @@ def cmd_run(a):
         print(f"# cfg {tag}: backend {a.backend}, sizes {sizes}, shots {a.shots}, "
               f"twirls {a.twirls if a.backend == 'ace' else 0}"
               f"{', lrc/lrr ' + str(a.lrc) + '/' + str(a.lrr) if a.backend == 'ace' else ''}"
-              f"{(', is_torus ' + str(bool(getattr(a, 'ace_torus', False)))) if a.backend == 'ace' else ''}")
+              f"{(', is_torus ' + str(bool(getattr(a, 'ace_torus', False)))) if a.backend == 'ace' and not a.ace_max_width else ''}"
+              f"{(', max width ' + str(a.ace_max_width) + ' (layout per size above)') if a.backend == 'ace' and a.ace_max_width else ''}")
         print(f"# {len(jobs) - len(todo)} of {len(jobs)} points already done", flush=True)
         if a.gpus:
             if todo:
@@ -1559,6 +1909,35 @@ def cmd_run(a):
     recs = load_jsonl(a.out, tag, lay.n)
     pack_shots(recs, lay, a)
     summarize(recs, lay, a)
+
+
+# ================================================================== aceplan
+def cmd_aceplan(a):
+    lay = Layout(a.repo)
+    n = a.n or lay.n
+    size, R, C = ace_register(lay, n, a.ace_layout)
+    toruses = {"any": (False, True), "false": (False,), "true": (True,)}[a.torus]
+    cp = circuit_couplers(lay, n, a.ace_layout)
+    tiling = (lay, n, [r_ * C + c_ for r_, c_ in lay.pos[:n]]) if a.tiling else None
+    if tiling:
+        print(f"# tiling every layout (annealing, ~1-2 s each)...", flush=True)
+    rows = sorted(with_seams(ace_plan(size, toruses), cp, tiling), key=ace_rank)
+    pick = widest_ace_config(size, a.max_width, cp, None if a.torus == "any" else a.torus == "true", tiling) \
+        if a.max_width else None
+    print(f"ACE layouts of the {R}x{C} register ({size} sites) holding the first {n} logical qubits "
+          f"({len(cp)} circuit couplers); {amp_bytes()} bytes/amplitude; ranked by couplers across simulators"
+          + (", after tiling" if tiling else ", device-grid placement"))
+    print("torus  lrc lrr  cross CZ  seam CZ  seam qb  sims  widest  dense GB (worst)  simulator widths")
+    for r in rows[:a.top] if not a.max_width else rows:
+        if a.max_width and r["max_width"] > a.max_width and not a.all:
+            continue
+        mark = "  <- pick" if pick is not None and (r["lrc"], r["lrr"], r["torus"]) == \
+            (pick["lrc"], pick["lrr"], pick["torus"]) else ""
+        print(f"{str(r['torus']):5s}  {r['lrc']:>3} {r['lrr']:>3}  {r['cross_cz']:>8}  {r['seam_cz']:>7}  {r['boundary']:>7}  "
+              f"{r['sims']:>4}  {r['max_width']:>6}  {dense_gb(r['widths']):>16,.1f}  {r['widths']}{mark}")
+    ram = mem_total_gb()
+    if ram:
+        print(f"(this machine: {ram:,.0f} GB RAM)")
 
 
 # ================================================================== selftest
@@ -1760,6 +2139,15 @@ def main():
                    help="ace: long_range_columns, or auto (nn_qab.py two-patch rule)")
     r.add_argument("--lrr", default=4, type=lambda v: v if v == "auto" else int(v),
                    help="ace: long_range_rows, or auto")
+    r.add_argument("--ace-max-width", dest="ace_max_width", type=int, default=None,
+                   help="ace: bigger patches -- the layout with the fewest circuit couplers on a seam whose "
+                        "widest internal simulator has at most this many qubits (see aceplan); overrides --lrc/--lrr")
+    r.add_argument("--ace-tiling", dest="ace_tiling", action="store_true",
+                   help="ace: place logical qubits on ACE sites as compact tiles (annealed) instead of the "
+                        "device grid, so most couplers stay inside one simulator; same simulators and memory")
+    r.add_argument("--ace-torus-search", dest="ace_torus_search", choices=["flat", "torus", "any"], default="flat",
+                   help="--ace-max-width: search non-torus layouts only (flat, default: Nighthawk is not a torus), "
+                        "torus only, or any (the first runs' behaviour and config tag)")
     r.add_argument("--ace-layout", dest="ace_layout", choices=["grid", "strip"], default="grid",
                    help="grid: full 8x8 subgrid for every size; strip: smallest R x 8 strip holding "
                         "the first n qubits (nn_qab-style register)")
@@ -1784,6 +2172,18 @@ def main():
                         "exits (0 = off). Use this instead of ulimit -v or QRACK_MAX_CPU_QB")
     r.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
 
+    p = sub.add_parser("aceplan", help="list ACE layouts: seams, simulator widths, memory")
+    p.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
+    p.add_argument("--n", type=int, default=None, help="logical register (default 61)")
+    p.add_argument("--ace-layout", dest="ace_layout", choices=["grid", "strip"], default="grid")
+    p.add_argument("--torus", choices=["any", "false", "true"], default="false",
+                   help="layouts to list: false (default, the device patch is not a torus), true or any")
+    p.add_argument("--max-width", dest="max_width", type=int, default=None,
+                   help="mark the --ace-max-width pick and hide wider layouts")
+    p.add_argument("--all", action="store_true", help="with --max-width, still list the wider layouts")
+    p.add_argument("--top", type=int, default=25, help="without --max-width, list this many (default 25)")
+    p.add_argument("--tiling", action="store_true", help="count seam couplers after --ace-tiling placement")
+
     t = sub.add_parser("selftest", help="conventions and exactness checks")
     t.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
     t.add_argument("--n", type=int, default=14, help="register for the exact mirror checks")
@@ -1804,7 +2204,8 @@ up to 3 parents up, via $NIGHTHAWK_REPO or --repo):
 help per command: python3 nighthawk_qrack.py <command> -h""")
         return
     a = ap.parse_args()
-    dict(seamgap=cmd_seamgap, verify=cmd_verify, hwxeb=cmd_hwxeb, run=cmd_run, selftest=cmd_selftest)[a.cmd](a)
+    dict(seamgap=cmd_seamgap, verify=cmd_verify, hwxeb=cmd_hwxeb, run=cmd_run, selftest=cmd_selftest,
+         aceplan=cmd_aceplan)[a.cmd](a)
 
 
 if __name__ == "__main__":
