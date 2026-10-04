@@ -520,9 +520,9 @@ def with_seams(rows, couplers, tiling=None):
         if not r["boundary"]:
             continue
         if tiling:
-            lay, n, start = tiling
+            lay, n, start, *ver = tiling
             lc = logical_couplers(lay, n)
-            site = ace_tiling(r, start, lc, len(r["unpack"]))
+            site = ace_tiling(r, start, lc, len(r["unpack"]), ver[0] if ver else TILING_VERSION)
             sids = [frozenset(sid for sid, _ in u) for u in r["unpack"]]
             ex, rp, cr = coupler_classes(sids, site, lc)
             r = dict(r, seam_cz=rp + cr, cross_cz=cr)
@@ -560,7 +560,23 @@ def widest_ace_config(size, max_width, couplers, torus=None, tiling=None):
     return min(ok, key=ace_rank)
 
 
-TILING_VERSION = 2          # 2: crossings weighted 10x seam-replica couplers (was 4:3)
+TILING_VERSION = 3          # default for --ace-tiling; --ace-tiling-version 2 keeps the old placement
+# v2: couplers only, 10 x across simulators + 1 x through a seam replica, one annealing run
+# v3: couplers across simulators 20 (was 10), through a seam replica 1, + 6 per logical
+#     qubit on a seam site + 2 per simulator holding bulk qubits; three restarts, one from
+#     the device grid and two from the best (n-1)-qubit tiling extended by one qubit, so
+#     adding a qubit never starts from scratch; results cached on disk
+#     (~/.cache/nighthawk_qrack/tiles.json, or $NIGHTHAWK_TILE_CACHE).
+#     Seam qubits dominate: in the 4/4 tiled big run XEB at d=12 fell monotonically with
+#     seam qubits used (3, 5, 6, 8 -> 0.158, 0.101, 0.069, -0.015), and a trial weighting
+#     that traded seam qubits for fewer simulators (n=18: 4 seam / 1 simulator against
+#     1 seam / 2) dropped XEB from 0.48 to 0.06 and ran 4x slower
+TILING_W3 = dict(cross=20, replica=1, sim=2, seam=6)
+TILING_ITERS3, TILING_SEEDS3 = 150_000, (3, 1003, 2003)
+
+
+def tiling_version(a):
+    return int(getattr(a, "ace_tiling_version", None) or TILING_VERSION)
 
 
 def coupler_classes(sids, site, couplers):
@@ -583,7 +599,159 @@ def coupler_classes(sids, site, couplers):
 _TILES = {}
 
 
-def ace_tiling(row, start, couplers, size, iters=200_000, seed=TILING_VERSION):
+def ace_tiling(row, start, couplers, size, version=TILING_VERSION):
+    """Placement of logical qubits 0..n-1 on ACE sites (see TILING_VERSION)."""
+    if int(version) == 2:
+        return _tiling_v2(row, start, couplers, size)
+    if int(version) == 3:
+        return _tiling_v3(row, start, couplers, size)
+    raise SystemExit(f"unknown tiling version {version} (2 or 3)")
+
+
+def placement_stats(row, site, couplers):
+    """exact / replica / cross couplers, logical qubits on seam sites, simulators holding
+    bulk qubits -- of one placement."""
+    sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
+    ex, rp, cr = coupler_classes(sids, site, couplers)
+    bulk = {next(iter(sids[x])) for x in site if len(sids[x]) == 1}
+    return dict(exact=ex, replica=rp, cross=cr, seam_used=sum(1 for x in site if len(sids[x]) > 1),
+                sims_used=len(bulk))
+
+
+def _tile_cache_path():
+    p = os.environ.get("NIGHTHAWK_TILE_CACHE")
+    return Path(p) if p else Path.home() / ".cache" / "nighthawk_qrack" / "tiles.json"
+
+
+def _tile_cache_get(key):
+    try:
+        return json.loads(_tile_cache_path().read_text()).get(key)
+    except (OSError, ValueError):
+        return None
+
+
+def _tile_cache_put(key, site):
+    """Merge one entry into the shared cache file (atomic replace; a lost race only costs a
+    deterministic recomputation)."""
+    p = _tile_cache_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            d = json.loads(p.read_text())
+        except (OSError, ValueError):
+            d = {}
+        d[key] = site
+        tmp = p.with_name(p.name + f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(d))
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def _cost3_parts(sids, bulk_of):
+    W = TILING_W3
+
+    def w(su, sv):
+        a, b = sids[su], sids[sv]
+        if len(a) == 1 and len(b) == 1 and a == b:
+            return 0
+        return W["replica"] if a & b else W["cross"]
+
+    def total(site, couplers):
+        c = sum(w(site[u], site[v]) for u, v in couplers)
+        bulk = {bulk_of[x] for x in site if bulk_of[x] >= 0}
+        return c + W["sim"] * len(bulk) + W["seam"] * sum(1 for x in site if bulk_of[x] < 0)
+    return w, total
+
+
+def _anneal3(sids, couplers, site0, size, iters, seed):
+    """Simulated annealing of the v3 cost from site0; returns (best placement, its cost)."""
+    import random
+    W = TILING_W3
+    bulk_of = [next(iter(s)) if len(s) == 1 else -1 for s in sids]
+    w, total = _cost3_parts(sids, bulk_of)
+    n = len(site0)
+    site = list(site0)
+    used = set(site)
+    free = [x for x in range(size) if x not in used]
+    adj = [[] for _ in range(n)]
+    for u, v in couplers:
+        adj[u].append(v)
+        adj[v].append(u)
+    cnt = collections.Counter(bulk_of[x] for x in site if bulk_of[x] >= 0)
+
+    def local(q, sq, skip=-1):
+        return sum(w(sq, site[x]) for x in adj[q] if x != skip)
+
+    c = total(site, couplers)
+    best_c, best = c, site[:]
+    rng = random.Random(seed)
+    T0, T1 = 8.0, 0.1
+    for it in range(iters):
+        T = T0 * (T1 / T0) ** (it / iters)
+        if free and rng.random() < 0.15:
+            q, k = rng.randrange(n), rng.randrange(len(free))
+            sq, sf = site[q], free[k]
+            b1, b2 = bulk_of[sq], bulk_of[sf]
+            dsim = 0
+            if b1 != b2:
+                dsim -= 1 if b1 >= 0 and cnt[b1] == 1 else 0
+                dsim += 1 if b2 >= 0 and cnt[b2] == 0 else 0
+            d = (local(q, sf) - local(q, sq) + W["sim"] * dsim
+                 + W["seam"] * ((b2 < 0) - (b1 < 0)))
+            if d <= 0 or rng.random() < math.exp(-d / T):
+                site[q], free[k] = sf, sq
+                if b1 >= 0:
+                    cnt[b1] -= 1
+                if b2 >= 0:
+                    cnt[b2] += 1
+                c += d
+        elif n > 1:
+            a_, b_ = rng.sample(range(n), 2)
+            sa, sb = site[a_], site[b_]
+            before = local(a_, sa, b_) + local(b_, sb, a_)
+            after = local(a_, sb, b_) + local(b_, sa, a_)
+            d = after - before
+            if d <= 0 or rng.random() < math.exp(-d / T):
+                site[a_], site[b_] = sb, sa
+                c += d
+        if c < best_c:
+            best_c, best = c, site[:]
+    return best, best_c
+
+
+def _tiling_v3(row, start, couplers, size):
+    n = len(start)
+    couplers = [tuple(e) for e in couplers]
+    key = ("v3", row["torus"], row["lrc"], row["lrr"], size, tuple(start), tuple(couplers))
+    if key in _TILES:
+        return _TILES[key]
+    dkey = hashlib.sha1(json.dumps([3, TILING_W3, TILING_ITERS3, list(TILING_SEEDS3), row["unpack"],
+                                    list(start), couplers]).encode()).hexdigest()
+    hit = _tile_cache_get(dkey)
+    if hit is not None:
+        _TILES[key] = hit
+        return hit
+    sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
+    bulk_of = [next(iter(s)) if len(s) == 1 else -1 for s in sids]
+    _, total = _cost3_parts(sids, bulk_of)
+    starts = [list(start)]
+    if n > 2:                                    # warm start: best (n-1) tiling + one qubit
+        prev = _tiling_v3(row, start[:n - 1], [e for e in couplers if e[1] < n - 1], size)
+        free = [x for x in range(size) if x not in set(prev)]
+        ext = min((prev + [x] for x in free), key=lambda s_: total(s_, couplers))
+        starts = [ext, list(start)]
+    best = None
+    for k, seed in enumerate(TILING_SEEDS3):
+        site, c = _anneal3(sids, couplers, starts[k % len(starts)], size, TILING_ITERS3, seed)
+        if best is None or c < best[1]:
+            best = (site, c)
+    _TILES[key] = best[0]
+    _tile_cache_put(dkey, best[0])
+    return best[0]
+
+
+def _tiling_v2(row, start, couplers, size, iters=200_000, seed=2):
     """Placement of logical qubits 0..n-1 on ACE sites minimising 10 x (couplers across
     simulators) + (couplers through a seam replica), by simulated annealing over swaps and moves
     to free sites. Starts from `start` (the device-geometry placement), so it is never
@@ -646,7 +814,7 @@ def place(lay, n, a, row, size):
     start = [r * C + c for r, c in lay.pos[:n]]
     if not getattr(a, "ace_tiling", False):
         return start
-    return ace_tiling(row, start, logical_couplers(lay, n), size)
+    return ace_tiling(row, start, logical_couplers(lay, n), size, tiling_version(a))
 
 
 def logical_couplers(lay, n):
@@ -704,7 +872,7 @@ class AceEngine:
         self.torus = torus = getattr(a, "ace_torus", False)
         lrc, lrr = a.lrc, a.lrr
         mw = getattr(a, "ace_max_width", None)
-        tiling = (lay, n, grid_idx) if getattr(a, "ace_tiling", False) else None
+        tiling = (lay, n, grid_idx, tiling_version(a)) if getattr(a, "ace_tiling", False) else None
         if mw:
             pick = widest_ace_config(self.size, mw, circuit_couplers(lay, n, getattr(a, "ace_layout", "grid")),
                                      torus_search(a), tiling)
@@ -718,8 +886,8 @@ class AceEngine:
         _, _, self.patches, self.boundary, self.b2b = ace_register_geometry(self.size, self.lrc, self.lrr, torus)
         row = layout_row(self.size, self.lrc, self.lrr, torus)
         self.idx = place(lay, n, a, row, self.size)
-        sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
-        self.coupler_classes = coupler_classes(sids, self.idx, logical_couplers(lay, n))
+        self.stats = placement_stats(row, self.idx, logical_couplers(lay, n))
+        self.coupler_classes = (self.stats["exact"], self.stats["replica"], self.stats["cross"])
         from pyqrack import QrackAceBackend
         # ACE on rusticl/Vega10 hung compute rings and forced GPU resets: CPU unless --ace-gpu
         self.sim = QrackAceBackend(self.size, long_range_columns=self.lrc, long_range_rows=self.lrr,
@@ -736,6 +904,8 @@ class AceEngine:
                     ace_b2b=round(self.b2b, 3) if self.boundary else None, ace_widths=self.widths,
                     ace_couplers=dict(zip(("exact", "replica", "cross"), self.coupler_classes)),
                     ace_tiling=bool(getattr(self.a, "ace_tiling", False)),
+                    **({"ace_tiling_version": tiling_version(self.a)} if getattr(self.a, "ace_tiling", False) else {}),
+                    ace_seam_used=self.stats["seam_used"], ace_sims_used=self.stats["sims_used"],
                     ace_map=hashlib.sha1(json.dumps(self.idx).encode()).hexdigest()[:10])
 
     def reset(self):
@@ -1052,7 +1222,7 @@ def cfg_tag(a):
         if getattr(a, "ace_torus_search", "flat") != "any":
             keys["torus_search"] = a.ace_torus_search   # 'any' keeps the tag of the first runs
     if getattr(a, "ace_tiling", False) and a.backend == "ace":
-        keys["tiling"] = TILING_VERSION           # absent for device-geometry placement
+        keys["tiling"] = tiling_version(a)        # absent for device-geometry placement; 2 = the v2 tags
     return a.backend + "-" + hashlib.sha1(json.dumps(keys, sort_keys=True).encode()).hexdigest()[:8]
 
 
@@ -1173,21 +1343,16 @@ def fxeb_cycles(lay, d, inst, n):
     return build_cycles(lay, d, instance_seed(inst, "full"), inst, n=n)
 
 
-def run_fxeb(lay, eng, d, inst, a):
-    """Forward XEB of the backend's samples against the exact reference, as nn_qab.py
-    does: (N sum_s q p - 1) / (N sum p^2 - 1), which is Eq. (1) with the whole register
-    as one patch. No twirling: the samples come from one plain forward run, so a
-    structured (coherent) approximation keeps whatever XEB it earns. The reference is
-    an exact QrackSimulator of the same gates; its 2^n probabilities live in one
-    float buffer (n=34: 128 GiB state + 64 GiB probabilities)."""
-    from pyqrack import QrackSimulator
-    n = eng.n
-    cyc = fxeb_cycles(lay, d, inst, n)
+def fxeb_sample(eng, cyc, a):
     eng.reset()
     apply_forward(eng, cyc)
-    k = FXEB_SHOTS if a.shots == "paper" else int(a.shots)
-    sh = eng.shots(k)
+    return eng.shots(FXEB_SHOTS if a.shots == "paper" else int(a.shots))
 
+
+def fxeb_reference(n, cyc, a):
+    """Exact 2^n output probabilities of the forward circuit (one float buffer; n=34:
+    128 GiB state + 64 GiB probabilities), with their sum and collision sum."""
+    from pyqrack import QrackSimulator
     ref = QrackSimulator(n, is_gpu=not a.cpu and a.ref_gpu)
     for ang, es in cyc:
         for q, t in enumerate(ang):
@@ -1196,17 +1361,53 @@ def run_fxeb(lay, eng, d, inst, a):
             ref.mcz([a_], b_)
     p = out_probs_np(ref)
     del ref
-    N = float(p.size)
     sum_p = float(p.sum(dtype=np.float64))
     sum_sq = float(np.einsum("i,i->", p, p, dtype=np.float64)) / (sum_p * sum_p)
+    return p, sum_p, sum_sq
+
+
+def fxeb_score(ref, sh):
+    """(N sum_s q p - 1) / (N sum p^2 - 1) of samples sh against the reference."""
+    p, sum_p, sum_sq = ref
+    N = float(p.size)
     ps = p[sh.astype(np.int64)].astype(np.float64) / sum_p
-    del p
     norm = N * sum_sq - 1.0                      # ideal XEB (collision ratio), ~1 if Porter-Thomas
     x = N * ps - 1.0
-    xeb = float(x.mean() / norm)
-    se = float(x.std(ddof=1) / math.sqrt(len(x)) / norm)
-    return dict(fidelity=xeb, se=se, xeb_linear=float(x.mean()), ideal_xeb=norm,
-                hog=float(np.mean(ps > math.log(2.0) / N)), shots=int(len(x)), _shots={"shots": sh})
+    return dict(fidelity=float(x.mean() / norm), se=float(x.std(ddof=1) / math.sqrt(len(x)) / norm),
+                xeb_linear=float(x.mean()), ideal_xeb=norm, hog=float(np.mean(ps > math.log(2.0) / N)),
+                shots=int(len(x)), _shots={"shots": sh})
+
+
+def run_fxeb(lay, eng, d, inst, a):
+    """Forward XEB of the backend's samples against the exact reference, as nn_qab.py
+    does: (N sum_s q p - 1) / (N sum p^2 - 1), which is Eq. (1) with the whole register
+    as one patch. No twirling: the samples come from one plain forward run, so a
+    structured (coherent) approximation keeps whatever XEB it earns. The reference is
+    an exact QrackSimulator of the same gates."""
+    cyc = fxeb_cycles(lay, d, inst, eng.n)
+    sh = fxeb_sample(eng, cyc, a)
+    return fxeb_score(fxeb_reference(eng.n, cyc, a), sh)
+
+
+def run_fxeb_group(lay, engs, d, inst, a):
+    """Several engines' samples of the same circuit scored against ONE exact reference.
+    Samples are drawn first, so only bitstrings are held while the reference is built."""
+    n = engs[0].n
+    cyc = fxeb_cycles(lay, d, inst, n)
+    shots, ace_s = [], []
+    for eng in engs:
+        t0 = time.time()
+        shots.append(fxeb_sample(eng, cyc, a))
+        ace_s.append(time.time() - t0)
+    t0 = time.time()
+    ref = fxeb_reference(n, cyc, a)
+    ref_s = time.time() - t0
+    out = []
+    for sh, s in zip(shots, ace_s):
+        r = fxeb_score(ref, sh)
+        r.update(ace_seconds=round(s, 2), ref_seconds=round(ref_s, 2), ref_shared=len(engs))
+        out.append(r)
+    return out
 
 
 def run_full(lay, eng, d, pub, a):
@@ -1221,10 +1422,19 @@ def run_full(lay, eng, d, pub, a):
 
 
 # ================================================================== bitstring storage
+def shots_base(a):
+    return Path(a.shots_dir) if a.shots_dir else Path(a.out).with_name(Path(a.out).stem + "_shots")
+
+
 def shots_root(a):
     """<shots-dir or out stem_shots>/<cfg tag>: configurations never mix in one release/."""
-    base = Path(a.shots_dir) if a.shots_dir else Path(a.out).with_name(Path(a.out).stem + "_shots")
-    return base / cfg_tag(a)
+    return shots_base(a) / cfg_tag(a)
+
+
+def claim_dir(a):
+    """Claims of a single configuration, or of a --variants group (one claim per point
+    covers every variant scored against that point's reference)."""
+    return shots_base(a) / (getattr(a, "claim_tag", None) or cfg_tag(a)) / "claims"
 
 
 def point_file(a, n, fam, K, d, j, i):
@@ -1356,7 +1566,7 @@ def _pid_alive(pid):
 
 def claim_file(a, key):
     n, fam, K, d, j, i = key
-    return shots_root(a) / "claims" / f"n{n}_{fam}_K{K}_d{d:02d}_p{j}_i{i}"
+    return claim_dir(a) / f"n{n}_{fam}_K{K}_d{d:02d}_p{j}_i{i}"
 
 
 def _write_atomic(path, text):
@@ -1409,7 +1619,7 @@ def try_claim(path, max_attempts=2, retry_failed=False):
 
 
 def failed_points(a):
-    root = shots_root(a) / "claims"
+    root = claim_dir(a)
     out = []
     if root.exists():
         for f in sorted(root.iterdir()):
@@ -1650,9 +1860,12 @@ def _strip_launch_args(argv):
     return out
 
 
-def launch(a, lay, tag, jobs, recs):
+def launch(a, lay, tag, jobs, recs, done_keys=None, finish=None):
     """Spawn len(gpus) x per_gpu workers (QRACK_OCL_DEFAULT_DEVICE per worker), watch the
-    record files, then pack the bitstrings and summarise once they are all done."""
+    record files, then pack the bitstrings and summarise once they are all done.
+    done_keys/finish override how progress is read and what runs at the end (--variants)."""
+    if done_keys is None:
+        done_keys = lambda: load_jsonl(a.out, tag, lay.n)
     import subprocess
     gpus = parse_gpus(a.gpus)
     logdir = Path(a.out).with_name(Path(a.out).stem + "_logs")
@@ -1689,7 +1902,7 @@ def launch(a, lay, tag, jobs, recs):
 
     try:
         while True:
-            have = load_jsonl(a.out, tag, lay.n)
+            have = done_keys()
             alive = [p for *_, p in procs if p.poll() is None]
             # a worker the memory watchdog stopped (exit 3) is replaced while points remain;
             # other exits (crash loops, 3 failures in a row) are not
@@ -1704,7 +1917,7 @@ def launch(a, lay, tag, jobs, recs):
             if not alive:
                 break
             time.sleep(30)
-            have = load_jsonl(a.out, tag, lay.n)
+            have = done_keys()
             done = sum(1 for k in jobs if k in have)
             if done != last:
                 el = time.time() - t0
@@ -1721,6 +1934,8 @@ def launch(a, lay, tag, jobs, recs):
     bad = [(g, k, p.returncode) for g, k, p in procs if p.returncode and p.returncode != 3]
     if bad:
         print(f"# workers with errors (see logs): {bad}")
+    if finish is not None:
+        return finish()
     recs = load_jsonl(a.out, tag, lay.n)
     pack_shots(recs, lay, a)
     summarize(recs, lay, a)
@@ -1749,10 +1964,11 @@ def ace_preflight(lay, a, sizes):
             sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
             start = [r_ * C + c_ for r_, c_ in lay.pos[:n]]
             lc = logical_couplers(lay, n)
-            g = coupler_classes(sids, start, lc)
-            t = coupler_classes(sids, ace_tiling(row, start, lc, size), lc)
-            print(f"# ace tiling n={n}, lrc {a.lrc} lrr {a.lrr}: couplers exact/replica/cross "
-                  f"{g[0]}/{g[1]}/{g[2]} on the device grid -> {t[0]}/{t[1]}/{t[2]} tiled", flush=True)
+            g = placement_stats(row, start, lc)
+            t = placement_stats(row, ace_tiling(row, start, lc, size, tiling_version(a)), lc)
+            f = lambda x: f"{x['exact']}/{x['replica']}/{x['cross']}, {x['seam_used']} seam, {x['sims_used']} sims"
+            print(f"# ace tiling v{tiling_version(a)} n={n}, lrc {a.lrc} lrr {a.lrr}: exact/replica/cross "
+                  f"{f(g)} on the device grid -> {f(t)} tiled", flush=True)
         return
     if not getattr(a, "ace_max_width", None):
         return
@@ -1761,7 +1977,7 @@ def ace_preflight(lay, a, sizes):
     for n in sizes:
         size, _, C = ace_register(lay, n, a.ace_layout)
         cp = circuit_couplers(lay, n, a.ace_layout)
-        tiling = (lay, n, [r_ * C + c_ for r_, c_ in lay.pos[:n]]) if a.ace_tiling else None
+        tiling = (lay, n, [r_ * C + c_ for r_, c_ in lay.pos[:n]], tiling_version(a)) if a.ace_tiling else None
         r = widest_ace_config(size, a.ace_max_width, cp, torus_search(a), tiling)
         gb = dense_gb(r["widths"])
         worst = max(worst, gb)
@@ -1780,9 +1996,160 @@ def ace_preflight(lay, a, sizes):
               "(fp32) will not fit on one", flush=True)
 
 
+def parse_variant(spec, a):
+    """'4/4:t3', '4/4:t2', '4/3:tiled', '2/7:torus:t3', '4/4:untiled' -> run namespace."""
+    import copy
+    toks = spec.split(":")
+    try:
+        lrc, lrr = (int(x) for x in toks[0].split("/"))
+    except ValueError:
+        raise SystemExit(f"--variants {spec}: start with lrc/lrr, e.g. 4/4:t3")
+    v = copy.copy(a)
+    v.lrc, v.lrr, v.ace_torus, v.ace_tiling = lrc, lrr, False, False
+    v.ace_tiling_version, v.ace_max_width, v.geometry, v.variants = TILING_VERSION, None, "manual", None
+    for t in toks[1:]:
+        if t == "torus":
+            v.ace_torus = True
+        elif t in ("untiled", "grid"):
+            v.ace_tiling = False
+        elif t == "tiled":
+            v.ace_tiling = True
+        elif re.fullmatch(r"t\d+", t):
+            v.ace_tiling, v.ace_tiling_version = True, int(t[1:])
+        else:
+            raise SystemExit(f"--variants {spec}: unknown token {t!r} (torus, tiled, untiled, t2, t3)")
+    v.ace_torus_search = "torus" if v.ace_torus else "flat"
+    return v
+
+
+def cmd_run_group(a, lay):
+    """--variants: every fxeb point is sampled by each listed ACE configuration and all of
+    them are scored against one exact reference. Records and bitstrings go under each
+    variant's own config tag, exactly as separate runs would write them (so --summarize
+    with that variant's flags, the graph tool and resuming all work per variant); only
+    the claims are shared, under a group tag, one per point."""
+    if a.backend != "ace" or a.families != "fxeb":
+        raise SystemExit("--variants scores several ACE configurations against one exact reference: "
+                         "use it with --backend ace --families fxeb")
+    if a.ace_max_width or a.geometry == "nnqab" or a.ace_tiling or a.ace_torus:
+        raise SystemExit("--variants sets the layout per variant: drop --ace-max-width, --geometry, "
+                         "--ace-tiling and --ace-torus")
+    vas = [parse_variant(sp, a) for sp in a.variants]
+    tags = [cfg_tag(v) for v in vas]
+    if len(set(tags)) != len(tags):
+        raise SystemExit("two --variants describe the same configuration")
+    a.claim_tag = "grp-" + hashlib.sha1("|".join(sorted(tags)).encode()).hexdigest()[:8]
+    names = [f"{sp} [{t}]" for sp, t in zip(a.variants, tags)]
+
+    def done_keys():
+        rr = [set(load_jsonl(a.out, t, lay.n)) for t in tags]
+        return set.intersection(*rr)
+
+    def finish():
+        for v, t, nm in zip(vas, tags, names):
+            print(f"\n######## variant {nm}")
+            recs_v = load_jsonl(a.out, t, lay.n)
+            pack_shots(recs_v, lay, v)
+            summarize(recs_v, lay, v)
+
+    if a.summarize or a.pack:
+        for v, t, nm in zip(vas, tags, names):
+            print(f"\n######## variant {nm}")
+            recs_v = load_jsonl(a.out, t, lay.n)
+            if a.pack:
+                pack_shots(recs_v, lay, v)
+            if a.summarize:
+                summarize(recs_v, lay, v)
+        return
+    if a.sizes and a.n:
+        raise SystemExit("give --sizes or --n, not both")
+    sizes = parse_sizes(a.sizes) if a.sizes else [a.n or lay.n]
+    if max(sizes) > 36 or min(sizes) < 2:
+        raise SystemExit("fxeb needs an exact 2^n reference: sizes 2..~34-36")
+    jobs = build_jobs(lay, a, sizes, ["fxeb"])
+    done = done_keys()
+    todo = [k for k in jobs if k not in done]
+    if a.retry_failed and not a.worker:
+        cleared = 0
+        for k in todo:
+            cf = claim_file(a, k)
+            try:
+                if cf.read_text().strip().startswith("failed"):
+                    os.rename(cf, cf.with_name(cf.name + f".stale{os.getpid()}"))
+                    cleared += 1
+            except OSError:
+                pass
+        print(f"# --retry-failed: {cleared} failed point(s) cleared for another attempt", flush=True)
+    if not a.worker:
+        print(f"# variants group {a.claim_tag}: {len(vas)} ACE configurations, one exact reference per point")
+        for v, nm in zip(vas, names):
+            print(f"#   {nm}", flush=True)
+            if v.ace_tiling:
+                ace_preflight(lay, v, sizes)
+        print(f"# {len(jobs) - len(todo)} of {len(jobs)} points done for every variant", flush=True)
+        if a.gpus:
+            return launch(a, lay, None, jobs, done, done_keys, finish) if todo else finish()
+    out = Path(a.out)
+    fh = open(out.with_name(f"{out.stem}.w{os.getpid()}.jsonl") if a.worker else out, "a")
+    _GATE["a"] = a
+    if a.max_rss_gb:
+        start_rss_watchdog(a.max_rss_gb)
+    engines, cur, fails, remaining = {}, None, 0, list(todo)
+    while remaining:
+        key = next((k for k in remaining if k[0] == cur), remaining[0])
+        remaining.remove(key)
+        n, fam, K, d, j, i = key
+        cf = claim_file(a, key)
+        if not try_claim(cf, a.max_attempts):
+            continue
+        need = [vi for vi, t in enumerate(tags) if key not in load_jsonl(a.out, t, lay.n)]
+        if not need:
+            mark_done(cf)
+            continue
+        _WATCH["claim"] = cf
+        try:
+            if n != cur:
+                engines.clear()
+                cur = n
+            for vi in need:
+                if vi not in engines:
+                    engines[vi] = make_engine(lay, n, vas[vi])
+            t0 = time.time()
+            res = run_fxeb_group(lay, [engines[vi] for vi in need], d, i, a)
+        except Exception as err:
+            print(f"# n = {n} fxeb d{d} inst {i}: failed ({err}); marked failed", flush=True)
+            _write_atomic(cf, f"failed: {type(err).__name__}: {err}"[:500])
+            engines.clear()
+            cur = None
+            fails += 1
+            if a.worker and fails >= 3:
+                raise SystemExit(f"# worker stops after {fails} failures in a row")
+            continue
+        fails = 0
+        for vi, r in zip(need, res):
+            arrays = r.pop("_shots", None)
+            if arrays:
+                f = point_file(vas[vi], n, fam, K, d, j, i)
+                save_point(f, arrays)
+                r["shots_file"] = str(f)
+            rec = dict(cfg=tags[vi], n=n, family=fam, K=K, depth=d, partition=j, instance=i,
+                       seconds=round(r["ace_seconds"] + r["ref_seconds"] / len(need), 2),
+                       **engines[vi].geometry(), **r)
+            fh.write(json.dumps(rec) + "\n")
+            print(f"n {n:>2} fxeb d{d:>3} inst {i}  {a.variants[vi]:>14s}  F {r['fidelity']:.5f} +/- {r['se']:.1e}"
+                  f"  (ace {r['ace_seconds']}s, ref {r['ref_seconds']}s shared by {len(need)})", flush=True)
+        fh.flush()
+        os.fsync(fh.fileno())
+        mark_done(cf)
+    if not a.worker:
+        finish()
+
+
 def cmd_run(a):
     THETA_DIST["mode"] = a.theta
     lay = Layout(a.repo)
+    if a.variants:
+        return cmd_run_group(a, lay)
     geo = resolve_geometry(lay, a)
     if geo and not a.worker:
         print(f"# nnqab geometry: lrc={a.lrc} lrr={a.lrr} torus, {geo['boundary']} boundary qubits, "
@@ -2143,6 +2510,13 @@ def main():
     r.add_argument("--ace-max-width", dest="ace_max_width", type=int, default=None,
                    help="ace: bigger patches -- the layout with the fewest circuit couplers on a seam whose "
                         "widest internal simulator has at most this many qubits (see aceplan); overrides --lrc/--lrr")
+    r.add_argument("--ace-tiling-version", dest="ace_tiling_version", type=int, default=TILING_VERSION,
+                   choices=[2, 3], help=f"tiling search (default {TILING_VERSION}): 2 = couplers only, one run; "
+                   "3 = + simulators used and seam qubits, restarts, warm start from n-1 (see TILING_VERSION)")
+    r.add_argument("--variants", nargs="+", default=None, metavar="SPEC",
+                   help="fxeb only: score several ACE configurations against ONE exact reference per point, "
+                        "e.g. --variants 4/4:t3 4/4:t2 4/3:t3 (lrc/lrr, then torus / untiled / tiled / t2 / t3). "
+                        "Each variant keeps its own config tag and records")
     r.add_argument("--ace-tiling", dest="ace_tiling", action="store_true",
                    help="ace: place logical qubits on ACE sites as compact tiles (annealed) instead of the "
                         "device grid, so most couplers stay inside one simulator; same simulators and memory")
