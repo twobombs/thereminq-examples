@@ -24,8 +24,9 @@ Figures (one window each; --save writes PNGs too):
  10  fxeb: per-cycle decay b(N) per configuration, extrapolated to 61 qubits against
      ibm_phoenix's b
  11  fxeb: what predicts the XEB -- every ACE configuration at one (n, d) against its
-     coupler split (exact / replica / cross), seam qubits used, simulators used and
-     widest simulator, with the rank correlation of each
+     coupler split (exact / replica / cross), seam qubits used, simulators used,
+     widest simulator and effective bulk-to-boundary ratio of the placed qubits
+     (nn_qab.py's B-to-B), with the rank correlation of each
 
 Harvest: with no --out, every *.jsonl in the working directory is read (worker files
 are folded into their main file), so every sweep collected so far is set side by side.
@@ -765,6 +766,16 @@ def fig_fxeb_bN(plt, lay, fvd, data, dmin):
 _GEO = {}
 
 
+def with_b2b(out, n):
+    """Effective bulk-to-boundary ratio of the placed qubits: logical qubits on bulk sites
+    over logical qubits on seam sites -- nn_qab.py's B-to-B ratio, counted over the sites
+    the circuit actually occupies rather than over the whole register (no seam qubit used:
+    the bulk count itself, as the finite upper end)."""
+    s = out.get("seam_used")
+    out["eff_b2b"] = None if s is None else ((n - s) / s if s else float(n))
+    return out
+
+
 def geometry_stats(lay, rec, n):
     """Coupler split and placement facts of the ACE configuration a record ran with, at
     size n: from the record where it has them, recomputed with nighthawk_qrack's own
@@ -782,7 +793,7 @@ def geometry_stats(lay, rec, n):
         out.update(rec["ace_couplers"])
     if rec.get("ace_seam_used") is not None:            # written by newer runs: nothing to recompute
         out.update(seam_used=rec["ace_seam_used"], sims_used=rec.get("ace_sims_used"), map_ok=True)
-        _GEO[key] = out
+        _GEO[key] = with_b2b(out, n)
         return out
     if None not in (reg, lrc, lrr):
         try:
@@ -806,7 +817,7 @@ def geometry_stats(lay, rec, n):
                            sims_used=len(set().union(*[sids[s] for s in idx if len(sids[s]) == 1])))
         except Exception as err:                    # no PyQrack here: record values only
             out["error"] = str(err)
-    _GEO[key] = out
+    _GEO[key] = with_b2b(out, n)
     return out
 
 
@@ -834,7 +845,8 @@ def rank_corr(x, y):
 
 PREDICTORS = [("exact", "couplers inside one simulator"), ("replica", "couplers through a seam replica"),
               ("cross", "couplers across simulators"), ("seam_used", "logical qubits on seam sites"),
-              ("sims_used", "simulators holding bulk qubits"), ("widest", "widest internal simulator")]
+              ("sims_used", "simulators holding bulk qubits"), ("widest", "widest internal simulator"),
+              ("eff_b2b", "effective bulk-to-boundary ratio (nn_qab B-to-B, placed qubits)")]
 
 
 def pick_nd(data, want_n, want_d):
@@ -867,7 +879,10 @@ def fig_fxeb_predict(plt, lay, data, want_n, want_d):
             rows.append((c, p, geometry_stats(lay, p["recs"][0], n)))
     if not rows:
         return None
-    fig, axs = plt.subplots(2, 3, figsize=(15, 9))
+    ncol = math.ceil(len(PREDICTORS) / 2)
+    fig, axs = plt.subplots(2, ncol, figsize=(5 * ncol, 9), squeeze=False)
+    for ax in list(axs.flat)[len(PREDICTORS):]:
+        ax.set_axis_off()
     for ax, (key, title) in zip(axs.flat, PREDICTORS):
         xs, ys = [], []
         for c, p, g in rows:
@@ -1223,7 +1238,13 @@ def main():
     a = ap.parse_args()
     if not a.out:                                   # harvest: every record file here
         import re
-        a.out = sorted(str(p) for p in Path(".").glob("*.jsonl") if not re.search(r"\.w\d+\.jsonl$", p.name))
+        # a run launched with --gpus writes only worker files (<stem>.w<pid>.jsonl) until it
+        # finishes, so a run in progress is found through its worker files' stem as well
+        stems = set()
+        for p in Path(".").glob("*.jsonl"):
+            m = re.match(r"^(.*)\.w\d+\.jsonl$", p.name)
+            stems.add(m.group(1) + ".jsonl" if m else p.name)
+        a.out = sorted(stems)
         if a.out:
             print(f"harvesting {len(a.out)} record files: {', '.join(a.out)}")
     if not a.out and not a.hwxeb:
