@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-nighthawk_plot.py -- matplotlib views of everything nighthawk_qrack.py produces.
+nighthawk_graph.py -- matplotlib views of everything nighthawk_qrack.py produces.
 
 Reads, for every configuration found (backend / shots / twirls / ACE seams):
   run records    <out>.jsonl and every worker's <out>.w<pid>.jsonl
@@ -19,6 +19,24 @@ Figures (one window each; --save writes PNGs too):
      grid, Hamming-weight distribution against the uniform binomial
   6  release + hwxeb: collision ratios, PyQrack vs release per-circuit XEB, residuals
   7  run cost: seconds per point against register size and depth
+  8  fxeb: forward XEB against depth, one panel per register size, every configuration
+  9  fxeb: forward XEB against register size, one panel per depth
+ 10  fxeb: per-cycle decay b(N) per configuration, extrapolated to 61 qubits against
+     ibm_phoenix's b
+ 11  fxeb: what predicts the XEB -- every ACE configuration at one (n, d) against its
+     coupler split (exact / replica / cross), seam qubits used, simulators used and
+     widest simulator, with the rank correlation of each
+
+Harvest: with no --out, every *.jsonl in the working directory is read (worker files
+are folded into their main file), so every sweep collected so far is set side by side.
+Configurations are labelled from what their records say (lrc/lrr, torus, tiled, shots)
+instead of by config hash. --table FILE writes every point of every configuration as
+CSV (with the coupler split, recomputed where older records lack it) and prints a
+per-(n, d) comparison; then it exits.
+
+XEB points in views 8-11 are the plain mean over instances, with the standard error
+from the instance scatter (instances are different circuits, and their spread is far
+larger than shot noise); nighthawk_qrack.py's summary uses inverse-variance weights.
 
 Viewer (default when a display is available): a Tk window with the list of views on
 the left, the selected figure on the right with matplotlib's zoom/pan toolbar, and
@@ -27,12 +45,22 @@ Auto-reload refreshes every 60 s, so it can follow a sweep that is still running
 Save PNG writes the current view, Save all writes every view.
 
 Usage
-  python3 nighthawk_plot.py --out clean_ace.jsonl --hwxeb hwxeb.json      # viewer
-  python3 nighthawk_plot.py --out clean_ace.jsonl --save plots            # PNGs only
+  python3 nighthawk_graph.py                                               # viewer, every *.jsonl here
+  python3 nighthawk_graph.py --out clean_ace.jsonl --hwxeb hwxeb.json      # viewer, chosen files
+  python3 nighthawk_graph.py --save plots                                  # PNGs only
+  python3 nighthawk_graph.py --table harvest.csv                           # CSV + comparison table
 Without a display (no DISPLAY / WAYLAND_DISPLAY) it writes PNGs to ./nighthawk_plots.
 """
 
+import os
+
+QRACK_LIB_PATH = "/usr/local/lib/qrack/libqrack_pinvoke.so"
+if os.path.exists(QRACK_LIB_PATH):
+    os.environ["PYQRACK_SHARED_LIB_PATH"] = QRACK_LIB_PATH
+
 import argparse
+import csv
+import hashlib
 import importlib.util
 import json
 import math
@@ -57,6 +85,38 @@ def load_nh():
 nh = load_nh()
 
 FAM_STYLE = {"mirror": ("o", "C0"), "3-patch": ("s", "C1"), "4-patch": ("D", "C2")}
+LABELS = {}                 # cfg tag -> readable label, filled by Store.reload()
+
+
+def lab(cfg):
+    """Readable label of a configuration, with its tag for traceability."""
+    return f"{LABELS[cfg]} [{cfg}]" if cfg in LABELS else cfg
+
+
+def describe(cfg, recs, lay):
+    """Label a configuration from what its records say rather than by its hash."""
+    backend = cfg.split("-")[0]
+    rs = list(recs.values())
+    fams = sorted({r["family"] for r in rs})
+    shots = sorted({r.get("shots") for r in rs if r["family"] == "fxeb" and r.get("shots")})
+    extra = (f", {shots[0]} shots" if len(shots) == 1 and shots[0] != nh.FXEB_SHOTS else "")
+    if backend != "ace":
+        return f"{backend} {'/'.join(fams)}{extra}"
+    geos = {(r.get("ace_lrc"), r.get("ace_lrr"), bool(r.get("ace_torus")), bool(r.get("ace_tiling")))
+            for r in rs if "ace_lrc" in r}
+    regs = {r.get("ace_register") for r in rs if "ace_register" in r}
+    if not geos:
+        return f"ace (no geometry in records){extra}"
+    if len(geos) > 1:
+        lab_ = "ace max-width (layout per size)"
+        if all(g[3] for g in geos):
+            lab_ += " tiled"
+    else:
+        lrc, lrr, torus, tiled = next(iter(geos))
+        lab_ = f"ace {lrc}/{lrr}" + (" torus" if torus else "") + (" tiled" if tiled else " untiled")
+    if any(g != lay.grid[0] * lay.grid[1] for g in regs):
+        lab_ += " strip"
+    return lab_ + extra
 
 
 # ================================================================== data
@@ -152,7 +212,7 @@ def fig_fidelity(plt, lay, fvd, data, hw_recs):
             ds_ = [k[1] for k in ks]
             col = f"C{3 + ci}"
             ax.errorbar(ds_, [logsafe(x, floor) for x in F], se, fmt=m + "-", color=col, ms=6, lw=1,
-                        capsize=2, label=f"clean {fam} [{cfg}]")
+                        capsize=2, label=f"clean {fam} [{lab(cfg)}]")
             low = [(dd, x) for dd, x in zip(ds_, F) if x <= floor]
             if low:
                 ax.plot([x for x, _ in low], [floor] * len(low), "v", color=col, ms=9)
@@ -189,7 +249,7 @@ def fig_sweep(plt, lay, fvd, data):
         ax.set_yscale("log")
         ax.set_xlabel("depth d")
         ax.set_ylabel("mirror survival")
-        ax.set_title(f"2  Mirror decay by register size [{cfg}]")
+        ax.set_title(f"2  Mirror decay by register size [{lab(cfg)}]")
         ax.grid(True, which="both", alpha=0.3)
         ax.legend(fontsize=7, ncol=2)
     return fig
@@ -219,7 +279,7 @@ def fig_bN(plt, lay, fvd, data):
         col = f"C{ci}"
         N = [r[0] for r in rows]
         b = [r[2] for r in rows]
-        ax.plot(N, b, "o", color=col, label=f"b(N) [{cfg}]")
+        ax.plot(N, b, "o", color=col, label=f"b(N) [{lab(cfg)}]")
         for n, _, bb, dr, _ in rows:
             if dr:
                 ax.annotate("*", (n, bb), color=col, fontsize=12)
@@ -295,7 +355,7 @@ def fig_mirror_bits(plt, lay, data, base, want_n, want_d):
                     input_surv[d][0, s] += hit.sum()
                     input_surv[d][1, s] += x.size
         fig, axs = plt.subplots(2, 2, figsize=(13, 9))
-        fig.suptitle(f"4  Mirror bitstrings, n = {n} [{cfg}]")
+        fig.suptitle(f"4  Mirror bitstrings, n = {n} [{lab(cfg)}]")
         ax = axs[0, 0]
         cmap = plt.get_cmap("plasma")
         bins = np.arange(n + 2) - 0.5
@@ -355,7 +415,7 @@ def fig_patched_full(plt, lay, data, base, hw_recs):
         if not pk and not fk:
             continue
         fig, axs = plt.subplots(2, 2, figsize=(13, 9))
-        fig.suptitle(f"5  Patched and full-circuit bitstrings, n = 61 [{cfg}]")
+        fig.suptitle(f"5  Patched and full-circuit bitstrings, n = 61 [{lab(cfg)}]")
         ax = axs[0, 0]
         if pk:
             labels, x0 = [], 0
@@ -492,13 +552,13 @@ def fig_cost(plt, data):
     fig, ax = plt.subplots(figsize=(8, 5))
     any_ = False
     for ci, (cfg, recs) in enumerate(sorted(data.items())):
-        for fam, m in (("mirror", "o"), ("patched", "s"), ("full", "^")):
+        for fam, m in (("mirror", "o"), ("patched", "s"), ("full", "^"), ("fxeb", "P")):
             rr = [r for k, r in recs.items() if k[1] == fam and r.get("seconds") is not None]
             if rr:
                 any_ = True
                 sc = ax.scatter([r["n"] for r in rr], [r["seconds"] for r in rr], c=[r["depth"] for r in rr],
                                 marker=m, cmap="viridis", s=25, edgecolors=f"C{ci}",
-                                label=f"{fam} [{cfg}]")
+                                label=f"{fam} [{lab(cfg)}]")
     if not any_:
         plt.close(fig)
         return None
@@ -510,6 +570,362 @@ def fig_cost(plt, data):
     ax.legend(fontsize=7)
     ax.grid(True, which="both", alpha=0.3)
     return fig
+
+
+# ================================================================== fxeb: harvest and comparison
+def fxeb_points(recs):
+    """{(n, d): stats} over instances: plain mean, standard error from the instance
+    scatter (shot se when there is one instance), shot noise, spread, HOG, ideal XEB."""
+    acc = defaultdict(list)
+    for k, r in recs.items():
+        if k[1] == "fxeb" and r.get("fidelity") is not None:
+            acc[(k[0], k[3])].append(r)
+    out = {}
+    for key, v in acc.items():
+        F = np.array([r["fidelity"] for r in v], float)
+        se = np.array([r["se"] for r in v], float)
+        k = len(v)
+        spread = float(F.std(ddof=1)) if k > 1 else float("nan")
+        shot = float(math.sqrt(np.sum(se ** 2)) / k)
+        out[key] = dict(F=float(F.mean()), err=(spread / math.sqrt(k)) if k > 1 else shot, shot=shot, k=k,
+                        spread=spread, hog=float(np.mean([r.get("hog", np.nan) for r in v])),
+                        ideal=float(np.mean([r.get("ideal_xeb", np.nan) for r in v])), recs=v)
+    return out
+
+
+def fxeb_cfgs(data):
+    return [c for c, r in sorted(data.items()) if any(k[1] == "fxeb" for k in r)]
+
+
+def cfg_colors(cfgs):
+    return {c: f"C{i % 10}" for i, c in enumerate(cfgs)}
+
+
+def fxeb_decay(pts, n, dmin):
+    """Per-cycle decay b = -d ln F / dd at size n, weighted fit over depths >= dmin whose
+    XEB is resolved (F > 2 x its error). Returns (b, b_err, depths used) or None."""
+    good = sorted((d, p) for (nn, d), p in pts.items() if nn == n and d >= dmin and p["F"] > 2 * p["err"])
+    if len(good) < 2:
+        return None
+    d = np.array([x for x, _ in good], float)
+    F = np.array([p["F"] for _, p in good])
+    w = (F / np.array([p["err"] for _, p in good])) ** 2
+    W = np.diag(w)
+    X = np.column_stack([np.ones_like(d), d])
+    cov = np.linalg.inv(X.T @ W @ X)
+    beta = cov @ X.T @ W @ np.log(F)
+    return float(-beta[1]), float(math.sqrt(cov[1, 1])), [int(x) for x in d]
+
+
+def fxeb_czpc(lay, n, depths):
+    """CZ gates per cycle of the forward fxeb circuit on the first n qubits."""
+    c = [sum(len(es) for _, es in nh.fxeb_cycles(lay, d, 0, n)) / d for d in depths]
+    return float(np.mean(c))
+
+
+def nonneg_fit(X, y):
+    """y ~ X @ (u, v) with u, v >= 0 (best single term if the free fit goes negative)."""
+    (u, v), *_ = np.linalg.lstsq(X, y, rcond=None)
+    if u < 0 or v < 0:
+        best = None
+        for j in (0, 1):
+            cj = max(float(X[:, j] @ y / (X[:, j] @ X[:, j])), 0.0)
+            err = float(np.sum((y - cj * X[:, j]) ** 2))
+            if best is None or err < best[0]:
+                best = (err, j, cj)
+        u, v = (best[2], 0.0) if best[1] == 0 else (0.0, best[2])
+    return float(u), float(v)
+
+
+def all_handles(axes):
+    """Legend entries of every panel, each label once."""
+    seen = {}
+    for ax in axes:
+        for h, l in zip(*ax.get_legend_handles_labels()):
+            seen.setdefault(l, h)
+    return list(seen.values()), list(seen.keys())
+
+
+def fxeb_axes(ax, top):
+    ax.axhline(0, color="gray", lw=0.6)
+    ax.set_yscale("symlog", linthresh=1e-3)
+    ax.set_ylim(top=max(top * 1.6, 0.05))
+    ax.set_ylabel("forward XEB")
+    ax.grid(True, which="both", alpha=0.3)
+
+
+def fig_fxeb_depth(plt, lay, fvd, data):
+    cfgs = fxeb_cfgs(data)
+    if not cfgs:
+        return None
+    col = cfg_colors(cfgs)
+    pts = {c: fxeb_points(data[c]) for c in cfgs}
+    sizes = sorted({n for c in cfgs for n, _ in pts[c]})
+    nc = min(4, len(sizes))
+    nr = math.ceil(len(sizes) / nc)
+    fig, axs = plt.subplots(nr, nc, figsize=(4.6 * nc, 3.9 * nr + 0.9), squeeze=False)
+    A, f = fvd["fit"]["prefactor"], fvd["fit"]["fidelity_per_cycle"]
+    dmax = max(d for c in cfgs for _, d in pts[c])
+    dd = np.arange(2, dmax + 5)
+    top = max(p["F"] + p["err"] for c in cfgs for p in pts[c].values())
+    for ax, n in zip(axs.flat, sizes):
+        for ci, c in enumerate(cfgs):
+            ks = sorted(d for nn, d in pts[c] if nn == n)
+            if not ks:
+                continue
+            P = [pts[c][(n, d)] for d in ks]
+            off = (ci - (len(cfgs) - 1) / 2) * 0.15
+            ax.errorbar([d + off for d in ks], [p["F"] for p in P], [p["err"] for p in P], fmt="o-",
+                        color=col[c], ms=4, lw=1, capsize=2, label=lab(c))
+        ax.plot(dd, A * f ** dd, "k--", lw=0.8, label="ibm_phoenix fit (61 q)")
+        fxeb_axes(ax, top)
+        ax.set_xlim(0, dmax + 4)
+        ax.set_title(f"n = {n}", fontsize=10)
+        ax.set_xlabel("depth d")
+    for ax in list(axs.flat)[len(sizes):]:
+        ax.set_axis_off()
+    h, l = all_handles(axs.flat)
+    fig.legend(h, l, loc="lower center", ncol=min(3, len(l)), fontsize=7)
+    fig.suptitle("8  Forward XEB vs depth per register size (error bars: instance scatter)")
+    fig.tight_layout(rect=(0, 0.04 + 0.025 * math.ceil(len(l) / 3), 1, 0.97))
+    return fig
+
+
+def fig_fxeb_size(plt, lay, fvd, data):
+    cfgs = fxeb_cfgs(data)
+    if not cfgs:
+        return None
+    col = cfg_colors(cfgs)
+    pts = {c: fxeb_points(data[c]) for c in cfgs}
+    depths = sorted({d for c in cfgs for _, d in pts[c]})
+    top = max(p["F"] + p["err"] for c in cfgs for p in pts[c].values())
+    fig, axs = plt.subplots(1, len(depths), figsize=(4.6 * len(depths), 4.8), squeeze=False)
+    for ax, d in zip(axs[0], depths):
+        for c in cfgs:
+            ns = sorted(n for n, dd in pts[c] if dd == d)
+            if ns:
+                P = [pts[c][(n, d)] for n in ns]
+                ax.errorbar(ns, [p["F"] for p in P], [p["err"] for p in P], fmt="o-", color=col[c], ms=4,
+                            lw=1, capsize=2, label=lab(c))
+        fxeb_axes(ax, top)
+        ax.set_title(f"d = {d}", fontsize=10)
+        ax.set_xlabel("register size n")
+    h, l = all_handles(axs.flat)
+    fig.legend(h, l, loc="lower center", ncol=min(3, len(l)), fontsize=7)
+    fig.suptitle("9  Forward XEB vs register size per depth")
+    fig.tight_layout(rect=(0, 0.05 + 0.03 * math.ceil(len(l) / 3), 1, 0.95))
+    return fig
+
+
+def fig_fxeb_bN(plt, lay, fvd, data, dmin):
+    cfgs = fxeb_cfgs(data)
+    rows = {}
+    for c in cfgs:
+        pts = fxeb_points(data[c])
+        rr = []
+        for n in sorted({n for n, _ in pts}):
+            fit = fxeb_decay(pts, n, dmin)
+            if fit:
+                rr.append((n, fxeb_czpc(lay, n, fit[2]), *fit))
+        if rr:
+            rows[c] = rr
+    if not rows:
+        return None
+    col = cfg_colors(cfgs)
+    b_dev = -math.log(fvd["fit"]["fidelity_per_cycle"])
+    fig, ax = plt.subplots(figsize=(9, 5.8))
+    ax.axhline(b_dev, color="k", ls="--", lw=1, label=f"ibm_phoenix b = {b_dev:.3f} (per-cycle 0.872)")
+    for c, rr in rows.items():
+        N = np.array([r[0] for r in rr], float)
+        b = np.array([r[2] for r in rr])
+        ax.errorbar(N, b, [r[3] for r in rr], fmt="o", color=col[c], capsize=2, label=f"b(N) {lab(c)}")
+        if len(rr) >= 2:
+            u, v = nonneg_fit(np.column_stack([N, [r[1] for r in rr]]), b)
+            depths = sorted({d for r in rr for d in r[4]})
+            grid = np.arange(int(N.min()), lay.n + 1)
+            cz = np.array([fxeb_czpc(lay, int(g), depths) for g in grid])
+            fit = u * grid + v * cz
+            ax.plot(grid, fit, "-", color=col[c], lw=1)
+            ax.plot([lay.n], [fit[-1]], "*", color=col[c], ms=14,
+                    label=f"  -> b(61) {fit[-1]:.3f}, per-cycle {math.exp(-fit[-1]):.3f}"
+                          f" ({'cleaner' if fit[-1] < b_dev else 'noisier'} than ibm_phoenix)")
+    ax.set_xlabel("register size N (first-n truncation)")
+    ax.set_ylabel("per-cycle decay b = -d ln XEB / dd")
+    ax.set_title(f"10  Forward-XEB decay per cycle vs size, fit over resolved depths >= {dmin}, extrapolated to 61")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=7)
+    sec = ax.secondary_yaxis("right", functions=(lambda x: np.exp(-np.asarray(x)),
+                                                 lambda y: -np.log(np.clip(np.asarray(y), 1e-12, None))))
+    sec.set_ylabel("per-cycle fidelity e^-b")
+    return fig
+
+
+_GEO = {}
+
+
+def geometry_stats(lay, rec, n):
+    """Coupler split and placement facts of the ACE configuration a record ran with, at
+    size n: from the record where it has them, recomputed with nighthawk_qrack's own
+    layout and tiling code otherwise. The recomputed placement is checked against the
+    record's ace_map; if they differ (older tiling version), only the record's own
+    counts are used."""
+    key = (rec.get("ace_register"), rec.get("ace_lrc"), rec.get("ace_lrr"), bool(rec.get("ace_torus")),
+           bool(rec.get("ace_tiling")), n, rec.get("ace_map"))
+    if key in _GEO:
+        return _GEO[key]
+    reg, lrc, lrr, torus, tiled, _, rmap = key
+    out = dict(exact=None, replica=None, cross=None, seam_used=None, sims_used=None,
+               widest=(rec.get("ace_widths") or [None])[0], map_ok=None)
+    if rec.get("ace_couplers"):
+        out.update(rec["ace_couplers"])
+    if None not in (reg, lrc, lrr):
+        try:
+            row = nh.layout_row(reg, lrc, lrr, torus)
+            layout = "grid" if reg == lay.grid[0] * lay.grid[1] else "strip"
+            idx = nh.place(lay, n, argparse.Namespace(ace_layout=layout, ace_tiling=tiled), row, reg)
+            ok = rmap is None or hashlib.sha1(json.dumps(idx).encode()).hexdigest()[:10] == rmap
+            out["map_ok"] = ok
+            out["widest"] = row["max_width"]
+            if ok:
+                sids = [frozenset(s for s, _ in u) for u in row["unpack"]]
+                ex, rp, cr = nh.coupler_classes(sids, idx, nh.logical_couplers(lay, n))
+                out.update(exact=ex, replica=rp, cross=cr,
+                           seam_used=sum(1 for s in idx if len(sids[s]) > 1),
+                           sims_used=len(set().union(*[sids[s] for s in idx if len(sids[s]) == 1])))
+        except Exception as err:                    # no PyQrack here: record values only
+            out["error"] = str(err)
+    _GEO[key] = out
+    return out
+
+
+def rank_corr(x, y):
+    """Spearman rank correlation (average ranks for ties)."""
+    def ranks(v):
+        v = np.asarray(v, float)
+        order = np.argsort(v, kind="mergesort")
+        r = np.empty(len(v))
+        i = 0
+        while i < len(v):
+            j = i
+            while j + 1 < len(v) and v[order[j + 1]] == v[order[i]]:
+                j += 1
+            r[order[i:j + 1]] = (i + j) / 2
+            i = j + 1
+        return r
+    if len(x) < 3:
+        return float("nan")
+    rx, ry = ranks(x), ranks(y)
+    if rx.std() == 0 or ry.std() == 0:
+        return float("nan")
+    return float(np.corrcoef(rx, ry)[0, 1])
+
+
+PREDICTORS = [("exact", "couplers inside one simulator"), ("replica", "couplers through a seam replica"),
+              ("cross", "couplers across simulators"), ("seam_used", "logical qubits on seam sites"),
+              ("sims_used", "simulators holding bulk qubits"), ("widest", "widest internal simulator")]
+
+
+def pick_nd(data, want_n, want_d):
+    """(n, d) for view 11: the requested pair, else the pair most ACE configurations
+    share, preferring d >= 8 (shallower outputs are too concentrated to rank by)."""
+    count = defaultdict(int)
+    for c in fxeb_cfgs(data):
+        if c.startswith("ace"):
+            for key in fxeb_points(data[c]):
+                count[key] += 1
+    if not count:
+        return None
+    if want_n and want_d and (want_n, want_d) in count:
+        return want_n, want_d
+    cands = [k for k in count if (not want_n or k[0] == want_n) and (not want_d or k[1] == want_d)] or list(count)
+    return max(cands, key=lambda k: (count[k], k[1] >= 8, -abs(k[1] - 8), k[0]))
+
+
+def fig_fxeb_predict(plt, lay, data, want_n, want_d):
+    nd = pick_nd(data, want_n, want_d)
+    if nd is None:
+        return None
+    n, d = nd
+    cfgs = [c for c in fxeb_cfgs(data) if c.startswith("ace")]
+    col = cfg_colors(fxeb_cfgs(data))
+    rows = []
+    for c in cfgs:
+        p = fxeb_points(data[c]).get((n, d))
+        if p:
+            rows.append((c, p, geometry_stats(lay, p["recs"][0], n)))
+    if not rows:
+        return None
+    fig, axs = plt.subplots(2, 3, figsize=(15, 9))
+    for ax, (key, title) in zip(axs.flat, PREDICTORS):
+        xs, ys = [], []
+        for c, p, g in rows:
+            if g.get(key) is None:
+                continue
+            ax.errorbar(g[key], p["F"], p["err"], fmt="o", color=col[c], ms=7, capsize=3, label=lab(c))
+            ax.annotate(LABELS.get(c, c).replace("ace ", ""), (g[key], p["F"]), fontsize=6,
+                        xytext=(4, 3), textcoords="offset points")
+            xs.append(g[key])
+            ys.append(p["F"])
+        rho = rank_corr(xs, ys)
+        rtxt = f"rank corr {rho:+.2f}" if rho == rho else "rank corr n/a (needs 3+ distinct)"
+        ax.set_title(f"{title}\n{rtxt} over {len(xs)} configs" if xs else f"{title}\n(no data)", fontsize=9)
+        ax.set_xlabel(key)
+        ax.set_ylabel(f"forward XEB, n={n} d={d}")
+        ax.grid(True, alpha=0.3)
+    stale = [lab(c) for c, _, g in rows if g.get("map_ok") is False]
+    fig.suptitle(f"11  What predicts the XEB: ACE configurations at n = {n}, d = {d}"
+                 + (f"\n(placement recomputed differently for: {', '.join(stale)} -- record counts only)"
+                    if stale else ""), fontsize=11)
+    fig.tight_layout()
+    return fig
+
+
+def harvest_rows(store):
+    """One row per point of every configuration, with its readable label and the
+    coupler split of ACE points."""
+    rows = []
+    for c, recs in sorted(store.data.items()):
+        for k, r in sorted(recs.items(), key=lambda kv: kv[0]):
+            n, fam, K, d, j, i = k
+            row = dict(cfg=c, label=LABELS.get(c, c), family=fam, n=n, K=K, depth=d, partition=j, instance=i,
+                       fidelity=r.get("fidelity"), se=r.get("se"), xeb_linear=r.get("xeb_linear"),
+                       ideal_xeb=r.get("ideal_xeb"), hog=r.get("hog"), shots=r.get("shots"),
+                       seconds=r.get("seconds"), lrc=r.get("ace_lrc"), lrr=r.get("ace_lrr"),
+                       torus=r.get("ace_torus"), tiled=r.get("ace_tiling"), register=r.get("ace_register"))
+            if c.startswith("ace") and fam == "fxeb":
+                g = geometry_stats(store.lay, r, n)
+                row.update({key: g.get(key) for key, _ in PREDICTORS})
+            rows.append(row)
+    return rows
+
+
+def write_table(store, path):
+    rows = harvest_rows(store)
+    cols = list(dict.fromkeys(k for r in rows for k in r))
+    with open(path, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=cols)
+        w.writeheader()
+        w.writerows(rows)
+    print(f"wrote {len(rows)} points of {len(store.data)} configurations to {path}")
+    cfgs = fxeb_cfgs(store.data)
+    if not cfgs:
+        return
+    pts = {c: fxeb_points(store.data[c]) for c in cfgs}
+    keys = sorted({k for c in cfgs for k in pts[c]})
+    width = max(len(LABELS.get(c, c)) for c in cfgs)
+    print(f"\nforward XEB, mean over instances +/- instance-scatter se (k = instances)")
+    for n, d in keys:
+        here = sorted(((pts[c][(n, d)], c) for c in cfgs if (n, d) in pts[c]), key=lambda x: -x[0]["F"])
+        print(f"\nn = {n}, d = {d}")
+        for p, c in here:
+            print(f"  {LABELS.get(c, c):{width}s}  {p['F']:+.4f} +/- {p['err']:.4f}  (k={p['k']})")
+    print(f"\nper-cycle decay b over resolved depths >= {store.a.fxeb_dmin} (ibm_phoenix: "
+          f"{-math.log(store.fvd['fit']['fidelity_per_cycle']):.4f})")
+    for c in cfgs:
+        for n in sorted({n for n, _ in pts[c]}):
+            fit = fxeb_decay(pts[c], n, store.a.fxeb_dmin)
+            if fit:
+                print(f"  {LABELS.get(c, c):{width}s}  n={n:<3} b {fit[0]:.4f} +/- {fit[1]:.4f}  depths {fit[2]}")
 
 
 # ================================================================== figure factory
@@ -538,6 +954,10 @@ VIEWS = [
     ("5  Patched + full bitstrings", "pbits"),
     ("6  Release + hwxeb", "release"),
     ("7  Run cost", "cost"),
+    ("8  fxeb: XEB vs depth", "fxd"),
+    ("9  fxeb: XEB vs size", "fxn"),
+    ("10 fxeb: decay b(N) -> 61", "fxb"),
+    ("11 fxeb: what predicts XEB", "fxp"),
 ]
 PER_CFG = {"mbits", "pbits"}
 
@@ -560,6 +980,8 @@ class Store:
                 data.setdefault(cfg, {}).update(recs)
                 bases[cfg] = shots_base(out, self.a.shots_dir)
         self.data, self.bases = data, bases
+        LABELS.clear()
+        LABELS.update({c: describe(c, r, self.lay) for c, r in data.items()})
         self.hw = []
         for f in self.a.hwxeb:
             try:
@@ -573,12 +995,13 @@ class Store:
                 f"; hwxeb circuits: {len(self.hw)}; read {self.stamp}")
 
     def mirror_sizes(self, cfg):
-        recs = self.data.get(cfg, {})
-        return sorted({k[0] for k in recs if k[1] == "mirror"})
+        """Sizes with mirror or fxeb points (of cfg, or of every configuration)."""
+        recs = [self.data.get(cfg, {})] if cfg else list(self.data.values())
+        return sorted({k[0] for r in recs for k in r if k[1] in ("mirror", "fxeb")})
 
     def mirror_depths(self, cfg, n):
-        recs = self.data.get(cfg, {})
-        return sorted({k[3] for k in recs if k[1] == "mirror" and k[0] == n})
+        recs = [self.data.get(cfg, {})] if cfg else list(self.data.values())
+        return sorted({k[3] for r in recs for k in r if k[1] in ("mirror", "fxeb") and k[0] == n})
 
     def build(self, view, cfg=None, n=None, depth=None):
         """One Figure for a view (None if it has no data for this selection)."""
@@ -594,6 +1017,14 @@ class Store:
             return fig_release(F, lay, fvd, self.hw)
         if view == "cost":
             return fig_cost(F, data) if data else None
+        if view == "fxd":
+            return fig_fxeb_depth(F, lay, fvd, data)
+        if view == "fxn":
+            return fig_fxeb_size(F, lay, fvd, data)
+        if view == "fxb":
+            return fig_fxeb_bN(F, lay, fvd, data, self.a.fxeb_dmin)
+        if view == "fxp":
+            return fig_fxeb_predict(F, lay, data, n, depth)
         c = cfg if cfg in self.data else next(iter(sorted(self.data)), None)
         if c is None:
             return None
@@ -641,12 +1072,12 @@ def run_viewer(store):
     ALL = "(all configurations)"
     v_cfg, v_n, v_d = tk.StringVar(), tk.StringVar(), tk.StringVar()
     ttk.Label(left, text="Configuration").pack(anchor="w")
-    cb_cfg = ttk.Combobox(left, textvariable=v_cfg, state="readonly", width=28)
+    cb_cfg = ttk.Combobox(left, textvariable=v_cfg, state="readonly", width=40)
     cb_cfg.pack(anchor="w", pady=(0, 8))
-    ttk.Label(left, text="Register size n (view 4)").pack(anchor="w")
+    ttk.Label(left, text="Register size n (views 4, 11)").pack(anchor="w")
     cb_n = ttk.Combobox(left, textvariable=v_n, state="readonly", width=28)
     cb_n.pack(anchor="w", pady=(0, 8))
-    ttk.Label(left, text="Depth for the grid (view 4)").pack(anchor="w")
+    ttk.Label(left, text="Depth (views 4, 11)").pack(anchor="w")
     cb_d = ttk.Combobox(left, textvariable=v_d, state="readonly", width=28)
     cb_d.pack(anchor="w", pady=(0, 12))
 
@@ -662,12 +1093,15 @@ def run_viewer(store):
         sel = lb.curselection()
         return VIEWS[sel[0] if sel else 0][1]
 
+    def cfg_of(choice):
+        return None if choice in ("", ALL) else choice.rsplit("[", 1)[-1].rstrip("]")
+
     def refresh_choices():
-        cfgs = sorted(store.data)
-        cb_cfg["values"] = [ALL] + cfgs
+        cfgs = sorted(store.data, key=lambda c: (LABELS.get(c, c), c))
+        cb_cfg["values"] = [ALL] + [lab(c) for c in cfgs]
         if v_cfg.get() not in cb_cfg["values"]:
-            v_cfg.set(cfgs[0] if len(cfgs) == 1 else ALL)
-        c = v_cfg.get() if v_cfg.get() != ALL else (cfgs[0] if cfgs else None)
+            v_cfg.set(lab(cfgs[0]) if len(cfgs) == 1 else ALL)
+        c = cfg_of(v_cfg.get())
         sizes = store.mirror_sizes(c) if c else []
         cb_n["values"] = [str(x) for x in sizes]
         if v_n.get() not in cb_n["values"]:
@@ -680,7 +1114,7 @@ def run_viewer(store):
     def draw(*_):
         refresh_choices()
         view = view_key()
-        cfg = None if v_cfg.get() == ALL else v_cfg.get()
+        cfg = cfg_of(v_cfg.get())
         n = int(v_n.get()) if v_n.get() else None
         d = int(v_d.get()) if v_d.get() not in ("", "auto") else None
         root.config(cursor="watch")
@@ -735,6 +1169,15 @@ def run_viewer(store):
     ttk.Button(btns, text="Save PNG...", command=save_png).pack(fill=tk.X)
     ttk.Button(btns, text="Save all views...", command=save_every).pack(fill=tk.X, pady=(4, 0))
 
+    def export_table():
+        p = filedialog.asksaveasfilename(defaultextension=".csv", initialfile="harvest.csv",
+                                         filetypes=[("CSV", "*.csv")])
+        if p:
+            write_table(store, p)
+            status.set(f"wrote {p}")
+
+    ttk.Button(btns, text="Export table (CSV)...", command=export_table).pack(fill=tk.X, pady=(4, 0))
+
     lb.bind("<<ListboxSelect>>", draw)
     for cb in (cb_cfg, cb_n, cb_d):
         cb.bind("<<ComboboxSelected>>", draw)
@@ -760,13 +1203,28 @@ def main():
     ap.add_argument("--depth", type=int, default=None, help="depth for the per-qubit grid in view 4")
     ap.add_argument("--figs", default=None, help="PNG mode: which views, e.g. 1-3,6; viewer: the first one shown")
     ap.add_argument("--save", default=None, help="write PNGs to this directory instead of opening the viewer")
+    ap.add_argument("--table", default=None,
+                    help="write every point of every configuration to this CSV, print the comparison, exit")
+    ap.add_argument("--fxeb-dmin", dest="fxeb_dmin", type=int, default=8,
+                    help="views 10-11 and --table: smallest depth used in the decay fit (default 8; "
+                         "shallower outputs are too concentrated)")
     a = ap.parse_args()
-    if not a.out:
-        a.out = [p for p in ["clean_ace.jsonl", "nighthawk_clean.jsonl"] if Path(p).exists()]
+    if not a.out:                                   # harvest: every record file here
+        import re
+        a.out = sorted(str(p) for p in Path(".").glob("*.jsonl") if not re.search(r"\.w\d+\.jsonl$", p.name))
+        if a.out:
+            print(f"harvesting {len(a.out)} record files: {', '.join(a.out)}")
     if not a.out and not a.hwxeb:
         ap.print_help()
         return
     a.figs_set = set(nh.parse_sizes(a.figs)) if a.figs else set()
+    if a.table:
+        import matplotlib
+        matplotlib.use("Agg")
+        store = Store(a)
+        print(store.summary())
+        write_table(store, a.table)
+        return
 
     import matplotlib
     display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) or sys.platform in ("win32", "darwin")
