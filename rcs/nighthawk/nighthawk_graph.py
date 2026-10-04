@@ -113,7 +113,9 @@ def describe(cfg, recs, lay):
             lab_ += " tiled"
     else:
         lrc, lrr, torus, tiled = next(iter(geos))
-        lab_ = f"ace {lrc}/{lrr}" + (" torus" if torus else "") + (" tiled" if tiled else " untiled")
+        vers = {r.get("ace_tiling_version") for r in rs if r.get("ace_tiling")}
+        tv = f" tiled v{vers.pop()}" if len(vers) == 1 and None not in vers else " tiled"
+        lab_ = f"ace {lrc}/{lrr}" + (" torus" if torus else "") + (tv if tiled else " untiled")
     if any(g != lay.grid[0] * lay.grid[1] for g in regs):
         lab_ += " strip"
     return lab_ + extra
@@ -778,12 +780,22 @@ def geometry_stats(lay, rec, n):
                widest=(rec.get("ace_widths") or [None])[0], map_ok=None)
     if rec.get("ace_couplers"):
         out.update(rec["ace_couplers"])
+    if rec.get("ace_seam_used") is not None:            # written by newer runs: nothing to recompute
+        out.update(seam_used=rec["ace_seam_used"], sims_used=rec.get("ace_sims_used"), map_ok=True)
+        _GEO[key] = out
+        return out
     if None not in (reg, lrc, lrr):
         try:
             row = nh.layout_row(reg, lrc, lrr, torus)
             layout = "grid" if reg == lay.grid[0] * lay.grid[1] else "strip"
-            idx = nh.place(lay, n, argparse.Namespace(ace_layout=layout, ace_tiling=tiled), row, reg)
-            ok = rmap is None or hashlib.sha1(json.dumps(idx).encode()).hexdigest()[:10] == rmap
+            # older tiled records carry no tiling version: try each until the placement hash matches
+            versions = [rec["ace_tiling_version"]] if rec.get("ace_tiling_version") else [2, 3]
+            for ver in versions if tiled else [None]:
+                idx = nh.place(lay, n, argparse.Namespace(ace_layout=layout, ace_tiling=tiled,
+                                                          ace_tiling_version=ver), row, reg)
+                ok = rmap is None or hashlib.sha1(json.dumps(idx).encode()).hexdigest()[:10] == rmap
+                if ok:
+                    break
             out["map_ok"] = ok
             out["widest"] = row["max_width"]
             if ok:
