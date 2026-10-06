@@ -10,12 +10,13 @@
 | Paper under study | Sedrakyan et al., [arXiv:2609.28657](https://arxiv.org/abs/2609.28657) (preprint, v1) [[1]](#ref-1) |
 | Simulator | [Qrack / PyQrack](https://github.com/unitaryfund/pyqrack) — `QrackSimulator`, `QrackAceBackend` [[10]](#ref-10) |
 | Acceleration | OpenCL or CPU. **No CUDA.** |
+| Companion | [`rcs/nn_qab/`](https://github.com/twobombs/thereminq-examples/tree/main/rcs/nn_qab) — ACE bulk-to-boundary sweeps on `nn_qab`'s torus circuits, same estimator |
 
 ---
 
 ## Abstract
 
-We provide a reproducible, simulator-side companion to the 61-qubit random-circuit sampling (RCS) experiment of Ref. [[1]](#ref-1). The released circuits are regenerated bit-for-bit, the hardware bitstrings are re-scored against PyQrack ideal distributions, and the circuits are emulated on ideal qubits with an exact backend (a pipeline control) and with Qrack's approximate, seam-partitioned `QrackAceBackend` (ACE). For first-n truncations of the register (n ≤ 34) every ACE sample is scored by forward linear XEB against an exact 2ⁿ-amplitude reference. On the 8×8 Nighthawk window we find that ACE's native chunk numbering places most couplers across simulators, and that re-placing logical qubits onto ACE sites as compact tiles raises the forward XEB at n = 27, d = 8 from 0.008 to 0.32 at unchanged memory. Across ten layout/placement configurations the XEB is predicted best by the number of couplers across simulators and of simulators in use (rank correlations −0.80 and −0.84), and, among crossing-free tilings, by the number of logical qubits on seam sites. Even so, at depths where the output is close to Porter–Thomas (d ≥ 12), the tiled emulator's per-cycle decay at n = 27–29 (b ≈ 0.24–0.31) exceeds the device's b = 0.137 at n = 61, and grows with depth. A shared-reference comparison of two tiling heuristics over n = 27–34 is in progress (Sec. 9.5).
+We provide a reproducible, simulator-side companion to the 61-qubit random-circuit sampling (RCS) experiment of Ref. [[1]](#ref-1). The released circuits are regenerated bit-for-bit, the hardware bitstrings are re-scored against PyQrack ideal distributions, and the circuits are emulated on ideal qubits with an exact backend (a pipeline control) and with Qrack's approximate, seam-partitioned `QrackAceBackend` (ACE). For first-n truncations of the register (n ≤ 34) every ACE sample is scored by forward linear XEB against an exact 2ⁿ-amplitude reference. On the 8×8 Nighthawk window we find that ACE's native chunk numbering places most couplers across simulators, and that re-placing logical qubits onto ACE sites as compact tiles raises the forward XEB at n = 27, d = 8 from 0.008 to 0.32 at unchanged memory. Across ten layout/placement configurations the XEB is predicted best by the number of couplers across simulators and of simulators in use (rank correlations −0.80 and −0.84), and, among crossing-free tilings, by the number of logical qubits on seam sites. Even so, at depths where the output is close to Porter–Thomas (d ≥ 12), the tiled emulator's per-cycle decay at n = 27–29 (b ≈ 0.24–0.31) exceeds the device's b = 0.137 at n = 61, and grows with depth. Under the weaker single-qubit ensemble of the `nn_qab` benchmark (sin θ uniform), tiled ACE on the Nighthawk window reaches a mean XEB of 0.435 ± 0.037 at n = 27, d = 12 over 20 circuits, against 0.153 ± 0.014 with the device placement and 0.111–0.241 for `nn_qab`'s own register geometries (Sec. 9.7). At 61 qubits no XEB can be scored directly; the release's own contraction-cost estimates put one exact amplitude of the 36-cycle circuit at ≈ 10²² multiply-adds (Sec. 8.6). A shared-reference comparison of two tiling heuristics over n = 27–34 is in progress (Sec. 9.5).
 
 ---
 
@@ -34,7 +35,7 @@ Ref. [[1]](#ref-1) reports forward RCS on 61 qubits of the 120-qubit IBM Nightha
 
 There is **no noise model**. Any deviation from F = 1 under `run` is attributable to the simulator backend or to sampling, not to an assumed device error.
 
-> **Version note.** This HOWTO describes `nighthawk_qrack.py` at 2794 lines and `nighthawk_graph.py` at 1261 lines. Earlier revisions contained a noise-model audit (`--preset r2`, `--stochastic`, `--edge-layers`); those flags no longer exist. Tiling version 2 (`--ace-tiling-version 2`) reproduces the config tags of runs made before tiling version 3 became the default.
+> **Version note.** This HOWTO describes `nighthawk_qrack.py` at 2805 lines and `nighthawk_graph.py` at 1282 lines. Earlier revisions contained a noise-model audit (`--preset r2`, `--stochastic`, `--edge-layers`); those flags no longer exist. Tiling version 2 (`--ace-tiling-version 2`) reproduces the config tags of runs made before tiling version 3 became the default.
 
 ---
 
@@ -124,6 +125,7 @@ if os.path.exists(QRACK_LIB_PATH):
 | Variable | Effect |
 |---|---|
 | `QRACK_OCL_DEFAULT_DEVICE` | OpenCL device index; the launcher sets it per worker from `--gpus` |
+| `QRACK_QUNITMULTI_DEVICES`, `QRACK_QPAGER_DEVICES` | devices Qrack may spread units and pages over; the launcher pins both to the worker's device unless set by the user, so ACE patches do not land on other cards of a mixed host. For single-process runs set all three by hand: Qrack's own default device is not necessarily device 0 |
 | `QRACK_MAX_CPU_QB` | upper bound on qubits for CPU state vectors |
 | `QRACK_MAX_ALLOC_MB` | Qrack's memory ceiling |
 | `NIGHTHAWK_REPO` | location of the `rcs-nighthawk` checkout if `--repo` is not given |
@@ -250,7 +252,7 @@ Enumerates every distinct ACE layout of the register holding the first `--n` log
 | `--mem-budget-gb` | off | machine-wide budget shared by all workers and runs using the same ledger |
 | `--mem-ledger` | `/tmp/nighthawk_mem_ledger` | reservation directory |
 
-With a budget, a worker takes a point only if its estimated peak fits both the budget (all reservations plus this point) and `MemAvailable` after the not-yet-allocated part of other reservations; otherwise it takes a smaller point or waits. The estimate is 1 GiB of overhead, the engines' worst case, and for `fxeb` the reference at 1.5 × 2ⁿ amplitudes (state + probability buffer). For fp32 builds this is 12 · 2ⁿ bytes: 1.5 GiB at n = 27, 48 GiB at n = 32, 193 GiB at n = 34.
+With a budget, a worker takes a point only if its estimated peak fits both the budget (all reservations plus this point) and `MemAvailable` after the not-yet-allocated part of other reservations; otherwise it takes a smaller point or waits. The estimate is 1 GiB of overhead, the engines' worst case, and for `fxeb` the reference at 1.5 × 2ⁿ amplitudes (state + probability buffer). For fp32 builds this is 12 · 2ⁿ bytes: 1.5 GiB at n = 27, 48 GiB at n = 32, 193 GiB at n = 34. The ledger tracks host RAM only: with `--ref-gpu` or `--ace-gpu`, size `--per-gpu` to the card's memory yourself (≈ 8 · 2ⁿ bytes per reference while it is built, ≈ 0.15 GiB of ACE engines and ≈ 0.3 GiB of driver context per worker).
 
 **Resumability.** Every configuration is tagged `<backend>-<sha1[:8]>` over backend, shots, twirls, ACE parameters, tiling version and exact-probs mode, but *not* the register size, so a sweep can be extended and resumes per (n, point). Bitstrings are written atomically *before* the JSONL record, and the claim is marked done last.
 
@@ -284,6 +286,8 @@ Per-point files under `<shots-dir>/<cfg>/points/n{n}/` are merged into `<shots-d
 ### 7.3 Summary tables (`run --summarize`)
 
 Per n and family: F_sim ± σ (and F_hardware at n = 61); the mirror fit and per-cycle decay b(N) with a non-negative fit b = u·N + v·CZ/cycle extrapolated to N = 61; for `fxeb`, XEB (inverse-variance over instances), linear XEB, HOG, ideal XEB and the device fit at the same depth. With `--variants`, one block per variant.
+
+**Weighting.** The inverse-variance mean weights each instance by its shot-noise 1/σ², and for forward XEB that σ grows with the instance's own XEB and output concentration. When instances differ strongly, the weighted mean is therefore biased low: for the 20-circuit `nn_qab`-ensemble run of Sec. 9.7 it gives 0.343 (tiled) and 0.125 (untiled), against plain means over circuits of 0.435 ± 0.037 and 0.153 ± 0.014. The quantity of interest is the average over circuits, as in `nn_qab`; quote the plain mean with its instance-scatter error (`nighthawk_graph.py --table`, views 8–11).
 
 ### 7.4 `nighthawk_graph.py`
 
@@ -323,6 +327,8 @@ At d ≤ 8 the n = 27–30 outputs are still concentrated (ideal XEB 3–4 at d 
 
 On rusticl/radeonsi (Vega 10), ACE with device-geometry placement ran on the GPU, but tiled placements reset the device ("context is lost") both with states in VRAM and with `--ace-host-pointer` (host RAM via GTT); the fault surfaced at the first read-back after the circuit, so the offending operation is any of the queued cross-simulator CZs. Tiled ACE therefore runs on CPU (the default). Tiled 4/4 simulators are at most 23 qubits wide, so VRAM capacity is not the limit.
 
+The exact `fxeb` reference is an ordinary dense OpenCL engine and runs on GPU with `--ref-gpu`. On an NVIDIA CMP 50HX (10 GB, NVIDIA OpenCL, PCIe link at Gen 1 x1) the n = 27 reference took ≈ 10 s of an ≈ 10-min point; the point cost is the ACE samplers on the CPU, so throughput scales with workers, not with the card. With ten workers sharing the card one point failed twice and completed alone, consistent with overlapping references exhausting device memory; four workers per 10 GB is the safe setting at n = 27. Tiled ACE on the NVIDIA OpenCL stack has not yet been tested.
+
 ### 8.4 Precision
 
 The exact reference is held in float32. Floating-point storage keeps ~7 significant digits at any magnitude, so 2⁻³⁴-scale probabilities are not degraded by their size; CZs are sign flips and add no rounding; accumulated single-qubit rounding at d = 20, n = 34 is of order 10⁻⁶–10⁻⁵ relative per probability, ~10⁻⁵ in XEB, against a per-instance shot noise of ~0.015 at 4096 shots. All sums over 2ⁿ probabilities are taken in float64 and sampled probabilities are divided by the float64 total. The measured ideal XEB at d = 20 (1.02–1.05) is consistent with Porter–Thomas.
@@ -331,17 +337,32 @@ The exact reference is held in float32. Floating-point storage keeps ~7 signific
 
 At 4096 shots the per-instance standard error is ≈ 0.015, so XEB below ≈ 0.03 is unresolved; d = 16–20 points at n ≥ 30 need ≥ 16 384 shots to enter a decay fit.
 
+### 8.6 What can be verified at 61 qubits
+
+Scoring a sample by XEB needs the ideal probability of each sampled bitstring. The release contains every bitstring of the 61-qubit circuits that were sampled — all 10⁶ samples of the full d = 36 circuit (all distinct) and every shot of every patched circuit, as 61-bit integers, stored sorted so that shot order is not recoverable — but for mirror circuits only the number of shots that returned the prepared string. No probability of the full 61-qubit circuit is computed in Ref. [[1]](#ref-1) or here: the headline fidelity is inferred from the patched and mirror proxies under the assumption that the full circuit decays at the same rate per cycle, and every 61-qubit statement in this document is a proxy measurement or an extrapolation of b(N) (Sec. 10).
+
+The release's `contraction_cost/results/depth_sweep.json` gives BlueQubit's best-found single-amplitude contraction cost of the full circuits (cotengra/kahypar, unlimited memory, following the methodology of [[4]](#ref-4)); the authors note every value is an upper bound on the optimal path cost:
+
+| Depth | 20 | 28 | 32 | 36 | 40 |
+|---|---|---|---|---|---|
+| log₁₀ C_amp (complex multiply-adds) | 13.0 | 17.6 | 19.8 (repeat 20.0) | 21.8 (repeat 22.0) | 22.0 (repeat 22.1) |
+| largest intermediate tensor | 2³⁴ | 2⁴⁹ | 2⁵⁶ | 2⁶⁴ | 2⁶⁵ |
+
+Their sampling-cost model W = 8 κ N_s F C_amp (κ = 10, frugal rejection sampling), on Frontier at 20 % of 1.685 × 10¹⁸ FLOP/s, gives — evaluated here for N_s = 10⁶ and F(36) = 0.326 × 0.8717³⁶ ≈ 2.3 × 10⁻³ — W ≈ 1.2 × 10²⁷ FLOPs, ≈ 115 years (≈ 160 years with the repeat search). The intermediate of 2⁶⁴ entries (≈ 128 EiB in complex64) exceeds any machine, so a real contraction must slice, which raises the cost. Verification is costlier still in kind: it needs exact amplitudes (≈ 5 × 10²² FLOPs, ≈ 2 days on Frontier each, before batching) for ≈ 1/F² ≈ 2 × 10⁵ sampled bitstrings to resolve F. Within the cost model of the release, the 61-qubit, 36-cycle samples cannot be scored directly.
+
 ---
 
 ## 9. Results to date
 
-All results below are clean-qubit ACE emulations of the released circuit ensemble (Haar single-qubit gates, release seeds), scored by forward XEB against an exact reference, 3 instances, 4096 shots unless noted. The device figure of merit for comparison is the paper's mirror fit F(d) = 0.326 × 0.8717^d, i.e. b_dev = 0.137 per cycle at n = 61.
+All results below are clean-qubit ACE emulations of the released circuit ensemble (Haar single-qubit gates, release seeds), scored by forward XEB against an exact reference, 3 instances, 4096 shots unless noted. The device figure of merit for comparison is the paper's mirror fit F(d) = 0.326 × 0.8717^d, i.e. b_dev = 0.137 per cycle at n = 61. Values from `run --summarize` are inverse-variance means and may lie below the plain mean over circuits (Sec. 7.3); values from the graph tool are plain means. Each table states which.
 
 ### 9.1 Layout choice without tiling
 
 Ranking the non-torus layouts of the 8×8 window by couplers on a seam, the best layout with all simulators ≤ 33 qubits (5/4) improves on the default 4/4 by one coupler (68 vs 69 of 102). Larger simulators help only on a torus (2/7 torus: 57 of 102, simulators of 33, 33, 25, 25 qubits, 128 GiB dense worst case); layouts with fewer seam qubits on the flat register alternate chunk ownership by row and place every vertical coupler across simulators.
 
 ### 9.2 Placement dominates layout (n = 27)
+
+Inverse-variance means over 3 instances (`run --summarize`):
 
 | lrc/lrr | XEB d=8, device placement | XEB d=8, tiled (v2) | XEB d=12, tiled (v2) |
 |---|---|---|---|
@@ -366,7 +387,7 @@ Over the ten configurations of Sec. 9.2 at n = 27, d = 8 (view 11), Spearman ran
 | 29 | 5 / 3 | 0.101 | 0.043 | 0.008 |
 | 30 | 6 / 3 | 0.069 | 0.001 | −0.001 |
 
-(inverse-variance means; σ ≈ 0.009 shot noise, instance scatter larger.) At d = 12 the XEB falls monotonically with seam qubits used (3, 5, 6, 8 → 0.158, 0.101, 0.069, −0.015), so the size-to-size variation is dominated by tiling quality rather than by n. The decay is not exponential in depth: at n = 27, b ≈ 0.19 over d = 8–12 and ≈ 0.25 over d = 16–20; over d = 12–20, b ≈ 0.24 at n = 27 and ≈ 0.31 at n = 29, against b_dev = 0.137 at n = 61. At the headline depth the tiled emulator therefore loses fidelity faster per cycle than the device does at more than twice the register size, and the gap widens with depth.
+(inverse-variance means from `run --summarize`; σ ≈ 0.009 shot noise, instance scatter larger; plain means over circuits may be higher, Sec. 7.3.) At d = 12 the XEB falls monotonically with seam qubits used (3, 5, 6, 8 → 0.158, 0.101, 0.069, −0.015), so the size-to-size variation is dominated by tiling quality rather than by n. The decay is not exponential in depth: at n = 27, b ≈ 0.19 over d = 8–12 and ≈ 0.25 over d = 16–20; over d = 12–20, b ≈ 0.24 at n = 27 and ≈ 0.31 at n = 29, against b_dev = 0.137 at n = 61. At the headline depth the tiled emulator therefore loses fidelity faster per cycle than the device does at more than twice the register size, and the gap widens with depth.
 
 ### 9.5 Tiling version 3 (in progress)
 
@@ -383,6 +404,28 @@ The placements are deterministic and were reproduced identically on two machines
 
 The run cost is dominated by the exact reference: about 6.2 × 10³ s for one n = 34, d = 20 point on a 96-thread EPYC host, 1–4 × 10² s per tiled 4/4 point at n = 27. Wider ACE simulators also cost time (tiled 2/7 ≈ 1.8 × 10³ s per point at n = 27).
 
+### 9.7 Cross-check with the `nn_qab` ensemble
+
+The `nn_qab` benchmark ([`rcs/nn_qab/`](https://github.com/twobombs/thereminq-examples/tree/main/rcs/nn_qab)) scores ACE with the same estimator on circuits whose single-qubit θ is drawn with sin θ uniform (`--theta nnqab` here), on ACE's own torus registers with a twelve-gate two-qubit set. Running that θ ensemble on the Nighthawk window (CZ couplers, flat register) separates ensemble, geometry and placement:
+
+```bash
+python3 nighthawk_qrack.py run --backend ace --families fxeb --n 27 --depths 12 \
+  --theta nnqab --instances 20 --variants 4/4:t3 4/4:untiled --ref-gpu --gpus 0 --out nnqab_cross.jsonl
+```
+
+| Configuration (d = 12) | Circuits | Mean XEB (plain mean ± instance-scatter se) | HOG |
+|---|---|---|---|
+| Nighthawk window, 4/4 tiled v3 | 20 | **0.435 ± 0.037** | 0.665 |
+| Nighthawk window, 4/4 device placement | 20 | 0.153 ± 0.014 | 0.500 |
+| `nn_qab` 26 qubits, B-to-B 5.5 (best series) | 100 | 0.241 | — |
+| `nn_qab` 27 qubits, two patches, B-to-B 3.5 | 100 | 0.185 | — |
+| `nn_qab` 27 qubits, three patches, B-to-B 2.0 | 100 | 0.111 | — |
+| Nighthawk window, 4/4 tiled v2, Haar ensemble (Sec. 9.2; inverse-variance mean) | 3 | 0.182 | — |
+
+Three observations. (i) The ensemble matters: at d = 12 the `nn_qab` outputs are far from Porter–Thomas (ideal XEB ≈ 16 against ≈ 1.5 for the Haar ensemble), and the same tiled layout scores about twice its Haar value. XEB values from the two ensembles are not comparable. (ii) Within the ensemble, placement alone raises the XEB by a factor of 2.85, and tiled ACE on the Nighthawk geometry exceeds every `nn_qab` register geometry by a factor ≥ 1.8; part of this may be the gate set (CZ only, against `nn_qab`'s set including SWAP-type gates that move amplitude across seams), which this run does not separate. (iii) With the device placement the HOG is at chance (0.500) while the XEB is positive: in a concentrated distribution, a sampler that reaches a few very heavy bitstrings raises the probability-weighted score without carrying signal across the rest of the distribution; the tiled sampler has both.
+
+The effective bulk-to-boundary ratio of the placed qubits (bulk qubits used over seam qubits used; view 11) carries `nn_qab`'s B-to-B variable over to placed registers; for the five tiled layouts of Sec. 9.2 the d = 12 XEB (inverse-variance means) falls monotonically with it (8.0, 8.0, 5.8, 3.5, 0.7 → 0.182, 0.153, 0.136, 0.109, 0.091).
+
 ---
 
 verification and simulation at runtime:
@@ -398,6 +441,7 @@ verification and simulation at runtime:
 - `QrackAceBackend` is an approximate method whose layout, chunk numbering and seam treatment depend on the PyQrack version; record the version, `--lrc`/`--lrr`, torus setting and tiling version with every published number (all are in each record).
 - Tiling optimises a proxy cost; its weights are calibrated on the 4/4 runs of Sec. 9 and are not claimed optimal.
 - Three instances per point; instance scatter exceeds shot noise, and differences between configurations below ~2σ of the instance-scatter error are not resolved.
+- Sections 9.2 and 9.4–9.5 report inverse-variance means from `run --summarize`; the plain means over circuits can be higher (Sec. 7.3) and should be taken from the graph tool for publication.
 - arXiv:2609.28657 is a preprint (v1) and had not been peer reviewed at the time of writing.
 
 ---
@@ -430,4 +474,4 @@ All identifiers below were checked against the arXiv abstract pages and, where g
 
 <a id="ref-12"></a>**[12]** I. L. Markov, A. Fatima, S. V. Isakov, S. Boixo, "Quantum Supremacy Is Both Closer and Farther than It Appears," [arXiv:1807.10749](https://arxiv.org/abs/1807.10749) (2018). — *Trading circuit fidelity for simulation cost; cost linear in target fidelity.*
 
-**Software and data (not on arXiv):** [BlueQubitDev/rcs-nighthawk](https://github.com/BlueQubitDev/rcs-nighthawk) · [unitaryfund/pyqrack](https://github.com/unitaryfund/pyqrack) · [twobombs/thereminq-examples](https://github.com/twobombs/thereminq-examples)
+**Software and data (not on arXiv):** [BlueQubitDev/rcs-nighthawk](https://github.com/BlueQubitDev/rcs-nighthawk) (including `contraction_cost/`) · [unitaryfund/pyqrack](https://github.com/unitaryfund/pyqrack) · [vm6502q/pyqrack-examples](https://github.com/vm6502q/pyqrack-examples) (upstream `nn_qab.py`) · [twobombs/thereminq-examples](https://github.com/twobombs/thereminq-examples) (`rcs/nighthawk`, `rcs/nn_qab`)
