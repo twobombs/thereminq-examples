@@ -16,7 +16,7 @@
 
 ## Abstract
 
-We provide a reproducible, simulator-side companion to the 61-qubit random-circuit sampling (RCS) experiment of Ref. [[1]](#ref-1). The released circuits are regenerated bit-for-bit, the hardware bitstrings are re-scored against PyQrack ideal distributions, and the circuits are emulated on ideal qubits with an exact backend (a pipeline control) and with Qrack's approximate, seam-partitioned `QrackAceBackend` (ACE). For first-n truncations of the register (n ≤ 34) every ACE sample is scored by forward linear XEB against an exact 2ⁿ-amplitude reference. On the 8×8 Nighthawk window we find that ACE's native chunk numbering places most couplers across simulators, and that re-placing logical qubits onto ACE sites as compact tiles raises the forward XEB at n = 27, d = 8 from 0.008 to 0.32 at unchanged memory. Across ten layout/placement configurations the XEB is predicted best by the number of couplers across simulators and of simulators in use (rank correlations −0.80 and −0.84), and, among crossing-free tilings, by the number of logical qubits on seam sites. Even so, at depths where the output is close to Porter–Thomas (d ≥ 12), the tiled emulator's per-cycle decay at n = 27–29 (b ≈ 0.24–0.31) exceeds the device's b = 0.137 at n = 61, and grows with depth. Under the weaker single-qubit ensemble of the `nn_qab` benchmark (sin θ uniform), tiled ACE on the Nighthawk window reaches a mean XEB of 0.435 ± 0.037 at n = 27, d = 12 over 20 circuits, against 0.153 ± 0.014 with the device placement and 0.111–0.241 for `nn_qab`'s own register geometries (Sec. 9.7). At 61 qubits no XEB can be scored directly; the release's own contraction-cost estimates put one exact amplitude of the 36-cycle circuit at ≈ 10²² multiply-adds (Sec. 8.6). A shared-reference comparison of two tiling heuristics confirms the seam-qubit reading at n = 27–29: where the improved tiling halves the number of logical qubits on seam sites (n = 28, 8 → 4) the d = 12 XEB rises 3.6-fold, where the seam counts agree (n = 27) the two coincide (Sec. 9.5). Tiled ACE runs on NVIDIA's OpenCL stack and agrees with the CPU path, but resets AMD Vega 10 and Vega 20 devices under Mesa rusticl (Sec. 8.3).
+We provide a reproducible, simulator-side companion to the 61-qubit random-circuit sampling (RCS) experiment of Ref. [[1]](#ref-1). The released circuits are regenerated bit-for-bit, the hardware bitstrings are re-scored against PyQrack ideal distributions, and the circuits are emulated on ideal qubits with an exact backend (a pipeline control) and with Qrack's approximate, seam-partitioned `QrackAceBackend` (ACE). For first-n truncations of the register (n ≤ 34) every ACE sample is scored by forward linear XEB against an exact 2ⁿ-amplitude reference. On the 8×8 Nighthawk window we find that ACE's native chunk numbering places most couplers across simulators, and that re-placing logical qubits onto ACE sites as compact tiles raises the forward XEB at n = 27, d = 8 from 0.008 to 0.32 at unchanged memory. Across ten layout/placement configurations the XEB is predicted best by the number of couplers across simulators and of simulators in use (rank correlations −0.80 and −0.84), and, among crossing-free tilings, by the number of logical qubits on seam sites. Even so, at depths where the output is close to Porter–Thomas (d ≥ 12), the tiled emulator's per-cycle decay at n = 27–29 (b ≈ 0.24–0.31) exceeds the device's b = 0.137 at n = 61, and grows with depth. Under the weaker single-qubit ensemble of the `nn_qab` benchmark (sin θ uniform), tiled ACE on the Nighthawk window reaches a mean XEB of 0.435 ± 0.037 at n = 27, d = 12 over 20 circuits, against 0.153 ± 0.014 with the device placement and 0.111–0.241 for `nn_qab`'s own register geometries (Sec. 9.7). At 61 qubits no XEB can be scored directly; the release's own contraction-cost estimates put one exact amplitude of the 36-cycle circuit at ≈ 10²² multiply-adds (Sec. 8.6). A shared-reference comparison of two tiling heuristics confirms the seam-qubit reading at n = 27–29: where the improved tiling halves the number of logical qubits on seam sites (n = 28, 8 → 4) the d = 12 XEB rises 3.6-fold, where the seam counts agree (n = 27) the two coincide (Sec. 9.5). Tiled ACE runs on GPU through NVIDIA's OpenCL stack and reproduces the CPU path (Sec. 8.3). None of ACE's built-in settings — boundary repetition code, seam error detection, crossbars — lowers the per-cycle cost of a seam; disabling error detection raises the XEB by a constant offset of ≈ 0.01 (Sec. 9.5).
 
 ---
 
@@ -35,7 +35,7 @@ Ref. [[1]](#ref-1) reports forward RCS on 61 qubits of the 120-qubit IBM Nightha
 
 There is **no noise model**. Any deviation from F = 1 under `run` is attributable to the simulator backend or to sampling, not to an assumed device error.
 
-> **Version note.** This HOWTO describes `nighthawk_qrack.py` at 2805 lines and `nighthawk_graph.py` at 1282 lines. Earlier revisions contained a noise-model audit (`--preset r2`, `--stochastic`, `--edge-layers`); those flags no longer exist. Tiling version 2 (`--ace-tiling-version 2`) reproduces the config tags of runs made before tiling version 3 became the default.
+> **Version note.** This HOWTO describes `nighthawk_qrack.py` at 2863 lines and `nighthawk_graph.py` at 1289 lines. Earlier revisions contained a noise-model audit (`--preset r2`, `--stochastic`, `--edge-layers`); those flags no longer exist. Tiling version 2 (`--ace-tiling-version 2`) reproduces the config tags of runs made before tiling version 3 became the default.
 
 ---
 
@@ -234,7 +234,7 @@ Enumerates every distinct ACE layout of the register holding the first `--n` log
 | `--ace-layout` | `grid` | `grid` (8×8 for every n) or `strip` (smallest R×8 strip holding the first n) |
 | `--ace-tiling` | off | place logical qubits as compact tiles (Sec. 2.6) |
 | `--ace-tiling-version` | `3` | `2` reproduces earlier tiled runs and their config tags |
-| `--ace-gpu`, `--ace-host-pointer` | off | ACE on OpenCL; simulator states in host RAM (GTT). See Sec. 8.3 |
+| `--ace-gpu`, `--ace-host-pointer` | off | ACE on OpenCL; keep simulator states in host memory. See Sec. 8.3 |
 | `--ace-boundary-rep`, `--no-ace-error-detection`, `--no-ace-crossbars` | Qrack defaults (off, on, on) | ACE's boundary repetition code, seam error detection (detect-and-post-select) and crossbar simulator; non-default settings enter the config tag and the record |
 | `--theta` | `haar` | `nnqab`: sin θ uniform — a variant ensemble, not the released circuits |
 
@@ -324,17 +324,11 @@ A clean-qubit simulator whose decay is *slower* than the device's is a statement
 
 At d ≤ 8 the n = 27–30 outputs are still concentrated (ideal XEB 3–4 at d = 8, ≈ 66 at d = 4), the normalised XEB is dominated by few heavy bitstrings and is non-monotonic in depth; rank configurations on d ≥ 12, where the ideal XEB is 1.0–1.6. Because ACE's decay is not a single exponential (Sec. 9.4), b must be compared at matched depth windows across sizes.
 
-### 8.3 ACE on OpenCL
+### 8.3 ACE and the reference on GPU
 
-| Device | OpenCL stack | Exact reference (`--ref-gpu`) | ACE, device placement | ACE, tiled (`--ace-gpu --ace-tiling`) |
-|---|---|---|---|---|
-| Radeon Pro V340 (Vega 10) | Mesa rusticl / radeonsi | not tested | runs | **resets the device** (VRAM and `--ace-host-pointer` alike) |
-| Radeon Pro VII (Vega 20) | Mesa rusticl / radeonsi | not tested | not tested | **workers abort (SIGABRT)** |
-| NVIDIA CMP 50HX (TU102, 10 GB, link at Gen 1 x1) | NVIDIA OpenCL | runs | runs | **runs; agrees with CPU** |
+Both engines run on OpenCL devices: the exact `fxeb` reference with `--ref-gpu` (an ordinary dense state vector) and ACE with `--ace-gpu`. Tiled ACE was validated on an NVIDIA CMP 50HX (TU102, 10 GB, NVIDIA OpenCL): the v2-tiled n = 27 points reproduce the CPU run on the same circuits (d = 12, 16, 20: 0.146, 0.063, 0.033 on GPU against 0.158, 0.063, 0.024 on CPU; inverse-variance means, ±0.009). Before using another OpenCL device for tiled ACE, run one point against a CPU run of the same circuits.
 
-On rusticl the fault surfaced at the first read-back after the circuit, so the offending operation is one of the queued cross-simulator operations of a tiled placement; host-pointer mode (states in host RAM via GTT) did not avoid it, so it is not a VRAM-capacity effect — tiled 4/4 simulators are at most 23 qubits wide. On the NVIDIA stack the v2-tiled n = 27 points reproduce the CPU run on the same circuits (d = 12, 16, 20: 0.146, 0.063, 0.033 on GPU against 0.158, 0.063, 0.024 on CPU; inverse-variance means, ±0.009).
-
-GPU execution of ACE is not faster here: its simulators are small, its work is many short kernels with frequent read-backs and host-side seam logic, and workers sharing one card queue on it, whereas CPU workers run on separate cores. On the CMP 50HX an n = 27–28 `fxeb` point with both variants took ≈ 10 min per worker with three workers, an n = 29 point ≈ 13 min with two; the n = 27 reference alone took ≈ 10 s. The useful split is ACE on CPU workers and the reference on a GPU, unless CPU cores are the scarcer resource.
+GPU execution of ACE is not faster here: its simulators are small (≤ 23 qubits for tiled 4/4), its work is many short kernels with frequent read-backs and host-side seam logic, and workers sharing one card queue on it, whereas CPU workers run on separate cores. On the CMP 50HX an n = 27–28 `fxeb` point with two variants took ≈ 10 min per worker with three workers, an n = 29 point ≈ 13 min with two; the n = 27 reference alone took ≈ 10 s. The useful split is ACE on CPU workers and the reference on a GPU, unless CPU cores are the scarcer resource.
 
 **Device memory.** Device memory is not tracked by the memory ledger. Concurrent references on one 10 GB card failed with `QrackSimulator C++ library raised exception` (ten workers at n = 27; three at n = 28) and completed when rerun with one worker. Per worker, budget ≈ 8 · 2ⁿ bytes for the reference while it is built plus ≈ 0.5 GiB of ACE engines and driver context: on a 10 GB card ≤ 4 workers at n = 27, ≤ 2 at n = 28–29, 1 at n = 30, none beyond.
 
@@ -419,6 +413,16 @@ The placements are deterministic and were reproduced identically on two machines
 
 (inverse-variance means from `run --summarize`; σ ≈ 0.009 shot noise; d = 20 is at the 4096-shot floor.) The prediction holds: where the seam counts agree (n = 27) the tilings coincide; one seam qubit fewer (n = 29) gives a small gain at d = 12 and none resolvable at d = 16; halving the seam qubits (n = 28) raises the XEB 3.6–4.3-fold. With v3 the d = 12 XEB falls smoothly with size (0.165, 0.147, 0.140 at n = 27, 28, 29), so the n = 28 dip of the earlier runs (Sec. 9.4) was a tiling artefact. The per-cycle decay over d = 12–20 rises with n (b ≈ 0.23, 0.27, 0.32) and stays above b_dev = 0.137.
 
+**ACE settings.** The three switches of `QrackAceBackend` were compared on the same circuits as `--variants 4/4:t3 4/4:t3:rep 4/4:t3:noed 4/4:t3:noxbar` (n = 27–28, d = 12 and 16, 5 circuits per point, CMP 50HX, updated PyQrack). Paired per-circuit differences from the default:
+
+| Setting | n=27, d=12 | n=27, d=16 | n=28, d=12 | n=28, d=16 |
+|---|---|---|---|---|
+| boundary repetition code on (`rep`) | −0.007 ± 0.010 | +0.009 ± 0.008 | −0.012 ± 0.011 | −0.001 ± 0.008 |
+| seam error detection off (`noed`) | +0.008 ± 0.006 | +0.007 ± 0.009 | +0.029 ± 0.014 | +0.011 ± 0.005 |
+| crossbars off (`noxbar`) | +0.001 ± 0.012 | +0.002 ± 0.009 | −0.020 ± 0.009 | −0.002 ± 0.005 |
+
+The repetition code and the crossbars have no measurable effect. Disabling ACE's detect-and-post-select step raises the XEB in all four cells, by ≈ +0.010 ± 0.003 combined (an upper bound on significance, since the d = 12 and d = 16 circuits of an instance share their first twelve cycles), most at n = 28 where more qubits sit on seams. The gain is a constant offset: the per-cycle decay from d = 12 to 16 is unchanged (b ≈ 0.27 → 0.25 at n = 27, 0.26 → 0.26 at n = 28). No ACE setting reduces the cost per seam coupler; the remaining lever is structural (Sec. 9.9).
+
 Because both variants share circuits, the decisive statistic is the *paired* per-circuit difference v3 − v2, in which circuit-to-circuit variation cancels; the CSV from `nighthawk_graph.py --table` carries the per-instance values for it. Sizes n = 30–32 (seam differences 1, 2, 5) are pending on the CPU path; n = 32, with 11 seam qubits under v2 against 6 under v3, is expected to show the largest gap.
 
 ### 9.6 Cost
@@ -478,6 +482,19 @@ python3 nighthawk_qrack.py run --backend ace --families mirror --sizes 61 \
 
 Each worker needs ≈ 1.1 GiB. Larger budgets (`--shots 1000000`) lower p_min about threefold at the deep end at almost no extra cost, under their own config tag. In `fxeb`, by contrast, depth 40 is out of reach: at b ≈ 0.25 the XEB at d = 40 is ≈ 5 × 10⁻⁵, which would need ~10⁹ samples per circuit.
 
+### 9.9 Outlook: how close can ACE come at 61 qubits
+
+Across n = 27–29 the tiled v3 decay per replica coupler (a CZ through a seam replica) is nearly constant: b / replica couplers = 0.23/9, 0.27/13, 0.32/12 ≈ 0.025 per cycle. At matched size the device's error rate (2.25 × 10⁻³ per qubit per cycle) corresponds to b ≈ 0.06 at n = 27–29, so tiled ACE already loses fidelity 4–5 times faster per cycle than the hardware would on the same number of qubits. Extrapolated with that rate:
+
+| Split of the 8×8 window | couplers between simulators | estimated b at n = 61 | simulator width |
+|---|---|---|---|
+| tiled 4/4 (five simulators) | ≈ 40 | ≈ 1.0 | ≤ 23 |
+| three large tiles | ≈ 16 | ≈ 0.4 | ≈ 22–25 |
+| two halves, one seam line | ≈ 8 | ≈ 0.2 | ≈ 31–33 |
+| device | — | 0.137 | — |
+
+No balanced cut of an eight-wide grid crosses fewer than ≈ 8 couplers, so the device's rate (≲ 5 crossing couplers at 0.025 each) is out of reach of any seam-partitioned layout that fits in memory; a two-way split could come within ≈ 1.5× of it, with two dense ≈ 32-qubit simulators (32–64 GiB each). These estimates rest on three sizes and three to five circuits per point, and b itself grows with depth; the tiled mirror run of Sec. 9.8 tests them directly (predicted: survival below the 90 000-shot floor by d ≈ 8–14 for tiled 4/4). More shots only lower the measurement floor, and post-selection on ideal probabilities is the spoofing of [[5]](#ref-5), not a fidelity gain.
+
 ---
 
 verification and simulation at runtime:
@@ -493,6 +510,7 @@ verification and simulation at runtime:
 - `QrackAceBackend` is an approximate method whose layout, chunk numbering and seam treatment depend on the PyQrack version; record the version, `--lrc`/`--lrr`, torus setting and tiling version with every published number (all are in each record).
 - Tiling optimises a proxy cost; its weights are calibrated on the 4/4 runs of Sec. 9 and are not claimed optimal.
 - Three instances per point; instance scatter exceeds shot noise, and differences between configurations below ~2σ of the instance-scatter error are not resolved.
+- The ACE-settings comparison ran on an updated PyQrack; compare within one PyQrack version, as ACE's seam treatment and layout can change between versions (the PyQrack version enters neither the config tag nor the records: note it with each run, or use a new `--out` after an upgrade).
 - The v3/v2 comparison (Sec. 9.5) rests on 3 circuits per point; its effect size is approximate until the paired differences and the n = 30–32 points are in.
 - Sections 9.2 and 9.4–9.5 report inverse-variance means from `run --summarize`; the plain means over circuits can be higher (Sec. 7.3) and should be taken from the graph tool for publication.
 - arXiv:2609.28657 is a preprint (v1) and had not been peer reviewed at the time of writing.
