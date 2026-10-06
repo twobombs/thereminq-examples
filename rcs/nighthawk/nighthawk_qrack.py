@@ -406,12 +406,25 @@ class ExactEngine:
 _TWO_PATCH = {}
 
 
-def ace_register_geometry(size, lrc, lrr, torus):
+ACE_OPTS = (("ace_boundary_rep", "is_boundary_repetition_code", False),
+            ("ace_error_detection", "is_error_detection", True),
+            ("ace_crossbars", "use_crossbars", True))
+
+
+def ace_opts(a):
+    """QrackAceBackend keyword arguments that differ from Qrack's defaults (only those
+    are passed, so builds without an option work as long as it is not requested)."""
+    return {kw: bool(getattr(a, attr, dflt)) for attr, kw, dflt in ACE_OPTS
+            if a is not None and bool(getattr(a, attr, dflt)) != dflt}
+
+
+def ace_register_geometry(size, lrc, lrr, torus, opts=None):
     """(row_length, column_length, patch sizes, boundary sites, bulk/boundary) of an ACE
     register, read from its own _unpack() like nn_qab.py's bulk_to_boundary_ratio()."""
     from collections import Counter
     from pyqrack import QrackAceBackend
-    s = QrackAceBackend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False)
+    s = QrackAceBackend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False,
+                        **(opts or {}))
     sizes = Counter(sid for lq in range(s.num_qubits()) for sid, _ in s._unpack(lq))
     bnd = sum(1 for lq in range(s.num_qubits()) if len(s._unpack(lq)) > 1)
     patches = sorted(v for k, v in sizes.items() if not (bnd and k == max(sizes)))
@@ -821,11 +834,12 @@ def logical_couplers(lay, n):
     return sorted({tuple(sorted(e)) for es in lay.matchings.values() for e in es if e[0] < n and e[1] < n})
 
 
-def layout_row(size, lrc, lrr, torus):
+def layout_row(size, lrc, lrr, torus, opts=None):
     """ace_plan's entry for one layout (the identical layout with the smallest lrc+lrr
-    if this one was folded into it)."""
+    if this one was folded into it), for the given non-default ACE options."""
     from pyqrack import QrackAceBackend
-    s = QrackAceBackend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False)
+    s = QrackAceBackend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False,
+                        **(opts or {}))
     unpack = [tuple(tuple(e) for e in s._unpack(q)) for q in range(s.num_qubits())]
     widths = ace_sim_widths(s)
     del s
@@ -883,8 +897,10 @@ class AceEngine:
             lrc = alrc if str(lrc) == "auto" else int(lrc)
             lrr = alrr if str(lrr) == "auto" else int(lrr)
         self.lrc, self.lrr = int(lrc), int(lrr)
-        _, _, self.patches, self.boundary, self.b2b = ace_register_geometry(self.size, self.lrc, self.lrr, torus)
-        row = layout_row(self.size, self.lrc, self.lrr, torus)
+        self.opts = ace_opts(a)
+        _, _, self.patches, self.boundary, self.b2b = ace_register_geometry(self.size, self.lrc, self.lrr, torus,
+                                                                            self.opts)
+        row = layout_row(self.size, self.lrc, self.lrr, torus, self.opts)
         self.idx = place(lay, n, a, row, self.size)
         self.stats = placement_stats(row, self.idx, logical_couplers(lay, n))
         self.coupler_classes = (self.stats["exact"], self.stats["replica"], self.stats["cross"])
@@ -892,7 +908,7 @@ class AceEngine:
         # ACE on rusticl/Vega10 hung compute rings and forced GPU resets: CPU unless --ace-gpu
         self.sim = QrackAceBackend(self.size, long_range_columns=self.lrc, long_range_rows=self.lrr,
                                    is_torus=torus, is_gpu=(not a.cpu) and getattr(a, "ace_gpu", False),
-                                   is_host_pointer=getattr(a, "ace_host_pointer", False))
+                                   is_host_pointer=getattr(a, "ace_host_pointer", False), **self.opts)
         rl, cl = self.sim.get_row_length(), self.sim.get_column_length()
         if (rl, cl) != (C, R):
             raise SystemExit(f"ACE chose a {rl}x{cl} grid for {self.size} qubits, expected {C} columns x {R} rows")
@@ -906,6 +922,8 @@ class AceEngine:
                     ace_tiling=bool(getattr(self.a, "ace_tiling", False)),
                     **({"ace_tiling_version": tiling_version(self.a)} if getattr(self.a, "ace_tiling", False) else {}),
                     ace_seam_used=self.stats["seam_used"], ace_sims_used=self.stats["sims_used"],
+                    **{attr: bool(getattr(self.a, attr, dflt)) for attr, _, dflt in ACE_OPTS
+                       if bool(getattr(self.a, attr, dflt)) != dflt},
                     ace_map=hashlib.sha1(json.dumps(self.idx).encode()).hexdigest()[:10])
 
     def reset(self):
@@ -1221,6 +1239,10 @@ def cfg_tag(a):
         keys["max_width"] = a.ace_max_width       # absent unless --ace-max-width; lrc/lrr then unused
         if getattr(a, "ace_torus_search", "flat") != "any":
             keys["torus_search"] = a.ace_torus_search   # 'any' keeps the tag of the first runs
+    if a.backend == "ace":
+        for attr, kw, dflt in ACE_OPTS:                # only non-defaults: existing tags unchanged
+            if bool(getattr(a, attr, dflt)) != dflt:
+                keys[kw] = bool(getattr(a, attr, dflt))
     if getattr(a, "ace_tiling", False) and a.backend == "ace":
         keys["tiling"] = tiling_version(a)        # absent for device-geometry placement; 2 = the v2 tags
     return a.backend + "-" + hashlib.sha1(json.dumps(keys, sort_keys=True).encode()).hexdigest()[:8]
@@ -1971,7 +1993,7 @@ def ace_preflight(lay, a, sizes):
     if getattr(a, "ace_tiling", False) and not a.ace_max_width:
         for n in sizes:
             size, _, C = ace_register(lay, n, a.ace_layout)
-            row = layout_row(size, int(a.lrc), int(a.lrr), bool(a.ace_torus))
+            row = layout_row(size, int(a.lrc), int(a.lrr), bool(a.ace_torus), ace_opts(a))
             sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
             start = [r_ * C + c_ for r_, c_ in lay.pos[:n]]
             lc = logical_couplers(lay, n)
@@ -2034,6 +2056,7 @@ _ENGINE_GB = {}
 def engine_gb(lay, n, a):
     """Worst-case memory of one simulation engine at size n, in GiB."""
     key = (n, a.backend, str(a.lrc), str(a.lrr), bool(getattr(a, "ace_torus", False)),
+           tuple(sorted(ace_opts(a).items())),
            getattr(a, "ace_layout", "grid"), getattr(a, "ace_max_width", None))
     if key in _ENGINE_GB:
         return _ENGINE_GB[key]
@@ -2045,7 +2068,7 @@ def engine_gb(lay, n, a):
         gb = min(full, 4 * 2.0 ** (getattr(a, "ace_max_width", None) or 33) * amp / gib)
     else:
         size = ace_register(lay, n, getattr(a, "ace_layout", "grid"))[0]
-        widths = layout_row(size, int(a.lrc), int(a.lrr), bool(getattr(a, "ace_torus", False)))["widths"]
+        widths = layout_row(size, int(a.lrc), int(a.lrr), bool(getattr(a, "ace_torus", False)), ace_opts(a))["widths"]
         gb = min(dense_gb(widths), 2 * full)      # only n of the register's sites are ever entangled
     _ENGINE_GB[key] = gb
     return gb
@@ -2195,7 +2218,9 @@ def mem_preflight(lay, a, jobs, variants=None):
 
 
 def parse_variant(spec, a):
-    """'4/4:t3', '4/4:t2', '4/3:tiled', '2/7:torus:t3', '4/4:untiled' -> run namespace."""
+    """'4/4:t3', '4/4:t2', '4/3:tiled', '2/7:torus:t3', '4/4:untiled', '4/4:t3:rep' -> run namespace.
+    ACE options: rep = boundary repetition code on, noed = error detection off,
+    noxbar = crossbars off (Qrack defaults: off, on, on)."""
     import copy
     toks = spec.split(":")
     try:
@@ -2205,6 +2230,7 @@ def parse_variant(spec, a):
     v = copy.copy(a)
     v.lrc, v.lrr, v.ace_torus, v.ace_tiling = lrc, lrr, False, False
     v.ace_tiling_version, v.ace_max_width, v.geometry, v.variants = TILING_VERSION, None, "manual", None
+    v.ace_boundary_rep, v.ace_error_detection, v.ace_crossbars = False, True, True
     for t in toks[1:]:
         if t == "torus":
             v.ace_torus = True
@@ -2212,10 +2238,17 @@ def parse_variant(spec, a):
             v.ace_tiling = False
         elif t == "tiled":
             v.ace_tiling = True
+        elif t == "rep":
+            v.ace_boundary_rep = True               # is_boundary_repetition_code=True
+        elif t == "noed":
+            v.ace_error_detection = False           # is_error_detection=False
+        elif t == "noxbar":
+            v.ace_crossbars = False                 # use_crossbars=False
         elif re.fullmatch(r"t\d+", t):
             v.ace_tiling, v.ace_tiling_version = True, int(t[1:])
         else:
-            raise SystemExit(f"--variants {spec}: unknown token {t!r} (torus, tiled, untiled, t2, t3)")
+            raise SystemExit(f"--variants {spec}: unknown token {t!r} "
+                             f"(torus, tiled, untiled, t2, t3, rep, noed, noxbar)")
     v.ace_torus_search = "torus" if v.ace_torus else "flat"
     return v
 
@@ -2725,6 +2758,12 @@ def main():
                    help="fxeb only: score several ACE configurations against ONE exact reference per point, "
                         "e.g. --variants 4/4:t3 4/4:t2 4/3:t3 (lrc/lrr, then torus / untiled / tiled / t2 / t3). "
                         "Each variant keeps its own config tag and records")
+    r.add_argument("--ace-boundary-rep", dest="ace_boundary_rep", action="store_true",
+                   help="ace: is_boundary_repetition_code=True (repetition code on seam qubits; Qrack default off)")
+    r.add_argument("--no-ace-error-detection", dest="ace_error_detection", action="store_false",
+                   help="ace: is_error_detection=False (Qrack default on: detect-and-post-select at the seams)")
+    r.add_argument("--no-ace-crossbars", dest="ace_crossbars", action="store_false",
+                   help="ace: use_crossbars=False (Qrack default on)")
     r.add_argument("--ace-tiling", dest="ace_tiling", action="store_true",
                    help="ace: place logical qubits on ACE sites as compact tiles (annealed) instead of the "
                         "device grid, so most couplers stay inside one simulator; same simulators and memory")

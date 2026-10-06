@@ -119,6 +119,10 @@ def describe(cfg, recs, lay):
         lab_ = f"ace {lrc}/{lrr}" + (" torus" if torus else "") + (tv if tiled else " untiled")
     if any(g != lay.grid[0] * lay.grid[1] for g in regs):
         lab_ += " strip"
+    for key, val, tok in (("ace_boundary_rep", True, " rep"), ("ace_error_detection", False, " noED"),
+                          ("ace_crossbars", False, " noXbar")):
+        if any(r.get(key) == val for r in rs):
+            lab_ += tok
     return lab_ + extra
 
 
@@ -797,7 +801,10 @@ def geometry_stats(lay, rec, n):
         return out
     if None not in (reg, lrc, lrr):
         try:
-            row = nh.layout_row(reg, lrc, lrr, torus)
+            opts = nh.ace_opts(argparse.Namespace(**{k: rec[k] for k in
+                                                     ("ace_boundary_rep", "ace_error_detection", "ace_crossbars")
+                                                     if k in rec}))
+            row = nh.layout_row(reg, lrc, lrr, torus, opts)
             layout = "grid" if reg == lay.grid[0] * lay.grid[1] else "strip"
             # older tiled records carry no tiling version: try each until the placement hash matches
             versions = [rec["ace_tiling_version"]] if rec.get("ace_tiling_version") else [2, 3]
