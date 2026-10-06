@@ -1860,6 +1860,17 @@ def _strip_launch_args(argv):
     return out
 
 
+def worker_env(g):
+    """Environment of a worker pinned to OpenCL device g. Qrack otherwise spreads a
+    simulator's units and pages over every detected device, which on a mixed host
+    (different vendors, drivers, PCIe links) puts ACE patches on cards the worker was
+    not given. Variables the user set explicitly are left alone."""
+    env = dict(os.environ, QRACK_OCL_DEFAULT_DEVICE=str(g))
+    for k in ("QRACK_QUNITMULTI_DEVICES", "QRACK_QPAGER_DEVICES"):
+        env.setdefault(k, str(g))
+    return env
+
+
 def launch(a, lay, tag, jobs, recs, done_keys=None, finish=None):
     """Spawn len(gpus) x per_gpu workers (QRACK_OCL_DEFAULT_DEVICE per worker), watch the
     record files, then pack the bitstrings and summarise once they are all done.
@@ -1878,7 +1889,7 @@ def launch(a, lay, tag, jobs, recs, done_keys=None, finish=None):
     for idx, (g, k) in enumerate(order):
         if idx:
             time.sleep(a.stagger)
-        env = dict(os.environ, QRACK_OCL_DEFAULT_DEVICE=str(g))
+        env = worker_env(g)
         log = open(logdir / f"gpu{g}_job{k}.txt", "a")
         procs.append((g, k, subprocess.Popen(child, env=env, stdout=log, stderr=subprocess.STDOUT)))
         print(f"#   started gpu{g} job{k}", flush=True)
@@ -1908,7 +1919,7 @@ def launch(a, lay, tag, jobs, recs, done_keys=None, finish=None):
             # other exits (crash loops, 3 failures in a row) are not
             for idx, (g, k, p) in enumerate(procs):
                 if p.poll() == 3 and respawns < total and open_points(have):
-                    env = dict(os.environ, QRACK_OCL_DEFAULT_DEVICE=str(g))
+                    env = worker_env(g)
                     log = open(logdir / f"gpu{g}_job{k}.txt", "a")
                     procs[idx] = (g, k, subprocess.Popen(child, env=env, stdout=log, stderr=subprocess.STDOUT))
                     respawns += 1
