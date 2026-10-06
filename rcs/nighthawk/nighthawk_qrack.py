@@ -418,6 +418,21 @@ def ace_opts(a):
             if a is not None and bool(getattr(a, attr, dflt)) != dflt}
 
 
+def check_ace_opts(configs):
+    """Stop before any work if a requested ACE option is not a parameter of this PyQrack
+    build's QrackAceBackend (the options appeared in different PyQrack versions)."""
+    import inspect
+    from pyqrack import QrackAceBackend
+    have = set(inspect.signature(QrackAceBackend.__init__).parameters)
+    bad = [(name, kw) for name, a in configs for kw in ace_opts(a) if kw not in have]
+    if bad:
+        import pyqrack
+        ver = getattr(pyqrack, "__version__", "unknown version")
+        raise SystemExit("this PyQrack build (" + ver + ") has no QrackAceBackend parameter "
+                         + ", ".join(sorted({kw for _, kw in bad})) + "; drop "
+                         + ", ".join(sorted({name for name, _ in bad})) + " or update PyQrack")
+
+
 def ace_register_geometry(size, lrc, lrr, torus, opts=None):
     """(row_length, column_length, patch sizes, boundary sites, bulk/boundary) of an ACE
     register, read from its own _unpack() like nn_qab.py's bulk_to_boundary_ratio()."""
@@ -2271,6 +2286,8 @@ def cmd_run_group(a, lay):
         raise SystemExit("two --variants describe the same configuration")
     a.claim_tag = "grp-" + hashlib.sha1("|".join(sorted(tags)).encode()).hexdigest()[:8]
     names = [f"{sp} [{t}]" for sp, t in zip(a.variants, tags)]
+    if not (a.summarize or a.pack):
+        check_ace_opts(list(zip(a.variants, vas)))
 
     def done_keys():
         rr = [set(load_jsonl(a.out, t, lay.n)) for t in tags]
@@ -2386,6 +2403,8 @@ def cmd_run(a):
     lay = Layout(a.repo)
     if a.variants:
         return cmd_run_group(a, lay)
+    if a.backend == "ace" and not (a.summarize or a.pack):
+        check_ace_opts([("this run", a)])
     geo = resolve_geometry(lay, a)
     if geo and not a.worker:
         print(f"# nnqab geometry: lrc={a.lrc} lrr={a.lrr} torus, {geo['boundary']} boundary qubits, "
