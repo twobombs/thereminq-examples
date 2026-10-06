@@ -278,7 +278,7 @@ Schematic `fxeb` record from a `--variants` run (values illustrative):
  "ace_tiling": true, "ace_tiling_version": 3, "ace_map": "…", "shots_file": "…"}
 ```
 
-`ace_map` is a hash of the placement; the graph tool uses it to verify recomputed coupler splits. Mirror records carry `hits`, `shots_per_input`; patched records `patch_fidelity`, `patch_ideal_xeb`.
+Every record carries `theta` (`haar` or `nnqab`), the single-qubit ensemble of its circuits. `ace_map` is a hash of the placement; the graph tool uses it to verify recomputed coupler splits. Mirror records carry `hits`, `shots_per_input`; patched records `patch_fidelity`, `patch_ideal_xeb`.
 
 ### 7.2 Bitstrings in the release's own layout
 
@@ -302,7 +302,7 @@ With no `--out`, every `*.jsonl` in the working directory is harvested (worker f
 | 10 | `fxeb`: per-cycle decay b(N) per configuration, extrapolated to 61, against the device |
 | 11 | `fxeb`: XEB at one (n, d) against exact/replica/cross couplers, seam qubits used, simulators used and widest simulator, with rank correlations |
 
-`--table FILE` writes every point as CSV (coupler splits recomputed for older records where the placement hash matches) and prints a per-(n, d) ranking and each configuration's b. In views 8–11, points are plain means over instances with the standard error from the instance scatter, which exceeds shot noise; `run --summarize` uses inverse-variance weights.
+Views 8–11 and the `--table` comparison show one single-qubit ensemble at a time (`--theta haar|nnqab|all`, default `haar`), since XEB values of different ensembles are not comparable; configurations of the `nn_qab` ensemble are labelled `[θ nnqab]`. Records written before the `theta` field existed are classified by their ideal XEB at d ≥ 8 (> 5 for the concentrated `nn_qab` outputs). `--table FILE` writes every point as CSV (coupler splits recomputed for older records where the placement hash matches) and prints a per-(n, d) ranking and each configuration's b. In views 8–11, points are plain means over instances with the standard error from the instance scatter, which exceeds shot noise; `run --summarize` uses inverse-variance weights.
 
 ---
 

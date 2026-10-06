@@ -2383,7 +2383,7 @@ def cmd_run_group(a, lay):
                 f = point_file(vas[vi], n, fam, K, d, j, i)
                 save_point(f, arrays)
                 r["shots_file"] = str(f)
-            rec = dict(cfg=tags[vi], n=n, family=fam, K=K, depth=d, partition=j, instance=i,
+            rec = dict(cfg=tags[vi], n=n, family=fam, K=K, depth=d, partition=j, instance=i, theta=a.theta,
                        seconds=round(r["ace_seconds"] + r["ref_seconds"] / len(need), 2),
                        **engines[vi].geometry(), **r)
             fh.write(json.dumps(rec) + "\n")
@@ -2521,7 +2521,7 @@ def cmd_run(a):
             f = point_file(a, n, fam, K, d, j, i)
             save_point(f, arrays)
             r["shots_file"] = str(f)
-        rec = dict(cfg=tag, n=n, family=fam, K=K, depth=d, partition=j, instance=i,
+        rec = dict(cfg=tag, n=n, family=fam, K=K, depth=d, partition=j, instance=i, theta=a.theta,
                    seconds=round(time.time() - t0, 2), **eng.geometry(), **r)
         fh.write(json.dumps(rec) + "\n")
         fh.flush()

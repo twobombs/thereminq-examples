@@ -94,8 +94,32 @@ def lab(cfg):
     return f"{LABELS[cfg]} [{cfg}]" if cfg in LABELS else cfg
 
 
+ENSEMBLE = {}               # cfg tag -> "haar" | "nnqab", filled by Store.reload()
+THETA = {"show": "haar"}    # --theta: which ensemble views 8-11 compare
+
+
+def ensemble(recs):
+    """Single-qubit ensemble of a configuration: the records' own `theta` (written since
+    it was added), else inferred for fxeb records from the ideal XEB at d >= 8 -- the
+    nn_qab ensemble's outputs are far more concentrated (ideal XEB ~ 16 at d = 12 against
+    ~ 1.6 for Haar circuits), so > 5 marks it. Mirror-only records without `theta` are
+    taken as Haar, the only ensemble they were run with before the field existed."""
+    rs = list(recs.values())
+    th = {r["theta"] for r in rs if r.get("theta")}
+    if th:
+        return th.pop() if len(th) == 1 else "mixed"
+    ideal = [r["ideal_xeb"] for r in rs if r.get("family") == "fxeb" and r.get("depth", 0) >= 8
+             and r.get("ideal_xeb") is not None]
+    return "nnqab" if ideal and float(np.median(ideal)) > 5 else "haar"
+
+
 def describe(cfg, recs, lay):
     """Label a configuration from what its records say rather than by its hash."""
+    lab_ = _describe(cfg, recs, lay)
+    return lab_ + ("" if ENSEMBLE.get(cfg, "haar") == "haar" else f" [θ {ENSEMBLE[cfg]}]")
+
+
+def _describe(cfg, recs, lay):
     backend = cfg.split("-")[0]
     rs = list(recs.values())
     fams = sorted({r["family"] for r in rs})
@@ -601,7 +625,10 @@ def fxeb_points(recs):
 
 
 def fxeb_cfgs(data):
-    return [c for c, r in sorted(data.items()) if any(k[1] == "fxeb" for k in r)]
+    """Configurations with fxeb points, restricted to the ensemble chosen with --theta
+    (default haar): XEB values of different ensembles are not comparable."""
+    return [c for c, r in sorted(data.items()) if any(k[1] == "fxeb" for k in r)
+            and (THETA["show"] == "all" or ENSEMBLE.get(c, "haar") == THETA["show"])]
 
 
 def cfg_colors(cfgs):
@@ -947,7 +974,8 @@ def write_table(store, path):
     pts = {c: fxeb_points(store.data[c]) for c in cfgs}
     keys = sorted({k for c in cfgs for k in pts[c]})
     width = max(len(LABELS.get(c, c)) for c in cfgs)
-    print(f"\nforward XEB, mean over instances +/- instance-scatter se (k = instances)")
+    print(f"\nforward XEB, mean over instances +/- instance-scatter se (k = instances); "
+          f"ensemble: {THETA['show']} (--theta)")
     for n, d in keys:
         here = sorted(((pts[c][(n, d)], c) for c in cfgs if (n, d) in pts[c]), key=lambda x: -x[0]["F"])
         print(f"\nn = {n}, d = {d}")
@@ -1014,6 +1042,8 @@ class Store:
                 data.setdefault(cfg, {}).update(recs)
                 bases[cfg] = shots_base(out, self.a.shots_dir)
         self.data, self.bases = data, bases
+        ENSEMBLE.clear()
+        ENSEMBLE.update({c: ensemble(r) for c, r in data.items()})
         LABELS.clear()
         LABELS.update({c: describe(c, r, self.lay) for c, r in data.items()})
         self.hw = []
@@ -1239,10 +1269,14 @@ def main():
     ap.add_argument("--save", default=None, help="write PNGs to this directory instead of opening the viewer")
     ap.add_argument("--table", default=None,
                     help="write every point of every configuration to this CSV, print the comparison, exit")
+    ap.add_argument("--theta", choices=["haar", "nnqab", "all"], default="haar",
+                    help="views 8-11 and the --table comparison: single-qubit ensemble to compare "
+                         "(default haar, the paper's circuits; all = both, labelled)")
     ap.add_argument("--fxeb-dmin", dest="fxeb_dmin", type=int, default=8,
                     help="views 10-11 and --table: smallest depth used in the decay fit (default 8; "
                          "shallower outputs are too concentrated)")
     a = ap.parse_args()
+    THETA["show"] = a.theta
     if not a.out:                                   # harvest: every record file here
         import re
         # a run launched with --gpus writes only worker files (<stem>.w<pid>.jsonl) until it
