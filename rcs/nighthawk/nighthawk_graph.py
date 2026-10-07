@@ -141,6 +141,11 @@ def _describe(cfg, recs, lay):
         vers = {r.get("ace_tiling_version") for r in rs if r.get("ace_tiling")}
         tv = f" tiled v{vers.pop()}" if len(vers) == 1 and None not in vers else " tiled"
         lab_ = f"ace {lrc}/{lrr}" + (" torus" if torus else "") + (tv if tiled else " untiled")
+        txr = [r for r in rs if r.get("ace_transpile")]
+        if txr:
+            r0 = txr[0]
+            lab_ = (f"ace {lrc}/{lrr}" + (" torus" if torus else "") + f" {r0.get('ace_transpile_engine', 'anneal')}"
+                    + f" w{r0.get('ace_register')}" + (f" ex{len(r0['ace_exclude'])}" if r0.get("ace_exclude") else ""))
     if any(g != lay.grid[0] * lay.grid[1] for g in regs):
         lab_ += " strip"
     for key, val, tok in (("ace_boundary_rep", True, " rep"), ("ace_error_detection", False, " noED"),

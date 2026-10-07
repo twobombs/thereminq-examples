@@ -692,8 +692,9 @@ def _cost3_parts(sids, bulk_of):
     return w, total
 
 
-def _anneal3(sids, couplers, site0, size, iters, seed):
-    """Simulated annealing of the v3 cost from site0; returns (best placement, its cost)."""
+def _anneal3(sids, couplers, site0, size, iters, seed, exclude=()):
+    """Simulated annealing of the v3 cost from site0 over sites not in exclude; returns
+    (best placement, its cost)."""
     import random
     W = TILING_W3
     bulk_of = [next(iter(s)) if len(s) == 1 else -1 for s in sids]
@@ -701,7 +702,8 @@ def _anneal3(sids, couplers, site0, size, iters, seed):
     n = len(site0)
     site = list(site0)
     used = set(site)
-    free = [x for x in range(size) if x not in used]
+    excl = set(exclude)
+    free = [x for x in range(size) if x not in used and x not in excl]
     adj = [[] for _ in range(n)]
     for u, v in couplers:
         adj[u].append(v)
@@ -836,13 +838,179 @@ def _tiling_v2(row, start, couplers, size, iters=200_000, seed=2):
 
 
 def place(lay, n, a, row, size):
-    """ACE site of each of the first n logical qubits: the device geometry, or with
-    --ace-tiling the annealed tiling of that geometry for this layout."""
+    """ACE site of each of the first n logical qubits: the device geometry, with
+    --ace-tiling the annealed tiling of that geometry, with --ace-transpile the layout
+    Qiskit's VF2Layout finds on ACE's own logical coupling map."""
+    if getattr(a, "ace_transpile", False):
+        return transpile_layout(lay, n, a, row, size)
     _, _, C = ace_register(lay, n, getattr(a, "ace_layout", "grid"))
     start = [r * C + c for r, c in lay.pos[:n]]
     if not getattr(a, "ace_tiling", False):
         return start
     return ace_tiling(row, start, logical_couplers(lay, n), size, tiling_version(a))
+
+
+def ace_size(lay, n, a):
+    """Number of ACE sites: --ace-width, else the device window (or strip) of ace_register."""
+    w = getattr(a, "ace_width", None)
+    return int(w) if w else ace_register(lay, n, getattr(a, "ace_layout", "grid"))[0]
+
+
+def parse_exclude(spec):
+    """'74,59,44' or '74+59+44' -> sorted tuple of ACE sites."""
+    if not spec:
+        return ()
+    return tuple(sorted({int(x) for x in re.split(r"[,+ ]+", str(spec).strip()) if x}))
+
+
+TRANSPILE_SEAM_EDGE_ERR, TRANSPILE_BULK_EDGE_ERR = 2e-2, 1e-4
+# VF2 search bounds: on ACE's dense coupling graph (every pair inside a patch) the
+# isomorphism search is unbounded without them; the defaults are set from timings on
+# the 64- and 75-site registers (see README)
+TRANSPILE_TRIALS, TRANSPILE_CALLS, TRANSPILE_TIME_S = 2000, 2_000_000, 120
+TRANSPILE_SEAM_QUBIT_ERR, TRANSPILE_BULK_QUBIT_ERR = 1e-2, 1e-4
+
+
+def ace_coupling_edges(row, size, torus, opts, exclude):
+    """Undirected couplers of the ACE register: the backend's own get_logical_coupling_map()
+    where this PyQrack has it (as mirror_nighthawk.py uses it), else every pair of sites
+    sharing a simulator -- inside a patch the bulk is a dense state vector, i.e. fully
+    connected. Couplers touching an excluded site are dropped (Dan's coupler_exclusions)."""
+    ex = set(exclude)
+    edges = None
+    try:
+        from pyqrack import QrackAceBackend
+        b = QrackAceBackend(size, long_range_columns=row["lrc"], long_range_rows=row["lrr"], is_torus=torus,
+                            is_gpu=False, **(opts or {}))
+        if hasattr(b, "get_logical_coupling_map"):
+            edges = {tuple(sorted(map(int, e))) for e in b.get_logical_coupling_map() if e[0] != e[1]}
+        del b
+    except Exception:
+        edges = None
+    if edges is None:
+        sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
+        edges = {(i, j) for i in range(size) for j in range(i + 1, size) if sids[i] & sids[j]}
+    return sorted(e for e in edges if not (ex & set(e)))
+
+
+_TX = {}
+
+
+def _anneal_on_register(row, size, couplers, exclude, start=None):
+    """Tiling cost (version 3 weights) annealed on an arbitrary ACE register with excluded
+    sites: from the VF2 layout when Qiskit found one, else from a greedy fill (logical qubits
+    in breadth-first order of the circuit graph onto allowed sites, bulk patch by patch,
+    seam sites last). Three restarts; the best placement is kept."""
+    sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
+    n = 1 + max(max(e) for e in couplers)
+    excl = set(exclude)
+    starts = []
+    if start is not None:
+        starts.append(list(start))
+    adj = [[] for _ in range(n)]
+    for u, v in couplers:
+        adj[u].append(v)
+        adj[v].append(u)
+    order, seen = [], set()
+    for root in range(n):
+        if root in seen:
+            continue
+        queue = [root]
+        seen.add(root)
+        while queue:
+            x = queue.pop(0)
+            order.append(x)
+            for y in sorted(adj[x]):
+                if y not in seen:
+                    seen.add(y)
+                    queue.append(y)
+    sites = sorted((x for x in range(size) if x not in excl),
+                   key=lambda x: (len(sids[x]) > 1, min(sids[x]), x))
+    if len(sites) < n:
+        raise SystemExit(f"--ace-transpile: {n} qubits do not fit on {len(sites)} usable ACE sites")
+    greedy = [0] * n
+    for q, x in zip(order, sites):
+        greedy[q] = x
+    starts.append(greedy)
+    best = None
+    for k, seed in enumerate(TILING_SEEDS3):
+        site, c = _anneal3(sids, couplers, starts[k % len(starts)], size, TILING_ITERS3, seed, excl)
+        if best is None or c < best[1]:
+            best = (site, c)
+    return best[0]
+
+
+def transpile_layout(lay, n, a, row, size):
+    """Placement by Qiskit's VF2Layout pass on ACE's coupling map: a perfect layout, so every
+    circuit coupler is a coupler of the ACE register and no routing (SWAP) is needed.
+    Among the layouts it tries, VF2Layout keeps the one with the best error score; the
+    target charges couplers that touch a seam site (and seam sites themselves) more than
+    bulk ones, so it prefers placements with few seam crossings. Routing is deliberately not
+    done: it would change the circuit, and the shared-circuit variants, twirling and
+    estimators all assume the released gates. Deterministic for a given seed; cached in the
+    tiling cache file."""
+    exclude = parse_exclude(getattr(a, "ace_exclude", None))
+    engine = getattr(a, "transpile_engine", "anneal") or "anneal"
+    seed = int(getattr(a, "transpile_seed", 0) or 0)
+    trials = int(getattr(a, "transpile_trials", 0) or 0) or TRANSPILE_TRIALS
+    calls = int(getattr(a, "transpile_calls", 0) or 0) or TRANSPILE_CALLS
+    couplers = logical_couplers(lay, n)
+    torus = bool(getattr(a, "ace_torus", False))
+    opts = ace_opts(a)
+    key = (engine, n, row["lrc"], row["lrr"], torus, size, exclude, seed, trials, calls, tuple(sorted(opts.items())))
+    if key in _TX:
+        return _TX[key]
+    try:
+        import qiskit
+        from qiskit import QuantumCircuit
+        from qiskit.circuit.library import CZGate, RZGate, SXGate
+        from qiskit.circuit import Parameter
+        from qiskit.transpiler import Target, InstructionProperties, PassManager
+        from qiskit.transpiler.passes import VF2Layout
+    except ImportError:
+        raise SystemExit("--ace-transpile needs Qiskit: python3 -m pip install qiskit")
+    dkey = hashlib.sha1(json.dumps(["tx", engine, TILING_W3, TILING_ITERS3, list(TILING_SEEDS3), qiskit.__version__, row["unpack"], list(exclude), seed, trials, calls,
+                                    couplers, sorted(opts.items())]).encode()).hexdigest()
+    hit = _tile_cache_get(dkey)
+    if hit is not None:
+        _TX[key] = hit
+        return hit
+    edges = ace_coupling_edges(row, size, torus, opts, exclude)
+    seam = {q for q, u in enumerate(row["unpack"]) if len(u) > 1}
+    tgt = Target(num_qubits=size)
+    tgt.add_instruction(CZGate(), {
+        e2: InstructionProperties(error=TRANSPILE_SEAM_EDGE_ERR if (seam & set(e)) else TRANSPILE_BULK_EDGE_ERR)
+        for e in edges for e2 in (e, e[::-1])})
+    q_err = {q: InstructionProperties(error=TRANSPILE_SEAM_QUBIT_ERR if q in seam else TRANSPILE_BULK_QUBIT_ERR)
+             for q in range(size)}
+    tgt.add_instruction(SXGate(), {(q,): q_err[q] for q in range(size)})
+    tgt.add_instruction(RZGate(Parameter("t")), {(q,): InstructionProperties(error=0.0) for q in range(size)})
+    qc = QuantumCircuit(n)
+    for q in range(n):
+        qc.sx(q)
+    for u, v in couplers:
+        qc.cz(u, v)
+    kw = dict(target=tgt, seed=seed, strict_direction=False, max_trials=trials, call_limit=calls,
+              time_limit=TRANSPILE_TIME_S)
+    pm = PassManager([VF2Layout(**kw)])
+    pm.run(qc)
+    layout = pm.property_set.get("layout")
+    vf2 = None
+    if layout is not None:
+        virt = layout.get_virtual_bits()
+        vf2 = [int(virt[qc.qubits[q]]) for q in range(n)]
+    if engine == "vf2":
+        if vf2 is None:
+            why = pm.property_set.get("VF2Layout_stop_reason")
+            raise SystemExit(f"--ace-transpile vf2: no routing-free layout of the {n}-qubit circuit found on this ACE "
+                             f"register ({size} sites, lrc {row['lrc']} lrr {row['lrr']}, {len(exclude)} excluded; "
+                             f"VF2: {why}). Raise --transpile-calls, or use --transpile-engine anneal")
+        site = vf2
+    else:
+        site = _anneal_on_register(row, size, couplers, exclude, vf2)
+    _TX[key] = site
+    _tile_cache_put(dkey, site)
+    return site
 
 
 def logical_couplers(lay, n):
@@ -896,6 +1064,8 @@ class AceEngine:
     def __init__(self, lay, n, a):
         self.lay, self.n, self.a = lay, n, a
         self.size, R, C = ace_register(lay, n, getattr(a, "ace_layout", "grid"))
+        if getattr(a, "ace_width", None):
+            self.size = int(a.ace_width)            # --ace-transpile on a register of its own size
         grid_idx = [r * C + c for r, c in lay.pos[:n]]
         self.idx = grid_idx
         self.torus = torus = getattr(a, "ace_torus", False)
@@ -925,7 +1095,7 @@ class AceEngine:
                                    is_torus=torus, is_gpu=(not a.cpu) and getattr(a, "ace_gpu", False),
                                    is_host_pointer=getattr(a, "ace_host_pointer", False), **self.opts)
         rl, cl = self.sim.get_row_length(), self.sim.get_column_length()
-        if (rl, cl) != (C, R):
+        if not getattr(a, "ace_width", None) and (rl, cl) != (C, R):
             raise SystemExit(f"ACE chose a {rl}x{cl} grid for {self.size} qubits, expected {C} columns x {R} rows")
         self.widths = ace_sim_widths(self.sim)
 
@@ -937,6 +1107,10 @@ class AceEngine:
                     ace_tiling=bool(getattr(self.a, "ace_tiling", False)),
                     **({"ace_tiling_version": tiling_version(self.a)} if getattr(self.a, "ace_tiling", False) else {}),
                     ace_seam_used=self.stats["seam_used"], ace_sims_used=self.stats["sims_used"],
+                    **({"ace_transpile": True, "ace_transpile_engine": getattr(self.a, "transpile_engine", "anneal"),
+                        "ace_exclude": list(parse_exclude(getattr(self.a, "ace_exclude", None))),
+                        "ace_transpile_seed": int(getattr(self.a, "transpile_seed", 0) or 0)}
+                       if getattr(self.a, "ace_transpile", False) else {}),
                     **{attr: bool(getattr(self.a, attr, dflt)) for attr, _, dflt in ACE_OPTS
                        if bool(getattr(self.a, attr, dflt)) != dflt},
                     ace_map=hashlib.sha1(json.dumps(self.idx).encode()).hexdigest()[:10])
@@ -1258,6 +1432,13 @@ def cfg_tag(a):
         for attr, kw, dflt in ACE_OPTS:                # only non-defaults: existing tags unchanged
             if bool(getattr(a, attr, dflt)) != dflt:
                 keys[kw] = bool(getattr(a, attr, dflt))
+    if getattr(a, "ace_transpile", False) and a.backend == "ace":
+        keys["transpile"] = dict(engine=getattr(a, "transpile_engine", "anneal") or "anneal",
+                                 width=getattr(a, "ace_width", None),
+                                 exclude=list(parse_exclude(getattr(a, "ace_exclude", None))),
+                                 seed=int(getattr(a, "transpile_seed", 0) or 0),
+                                 trials=int(getattr(a, "transpile_trials", 0) or 0),
+                                 calls=int(getattr(a, "transpile_calls", 0) or 0))
     if getattr(a, "ace_tiling", False) and a.backend == "ace":
         keys["tiling"] = tiling_version(a)        # absent for device-geometry placement; 2 = the v2 tags
     return a.backend + "-" + hashlib.sha1(json.dumps(keys, sort_keys=True).encode()).hexdigest()[:8]
@@ -2005,6 +2186,19 @@ def ace_preflight(lay, a, sizes):
     --ace-tiling with fixed lrc/lrr: print the coupler counts the tiling reaches."""
     if a.backend != "ace":
         return
+    if getattr(a, "ace_transpile", False):
+        f = lambda x: f"{x['exact']}/{x['replica']}/{x['cross']}, {x['seam_used']} seam, {x['sims_used']} sims"
+        for n in sizes:
+            size = ace_size(lay, n, a)
+            row = layout_row(size, int(a.lrc), int(a.lrr), bool(a.ace_torus), ace_opts(a))
+            lc = logical_couplers(lay, n)
+            t = placement_stats(row, transpile_layout(lay, n, a, row, size), lc)
+            ex = parse_exclude(getattr(a, "ace_exclude", None))
+            print(f"# ace transpile ({getattr(a, 'transpile_engine', 'anneal')}) n={n}, {size} sites, "
+                  f"lrc {a.lrc} lrr {a.lrr}{' torus' if a.ace_torus else ''}, "
+                  f"{len(ex)} sites excluded: exact/replica/cross {f(t)}, simulator widths {row['widths']}",
+                  flush=True)
+        return
     if getattr(a, "ace_tiling", False) and not a.ace_max_width:
         for n in sizes:
             size, _, C = ace_register(lay, n, a.ace_layout)
@@ -2071,7 +2265,9 @@ _ENGINE_GB = {}
 def engine_gb(lay, n, a):
     """Worst-case memory of one simulation engine at size n, in GiB."""
     key = (n, a.backend, str(a.lrc), str(a.lrr), bool(getattr(a, "ace_torus", False)),
-           tuple(sorted(ace_opts(a).items())),
+           tuple(sorted(ace_opts(a).items())), bool(getattr(a, "ace_tiling", False)), tiling_version(a),
+           bool(getattr(a, "ace_transpile", False)), getattr(a, "ace_width", None),
+           parse_exclude(getattr(a, "ace_exclude", None)), getattr(a, "transpile_seed", 0),
            getattr(a, "ace_layout", "grid"), getattr(a, "ace_max_width", None))
     if key in _ENGINE_GB:
         return _ENGINE_GB[key]
@@ -2082,11 +2278,29 @@ def engine_gb(lay, n, a):
     elif getattr(a, "ace_max_width", None) or "auto" in (str(a.lrc), str(a.lrr)):
         gb = min(full, 4 * 2.0 ** (getattr(a, "ace_max_width", None) or 33) * amp / gib)
     else:
-        size = ace_register(lay, n, getattr(a, "ace_layout", "grid"))[0]
-        widths = layout_row(size, int(a.lrc), int(a.lrr), bool(getattr(a, "ace_torus", False)), ace_opts(a))["widths"]
-        gb = min(dense_gb(widths), 2 * full)      # only n of the register's sites are ever entangled
+        size = ace_size(lay, n, a)
+        row = layout_row(size, int(a.lrc), int(a.lrr), bool(getattr(a, "ace_torus", False)), ace_opts(a))
+        gb = min(active_dense_gb(lay, n, a, row, size), 2 * full)
     _ENGINE_GB[key] = gb
     return gb
+
+
+def active_dense_gb(lay, n, a, row, size):
+    """Dense worst case of the ACE simulators counting only the sites the circuit uses:
+    replicas of unused seam sites (and unused bulk sites) stay in |0>, separable, and are
+    never allocated by QUnit. Each simulator keeps its non-site qubits (error-detection
+    ancilla, repetition code) as in the full register."""
+    idx = place(lay, n, a, row, size)
+    used, total = collections.Counter(), collections.Counter()
+    for q, entries in enumerate(row["unpack"]):
+        for sid, _ in entries:
+            total[sid] += 1
+            if q in set(idx):
+                used[sid] += 1
+    extra = (1 if bool(getattr(a, "ace_error_detection", True)) else 0) + \
+            (1 if bool(getattr(a, "ace_boundary_rep", False)) else 0)
+    widths = [used[sid] + extra for sid in total if used[sid]]
+    return dense_gb(widths) if widths else 0.0
 
 
 def point_mem_gb(lay, a, key, variants=None):
@@ -2232,6 +2446,17 @@ def mem_preflight(lay, a, jobs, variants=None):
         print(f"# WARNING: sizes {sorted(over)} exceed the budget and will be marked failed", flush=True)
 
 
+def check_transpile_args(a):
+    if getattr(a, "ace_transpile", False):
+        if getattr(a, "ace_tiling", False):
+            raise SystemExit("give --ace-transpile or --ace-tiling, not both")
+        if getattr(a, "ace_max_width", None) or "auto" in (str(a.lrc), str(a.lrr)) or \
+                getattr(a, "geometry", "manual") == "nnqab":
+            raise SystemExit("--ace-transpile needs explicit --lrc/--lrr")
+    elif getattr(a, "ace_width", None) or getattr(a, "ace_exclude", None):
+        raise SystemExit("--ace-width and --ace-exclude apply to --ace-transpile placements only")
+
+
 def parse_variant(spec, a):
     """'4/4:t3', '4/4:t2', '4/3:tiled', '2/7:torus:t3', '4/4:untiled', '4/4:t3:rep' -> run namespace.
     ACE options: rep = boundary repetition code on, noed = error detection off,
@@ -2246,6 +2471,7 @@ def parse_variant(spec, a):
     v.lrc, v.lrr, v.ace_torus, v.ace_tiling = lrc, lrr, False, False
     v.ace_tiling_version, v.ace_max_width, v.geometry, v.variants = TILING_VERSION, None, "manual", None
     v.ace_boundary_rep, v.ace_error_detection, v.ace_crossbars = False, True, True
+    v.ace_transpile, v.ace_width, v.ace_exclude, v.transpile_engine = False, None, None, "anneal"
     for t in toks[1:]:
         if t == "torus":
             v.ace_torus = True
@@ -2259,12 +2485,20 @@ def parse_variant(spec, a):
             v.ace_error_detection = False           # is_error_detection=False
         elif t == "noxbar":
             v.ace_crossbars = False                 # use_crossbars=False
+        elif t in ("tx", "vf2"):
+            v.ace_transpile, v.ace_tiling = True, False   # register + coupling-map placement
+            v.transpile_engine = "vf2" if t == "vf2" else "anneal"
+        elif re.fullmatch(r"w\d+", t):
+            v.ace_width = int(t[1:])                # ACE register of this many sites (with tx)
+        elif re.fullmatch(r"ex[\d+]+", t):
+            v.ace_exclude = t[2:]                   # sites excluded from the coupling map (with tx)
         elif re.fullmatch(r"t\d+", t):
             v.ace_tiling, v.ace_tiling_version = True, int(t[1:])
         else:
             raise SystemExit(f"--variants {spec}: unknown token {t!r} "
-                             f"(torus, tiled, untiled, t2, t3, rep, noed, noxbar)")
+                             f"(torus, tiled, untiled, t2, t3, rep, noed, noxbar, tx, vf2, w<N>, ex<a+b+...>)")
     v.ace_torus_search = "torus" if v.ace_torus else "flat"
+    check_transpile_args(v)
     return v
 
 
@@ -2277,9 +2511,11 @@ def cmd_run_group(a, lay):
     if a.backend != "ace" or a.families != "fxeb":
         raise SystemExit("--variants scores several ACE configurations against one exact reference: "
                          "use it with --backend ace --families fxeb")
-    if a.ace_max_width or a.geometry == "nnqab" or a.ace_tiling or a.ace_torus:
+    if a.ace_max_width or a.geometry == "nnqab" or a.ace_tiling or a.ace_torus or a.ace_transpile \
+            or a.ace_width or a.ace_exclude:
         raise SystemExit("--variants sets the layout per variant: drop --ace-max-width, --geometry, "
-                         "--ace-tiling and --ace-torus")
+                         "--ace-tiling, --ace-torus, --ace-transpile, --ace-width and --ace-exclude "
+                         "(use the tokens tx, w<N>, ex<a+b+...>)")
     vas = [parse_variant(sp, a) for sp in a.variants]
     tags = [cfg_tag(v) for v in vas]
     if len(set(tags)) != len(tags):
@@ -2332,7 +2568,7 @@ def cmd_run_group(a, lay):
         print(f"# variants group {a.claim_tag}: {len(vas)} ACE configurations, one exact reference per point")
         for v, nm in zip(vas, names):
             print(f"#   {nm}", flush=True)
-            if v.ace_tiling:
+            if v.ace_tiling or getattr(v, "ace_transpile", False):
                 ace_preflight(lay, v, sizes)
         print(f"# {len(jobs) - len(todo)} of {len(jobs)} points done for every variant", flush=True)
         mem_preflight(lay, a, jobs, vas)
@@ -2427,6 +2663,7 @@ def cmd_run(a):
         a.ace_torus_search = "torus"
     if a.ace_tiling and ("auto" in (str(a.lrc), str(a.lrr)) or a.geometry == "nnqab"):
         raise SystemExit("--ace-tiling needs explicit --lrc/--lrr or --ace-max-width")
+    check_transpile_args(a)
     if a.theta != "haar" and not a.worker:
         print(f"# VARIANT: single-qubit theta drawn as {a.theta}, not Haar -- these are not the paper's "
               f"circuits (records kept under their own config tag)", flush=True)
@@ -2777,6 +3014,24 @@ def main():
                    help="fxeb only: score several ACE configurations against ONE exact reference per point, "
                         "e.g. --variants 4/4:t3 4/4:t2 4/3:t3 (lrc/lrr, then torus / untiled / tiled / t2 / t3). "
                         "Each variant keeps its own config tag and records")
+    r.add_argument("--ace-transpile", dest="ace_transpile", action="store_true",
+                   help="ace: place logical qubits with Qiskit's VF2Layout on ACE's logical coupling map (bulk "
+                        "fully connected inside a patch), as in pyqrack-examples rcs/mirror_nighthawk.py; "
+                        "routing-free, so twirling, variants and estimators apply unchanged. Needs qiskit")
+    r.add_argument("--ace-width", dest="ace_width", type=int, default=None,
+                   help="with --ace-transpile: ACE register size in sites (default: the 8x8 device window); "
+                        "e.g. 75 for mirror_nighthawk.py's 15x5 register")
+    r.add_argument("--ace-exclude", dest="ace_exclude", default=None,
+                   help="with --ace-transpile: ACE sites removed from the coupling map, e.g. '74,59,44,69,54,68,64' "
+                        "(mirror_nighthawk.py's coupler_exclusions) to shape the boundary")
+    r.add_argument("--transpile-engine", dest="transpile_engine", choices=["anneal", "vf2"], default="anneal",
+                   help="with --ace-transpile: vf2 = Qiskit's VF2Layout as is; anneal (default) = the tiling cost "
+                        "annealed on the same register and coupling map, started from the VF2 layout when found")
+    r.add_argument("--transpile-seed", dest="transpile_seed", type=int, default=0, help="VF2Layout seed")
+    r.add_argument("--transpile-trials", dest="transpile_trials", type=int, default=0,
+                   help=f"VF2Layout max_trials: layouts scored before keeping the best (0 = {TRANSPILE_TRIALS})")
+    r.add_argument("--transpile-calls", dest="transpile_calls", type=int, default=0,
+                   help=f"VF2Layout call_limit: bound on the isomorphism search (0 = {TRANSPILE_CALLS})")
     r.add_argument("--ace-boundary-rep", dest="ace_boundary_rep", action="store_true",
                    help="ace: is_boundary_repetition_code=True (repetition code on seam qubits; Qrack default off)")
     r.add_argument("--no-ace-error-detection", dest="ace_error_detection", action="store_false",

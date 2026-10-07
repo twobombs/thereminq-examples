@@ -98,6 +98,22 @@ The version-3 weights follow the measurements of Sec. 9.3–9.4. A trial weighti
 
 The quantity compared throughout is a per-cycle decay b = −d ln F / dd. A classical method that loses fidelity at a controlled rate per gate, and is matched against a device on that rate, is the framing of Zhou, Stoudenmire and Waintal for truncated matrix-product-state simulation [[11]](#ref-11). The exact alternative to ACE's approximate seams — Schrödinger–Feynman path summation across a cut, with simulation cost scaling linearly in the fraction of paths kept and hence in the target fidelity — is that of Markov et al. [[12]](#ref-12). On this lattice roughly two CZs cross the best bipartition per cycle, so the number of paths grows as about 2^(2d); this is used only as a shallow-depth reference, not at d = 36.
 
+### 2.8 Bespoke registers: `--ace-transpile`
+
+Inside a patch the bulk is a dense state vector, so every pair of its qubits is a coupler; only the boundary has geometry. Following `rcs/mirror_nighthawk.py` in [`vm6502q/pyqrack-examples`](https://github.com/vm6502q/pyqrack-examples), `--ace-transpile` takes the coupling map of an ACE register of any size (`get_logical_coupling_map()`, or the pairs sharing a simulator), removes chosen sites (`--ace-exclude`, to shape the boundary), and places the circuit's qubits on it. The placement is routing-free — every circuit coupler is a coupler of the register — so the released gates, Pauli twirling, `--variants` and the estimators apply unchanged; routing would insert SWAPs and change the circuit, and is not done. For these circuits (CZ between fresh random single-qubit gates) Qiskit's gate-level optimisations have nothing to cancel; their gain applies to circuits with SWAP-type gates such as the `nn_qab` set.
+
+Two placement engines are provided. `vf2` is Qiskit's VF2Layout with a target that charges couplers and qubits on seam sites; on ACE's dense coupling graph its search must be bounded and it ranks only the layouts it reaches. `anneal` (default) applies the tiling cost of Sec. 2.6 to the same register and exclusions, starting from the VF2 layout when Qiskit finds one. Measured placements of the 61-qubit circuit:
+
+| Register (flat) | Engine | exact / replica / cross CZ | qubits on seams | active dense memory |
+|---|---|---|---|---|
+| 64 sites, lrc 4 lrr 4 | vf2 | no routing-free layout within the search bound | — | — |
+| 64 sites, lrc 4 lrr 4 | anneal | 63 / 38 / 1 | 12 | 0.05 GiB |
+| 64 sites, lrc 4 lrr 7, error detection off | anneal | 84 / 18 / 0 | 6 | 192 GiB |
+| 75 sites, lrc 4 lrr 5 (`mirror_nighthawk.py`) | anneal | 74 / 28 / 0 | 9 | 0.56 GiB |
+| 75 sites, lrc 4 lrr 5, its 7 exclusions | anneal | 76 / 24 / 2 | 8 | 0.66 GiB |
+
+At n = 27 VF2 placed the circuit with 9–10 qubits on seams (17 exact / 24 replica CZ on 64 sites) where the tiling uses 3, and in the n = 18 smoke test it scored 0.26 against 0.60–0.69 for the annealed placements. The 75-site register (three 31-site simulators) holds up to ≈ 30 qubits in a single exact simulator, so its `fxeb` scores below n ≈ 30 are trivially exact; its comparisons are meaningful at the full 61 qubits, where it reaches 24–28 replica couplers at under 1 GiB, against 18 at 192 GiB for the two-patch register. `mirror_nighthawk.py` builds its backend with Qrack's default `is_torus=True`; add the `torus` token to match it.
+
 ---
 
 ## 3. Requirements
@@ -109,7 +125,7 @@ The quantity compared throughout is a per-cycle decay b = −d ln F / dd. A clas
 | matplotlib | `nighthawk_graph.py` only (Tk for the interactive viewer) |
 | PyQrack | required by `hwxeb`, `run`, `selftest`, `aceplan`; **not** by `verify` or `seamgap`. The `ace` backend needs a PyQrack build that ships `QrackAceBackend`; exact references above 32 qubits need Qrack built in >32-qubit mode |
 | Qrack shared library | if `/usr/local/lib/qrack/libqrack_pinvoke.so` exists, the script exports it as `PYQRACK_SHARED_LIB_PATH` |
-| Qiskit | **not** required |
+| Qiskit | only for `--ace-transpile` |
 | GPU | OpenCL (select with `QRACK_OCL_DEFAULT_DEVICE`) or `--cpu`. No CUDA path is used. See Sec. 8.3 for ACE on GPU |
 
 The header block every PyQrack script in this repository carries:
@@ -233,6 +249,10 @@ Enumerates every distinct ACE layout of the register holding the first `--n` log
 | `--ace-torus-search` | `flat` | layouts `--ace-max-width` may use: `flat`, `torus`, `any` |
 | `--ace-layout` | `grid` | `grid` (8×8 for every n) or `strip` (smallest R×8 strip holding the first n) |
 | `--ace-tiling` | off | place logical qubits as compact tiles (Sec. 2.6) |
+| `--ace-transpile` | off | place logical qubits on a register and coupling map of your choosing (Sec. 2.8); needs Qiskit |
+| `--ace-width W`, `--ace-exclude a,b,…` | — | with `--ace-transpile`: ACE register size in sites, and sites removed from its coupling map |
+| `--transpile-engine` | `anneal` | `vf2`: Qiskit's VF2Layout as is; `anneal`: the tiling cost annealed on that register, started from the VF2 layout when one is found |
+| `--transpile-seed`, `--transpile-trials`, `--transpile-calls` | 0, 2000, 2·10⁶ | VF2Layout seed, layouts scored, isomorphism-search bound |
 | `--ace-tiling-version` | `3` | `2` reproduces earlier tiled runs and their config tags |
 | `--ace-gpu`, `--ace-host-pointer` | off | ACE on OpenCL; keep simulator states in host memory. See Sec. 8.3 |
 | `--ace-boundary-rep`, `--no-ace-error-detection`, `--no-ace-crossbars` | Qrack defaults (off, on, on) | ACE's boundary repetition code, seam error detection (detect-and-post-select) and crossbar simulator; non-default settings enter the config tag and the record |
@@ -240,7 +260,7 @@ Enumerates every distinct ACE layout of the register holding the first `--n` log
 
 **Sampling and scope:** `--depths`, `--K`, `--instances` (3), `--partitions`, `--shots` (`paper` = Appendix-D budgets for mirror/patched, 4096 for `fxeb`, 100 000 per pub for `full`; or an integer), `--twirls` (64), `--exact-probs`, `--sizes` (`27-34`, `20,27-36`), `--n`, `--pubs`, `--cache`, `--cpu`, `--ref-gpu` (exact `fxeb` reference on OpenCL).
 
-**Shared reference.** `--variants 4/4:t3 4/4:t2 4/3:t3 …` (lrc/lrr, then `torus`, `untiled`, `tiled`, `t2`, `t3`, and the ACE options `rep`, `noed`, `noxbar`) samples each `fxeb` point with every listed ACE configuration and scores all of them against **one** exact reference. Records, bitstrings and config tags stay per variant; only the claims are shared under a group tag. At n = 33–34, where the reference dominates the cost, this compares configurations for the price of one.
+**Shared reference.** `--variants 4/4:t3 4/4:t2 4/3:t3 …` (lrc/lrr, then `torus`, `untiled`, `tiled`, `t2`, `t3`, the ACE options `rep`, `noed`, `noxbar`, and the transpile placements `tx` (anneal) or `vf2`, with `w<N>` and `ex<a+b+…>`) samples each `fxeb` point with every listed ACE configuration and scores all of them against **one** exact reference. Records, bitstrings and config tags stay per variant; only the claims are shared under a group tag. At n = 33–34, where the reference dominates the cost, this compares configurations for the price of one.
 
 **Workers and memory.**
 
