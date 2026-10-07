@@ -102,7 +102,7 @@ The quantity compared throughout is a per-cycle decay b = −d ln F / dd. A clas
 
 Inside a patch the bulk is a dense state vector, so every pair of its qubits is a coupler; only the boundary has geometry. Following `rcs/mirror_nighthawk.py` in [`vm6502q/pyqrack-examples`](https://github.com/vm6502q/pyqrack-examples), `--ace-transpile` takes the coupling map of an ACE register of any size (`get_logical_coupling_map()`, or the pairs sharing a simulator), removes chosen sites (`--ace-exclude`, to shape the boundary), and places the circuit's qubits on it. The placement is routing-free — every circuit coupler is a coupler of the register — so the released gates, Pauli twirling, `--variants` and the estimators apply unchanged; routing would insert SWAPs and change the circuit, and is not done. For these circuits (CZ between fresh random single-qubit gates) Qiskit's gate-level optimisations have nothing to cancel; their gain applies to circuits with SWAP-type gates such as the `nn_qab` set.
 
-Two placement engines are provided. `vf2` is Qiskit's VF2Layout with a target that charges couplers and qubits on seam sites; on ACE's dense coupling graph its search must be bounded and it ranks only the layouts it reaches. `anneal` (default) applies the tiling cost of Sec. 2.6 to the same register and exclusions, starting from the VF2 layout when Qiskit finds one. Measured placements of the 61-qubit circuit:
+Three placement engines are provided. `exact` (default; needs OR-Tools) solves the placement with CP-SAT: inside a patch every site is equivalent, so the sites are grouped by the simulators that hold them (one patch's bulk, or the seam between two patches), and each logical qubit is given a group within the group capacities such that every circuit coupler lands on a pair of groups the register couples (ACE's own coupling map, which couples a seam site to both its patches and to seam sites of the same boundary). The objective is lexicographic: fewest qubits on seam sites (the smallest boundaries), then the most even patch widths, then the fewest circuit couplers touching a seam. `anneal` applies the tiling cost of Sec. 2.6 to the same register and exclusions, starting from the VF2 layout when Qiskit finds one; it is not guaranteed optimal. `vf2` is Qiskit's VF2Layout with a target that charges couplers and qubits on seam sites; on ACE's dense coupling graph its search must be bounded and it ranks only the layouts it reaches. Measured placements of the 61-qubit circuit:
 
 | Register (flat) | Engine | exact / replica / cross CZ | qubits on seams | active dense memory |
 |---|---|---|---|---|
@@ -110,13 +110,28 @@ Two placement engines are provided. `vf2` is Qiskit's VF2Layout with a target th
 | 64 sites, lrc 4 lrr 4 | anneal | 63 / 38 / 1 | 12 | 0.05 GiB |
 | 64 sites, lrc 4 lrr 7, error detection off | anneal | 84 / 18 / 0 | 6 | 192 GiB |
 | 75 sites, lrc 4 lrr 5 (`mirror_nighthawk.py`) | anneal | 74 / 28 / 0 | 9 | 0.56 GiB |
-| 75 sites, lrc 4 lrr 5, its first 7 exclusions | anneal | 76 / 24 / 2 | 8 | 0.66 GiB |
-| 75 sites, lrc 4 lrr 5, its current 11 exclusions (64 sites left) | anneal | 76 / 25 / 1 | 8 | 0.44 GiB |
-| 75 sites, lrc 4 lrr 5, its current 11 exclusions | vf2 | none exists (VF2 search exhausted: `NO_SOLUTION_FOUND`) | — | — |
+| 75 sites, lrc 4 lrr 5, its first 7 exclusions | anneal, `--transpile-allow-cross` | 76 / 24 / 2 | 8 | 0.66 GiB |
+| 75 sites, lrc 4 lrr 5, its current 11 exclusions (64 sites left) | anneal, `--transpile-allow-cross` | 76 / 25 / 1 | 8 | 0.44 GiB |
+| 75 sites, lrc 4 lrr 5, its current 11 exclusions | anneal | refused: the annealer ends with one coupler (34–41) joining two patches with no seam | — | — |
+| 75 sites, lrc 4 lrr 5, its 11 exclusions with seam site 69 reopened | anneal | 72 / 30 / 0 | 9 | 0.50 GiB |
+| 75 sites, lrc 4 lrr 5, its current 11 exclusions | vf2 | none found within the time bound | — | — |
+| **75 sites, lrc 4 lrr 5, its current 11 exclusions** | **exact (default)** | **74 / 28 / 0, proven optimal; boundaries 4 / 3 / 2, bulk 18 / 16 / 18** | **9** | **0.50 GiB** |
+| 75 sites, lrc 4 lrr 5, no exclusions | exact | 73 / 29 / 0 (8 seam qubits, fewer than the balanced optimum of 9) | 8 | 0.77 GiB |
 
 At n = 27 VF2 placed the circuit with 9–10 qubits on seams (17 exact / 24 replica CZ on 64 sites) where the tiling uses 3, and in the n = 18 smoke test it scored 0.26 against 0.60–0.69 for the annealed placements. The 75-site register (three 31-site simulators) holds up to ≈ 30 qubits in a single exact simulator, so its `fxeb` scores below n ≈ 30 are trivially exact; its comparisons are meaningful at the full 61 qubits, where it reaches 24–28 replica couplers at under 1 GiB, against 18 at 192 GiB for the two-patch register. `mirror_nighthawk.py` builds its backend with Qrack's default `is_torus=True`; add the `torus` token to match it (the torus does not change these placements).
 
-The current `mirror_nighthawk.py` excludes 11 sites (74, 59, 44, 73, 69, 54, 68, 67, 64, 63, 62: six of the fifteen seam sites and five bulk sites), leaving exactly 64 sites for its 64-wire circuit, whose three dead qubits are idle wires the transpiler places like any other. On that register VF2 finishes its search without a solution, so no routing-free embedding of the Nighthawk coupler graph exists: Qiskit's `optimization_level=3` routes, and on that script's gate set (SWAP, iSWAP and their CZ products) absorbs SWAPs into the qubit permutation. Measured on its own circuits, transpiling took 64–72 s per circuit and reduced the two-qubit gates from 141 to 83 at d = 4 and from 432 to 271 at d = 12, with none between simulators and 49–56 % touching a seam replica; all nine remaining seam sites hold a qubit. With `--ace-transpile` the 61 live qubits are placed once per register (cached), the three spare sites are free, and twirled circuits are not re-transpiled.
+The current `mirror_nighthawk.py` excludes 11 sites (74, 59, 44, 73, 69, 54, 68, 67, 64, 63, 62: six of the fifteen seam sites and five bulk sites), leaving exactly 64 sites for its 64-wire circuit, whose three dead qubits are idle wires the transpiler places like any other. On that register Qiskit's VF2 search stops at its time bound without a layout (its `NO_SOLUTION_FOUND` is not a proof), and `optimization_level=3` routes; on that script's gate set (SWAP, iSWAP and their CZ products) absorbs SWAPs into the qubit permutation. Measured on its own circuits, transpiling took 64–72 s per circuit and reduced the two-qubit gates from 141 to 83 at d = 4 and from 432 to 271 at d = 12, with none between simulators and 49–56 % touching a seam replica; all nine remaining seam sites hold a qubit. With `--ace-transpile` the 61 live qubits are placed once per register (cached), the three spare sites are free, and twirled circuits are not re-transpiled.
+
+A placement may not join two patches that share no seam site: such a coupler is a contact between patches for which ACE keeps no boundary replica. The `exact` engine never produces one (it is outside the register's coupling map); the annealer weights it 1000 (against 20 in the tiling cost), and a placement that still contains one is refused, naming the coupler and the excluded seam sites that could be reopened; `--transpile-allow-cross` (token `xok`) accepts it. On the 11-exclusion register the annealer stops at such a placement, but CP-SAT shows the register is not the cause: the balanced three-way split of the Nighthawk graph needs at least 9 boundary qubits (proven, any register), and the register's open seam sites — four between patches 0 and 1, three between 1 and 2, two between 2 and 0 — hold exactly such a split, with 28 replica couplers and none across.
+
+First mirror comparison at n = 61 (nnqab θ, one instance, 1000 shots, 4 twirls per point; placement effects beyond the coupler counts are visible, so treat it as indicative):
+
+| Placement | exact / replica / cross | F, d = 4 | F, d = 6 |
+|---|---|---|---|
+| anneal, 11 exclusions, `xok` | 76 / 25 / 1 | 0.897 ± 0.010 | 0.118 ± 0.010 |
+| anneal, 11 exclusions with 69 reopened | 72 / 30 / 0 | 0.799 ± 0.013 | 0.086 ± 0.009 |
+| exact, 11 exclusions | 74 / 28 / 0 | 0.646 ± 0.015 | 0.388 ± 0.015 |
+| exact, no exclusions | 73 / 29 / 0 | 0.121 ± 0.010 | 0.056 ± 0.007 |
 
 ---
 
@@ -127,6 +142,7 @@ The current `mirror_nighthawk.py` excludes 11 sites (74, 59, 44, 73, 69, 54, 68,
 | Python | ≥ 3.9 (uses `argparse.BooleanOptionalAction`) |
 | numpy | required by every subcommand |
 | matplotlib | `nighthawk_graph.py` only (Tk for the interactive viewer) |
+| OR-Tools | `--ace-transpile` with the default `exact` engine only (`python3 -m pip install ortools`) |
 | PyQrack | required by `hwxeb`, `run`, `selftest`, `aceplan`; **not** by `verify` or `seamgap`. The `ace` backend needs a PyQrack build that ships `QrackAceBackend`; exact references above 32 qubits need Qrack built in >32-qubit mode |
 | Qrack shared library | if `/usr/local/lib/qrack/libqrack_pinvoke.so` exists, the script exports it as `PYQRACK_SHARED_LIB_PATH` |
 | Qiskit | only for `--ace-transpile` |
@@ -255,7 +271,8 @@ Enumerates every distinct ACE layout of the register holding the first `--n` log
 | `--ace-tiling` | off | place logical qubits as compact tiles (Sec. 2.6) |
 | `--ace-transpile` | off | place logical qubits on a register and coupling map of your choosing (Sec. 2.8); needs Qiskit |
 | `--ace-width W`, `--ace-exclude a,b,…` | — | with `--ace-transpile`: ACE register size in sites, and sites removed from its coupling map |
-| `--transpile-engine` | `anneal` | `vf2`: Qiskit's VF2Layout as is; `anneal`: the tiling cost annealed on that register, started from the VF2 layout when one is found |
+| `--transpile-engine` | `exact` | `exact`: CP-SAT placement, fewest seam qubits, then even patches, then fewest seam couplers (needs OR-Tools); `anneal`: the tiling cost annealed on that register; `vf2`: Qiskit's VF2Layout as is |
+| `--transpile-allow-cross` | off | accept placements in which a coupler joins two patches that share no seam site (refused by default) |
 | `--transpile-seed`, `--transpile-trials`, `--transpile-calls` | 0, 2000, 2·10⁶ | VF2Layout seed, layouts scored, isomorphism-search bound |
 | `--ace-tiling-version` | `3` | `2` reproduces earlier tiled runs and their config tags |
 | `--ace-gpu`, `--ace-host-pointer` | off | ACE on OpenCL; keep simulator states in host memory. See Sec. 8.3 |
@@ -264,7 +281,7 @@ Enumerates every distinct ACE layout of the register holding the first `--n` log
 
 **Sampling and scope:** `--depths`, `--K`, `--instances` (3), `--partitions`, `--shots` (`paper` = Appendix-D budgets for mirror/patched, 4096 for `fxeb`, 100 000 per pub for `full`; or an integer), `--twirls` (64), `--exact-probs`, `--sizes` (`27-34`, `20,27-36`), `--n`, `--pubs`, `--cache`, `--cpu`, `--ref-gpu` (exact `fxeb` reference on OpenCL).
 
-**Shared reference.** `--variants 4/4:t3 4/4:t2 4/3:t3 …` (lrc/lrr, then `torus`, `untiled`, `tiled`, `t2`, `t3`, the ACE options `rep`, `noed`, `noxbar`, and the transpile placements `tx` (anneal) or `vf2`, with `w<N>` and `ex<a+b+…>`) samples each `fxeb` point with every listed ACE configuration and scores all of them against **one** exact reference. Records, bitstrings and config tags stay per variant; only the claims are shared under a group tag. At n = 33–34, where the reference dominates the cost, this compares configurations for the price of one.
+**Shared reference.** `--variants 4/4:t3 4/4:t2 4/3:t3 …` (lrc/lrr, then `torus`, `untiled`, `tiled`, `t2`, `t3`, the ACE options `rep`, `noed`, `noxbar`, and the transpile placements `tx` (exact), `txa` (anneal) or `vf2`, with `w<N>`, `ex<a+b+…>` and `xok` for `--transpile-allow-cross`) samples each `fxeb` point with every listed ACE configuration and scores all of them against **one** exact reference. Records, bitstrings and config tags stay per variant; only the claims are shared under a group tag. At n = 33–34, where the reference dominates the cost, this compares configurations for the price of one.
 
 **Workers and memory.**
 

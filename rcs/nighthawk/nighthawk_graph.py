@@ -145,7 +145,8 @@ def _describe(cfg, recs, lay):
         if txr:
             r0 = txr[0]
             lab_ = (f"ace {lrc}/{lrr}" + (" torus" if torus else "") + f" {r0.get('ace_transpile_engine', 'anneal')}"
-                    + f" w{r0.get('ace_register')}" + (f" ex{len(r0['ace_exclude'])}" if r0.get("ace_exclude") else ""))
+                    + f" w{r0.get('ace_register')}" + (f" ex{len(r0['ace_exclude'])}" if r0.get("ace_exclude") else "")
+                    + (" xok" if r0.get("ace_transpile_allow_cross") else ""))
     if any(g != lay.grid[0] * lay.grid[1] for g in regs):
         lab_ += " strip"
     for key, val, tok in (("ace_boundary_rep", True, " rep"), ("ace_error_detection", False, " noED"),

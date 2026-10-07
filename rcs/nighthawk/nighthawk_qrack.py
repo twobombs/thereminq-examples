@@ -867,6 +867,7 @@ TRANSPILE_SEAM_EDGE_ERR, TRANSPILE_BULK_EDGE_ERR = 2e-2, 1e-4
 # VF2 search bounds: on ACE's dense coupling graph (every pair inside a patch) the
 # isomorphism search is unbounded without them; the defaults are set from timings on
 # the 64- and 75-site registers (see README)
+TRANSPILE_CROSS_W = 1000          # anneal weight of a coupler between patches with no seam between them
 TRANSPILE_TRIALS, TRANSPILE_CALLS, TRANSPILE_TIME_S = 2000, 2_000_000, 120
 TRANSPILE_SEAM_QUBIT_ERR, TRANSPILE_BULK_QUBIT_ERR = 1e-2, 1e-4
 
@@ -894,6 +895,73 @@ def ace_coupling_edges(row, size, torus, opts, exclude):
 
 
 _TX = {}
+
+
+def _exact_on_register(row, size, couplers, edges, exclude, time_s):
+    """Exact placement by CP-SAT (OR-Tools). Sites are grouped by the set of simulators that
+    hold them (a patch's bulk; a seam between two patches); sites of one group are
+    interchangeable because a patch simulator is a dense, fully connected state vector.
+    Each logical qubit gets a group, within the group capacities, such that every circuit
+    coupler lands on a pair of groups the register couples (`edges`, ACE's own coupling map
+    when PyQrack has it). Lexicographic objective: fewest qubits on seam sites (the three
+    smallest boundaries), then the most even patch widths (bulk + seam replicas), then the
+    fewest circuit couplers touching a seam. Returns (site list, status) or (None, status)."""
+    from ortools.sat.python import cp_model
+    sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
+    ex = set(exclude)
+    patch = sorted({next(iter(x)) for i, x in enumerate(sids) if len(x) == 1 and i not in ex}
+                   | {next(iter(x)) for x in sids if len(x) == 1})
+    groups = {}
+    for i in range(size):
+        if i not in ex:
+            groups.setdefault(sids[i], []).append(i)
+    G = sorted(groups, key=lambda g: (len(g), sorted(g)))
+    eset = {tuple(sorted(e)) for e in edges}
+    ok = {}
+    for a in range(len(G)):
+        for b in range(a, len(G)):
+            ga, gb = groups[G[a]], groups[G[b]]
+            ok[a, b] = ok[b, a] = any((min(i, j), max(i, j)) in eset for i in ga for j in gb if i != j)
+    n = 1 + max(max(e) for e in couplers)
+    m = cp_model.CpModel()
+    x = {(q, g): m.NewBoolVar("") for q in range(n) for g in range(len(G))}
+    for q in range(n):
+        m.AddExactlyOne(x[q, g] for g in range(len(G)))
+    for g in range(len(G)):
+        m.Add(sum(x[q, g] for q in range(n)) <= len(groups[G[g]]))
+    for u, v in couplers:
+        for a in range(len(G)):
+            for b in range(len(G)):
+                if not ok[a, b]:
+                    m.AddBoolOr([x[u, a].Not(), x[v, b].Not()])
+    seamg = [g for g in range(len(G)) if len(G[g]) > 1]
+    on_seam = [sum(x[q, g] for g in seamg) for q in range(n)]
+    B = sum(on_seam)
+    rep = []
+    for u, v in couplers:
+        r = m.NewBoolVar("")
+        m.Add(r >= on_seam[u])
+        m.Add(r >= on_seam[v])
+        rep.append(r)
+    widths = [sum(x[q, g] for q in range(n) for g in range(len(G)) if p in G[g]) for p in patch]
+    wmax, wmin = m.NewIntVar(0, n, ""), m.NewIntVar(0, n, "")
+    m.AddMaxEquality(wmax, widths)
+    m.AddMinEquality(wmin, widths)
+    m.Minimize(1_000_000 * B + 1_000 * (wmax - wmin) + sum(rep))
+    sol = cp_model.CpSolver()
+    sol.parameters.max_time_in_seconds = float(time_s)
+    sol.parameters.num_workers = max(1, min(8, os.cpu_count() or 1))
+    sol.parameters.random_seed = 0
+    st = sol.Solve(m)
+    name = sol.StatusName(st)
+    if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None, name
+    free = {g: list(groups[G[g]]) for g in range(len(G))}
+    site = [0] * n
+    for q in range(n):
+        g = next(g for g in range(len(G)) if sol.Value(x[q, g]))
+        site[q] = free[g].pop(0)
+    return site, name
 
 
 def _anneal_on_register(row, size, couplers, exclude, start=None):
@@ -950,16 +1018,38 @@ def transpile_layout(lay, n, a, row, size):
     estimators all assume the released gates. Deterministic for a given seed; cached in the
     tiling cache file."""
     exclude = parse_exclude(getattr(a, "ace_exclude", None))
-    engine = getattr(a, "transpile_engine", "anneal") or "anneal"
+    engine = getattr(a, "transpile_engine", "exact") or "exact"
     seed = int(getattr(a, "transpile_seed", 0) or 0)
     trials = int(getattr(a, "transpile_trials", 0) or 0) or TRANSPILE_TRIALS
     calls = int(getattr(a, "transpile_calls", 0) or 0) or TRANSPILE_CALLS
     couplers = logical_couplers(lay, n)
     torus = bool(getattr(a, "ace_torus", False))
     opts = ace_opts(a)
-    key = (engine, n, row["lrc"], row["lrr"], torus, size, exclude, seed, trials, calls, tuple(sorted(opts.items())))
+    strict = not getattr(a, "transpile_allow_cross", False)
+    key = (engine, n, row["lrc"], row["lrr"], torus, size, exclude, seed, trials, calls, tuple(sorted(opts.items())),
+           strict)
     if key in _TX:
         return _TX[key]
+    if engine == "exact":
+        try:
+            import ortools
+        except ImportError:
+            raise SystemExit("--transpile-engine exact needs OR-Tools: python3 -m pip install ortools "
+                             "(or use --transpile-engine anneal)")
+        edges = ace_coupling_edges(row, size, torus, opts, exclude)
+        dkey = hashlib.sha1(json.dumps(["tx-exact", ortools.__version__, row["unpack"], list(exclude), couplers,
+                                        edges, sorted(opts.items()), TRANSPILE_TIME_S]).encode()).hexdigest()
+        hit = _tile_cache_get(dkey)
+        if hit is None:
+            hit, status = _exact_on_register(row, size, couplers, edges, exclude, TRANSPILE_TIME_S)
+            if hit is None:
+                raise SystemExit(f"--ace-transpile exact: no placement of the {n}-qubit circuit on this ACE register "
+                                 f"({size} sites, lrc {row['lrc']} lrr {row['lrr']}, {len(exclude)} excluded) puts every "
+                                 f"coupler on a register coupler (CP-SAT: {status}); reopen excluded sites")
+            print(f"# ace transpile exact: CP-SAT {status}", flush=True)
+            _tile_cache_put(dkey, hit)
+        _TX[key] = _check_no_cross(row, hit, couplers, True, size, exclude)
+        return hit
     try:
         import qiskit
         from qiskit import QuantumCircuit
@@ -969,11 +1059,12 @@ def transpile_layout(lay, n, a, row, size):
         from qiskit.transpiler.passes import VF2Layout
     except ImportError:
         raise SystemExit("--ace-transpile needs Qiskit: python3 -m pip install qiskit")
-    dkey = hashlib.sha1(json.dumps(["tx", engine, TILING_W3, TILING_ITERS3, list(TILING_SEEDS3), qiskit.__version__, row["unpack"], list(exclude), seed, trials, calls,
+    W = dict(TILING_W3, cross=TRANSPILE_CROSS_W) if strict else TILING_W3
+    dkey = hashlib.sha1(json.dumps(["tx", engine, W, TILING_ITERS3, list(TILING_SEEDS3), qiskit.__version__, row["unpack"], list(exclude), seed, trials, calls,
                                     couplers, sorted(opts.items())]).encode()).hexdigest()
     hit = _tile_cache_get(dkey)
     if hit is not None:
-        _TX[key] = hit
+        _TX[key] = _check_no_cross(row, hit, couplers, strict, size, exclude)
         return hit
     edges = ace_coupling_edges(row, size, torus, opts, exclude)
     seam = {q for q, u in enumerate(row["unpack"]) if len(u) > 1}
@@ -1007,9 +1098,31 @@ def transpile_layout(lay, n, a, row, size):
                              f"VF2: {why}). Raise --transpile-calls, or use --transpile-engine anneal")
         site = vf2
     else:
-        site = _anneal_on_register(row, size, couplers, exclude, vf2)
-    _TX[key] = site
+        saved = dict(TILING_W3)
+        TILING_W3.update(W)
+        try:
+            site = _anneal_on_register(row, size, couplers, exclude, vf2)
+        finally:
+            TILING_W3.clear()
+            TILING_W3.update(saved)
     _tile_cache_put(dkey, site)
+    _TX[key] = _check_no_cross(row, site, couplers, strict, size, exclude)
+    return site
+
+
+def _check_no_cross(row, site, couplers, strict, size, exclude):
+    """A coupler between two patches that share no seam site is a contact ACE has no boundary
+    for. With --ace-transpile it is refused unless --transpile-allow-cross is given."""
+    st = placement_stats(row, site, couplers)
+    if strict and st["cross"]:
+        sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
+        bad = [(u, v) for u, v in couplers if not (sids[site[u]] & sids[site[v]])]
+        seams = sorted(x for x in exclude if len(sids[x]) > 1)
+        raise SystemExit(
+            f"--ace-transpile: every placement found on this register ({size} sites, lrc {row['lrc']} "
+            f"lrr {row['lrr']}, {len(exclude)} excluded) leaves {st['cross']} coupler(s) between patches with no "
+            f"seam between them (logical {bad}). Reopen an excluded seam site"
+            f"{' (one of ' + ','.join(map(str, seams)) + ')' if seams else ''}, or pass --transpile-allow-cross")
     return site
 
 
@@ -1107,9 +1220,10 @@ class AceEngine:
                     ace_tiling=bool(getattr(self.a, "ace_tiling", False)),
                     **({"ace_tiling_version": tiling_version(self.a)} if getattr(self.a, "ace_tiling", False) else {}),
                     ace_seam_used=self.stats["seam_used"], ace_sims_used=self.stats["sims_used"],
-                    **({"ace_transpile": True, "ace_transpile_engine": getattr(self.a, "transpile_engine", "anneal"),
+                    **({"ace_transpile": True, "ace_transpile_engine": getattr(self.a, "transpile_engine", "exact"),
                         "ace_exclude": list(parse_exclude(getattr(self.a, "ace_exclude", None))),
-                        "ace_transpile_seed": int(getattr(self.a, "transpile_seed", 0) or 0)}
+                        "ace_transpile_seed": int(getattr(self.a, "transpile_seed", 0) or 0),
+                        "ace_transpile_allow_cross": bool(getattr(self.a, "transpile_allow_cross", False))}
                        if getattr(self.a, "ace_transpile", False) else {}),
                     **{attr: bool(getattr(self.a, attr, dflt)) for attr, _, dflt in ACE_OPTS
                        if bool(getattr(self.a, attr, dflt)) != dflt},
@@ -1433,12 +1547,13 @@ def cfg_tag(a):
             if bool(getattr(a, attr, dflt)) != dflt:
                 keys[kw] = bool(getattr(a, attr, dflt))
     if getattr(a, "ace_transpile", False) and a.backend == "ace":
-        keys["transpile"] = dict(engine=getattr(a, "transpile_engine", "anneal") or "anneal",
+        keys["transpile"] = dict(engine=getattr(a, "transpile_engine", "exact") or "exact",
                                  width=getattr(a, "ace_width", None),
                                  exclude=list(parse_exclude(getattr(a, "ace_exclude", None))),
                                  seed=int(getattr(a, "transpile_seed", 0) or 0),
                                  trials=int(getattr(a, "transpile_trials", 0) or 0),
-                                 calls=int(getattr(a, "transpile_calls", 0) or 0))
+                                 calls=int(getattr(a, "transpile_calls", 0) or 0),
+                                 **({"allow_cross": True} if getattr(a, "transpile_allow_cross", False) else {}))
     if getattr(a, "ace_tiling", False) and a.backend == "ace":
         keys["tiling"] = tiling_version(a)        # absent for device-geometry placement; 2 = the v2 tags
     return a.backend + "-" + hashlib.sha1(json.dumps(keys, sort_keys=True).encode()).hexdigest()[:8]
@@ -2194,7 +2309,7 @@ def ace_preflight(lay, a, sizes):
             lc = logical_couplers(lay, n)
             t = placement_stats(row, transpile_layout(lay, n, a, row, size), lc)
             ex = parse_exclude(getattr(a, "ace_exclude", None))
-            print(f"# ace transpile ({getattr(a, 'transpile_engine', 'anneal')}) n={n}, {size} sites, "
+            print(f"# ace transpile ({getattr(a, 'transpile_engine', 'exact')}) n={n}, {size} sites, "
                   f"lrc {a.lrc} lrr {a.lrr}{' torus' if a.ace_torus else ''}, "
                   f"{len(ex)} sites excluded: exact/replica/cross {f(t)}, simulator widths {row['widths']}",
                   flush=True)
@@ -2453,8 +2568,8 @@ def check_transpile_args(a):
         if getattr(a, "ace_max_width", None) or "auto" in (str(a.lrc), str(a.lrr)) or \
                 getattr(a, "geometry", "manual") == "nnqab":
             raise SystemExit("--ace-transpile needs explicit --lrc/--lrr")
-    elif getattr(a, "ace_width", None) or getattr(a, "ace_exclude", None):
-        raise SystemExit("--ace-width and --ace-exclude apply to --ace-transpile placements only")
+    elif getattr(a, "ace_width", None) or getattr(a, "ace_exclude", None) or getattr(a, "transpile_allow_cross", False):
+        raise SystemExit("--ace-width, --ace-exclude and --transpile-allow-cross apply to --ace-transpile placements only")
 
 
 def parse_variant(spec, a):
@@ -2471,7 +2586,8 @@ def parse_variant(spec, a):
     v.lrc, v.lrr, v.ace_torus, v.ace_tiling = lrc, lrr, False, False
     v.ace_tiling_version, v.ace_max_width, v.geometry, v.variants = TILING_VERSION, None, "manual", None
     v.ace_boundary_rep, v.ace_error_detection, v.ace_crossbars = False, True, True
-    v.ace_transpile, v.ace_width, v.ace_exclude, v.transpile_engine = False, None, None, "anneal"
+    v.ace_transpile, v.ace_width, v.ace_exclude, v.transpile_engine = False, None, None, "exact"
+    v.transpile_allow_cross = False
     for t in toks[1:]:
         if t == "torus":
             v.ace_torus = True
@@ -2485,9 +2601,11 @@ def parse_variant(spec, a):
             v.ace_error_detection = False           # is_error_detection=False
         elif t == "noxbar":
             v.ace_crossbars = False                 # use_crossbars=False
-        elif t in ("tx", "vf2"):
+        elif t in ("tx", "txa", "vf2"):
             v.ace_transpile, v.ace_tiling = True, False   # register + coupling-map placement
-            v.transpile_engine = "vf2" if t == "vf2" else "anneal"
+            v.transpile_engine = {"tx": "exact", "txa": "anneal", "vf2": "vf2"}[t]
+        elif t == "xok":
+            v.transpile_allow_cross = True          # allow couplers between patches with no seam (with tx)
         elif re.fullmatch(r"w\d+", t):
             v.ace_width = int(t[1:])                # ACE register of this many sites (with tx)
         elif re.fullmatch(r"ex[\d+]+", t):
@@ -2496,7 +2614,7 @@ def parse_variant(spec, a):
             v.ace_tiling, v.ace_tiling_version = True, int(t[1:])
         else:
             raise SystemExit(f"--variants {spec}: unknown token {t!r} "
-                             f"(torus, tiled, untiled, t2, t3, rep, noed, noxbar, tx, vf2, w<N>, ex<a+b+...>)")
+                             f"(torus, tiled, untiled, t2, t3, rep, noed, noxbar, tx, txa, vf2, xok, w<N>, ex<a+b+...>)")
     v.ace_torus_search = "torus" if v.ace_torus else "flat"
     check_transpile_args(v)
     return v
@@ -3024,9 +3142,13 @@ def main():
     r.add_argument("--ace-exclude", dest="ace_exclude", default=None,
                    help="with --ace-transpile: ACE sites removed from the coupling map, e.g. '74,59,44,69,54,68,64' "
                         "(mirror_nighthawk.py's coupler_exclusions) to shape the boundary")
-    r.add_argument("--transpile-engine", dest="transpile_engine", choices=["anneal", "vf2"], default="anneal",
-                   help="with --ace-transpile: vf2 = Qiskit's VF2Layout as is; anneal (default) = the tiling cost "
-                        "annealed on the same register and coupling map, started from the VF2 layout when found")
+    r.add_argument("--transpile-engine", dest="transpile_engine", choices=["exact", "anneal", "vf2"], default="exact",
+                   help="with --ace-transpile: exact (default) = CP-SAT: fewest qubits on seams, then even patches, then "
+                        "fewest seam couplers (needs ortools); anneal = the tiling cost annealed on the register; "
+                        "vf2 = Qiskit's VF2Layout as is")
+    r.add_argument("--transpile-allow-cross", dest="transpile_allow_cross", action="store_true",
+                   help="with --ace-transpile: accept placements with couplers between patches that share no seam "
+                        "(by default refused: ACE has no boundary for that contact)")
     r.add_argument("--transpile-seed", dest="transpile_seed", type=int, default=0, help="VF2Layout seed")
     r.add_argument("--transpile-trials", dest="transpile_trials", type=int, default=0,
                    help=f"VF2Layout max_trials: layouts scored before keeping the best (0 = {TRANSPILE_TRIALS})")
