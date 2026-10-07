@@ -110,9 +110,13 @@ Two placement engines are provided. `vf2` is Qiskit's VF2Layout with a target th
 | 64 sites, lrc 4 lrr 4 | anneal | 63 / 38 / 1 | 12 | 0.05 GiB |
 | 64 sites, lrc 4 lrr 7, error detection off | anneal | 84 / 18 / 0 | 6 | 192 GiB |
 | 75 sites, lrc 4 lrr 5 (`mirror_nighthawk.py`) | anneal | 74 / 28 / 0 | 9 | 0.56 GiB |
-| 75 sites, lrc 4 lrr 5, its 7 exclusions | anneal | 76 / 24 / 2 | 8 | 0.66 GiB |
+| 75 sites, lrc 4 lrr 5, its first 7 exclusions | anneal | 76 / 24 / 2 | 8 | 0.66 GiB |
+| 75 sites, lrc 4 lrr 5, its current 11 exclusions (64 sites left) | anneal | 76 / 25 / 1 | 8 | 0.44 GiB |
+| 75 sites, lrc 4 lrr 5, its current 11 exclusions | vf2 | none exists (VF2 search exhausted: `NO_SOLUTION_FOUND`) | — | — |
 
-At n = 27 VF2 placed the circuit with 9–10 qubits on seams (17 exact / 24 replica CZ on 64 sites) where the tiling uses 3, and in the n = 18 smoke test it scored 0.26 against 0.60–0.69 for the annealed placements. The 75-site register (three 31-site simulators) holds up to ≈ 30 qubits in a single exact simulator, so its `fxeb` scores below n ≈ 30 are trivially exact; its comparisons are meaningful at the full 61 qubits, where it reaches 24–28 replica couplers at under 1 GiB, against 18 at 192 GiB for the two-patch register. `mirror_nighthawk.py` builds its backend with Qrack's default `is_torus=True`; add the `torus` token to match it.
+At n = 27 VF2 placed the circuit with 9–10 qubits on seams (17 exact / 24 replica CZ on 64 sites) where the tiling uses 3, and in the n = 18 smoke test it scored 0.26 against 0.60–0.69 for the annealed placements. The 75-site register (three 31-site simulators) holds up to ≈ 30 qubits in a single exact simulator, so its `fxeb` scores below n ≈ 30 are trivially exact; its comparisons are meaningful at the full 61 qubits, where it reaches 24–28 replica couplers at under 1 GiB, against 18 at 192 GiB for the two-patch register. `mirror_nighthawk.py` builds its backend with Qrack's default `is_torus=True`; add the `torus` token to match it (the torus does not change these placements).
+
+The current `mirror_nighthawk.py` excludes 11 sites (74, 59, 44, 73, 69, 54, 68, 67, 64, 63, 62: six of the fifteen seam sites and five bulk sites), leaving exactly 64 sites for its 64-wire circuit, whose three dead qubits are idle wires the transpiler places like any other. On that register VF2 finishes its search without a solution, so no routing-free embedding of the Nighthawk coupler graph exists: Qiskit's `optimization_level=3` routes, and on that script's gate set (SWAP, iSWAP and their CZ products) absorbs SWAPs into the qubit permutation. Measured on its own circuits, transpiling took 64–72 s per circuit and reduced the two-qubit gates from 141 to 83 at d = 4 and from 432 to 271 at d = 12, with none between simulators and 49–56 % touching a seam replica; all nine remaining seam sites hold a qubit. With `--ace-transpile` the 61 live qubits are placed once per register (cached), the three spare sites are free, and twirled circuits are not re-transpiled.
 
 ---
 
