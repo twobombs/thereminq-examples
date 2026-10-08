@@ -1252,6 +1252,24 @@ class AceEngine:
 
     prob_bits = None
 
+    def prob_target(self, bits, rng):
+        """Probability that ACE's sampler returns `bits`, by the chain rule on the live state:
+        in a random qubit order (as QrackAceBackend.m_all draws one), multiply the marginal of
+        the wanted outcome and force it (ACE's own force_m, with the same seam correction as
+        m). One pass per circuit run instead of measure_shots, which clones the whole backend
+        for every single shot. Its expectation over the order is the survival measure_shots
+        estimates; it collapses the state, which the next reset() clears."""
+        P = 1.0
+        for q in rng.permutation(self.n):
+            lq, b = self.idx[q], bool(bits[q])
+            p = float(self.sim.prob(lq))
+            f = p if b else 1.0 - p
+            if f <= 1e-12:
+                return 0.0
+            P *= f
+            self.sim.force_m(lq, b)
+        return P
+
 
 _GATE = {"a": None}
 
@@ -1638,6 +1656,8 @@ def cfg_tag(a):
                                  **({"allow_cross": True} if getattr(a, "transpile_allow_cross", False) else {}))
     if getattr(a, "ace_tiling", False) and a.backend == "ace":
         keys["tiling"] = tiling_version(a)        # absent for device-geometry placement; 2 = the v2 tags
+    if getattr(a, "mirror_estimator", "shots") != "shots" and a.backend == "ace":
+        keys["mirror_estimator"] = a.mirror_estimator   # absent for sampled (shots) runs
     return a.backend + "-" + hashlib.sha1(json.dumps(keys, sort_keys=True).encode()).hexdigest()[:8]
 
 
@@ -1687,6 +1707,8 @@ def run_mirror(lay, eng, d, inst, a):
     per_input = max(1, n_shots(a, "mirror", d) // len(lay.inputs))
     R = a.twirls if a.backend == "ace" else 0       # twirling is an identity for exact gates
     hits, shots, keep = [], [], {}
+    if a.backend == "ace" and getattr(a, "mirror_estimator", "shots") == "prob":
+        return run_mirror_prob(lay, eng, d, inst, a, n, cyc, R)
     runs = sum(1 for _ in lay.inputs for r in range(max(R, 1))
                if per_input // max(R, 1) + (1 if r < per_input % max(R, 1) else 0) > 0)
     prog = Progress(a, f"n{n} mirror d{d} i{inst}", runs, 2 * len(cyc))
@@ -1694,6 +1716,37 @@ def run_mirror(lay, eng, d, inst, a):
         return _run_mirror_body(lay, eng, d, inst, a, n, cyc, per_input, R, hits, shots, keep, prog)
     finally:
         prog.close()
+
+
+def run_mirror_prob(lay, eng, d, inst, a, n, cyc, R):
+    """--mirror-estimator prob (ACE): every input x twirl circuit run contributes the
+    probability that ACE's sampler returns the prepared string (AceEngine.prob_target),
+    instead of measure_shots samples. No shot noise and no per-shot backend clone; the
+    error bar is the spread over the runs. No bitstrings are kept."""
+    R = max(R, 1)
+    prog = Progress(a, f"n{n} mirror d{d} i{inst}", len(lay.inputs) * R, 2 * len(cyc))
+    per_run, per_input = [], []
+    try:
+        for s, string in enumerate(lay.inputs):
+            bits = [int(c) for c in string[:n]]
+            ps = []
+            for r in range(R):
+                rng = np.random.default_rng([BASE_SEED, d, inst, s, r]) if a.twirls else None
+                eng.reset()
+                for q, b in enumerate(bits):
+                    if b:
+                        eng.pauli("x", q)
+                apply_forward(eng, cyc, rng, prog.tick)
+                apply_inverse(eng, cyc, rng, prog.tick)
+                ps.append(eng.prob_target(bits, np.random.default_rng([BASE_SEED, d, inst, s, r, 7])))
+            per_run += ps
+            per_input.append(float(np.mean(ps)))
+    finally:
+        prog.close()
+    x = np.array(per_run)
+    se = float(x.std(ddof=1) / math.sqrt(len(x))) if len(x) > 1 else 0.0
+    return dict(fidelity=float(x.mean()), se=se, survival=per_input, shots=0, runs=len(x),
+                estimator="prob")
 
 
 def _run_mirror_body(lay, eng, d, inst, a, n, cyc, per_input, R, hits, shots, keep, prog):
@@ -3320,6 +3373,10 @@ def main():
                         "(GTT) instead of VRAM; same numbers, so not part of the config tag")
     r.add_argument("--out", default="nighthawk_clean.jsonl")
     r.add_argument("--summarize", action="store_true")
+    r.add_argument("--mirror-estimator", dest="mirror_estimator", choices=["shots", "prob"], default="shots",
+                   help="ace mirror: shots = sample with QrackAceBackend.measure_shots (clones the backend per "
+                        "shot; paper budgets); prob = per circuit run, the probability ACE returns the prepared "
+                        "string (chain rule with force_m): no shot noise, one pass per run, no bitstrings kept")
     r.add_argument("--order", choices=["deep", "shallow"], default="deep",
                    help="point order: deep = most expensive first (default, no lone tail); shallow = "
                         "cheapest first (early results with few workers)")
