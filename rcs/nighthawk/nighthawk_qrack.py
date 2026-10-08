@@ -1307,18 +1307,100 @@ def cz_layer(eng, es, rng):
             eng.pauli("z", b_)
 
 
-def apply_forward(eng, cyc, rng=None):
+def apply_forward(eng, cyc, rng=None, tick=None):
     for ang, es in cyc:
         for q, t in enumerate(ang):
             eng.g1(q, gate(t))
         cz_layer(eng, es, rng)
+        if tick:
+            tick()
 
 
-def apply_inverse(eng, cyc, rng=None):
+def apply_inverse(eng, cyc, rng=None, tick=None):
     for ang, es in reversed(cyc):
         cz_layer(eng, list(reversed(es)), rng)
         for q in reversed(range(len(ang))):
             eng.g1(q, gate(ang[q]).conj().T)
+        if tick:
+            tick()
+
+
+def progress_dir(a):
+    """<shots-dir>/<cfg tag>/progress: one JSON file per busy worker (pid), read by --status."""
+    return shots_root(a) / "progress"
+
+
+class Progress:
+    """Per-point progress of a long point (mirror: inputs x twirls circuit runs, each of
+    d cycles). Counts cycles, so even a single slow circuit run shows movement. Writes
+    <progress dir>/<pid>.json at most every PROGRESS_FILE_S and prints a log line at most
+    every PROGRESS_LOG_S (and after the first circuit run, which fixes the speed)."""
+
+    def __init__(self, a, label, runs, cycles_per_run):
+        self.a, self.label, self.runs, self.cpr = a, label, max(1, runs), max(1, cycles_per_run)
+        self.total = self.runs * self.cpr
+        self.done = 0
+        self.t0 = self.t_file = self.t_log = time.time()
+        self.first_logged = False
+        self.path = None
+        try:
+            d = progress_dir(a)
+            d.mkdir(parents=True, exist_ok=True)
+            self.path = d / f"{os.getpid()}.json"
+        except Exception:                          # no --out (selftest) or unwritable: log only
+            self.path = None
+        self._write(force=True)
+
+    def state(self):
+        el = time.time() - self.t0
+        f = self.done / self.total
+        eta = el / f - el if f > 0 else None
+        return dict(point=self.label, pid=os.getpid(), host=os.uname().nodename, runs=self.runs,
+                    run=min(self.runs, self.done // self.cpr), cycles_done=self.done, cycles_total=self.total,
+                    fraction=f, elapsed_s=el, eta_s=eta, started=self.t0, updated=time.time())
+
+    def _write(self, force=False):
+        now = time.time()
+        if self.path is None or (not force and now - self.t_file < PROGRESS_FILE_S):
+            return
+        self.t_file = now
+        try:
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(json.dumps(self.state()))
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def tick(self):
+        self.done += 1
+        self._write()
+        now = time.time()
+        first = not self.first_logged and self.done >= self.cpr
+        if first or now - self.t_log >= PROGRESS_LOG_S:
+            self.t_log, self.first_logged = now, self.first_logged or first
+            print(f"# progress {self.label}: {progress_line(self.state())}", flush=True)
+
+    def close(self):
+        if self.path is not None:
+            try:
+                self.path.unlink()
+            except OSError:
+                pass
+
+
+PROGRESS_FILE_S, PROGRESS_LOG_S = 20.0, 300.0
+
+
+def _hms(s):
+    if s is None:
+        return "?"
+    s = int(s)
+    return f"{s // 3600}h{s % 3600 // 60:02d}m" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
+
+
+def progress_line(st):
+    return (f"circuit run {st['run']}/{st['runs']}, {100 * st['fraction']:.1f}% of cycles, "
+            f"elapsed {_hms(st['elapsed_s'])}, ETA {_hms(st['eta_s'])}")
 
 
 # ================================================================== estimators (rcs/estimators.py)
@@ -1605,6 +1687,16 @@ def run_mirror(lay, eng, d, inst, a):
     per_input = max(1, n_shots(a, "mirror", d) // len(lay.inputs))
     R = a.twirls if a.backend == "ace" else 0       # twirling is an identity for exact gates
     hits, shots, keep = [], [], {}
+    runs = sum(1 for _ in lay.inputs for r in range(max(R, 1))
+               if per_input // max(R, 1) + (1 if r < per_input % max(R, 1) else 0) > 0)
+    prog = Progress(a, f"n{n} mirror d{d} i{inst}", runs, 2 * len(cyc))
+    try:
+        return _run_mirror_body(lay, eng, d, inst, a, n, cyc, per_input, R, hits, shots, keep, prog)
+    finally:
+        prog.close()
+
+
+def _run_mirror_body(lay, eng, d, inst, a, n, cyc, per_input, R, hits, shots, keep, prog):
     for s, string in enumerate(lay.inputs):
         bits = [int(c) for c in string[:n]]
         target = sum(b << q for q, b in enumerate(bits))
@@ -1620,8 +1712,8 @@ def run_mirror(lay, eng, d, inst, a):
             for q, b in enumerate(bits):
                 if b:
                     eng.pauli("x", q)
-            apply_forward(eng, cyc, rng)
-            apply_inverse(eng, cyc, rng)
+            apply_forward(eng, cyc, rng, prog.tick)
+            apply_inverse(eng, cyc, rng, prog.tick)
             if eng.prob_bits and a.exact_probs:
                 pr += eng.prob_bits(bits) / max(R, 1)
             else:
@@ -2174,8 +2266,10 @@ def build_jobs(lay, a, sizes, fams):
                     for K in a.K:
                         parts = range(len(lay.partitions[K])) if a.partitions is None else range(a.partitions)
                         jobs += [(n, "patched", K, d, j, i) for j in parts for i in insts]
-    # longest first, so the big points do not end up as a lone tail
-    return sorted(jobs, key=lambda k: -(k[0] * k[3] * (MIRROR_SHOTS.get(k[3], 1) if k[1] == "mirror" else 1)))
+    # longest first (default), so the big points do not end up as a lone tail; --order shallow
+    # takes the cheapest first, so results arrive early when few workers face very deep points
+    sign = 1 if getattr(a, "order", "deep") == "shallow" else -1
+    return sorted(jobs, key=lambda k: sign * (k[0] * k[3] * (MIRROR_SHOTS.get(k[3], 1) if k[1] == "mirror" else 1)))
 
 
 def _strip_launch_args(argv):
@@ -2494,6 +2588,52 @@ def make_ledger(a):
     return led
 
 
+def show_status(a, jobs, recs):
+    """--status: every point of this configuration -- done (with F), running (worker pid,
+    progress, ETA from the worker's progress file), failed, or pending. Reads files only;
+    safe while workers run."""
+    prog = {}
+    pdir = progress_dir(a)
+    if pdir.exists():
+        for f in pdir.glob("*.json"):
+            try:
+                st = json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue
+            if _pid_alive(int(st.get("pid", 0))):
+                prog[st["point"]] = st
+    rows, counts = [], collections.Counter()
+    for k in sorted(jobs, key=lambda k: (k[0], k[1], k[3], k[2], k[4], k[5])):
+        n, fam, K, d, j, i = k
+        label = f"n{n} {fam} d{d} i{i}" if fam == "mirror" else f"n{n} {fam} K{K} d{d} p{j} i{i}"
+        if k in recs:
+            r = recs[k]
+            state, info = "done", (f"F = {r['fidelity']:.4g}" if isinstance(r, dict) and "fidelity" in r else "")
+        else:
+            try:
+                t = claim_file(a, k).read_text().strip()
+            except OSError:
+                t = ""
+            pid_s = t.split(":")[0]
+            if t.startswith("failed"):
+                state, info = "failed", t
+            elif t == "done":
+                state, info = "done", "(record in a worker file)"
+            elif pid_s.isdigit() and _pid_alive(int(pid_s)):
+                st = prog.get(label)
+                state = "running"
+                info = f"pid {pid_s}" + (f", {progress_line(st)}" if st else ", no progress file yet")
+            else:
+                state, info = "pending", ""
+        counts[state] += 1
+        rows.append(f"  {label:<26} {state:<8} {info}")
+    print(f"# status {cfg_tag(a)} ({a.out}): " + ", ".join(f"{counts[s]} {s}" for s in
+                                                          ("done", "running", "failed", "pending")))
+    print("\n".join(rows))
+    if counts["running"] and not prog:
+        print("# no progress files: these workers were started by a version without progress reporting")
+
+
 def claim_peek(cf):
     """False if this point is done, failed, or held by a live worker."""
     try:
@@ -2793,6 +2933,8 @@ def cmd_run(a):
         raise SystemExit("fxeb needs an exact 2^n reference: sizes up to ~34-36 (memory), not 61")
     jobs = build_jobs(lay, a, sizes, fams)
     check_shot_budgets(a, jobs)
+    if getattr(a, "status", False):
+        return show_status(a, jobs, recs)
     if not a.worker:
         ace_preflight(lay, a, sizes)
     todo = [k for k in jobs if k not in recs]
@@ -3178,6 +3320,12 @@ def main():
                         "(GTT) instead of VRAM; same numbers, so not part of the config tag")
     r.add_argument("--out", default="nighthawk_clean.jsonl")
     r.add_argument("--summarize", action="store_true")
+    r.add_argument("--order", choices=["deep", "shallow"], default="deep",
+                   help="point order: deep = most expensive first (default, no lone tail); shallow = "
+                        "cheapest first (early results with few workers)")
+    r.add_argument("--status", action="store_true",
+                   help="list every point of this configuration: done (F), running (progress, ETA), failed, "
+                        "pending; give the same flags as the run. Reads files only, safe while it runs")
     r.add_argument("--gpus", default=None,
                    help="launch workers on these OpenCL devices, e.g. 0-5 or 0,2,4; pairs with --per-gpu")
     r.add_argument("--per-gpu", dest="per_gpu", type=int, default=3, help="workers per GPU (default 3)")
