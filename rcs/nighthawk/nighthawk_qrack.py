@@ -1204,9 +1204,12 @@ class AceEngine:
         self.coupler_classes = (self.stats["exact"], self.stats["replica"], self.stats["cross"])
         from pyqrack import QrackAceBackend
         # ACE on rusticl/Vega10 hung compute rings and forced GPU resets: CPU unless --ace-gpu
-        self.sim = QrackAceBackend(self.size, long_range_columns=self.lrc, long_range_rows=self.lrr,
-                                   is_torus=torus, is_gpu=(not a.cpu) and getattr(a, "ace_gpu", False),
-                                   is_host_pointer=getattr(a, "ace_host_pointer", False), **self.opts)
+        self._make_sim = lambda: QrackAceBackend(
+            self.size, long_range_columns=self.lrc, long_range_rows=self.lrr, is_torus=torus,
+            is_gpu=(not a.cpu) and getattr(a, "ace_gpu", False),
+            is_host_pointer=getattr(a, "ace_host_pointer", False), **self.opts)
+        self.sim = self._make_sim()
+        self.broken = False
         rl, cl = self.sim.get_row_length(), self.sim.get_column_length()
         if not getattr(a, "ace_width", None) and (rl, cl) != (C, R):
             raise SystemExit(f"ACE chose a {rl}x{cl} grid for {self.size} qubits, expected {C} columns x {R} rows")
@@ -1262,13 +1265,26 @@ class AceEngine:
         P = 1.0
         for q in rng.permutation(self.n):
             lq, b = self.idx[q], bool(bits[q])
-            p = float(self.sim.prob(lq))
-            f = p if b else 1.0 - p
-            if f <= 1e-12:
-                return 0.0
-            P *= f
-            self.sim.force_m(lq, b)
+            try:
+                p = float(self.sim.prob(lq))
+                f = p if b else 1.0 - p
+                if f <= PROB_TARGET_EPS:
+                    return 0.0                  # below single-precision resolution: Qrack's force_m throws
+                P *= f
+                self.sim.force_m(lq, b)
+            except RuntimeError:
+                self.broken = True              # the backend's state is unreliable now: rebuild before reuse
+                raise ProbTargetError(P)
         return P
+
+    def rebuild(self):
+        """Fresh backend after a C++ exception (same register, layout and options)."""
+        try:
+            del self.sim
+        except AttributeError:
+            pass
+        self.sim = self._make_sim()
+        self.broken = False
 
 
 _GATE = {"a": None}
@@ -1346,6 +1362,13 @@ def apply_inverse(eng, cyc, rng=None, tick=None):
 def progress_dir(a):
     """<shots-dir>/<cfg tag>/progress: one JSON file per busy worker (pid), read by --status."""
     return shots_root(a) / "progress"
+
+
+PROB_TARGET_EPS = 1e-6   # marginal below which a forced outcome is treated as probability 0 (fp32-safe)
+
+
+class ProbTargetError(Exception):
+    """Qrack raised inside prob_target; .args[0] is the partial product reached (an upper bound)."""
 
 
 class Progress:
@@ -1725,7 +1748,7 @@ def run_mirror_prob(lay, eng, d, inst, a, n, cyc, R):
     error bar is the spread over the runs. No bitstrings are kept."""
     R = max(R, 1)
     prog = Progress(a, f"n{n} mirror d{d} i{inst}", len(lay.inputs) * R, 2 * len(cyc))
-    per_run, per_input = [], []
+    per_run, per_input, errors = [], [], []
     try:
         for s, string in enumerate(lay.inputs):
             bits = [int(c) for c in string[:n]]
@@ -1738,15 +1761,26 @@ def run_mirror_prob(lay, eng, d, inst, a, n, cyc, R):
                         eng.pauli("x", q)
                 apply_forward(eng, cyc, rng, prog.tick)
                 apply_inverse(eng, cyc, rng, prog.tick)
-                ps.append(eng.prob_target(bits, np.random.default_rng([BASE_SEED, d, inst, s, r, 7])))
+                try:
+                    ps.append(eng.prob_target(bits, np.random.default_rng([BASE_SEED, d, inst, s, r, 7])))
+                except ProbTargetError as e:
+                    # Qrack's C++ side refused a forced outcome (fp32 edge case): count the run as 0,
+                    # record the partial product as its upper bound, rebuild the backend, carry on
+                    errors.append(float(e.args[0]))
+                    ps.append(0.0)
+                    print(f"# prob_target: Qrack exception in n{n} d{d} i{inst} input {s} twirl {r} "
+                          f"(partial product {e.args[0]:.3g}); run counted as 0, backend rebuilt", flush=True)
+                    eng.rebuild()
             per_run += ps
             per_input.append(float(np.mean(ps)))
     finally:
         prog.close()
     x = np.array(per_run)
     se = float(x.std(ddof=1) / math.sqrt(len(x))) if len(x) > 1 else 0.0
-    return dict(fidelity=float(x.mean()), se=se, survival=per_input, shots=0, runs=len(x),
-                estimator="prob")
+    out = dict(fidelity=float(x.mean()), se=se, survival=per_input, shots=0, runs=len(x), estimator="prob")
+    if errors:   # runs counted as 0 after a Qrack exception; their partial products bound the bias above
+        out.update(prob_errors=len(errors), prob_error_bound=float(sum(errors) / len(x)))
+    return out
 
 
 def _run_mirror_body(lay, eng, d, inst, a, n, cyc, per_input, R, hits, shots, keep, prog):
@@ -3058,7 +3092,10 @@ def cmd_run(a):
                  run_fxeb(lay, eng, d, i, a) if fam == "fxeb" else
                  run_full(lay, eng, d, j, a) if fam == "full" else run_patched(lay, eng, K, d, j, i, a))
         except Exception as err:                    # deterministic (e.g. QRACK_MAX_CPU_QB): do not retry
+            import traceback
             print(f"# n = {n} {fam} d{d} inst {i}: failed ({err}); marked failed", flush=True)
+            traceback.print_exc(file=sys.stdout)        # where it failed, for the worker log
+            sys.stdout.flush()
             _write_atomic(cf, f"failed: {type(err).__name__}: {err}"[:500])
             engines.clear()                         # do not reuse a backend that failed mid-run
             fails += 1
