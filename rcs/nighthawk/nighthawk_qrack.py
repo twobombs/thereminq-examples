@@ -80,6 +80,15 @@ Backends
 
 Environment: no CUDA. OpenCL via QRACK_OCL_DEFAULT_DEVICE, or --cpu.
 For big exact states: QRACK_MAX_CPU_QB, QRACK_MAX_ALLOC_MB.
+GPU isolation (--gpu-isolation auto): every GPU process sees exactly one OpenCL device.
+          clvk (OpenCL on Vulkan/RADV) allows one device per context and Qrack opens all of a
+          platform's devices, so a clvk worker gets only clvk's ICD plus Mesa's device-select
+          layer pinned to its GPU's PCI address (it is device 0 inside); workers on other
+          platforms get clvk's ICD hidden. Single-process runs re-exec themselves isolated to
+          QRACK_OCL_DEFAULT_DEVICE. --gpus numbers are global (`clinfo -l` order). Without
+          a clvk ICD installed this is the plain QRACK_OCL_DEFAULT_DEVICE pinning.
+          With --ace-gpu, gates run on the GPU and shots are drawn on a CPU copy of the final
+          state (measure_shots clones the backend per shot); --ace-gpu-shots keeps them on the GPU.
 
 Examples
   python nighthawk_qrack.py verify   --repo rcs-nighthawk
@@ -1251,7 +1260,46 @@ class AceEngine:
         self.sim.cz(self.idx[a], self.idx[b])
 
     def shots(self, s):
-        return np.array(self.sim.measure_shots(self.idx, s), dtype=np.uint64)
+        """s samples of the logical qubits. QrackAceBackend.measure_shots clones the whole
+        backend per shot; on the GPU that is new device buffers and copies for every shot
+        (4096 shots of a tiled register: hours, at near-zero GPU load). With --ace-gpu the
+        samples are drawn on a CPU copy of the final state instead, unless --ace-gpu-shots."""
+        sim = self.sim
+        if getattr(self.a, "ace_gpu", False) and not self.a.cpu and not getattr(self.a, "ace_gpu_shots", False):
+            sim = self._cpu_twin()
+        return np.array(sim.measure_shots(self.idx, s), dtype=np.uint64)
+
+    def _cpu_twin(self):
+        """CPU QrackAceBackend holding the GPU backend's state: same constructor arguments
+        (so the same internal simulators, seams and layout), one out_ket/in_ket per internal
+        simulator."""
+        from pyqrack import QrackAceBackend
+        widest = max(g.num_qubits() for g in self.sim.sim)
+        if widest > CPU_TWIN_MAX_QB:
+            # out_ket() returns every amplitude of an internal simulator as a Python list, unused
+            # sites included: 2^31 complex numbers for a 31-qubit patch is tens of GB per patch
+            raise RuntimeError(f"--ace-gpu shots: internal simulators up to {widest} qubits are too wide to copy "
+                               f"to the CPU (limit {CPU_TWIN_MAX_QB}); use --mirror-estimator prob (mirror) "
+                               f"or --ace-gpu-shots")
+        twin = QrackAceBackend(self.size, long_range_columns=self.lrc, long_range_rows=self.lrr,
+                               is_torus=self.torus, is_gpu=False, **self.opts)
+        if len(twin.sim) != len(self.sim.sim):
+            raise RuntimeError(f"CPU copy has {len(twin.sim)} simulators, the GPU backend {len(self.sim.sim)}")
+        for g, c in zip(self.sim.sim, twin.sim):
+            if g.num_qubits() != c.num_qubits():
+                raise RuntimeError(f"CPU copy simulator width {c.num_qubits()} != GPU {g.num_qubits()}")
+            c.in_ket(g.out_ket())
+        # ACE keeps classical state next to the simulators, which QrackAceBackend(to_clone=...)
+        # copies and a fresh backend does not: the LHV proxy of every boundary qubit (used by
+        # prob/m/force_m through _correct) and the logical -> (simulator, index) map
+        for k, lhv in getattr(self.sim, "_lhv", {}).items():
+            if k in twin._lhv:
+                twin._lhv[k].bloch = list(lhv.bloch)
+        if hasattr(self.sim, "_qubits"):
+            twin._qubits = [list(q) if isinstance(q, (list, tuple)) else q for q in self.sim._qubits] \
+                if isinstance(self.sim._qubits, list) else \
+                {k: (list(v) if isinstance(v, (list, tuple)) else v) for k, v in self.sim._qubits.items()}
+        return twin
 
     prob_bits = None
 
@@ -1365,6 +1413,9 @@ def progress_dir(a):
 
 
 PROB_TARGET_EPS = 1e-6   # marginal below which a forced outcome is treated as probability 0 (fp32-safe)
+
+
+CPU_TWIN_MAX_QB = 26     # widest internal simulator the --ace-gpu CPU shot copy accepts (2^26 amplitudes)
 
 
 class ProbTargetError(Exception):
@@ -2374,15 +2425,203 @@ def _strip_launch_args(argv):
     return out
 
 
-def worker_env(g):
+# ================================================================== OpenCL device isolation
+# clvk (OpenCL on Vulkan) accepts one device per context, while Qrack opens one context per
+# platform with all of its devices: with more than one GPU visible through clvk, Qrack aborts
+# at start-up ("Only one device per context is supported"). So every process that uses the
+# GPU sees exactly one device:
+#   clvk device   -> only clvk's ICD loaded, and Mesa's Vulkan device-select layer shows only
+#                    that GPU (DRI_PRIME=pci-..., MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE=1);
+#                    inside the process it is OpenCL device 0
+#   other device  -> clvk's ICD hidden (it would still abort Qrack's init), Qrack pinned to
+#                    the device's index among the remaining platforms
+#   no clvk       -> unchanged: Qrack pinned to the global index (QRACK_OCL_DEFAULT_DEVICE)
+# Device numbers given to --gpus / QRACK_OCL_DEFAULT_DEVICE are global: the order of
+# `clinfo -l` (all platforms) in the launching environment.
+
+_CL_PROBE = r'''
+import ctypes, json, sys
+try:
+    cl = ctypes.CDLL("libOpenCL.so.1")
+except OSError:
+    print("[]"); sys.exit(0)
+vp, u32, sz = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_size_t
+cl.clGetPlatformIDs.argtypes = [u32, ctypes.POINTER(vp), ctypes.POINTER(u32)]
+cl.clGetPlatformInfo.argtypes = [vp, u32, sz, vp, ctypes.POINTER(sz)]
+cl.clGetDeviceIDs.argtypes = [vp, ctypes.c_uint64, u32, ctypes.POINTER(vp), ctypes.POINTER(u32)]
+cl.clGetDeviceInfo.argtypes = [vp, u32, sz, vp, ctypes.POINTER(sz)]
+def info(fn, obj, param):
+    n = sz()
+    if fn(obj, param, 0, None, ctypes.byref(n)) or not n.value:
+        return ""
+    b = ctypes.create_string_buffer(n.value)
+    fn(obj, param, n, b, None)
+    return b.value.decode(errors="replace").strip()
+np_ = u32()
+if cl.clGetPlatformIDs(0, None, ctypes.byref(np_)) or not np_.value:
+    print("[]"); sys.exit(0)
+plats = (vp * np_.value)()
+cl.clGetPlatformIDs(np_.value, plats, None)
+out = []
+for p in plats:
+    pname = info(cl.clGetPlatformInfo, p, 0x0902)                 # CL_PLATFORM_NAME
+    nd = u32()
+    if cl.clGetDeviceIDs(p, 0xFFFFFFFF, 0, None, ctypes.byref(nd)) or not nd.value:
+        continue
+    devs = (vp * nd.value)()
+    cl.clGetDeviceIDs(p, 0xFFFFFFFF, nd.value, devs, None)
+    for d in devs:
+        bus = (u32 * 4)()                                          # cl_khr_pci_bus_info
+        ok = cl.clGetDeviceInfo(d, 0x410F, ctypes.sizeof(bus), bus, None) == 0
+        out.append(dict(platform=pname, device=info(cl.clGetDeviceInfo, d, 0x102B),
+                        pci=list(bus) if ok else None))
+print(json.dumps(out))
+'''
+
+_CL_PLAN = {}
+_ISO_KEYS = ("OCL_ICD_VENDORS", "DRI_PRIME", "MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE",
+             "QRACK_OCL_DEFAULT_DEVICE", "QRACK_QUNITMULTI_DEVICES", "QRACK_QPAGER_DEVICES")
+
+
+def base_env():
+    """The environment as the user started the run: an isolated process (launcher or
+    worker) restores the variables isolation changed, so device numbers stay global."""
+    env = dict(os.environ)
+    orig = env.pop("NIGHTHAWK_ORIG_ENV", None)
+    env.pop("NIGHTHAWK_ISOLATED", None)
+    if orig:
+        for k in _ISO_KEYS:
+            env.pop(k, None)
+        env.update({k: v for k, v in json.loads(orig).items() if v is not None})
+    return env
+
+
+def _icd_files():
+    """The .icd files the ICD loader reads in the user's environment."""
+    src = base_env().get("OCL_ICD_VENDORS") or "/etc/OpenCL/vendors"
+    p = Path(src)
+    if p.is_file():
+        return [p]
+    return sorted(p.glob("*.icd")) if p.is_dir() else []
+
+
+def _is_clvk_icd(f):
+    try:
+        return "clvk" in f.name.lower() or "clvk" in f.read_text().lower()
+    except OSError:
+        return False
+
+
+def _icd_dir(name, files):
+    """A private vendors directory holding exactly these .icd files."""
+    import tempfile
+    d = Path(tempfile.gettempdir()) / f"nighthawk_icd_{os.getuid()}" / name
+    d.mkdir(parents=True, exist_ok=True)
+    for old in d.glob("*.icd"):
+        old.unlink()
+    for f in files:
+        (d / f.name).write_text(f.read_text())
+    return str(d)
+
+
+def opencl_plan():
+    """Global OpenCL device list of this environment and how to isolate each device.
+    Enumerated in a child process, so the caller never loads an OpenCL driver itself.
+    Without a clvk ICD nothing is probed: the old pinning applies unchanged."""
+    if "plan" in _CL_PLAN:
+        return _CL_PLAN["plan"]
+    icds = _icd_files()
+    clvk_icds = [f for f in icds if _is_clvk_icd(f)]
+    plan = dict(devices=None, clvk=bool(clvk_icds))
+    if clvk_icds:
+        import subprocess
+        try:
+            res = subprocess.run([sys.executable, "-c", _CL_PROBE], capture_output=True, text=True, timeout=120,
+                                 env=base_env())
+            plan["devices"] = json.loads(res.stdout.strip().splitlines()[-1]) if res.stdout.strip() else []
+        except (subprocess.SubprocessError, ValueError, IndexError) as err:
+            raise SystemExit(f"OpenCL device probe failed ({err}); give --gpu-isolation off to skip it")
+        plan["clvk_dir"] = _icd_dir("clvk", clvk_icds)
+        plan["other_dir"] = _icd_dir("noclvk", [f for f in icds if f not in clvk_icds])
+    _CL_PLAN["plan"] = plan
+    return plan
+
+
+def isolated_env(g, base=None):
+    """Environment that shows a process only global OpenCL device g (see above)."""
+    env = base_env() if base is None else dict(base)
+    env["NIGHTHAWK_ORIG_ENV"] = json.dumps({k: env.get(k) for k in _ISO_KEYS})
+    env["NIGHTHAWK_ISOLATED"] = str(g)
+    plan = opencl_plan()
+    devs = plan["devices"]
+    if not plan["clvk"] or devs is None:
+        env["QRACK_OCL_DEFAULT_DEVICE"] = str(g)
+        for k in ("QRACK_QUNITMULTI_DEVICES", "QRACK_QPAGER_DEVICES"):
+            env.setdefault(k, str(g))
+        return env
+    if not 0 <= g < len(devs):
+        raise SystemExit(f"OpenCL device {g} does not exist here: {len(devs)} device(s) "
+                         + ", ".join(f"#{i} {d['device']} [{d['platform']}]" for i, d in enumerate(devs)))
+    d = devs[g]
+    if d["platform"].lower() == "clvk":
+        if not d["pci"]:
+            raise SystemExit(f"clvk device #{g} ({d['device']}) reports no PCI address "
+                             "(cl_khr_pci_bus_info): cannot isolate it")
+        dom, bus, dev, fn = d["pci"]
+        env.update(OCL_ICD_VENDORS=plan["clvk_dir"], DRI_PRIME=f"pci-{dom:04x}_{bus:02x}_{dev:02x}_{fn:x}",
+                   MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE="1", QRACK_OCL_DEFAULT_DEVICE="0",
+                   QRACK_QUNITMULTI_DEVICES="0", QRACK_QPAGER_DEVICES="0")
+        return env
+    local = sum(1 for x in devs[:g] if x["platform"].lower() != "clvk")
+    env.update(OCL_ICD_VENDORS=plan["other_dir"], QRACK_OCL_DEFAULT_DEVICE=str(local),
+               QRACK_QUNITMULTI_DEVICES=str(local), QRACK_QPAGER_DEVICES=str(local))
+    return env
+
+
+def describe_device(g):
+    plan = opencl_plan()
+    if not plan["clvk"] or plan["devices"] is None or not 0 <= g < len(plan["devices"]):
+        return f"OpenCL device {g}"
+    d = plan["devices"][g]
+    pci = "{:04x}:{:02x}:{:02x}.{:x}".format(*d["pci"]) if d["pci"] else "?"
+    return f"#{g} {d['device']} [{d['platform']}, {pci}]"
+
+
+def ensure_isolated(a):
+    """Qrack initialises OpenCL on its first simulator, CPU-only ones included, and aborts
+    when clvk shows it more than one device. So when clvk has several devices, this process
+    re-execs itself seeing one: QRACK_OCL_DEFAULT_DEVICE (default 0) for a single-process
+    run, the first --gpus device for a launcher (which only builds CPU backends itself;
+    its workers are isolated one by one from the original environment)."""
+    if getattr(a, "gpu_isolation", "auto") == "off" or getattr(a, "cmd", "") == "seamgap":
+        return
+    if os.environ.get("NIGHTHAWK_ISOLATED") is not None or getattr(a, "worker", False):
+        return
+    plan = opencl_plan()
+    if not plan["clvk"] or not plan["devices"]:
+        return
+    if sum(1 for d in plan["devices"] if d["platform"].lower() == "clvk") <= 1:
+        return                                      # Qrack copes with one clvk device
+    gpus = parse_gpus(getattr(a, "gpus", None))
+    g = gpus[0] if gpus else int(base_env().get("QRACK_OCL_DEFAULT_DEVICE", "0") or 0)
+    role = "launcher" if gpus else "this process"
+    print(f"# OpenCL isolation: {role} uses {describe_device(g)} only", flush=True)
+    os.execve(sys.executable, [sys.executable] + sys.argv, isolated_env(g))
+
+
+def worker_env(g, a=None):
     """Environment of a worker pinned to OpenCL device g. Qrack otherwise spreads a
     simulator's units and pages over every detected device, which on a mixed host
     (different vendors, drivers, PCIe links) puts ACE patches on cards the worker was
-    not given. Variables the user set explicitly are left alone."""
-    env = dict(os.environ, QRACK_OCL_DEFAULT_DEVICE=str(g))
-    for k in ("QRACK_QUNITMULTI_DEVICES", "QRACK_QPAGER_DEVICES"):
-        env.setdefault(k, str(g))
-    return env
+    not given; and with clvk it would abort outright (one device per context).
+    --gpu-isolation off: the old pinning only (QRACK_OCL_DEFAULT_DEVICE=g; variables the
+    user set explicitly are left alone)."""
+    if a is not None and getattr(a, "gpu_isolation", "auto") == "off":
+        env = dict(base_env(), QRACK_OCL_DEFAULT_DEVICE=str(g))
+        for k in ("QRACK_QUNITMULTI_DEVICES", "QRACK_QPAGER_DEVICES"):
+            env.setdefault(k, str(g))
+        return env
+    return isolated_env(g)
 
 
 def launch(a, lay, tag, jobs, recs, done_keys=None, finish=None):
@@ -2400,10 +2639,19 @@ def launch(a, lay, tag, jobs, recs, done_keys=None, finish=None):
     order = [(g, k) for k in range(a.per_gpu) for g in gpus]      # round-robin over the cards
     print(f"# launching {len(order)} workers (GPUs {gpus} x {a.per_gpu}), one every {a.stagger:g} s; "
           f"OpenCL inits serialised {a.init_gap:g} s apart; logs in {logdir}/", flush=True)
+    if getattr(a, "gpu_isolation", "auto") != "off":
+        plan = opencl_plan()
+        if plan["clvk"]:
+            for g in gpus:
+                print(f"#   gpu{g} = {describe_device(g)}, isolated per worker", flush=True)
+                if getattr(a, "ace_host_pointer", False) and plan["devices"] and \
+                        plan["devices"][g]["platform"].lower() == "clvk":
+                    print("#   note: clvk ignores host-pointer buffers: --ace-host-pointer has no effect "
+                          "on clvk devices", flush=True)
     for idx, (g, k) in enumerate(order):
         if idx:
             time.sleep(a.stagger)
-        env = worker_env(g)
+        env = worker_env(g, a)
         log = open(logdir / f"gpu{g}_job{k}.txt", "a")
         procs.append((g, k, subprocess.Popen(child, env=env, stdout=log, stderr=subprocess.STDOUT)))
         print(f"#   started gpu{g} job{k}", flush=True)
@@ -2433,7 +2681,7 @@ def launch(a, lay, tag, jobs, recs, done_keys=None, finish=None):
             # other exits (crash loops, 3 failures in a row) are not
             for idx, (g, k, p) in enumerate(procs):
                 if p.poll() == 3 and respawns < total and open_points(have):
-                    env = worker_env(g)
+                    env = worker_env(g, a)
                     log = open(logdir / f"gpu{g}_job{k}.txt", "a")
                     procs[idx] = (g, k, subprocess.Popen(child, env=env, stdout=log, stderr=subprocess.STDOUT))
                     respawns += 1
@@ -3404,7 +3652,9 @@ def main():
     r.add_argument("--cache", default=None, help="directory for ideal patch distributions")
     r.add_argument("--cpu", action="store_true", help="is_gpu=False everywhere")
     r.add_argument("--ace-gpu", dest="ace_gpu", action="store_true",
-                   help="run QrackAceBackend on OpenCL too (off by default: it wedged Vega10/rusticl cards)")
+                   help="run QrackAceBackend on OpenCL too (off by default: tiled placements reset Vega10/20 "
+                        "dies under rusticl/radeonsi; they run on clvk/RADV). Shots are drawn on a CPU copy "
+                        "unless --ace-gpu-shots")
     r.add_argument("--ace-host-pointer", dest="ace_host_pointer", action="store_true",
                    help="ace with --ace-gpu: keep simulator states in host RAM, read by the GPU over PCIe "
                         "(GTT) instead of VRAM; same numbers, so not part of the config tag")
@@ -3440,6 +3690,15 @@ def main():
     r.add_argument("--mem-ledger", dest="mem_ledger", default=None,
                    help="reservation directory shared by all runs on this machine "
                         "(default /tmp/nighthawk_mem_ledger, or $NIGHTHAWK_MEM_LEDGER)")
+    r.add_argument("--gpu-isolation", dest="gpu_isolation", choices=["auto", "off"], default="auto",
+                   help="auto (default): every GPU process sees exactly one OpenCL device; required for "
+                        "clvk (one device per context), whose ICD is hidden from processes on other "
+                        "platforms; without a clvk ICD this is the plain QRACK_OCL_DEFAULT_DEVICE pinning. "
+                        "off: QRACK_OCL_DEFAULT_DEVICE pinning only")
+    r.add_argument("--ace-gpu-shots", dest="ace_gpu_shots", action="store_true",
+                   help="with --ace-gpu: draw shots on the GPU backend itself. Default: sample on a CPU copy "
+                        "of the final state (one out_ket per internal simulator), because measure_shots "
+                        "clones the whole backend per shot, i.e. new device buffers and copies per shot")
     r.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
 
     p = sub.add_parser("aceplan", help="list ACE layouts: seams, simulator widths, memory")
@@ -3474,6 +3733,7 @@ up to 3 parents up, via $NIGHTHAWK_REPO or --repo):
 help per command: python3 nighthawk_qrack.py <command> -h""")
         return
     a = ap.parse_args()
+    ensure_isolated(a)
     dict(seamgap=cmd_seamgap, verify=cmd_verify, hwxeb=cmd_hwxeb, run=cmd_run, selftest=cmd_selftest,
          aceplan=cmd_aceplan)[a.cmd](a)
 
