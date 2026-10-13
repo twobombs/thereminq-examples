@@ -90,10 +90,27 @@ GPU isolation (--gpu-isolation auto): every GPU process sees exactly one OpenCL 
           With --ace-gpu, gates run on the GPU and shots are drawn on a CPU copy of the final
           state (measure_shots clones the backend per shot); --ace-gpu-shots keeps them on the GPU.
 
+Larger registers (--register NAME, mirror family only): a Nighthawk sub-register beyond the
+          experiment's 61 qubits, built with the release's own code and seed (rect_matchings,
+          make_patches(seed=2025, balance_tol=1, top_n=5), the input-string recipe; selftest [9]
+          checks that this recipe reproduces the release). nighthawk88: 88 qubits, rows 0-9 x
+          columns 1-9 of the 12 x 10 lattice. With --backend ace and no explicit --ace-transpile it
+          applies a four-patch preset that fits one 8 GB GPU in fp32: 102 sites, lrc 4 lrr 5, flat,
+          stored exact placement, patch widths 28/27/27/27 incl. the error-detection ancilla,
+          17 boundary qubits, couplers 102 inside / 55 through a boundary / 0 between patches.
+          nighthawk88d: the same 88 qubits' worth on the whole 12 x 10 lattice with 32 sites disabled
+          (the device's broken qubits 17, 55, 62 and corner sites), chosen so the four patches meet
+          in short diagonal seams, all four at broken qubit 55: 114 sites, lrc 4 lrr 5, flat, widths
+          28/23/25/27, 11 boundary qubits, couplers 108 inside / 42 through a boundary / 0 between.
+          No device data exists for either: summaries show survival and the fitted decay only.
+          --transpile-max-width W [--transpile-max-wide N]: the same width caps for any exact placement.
+
 Examples
   python nighthawk_qrack.py verify   --repo rcs-nighthawk
   python nighthawk_qrack.py selftest --repo rcs-nighthawk
   python nighthawk_qrack.py hwxeb    --repo rcs-nighthawk --cpu
+  python nighthawk_qrack.py run --backend ace --register nighthawk88 --theta nnqab --depths 4 6 8 10 12 \
+         --mirror-estimator prob --ace-gpu --gpus 0-5 --per-gpu 1 --out mirror88_clvk.jsonl
   python nighthawk_qrack.py run      --repo rcs-nighthawk --backend ace --families mirror \\
          --depths 4 8 16 24 36 --out clean_ace.jsonl
   python nighthawk_qrack.py run      --repo rcs-nighthawk --backend ace --families mirror \\
@@ -261,6 +278,147 @@ class Layout:
         self.grid = (r1 - r0 + 1, c1 - c0 + 1)
         self.pos = [(p // cols - r0, p % cols - c0) for p in self.l2p]
         assert self.base_seed == BASE_SEED
+
+
+# Nighthawk sub-registers beyond the experiment's 61 qubits, built with the release's own recipe
+# (scripts/run_experiment.py: rect_matchings + remove_qubits, make_patches(seed=base_seed,
+# balance_tol=1, top_n=5) for K = 3 and 4, ten half-filled mirror inputs from
+# default_rng(base_seed)). Region: rows/cols of the 12 x 10 device lattice, filled row by row
+# up to n qubits. 'ace' is the ACE preset applied when --backend ace is used without an
+# explicit --ace-transpile: an ACE register the exact engine maps this register onto within
+# the width caps (max width incl. the error-detection ancilla, how many patches may reach it).
+REGISTERS = {
+    "nighthawk88": dict(
+        n=88, rows=(0, 9), cols=(1, 9),
+        about="88 qubits, rows 0-9 x columns 1-9 of the 12 x 10 Nighthawk lattice (last row 7/9); "
+              "contains the experiment's 8 x 8 window, its three dropped sites included",
+        # four patches 28/27/27/27 wide (incl. ancilla) on one 8 GB die, 17 boundary qubits,
+        # couplers inside / through a boundary / between patches 102 / 55 / 0. Found by the exact
+        # engine with caps (28, 1) in ~5 min; stored so every run uses the same placement at once.
+        ace=dict(width=102, lrc=4, lrr=5, torus=False, max_width=28, max_wide=1,
+                 site=[10, 11, 12, 9, 5, 6, 7, 8, 27, 13, 32, 33, 31, 28, 29, 30, 49, 50, 34, 35, 36, 55, 51, 52, 53, 4, 26, 37, 56, 57, 77, 54, 73, 48, 0, 1, 58, 59, 78, 99, 74, 72, 2, 3, 22, 79, 80, 14, 38, 94, 23, 24, 25, 44, 60, 82, 15, 16, 21, 45, 46, 47, 66, 17, 18, 19, 20, 39, 43, 67, 68, 69, 40, 41, 42, 61, 62, 63, 65, 70, 71, 64, 83, 84, 85, 86, 87, 88])),
+    "nighthawk88d": dict(
+        n=88, rows=(0, 11), cols=(0, 9), drop=[0, 1, 2, 7, 8, 9, 10, 11, 17, 18, 19, 55, 62, 80, 81, 82, 83, 90, 91, 92, 93, 99, 100, 101, 102, 103, 109, 110, 111, 112, 113, 119],
+        about="88 qubits on the whole 12 x 10 Nighthawk lattice with 32 sites disabled: the device's broken "
+              "qubits 17, 55, 62 and corner sites chosen so the four ACE patches meet in short diagonal seams "
+              "(all four at broken qubit 55); every row and column of the region is one unbroken run",
+        # four patches 28/23/25/27 wide (incl. ancilla), 11 boundary qubits, couplers inside / through a
+        # boundary / between patches 108 / 42 / 0 (150 couplers; nighthawk88 has 157). Region and split
+        # found with CP-SAT under ACE's ring of seams (114 sites, lrc 4 lrr 5, flat: seams 0-1, 1-2,
+        # 2-3, 3-0 only); the placement puts each qubit straight into its patch's bulk or seam group.
+        ace=dict(width=114, lrc=4, lrr=5, torus=False, max_width=28, max_wide=1,
+                 site=[10, 11, 12, 13, 34, 35, 36, 37, 38, 15, 16, 14, 39, 40, 41, 62, 63, 9, 5, 17, 18, 19, 42, 64, 65, 86, 33, 6, 7, 20, 21, 22, 43, 66, 87, 61, 8, 29, 30, 44, 45, 46, 67, 68, 31, 32, 53, 54, 69, 70, 91, 23, 0, 4, 55, 56, 57, 92, 93, 94, 95, 47, 1, 2, 28, 58, 59, 3, 24, 25, 26, 52, 60, 27, 48, 49, 50, 51, 72, 73, 74, 75, 76, 77, 78, 79, 100, 101])),
+}
+
+
+def _load_release_module(repo, name):
+    """rcs/<name>.py of the release by file path (stdlib only; rcs/__init__ is not run)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(f"_nighthawk_rcs_{name}", repo / "rcs" / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod                 # dataclasses look their module up while loading
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class RegisterLayout(Layout):
+    """A Layout for REGISTERS[name], generated deterministically from the release's code and
+    its base seed, so the circuits follow the experiment's construction exactly: four-colour
+    schedule A B C D, the mirror circuits' rotating K = 3 pseudo-patch cuts, the same depths,
+    instances, angle hash and input-string recipe. There is no device data for it."""
+
+    def __init__(self, repo, name):
+        if name not in REGISTERS:
+            raise SystemExit(f"unknown --register {name}; known: release, {', '.join(sorted(REGISTERS))}")
+        spec = REGISTERS[name]
+        self.repo = find_repo(repo)
+        L = json.loads((self.repo / "data/layout.json").read_text())
+        rl, pt = _load_release_module(self.repo, "layout"), _load_release_module(self.repo, "patching")
+        (r0, r1), (c0, c1) = spec["rows"], spec["cols"]
+        R, C, n = r1 - r0 + 1, c1 - c0 + 1, spec["n"]
+        cols_dev = L["device_lattice"]["cols"]
+        if not (0 < n <= R * C):
+            raise SystemExit(f"register {name}: {n} qubits do not fit rows {r0}-{r1} x cols {c0}-{c1}")
+        if spec.get("drop") is not None:
+            # device sites (row * cols + col) left out of the window, as the release drops 17, 55, 62
+            gone = sorted({(p // cols_dev - r0) * C + (p % cols_dev - c0) for p in spec["drop"]})
+            if any(not (0 <= g < R * C) for g in gone) or R * C - len(gone) != n:
+                raise SystemExit(f"register {name}: drop list does not leave {n} sites in the window")
+        else:
+            gone = list(range(n, R * C))
+        keep = [i for i in range(R * C) if i not in set(gone)]
+        m = rl.remove_qubits(rl.rect_matchings(R, C), gone)
+        edges = sorted({tuple(sorted(e)) for es in m.values() for e in es})
+        base = L["base_seed"]
+        parts = {k: pt.make_patches(n, edges, k, seed=base, balance_tol=1, top_n=5) for k in (3, 4)}
+        rng = np.random.default_rng(seed=base)
+        strings = []
+        for _ in range(len(L["mirror_input_strings"])):
+            bits = np.array(["0"] * n)
+            bits[rng.choice(n, size=n // 2, replace=False)] = "1"
+            strings.append("".join(bits))
+        self.name = name
+        self.n = n
+        self.l2p = [(r0 + i // C) * cols_dev + (c0 + i % C) for i in keep]
+        self.schedule = L["schedule"]
+        self.matchings = {k: [tuple(e) for e in v] for k, v in m.items()}
+        self.base_seed = base
+        self.instances = L["instances"]
+        self.depths = L["depths"]
+        self.inputs = strings
+        self.partitions = {K: [dict(boundary=frozenset(tuple(sorted(e)) for e in b),
+                                    patches=[sorted(v) for _, v in sorted(pq.items(), key=lambda kv: int(kv[0]))])
+                               for b, pq in parts[K]] for K in (3, 4)}
+        self.grid = (R, C)
+        self.pos = [(i // C, i % C) for i in keep]
+        assert self.base_seed == BASE_SEED
+
+
+def make_layout(a):
+    """The release's 61-qubit layout, or --register NAME."""
+    name = getattr(a, "register", "release") or "release"
+    return Layout(getattr(a, "repo", None)) if name == "release" else RegisterLayout(getattr(a, "repo", None), name)
+
+
+def layout_id(lay):
+    return getattr(lay, "name", "release")
+
+
+def is_release(lay):
+    return layout_id(lay) == "release"
+
+
+def apply_register_preset(a, lay):
+    """--register NAME with --backend ace and no explicit --ace-transpile: the register's ACE
+    preset (geometry, exact engine, width caps). Explicit --ace-transpile settings win."""
+    if is_release(lay) or a.backend != "ace" or getattr(a, "ace_transpile", False):
+        return False
+    ace = REGISTERS[layout_id(lay)]["ace"]
+    a.ace_transpile, a.transpile_engine = True, "exact"
+    a.ace_width, a.lrc, a.lrr, a.ace_torus = ace["width"], ace["lrc"], ace["lrr"], ace["torus"]
+    a.ace_exclude = None
+    a.transpile_max_width, a.transpile_max_wide = ace["max_width"], ace["max_wide"]
+    return True
+
+
+def preset_placement(lay, n, a, row, size):
+    """The stored placement of the register's ACE preset, when this run uses exactly that preset."""
+    if is_release(lay):
+        return None
+    ace = REGISTERS[layout_id(lay)].get("ace")
+    if not ace or n != lay.n or size != ace["width"] or (row["lrc"], row["lrr"]) != (ace["lrc"], ace["lrr"]):
+        return None
+    if bool(getattr(a, "ace_torus", False)) != ace["torus"] or parse_exclude(getattr(a, "ace_exclude", None)) \
+            or ace_opts(a) or transpile_caps(a) != (ace["max_width"], ace["max_wide"]) \
+            or (getattr(a, "transpile_engine", "exact") or "exact") != "exact":
+        return None
+    return list(ace["site"])
+
+
+def transpile_caps(a):
+    """(max width incl. ancilla, patches allowed at that width) for the exact engine, or None."""
+    w = getattr(a, "transpile_max_width", None)
+    return (int(w), getattr(a, "transpile_max_wide", None)) if w else None
 
 
 def build_cycles(lay, ncyc, seed, inst, removed=frozenset(), rotate=None, n=None):
@@ -906,7 +1064,7 @@ def ace_coupling_edges(row, size, torus, opts, exclude):
 _TX = {}
 
 
-def _exact_on_register(row, size, couplers, edges, exclude, time_s):
+def _exact_on_register(row, size, couplers, edges, exclude, time_s, max_width=None, max_wide=None):
     """Exact placement by CP-SAT (OR-Tools). Sites are grouped by the set of simulators that
     hold them (a patch's bulk; a seam between two patches); sites of one group are
     interchangeable because a patch simulator is a dense, fully connected state vector.
@@ -914,7 +1072,10 @@ def _exact_on_register(row, size, couplers, edges, exclude, time_s):
     coupler lands on a pair of groups the register couples (`edges`, ACE's own coupling map
     when PyQrack has it). Lexicographic objective: fewest qubits on seam sites (the three
     smallest boundaries), then the most even patch widths (bulk + seam replicas), then the
-    fewest circuit couplers touching a seam. Returns (site list, status) or (None, status)."""
+    fewest circuit couplers touching a seam. Returns (site list, status) or (None, status).
+    max_width (with max_wide): hard memory caps, widths counted as ACE allocates them (logical
+    qubits on the patch's sites plus its error-detection ancilla): every patch <= max_width,
+    and at most max_wide patches at exactly max_width (the others <= max_width - 1)."""
     from ortools.sat.python import cp_model
     sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
     ex = set(exclude)
@@ -953,6 +1114,15 @@ def _exact_on_register(row, size, couplers, edges, exclude, time_s):
         m.Add(r >= on_seam[v])
         rep.append(r)
     widths = [sum(x[q, g] for q in range(n) for g in range(len(G)) if p in G[g]) for p in patch]
+    if max_width:
+        cap = int(max_width) - 1                 # - error-detection ancilla
+        for w in widths:
+            m.Add(w <= cap)
+        if max_wide is not None:
+            big = [m.NewBoolVar("") for _ in widths]
+            for w, b_ in zip(widths, big):
+                m.Add(w <= cap - 1 + b_)
+            m.Add(sum(big) <= int(max_wide))
     wmax, wmin = m.NewIntVar(0, n, ""), m.NewIntVar(0, n, "")
     m.AddMaxEquality(wmax, widths)
     m.AddMinEquality(wmin, widths)
@@ -1035,10 +1205,15 @@ def transpile_layout(lay, n, a, row, size):
     torus = bool(getattr(a, "ace_torus", False))
     opts = ace_opts(a)
     strict = not getattr(a, "transpile_allow_cross", False)
+    caps = transpile_caps(a)
     key = (engine, n, row["lrc"], row["lrr"], torus, size, exclude, seed, trials, calls, tuple(sorted(opts.items())),
-           strict)
+           strict, caps, layout_id(lay))
     if key in _TX:
         return _TX[key]
+    pre = preset_placement(lay, n, a, row, size)
+    if pre is not None:
+        _TX[key] = _check_no_cross(row, pre, couplers, True, size, exclude)
+        return pre
     if engine == "exact":
         try:
             import ortools
@@ -1047,14 +1222,17 @@ def transpile_layout(lay, n, a, row, size):
                              "(or use --transpile-engine anneal)")
         edges = ace_coupling_edges(row, size, torus, opts, exclude)
         dkey = hashlib.sha1(json.dumps(["tx-exact", ortools.__version__, row["unpack"], list(exclude), couplers,
-                                        edges, sorted(opts.items()), TRANSPILE_TIME_S]).encode()).hexdigest()
+                                        edges, sorted(opts.items()), TRANSPILE_TIME_S]
+                                       + ([list(caps)] if caps else [])).encode()).hexdigest()
         hit = _tile_cache_get(dkey)
         if hit is None:
-            hit, status = _exact_on_register(row, size, couplers, edges, exclude, TRANSPILE_TIME_S)
+            hit, status = _exact_on_register(row, size, couplers, edges, exclude, TRANSPILE_TIME_S, *(caps or ()))
             if hit is None:
                 raise SystemExit(f"--ace-transpile exact: no placement of the {n}-qubit circuit on this ACE register "
-                                 f"({size} sites, lrc {row['lrc']} lrr {row['lrr']}, {len(exclude)} excluded) puts every "
-                                 f"coupler on a register coupler (CP-SAT: {status}); reopen excluded sites")
+                                 f"({size} sites, lrc {row['lrc']} lrr {row['lrr']}, {len(exclude)} excluded) "
+                                 f"puts every coupler on a register coupler"
+                                 + (f" within the width caps {caps}" if caps else "")
+                                 + f" (CP-SAT: {status}); reopen excluded sites" + (" or relax the caps" if caps else ""))
             print(f"# ace transpile exact: CP-SAT {status}", flush=True)
             _tile_cache_put(dkey, hit)
         _TX[key] = _check_no_cross(row, hit, couplers, True, size, exclude)
@@ -1727,11 +1905,14 @@ def cfg_tag(a):
                                  seed=int(getattr(a, "transpile_seed", 0) or 0),
                                  trials=int(getattr(a, "transpile_trials", 0) or 0),
                                  calls=int(getattr(a, "transpile_calls", 0) or 0),
-                                 **({"allow_cross": True} if getattr(a, "transpile_allow_cross", False) else {}))
+                                 **({"allow_cross": True} if getattr(a, "transpile_allow_cross", False) else {}),
+                                 **({"caps": list(transpile_caps(a))} if transpile_caps(a) else {}))
     if getattr(a, "ace_tiling", False) and a.backend == "ace":
         keys["tiling"] = tiling_version(a)        # absent for device-geometry placement; 2 = the v2 tags
     if getattr(a, "mirror_estimator", "shots") != "shots" and a.backend == "ace":
         keys["mirror_estimator"] = a.mirror_estimator   # absent for sampled (shots) runs
+    if (getattr(a, "register", "release") or "release") != "release":
+        keys["register"] = a.register             # absent for the release's 61-qubit register
     return a.backend + "-" + hashlib.sha1(json.dumps(keys, sort_keys=True).encode()).hexdigest()[:8]
 
 
@@ -2285,9 +2466,11 @@ def summarize(recs, lay, a):
     b_rows, fit_depths = [], set()
     for n in sizes:
         fams = [f for f in ("mirror", "3-patch", "4-patch") if any(k[0] == n and k[1] == f for k in by)]
-        full = n == lay.n
+        full = n == lay.n and is_release(lay)
         print(f"\n== clean-qubit emulation ({a.backend}), n = {n}"
-              + (" -- the experiment's register, compared with ibm_phoenix ==" if full else " (first-n truncation) =="))
+              + (" -- the experiment's register, compared with ibm_phoenix ==" if full else
+                 f" -- register {layout_id(lay)} (no device data) ==" if not is_release(lay) and n == lay.n
+                 else " (first-n truncation) =="))
         print("family    d   F_sim" + ("            F_hardware     F_sim/F_hw" if full else ""))
         mpts = {}
         for fam in fams:
@@ -2314,13 +2497,13 @@ def summarize(recs, lay, a):
     print("N    CZ/cycle   b(N)       per-cycle F   err/qubit/cycle")
     for n, c, b, dr in b_rows:
         print(f"{n:<4} {c:8.2f}   {b:9.5f}{'*' if dr else ' '} {math.exp(-b):10.5f}    {b / n:.2e}")
-    print(f"device (ibm_phoenix, N=61): b = {b_dev:.5f}, per-cycle {math.exp(-b_dev):.4f}, err/qubit/cycle {b_dev / lay.n:.2e}")
+    print(f"device (ibm_phoenix, N=61): b = {b_dev:.5f}, per-cycle {math.exp(-b_dev):.4f}, err/qubit/cycle {b_dev / 61:.2e}")
     if any(dr for *_, dr in b_rows):
         print("(* fitted with deep depths dropped at or below 3/shots: shallow depths only)")
     if a.backend == "exact":
         print("(exact backend: b = 0 up to shot noise by construction -- a pipeline control)")
         return
-    if len(b_rows) >= 2:
+    if len(b_rows) >= 2 and is_release(lay):
         X = np.array([[n, c] for n, c, _, _ in b_rows])
         y = np.array([b for _, _, b, _ in b_rows])
         (u, v), *_ = np.linalg.lstsq(X, y, rcond=None)
@@ -2812,7 +2995,8 @@ def engine_gb(lay, n, a):
            tuple(sorted(ace_opts(a).items())), bool(getattr(a, "ace_tiling", False)), tiling_version(a),
            bool(getattr(a, "ace_transpile", False)), getattr(a, "ace_width", None),
            parse_exclude(getattr(a, "ace_exclude", None)), getattr(a, "transpile_seed", 0),
-           getattr(a, "ace_layout", "grid"), getattr(a, "ace_max_width", None))
+           getattr(a, "ace_layout", "grid"), getattr(a, "ace_max_width", None),
+           getattr(a, "register", "release"), transpile_caps(a))
     if key in _ENGINE_GB:
         return _ENGINE_GB[key]
     amp, gib = amp_bytes(), 2 ** 30
@@ -3229,7 +3413,22 @@ def cmd_run_group(a, lay):
 
 def cmd_run(a):
     THETA_DIST["mode"] = a.theta
-    lay = Layout(a.repo)
+    lay = make_layout(a)
+    if not is_release(lay):
+        if a.variants:
+            raise SystemExit("--register runs one configuration: drop --variants")
+        fams_ = a.families.split(",")
+        if a.families == "mirror,patched":           # the default: patched circuits need exact patch references
+            a.families = "mirror"
+        elif any(f != "mirror" for f in fams_):
+            raise SystemExit(f"--register {layout_id(lay)}: only --families mirror (no device data, no exact "
+                             f"reference at {lay.n} qubits)")
+        if apply_register_preset(a, lay) and not a.worker and not (a.summarize or a.pack or getattr(a, "status", False)):
+            ace = REGISTERS[layout_id(lay)]["ace"]
+            print(f"# register {layout_id(lay)}: {REGISTERS[layout_id(lay)]['about']}", flush=True)
+            print(f"# ACE preset: {ace['width']} sites, lrc {ace['lrc']} lrr {ace['lrr']}"
+                  f"{' torus' if ace['torus'] else ''}, exact placement (stored), patch widths <= {ace['max_width']} "
+                  f"(at most {ace['max_wide']} at {ace['max_width']}, incl. the error-detection ancilla)", flush=True)
     if a.variants:
         return cmd_run_group(a, lay)
     if a.backend == "ace" and not (a.summarize or a.pack):
@@ -3475,6 +3674,19 @@ def cmd_selftest(a):
               f"{all(abs(lay.pos[u][0] - lay.pos[v][0]) + abs(lay.pos[u][1] - lay.pos[v][1]) == 1 for es in lay.matchings.values() for u, v in es)}")
     except ImportError as err:
         print(f"[8] ACE not available: {err}")
+    # [9] the --register recipe, applied to the release's own register, reproduces the release
+    pt = _load_release_module(lay.repo, "patching")
+    rng = np.random.default_rng(seed=lay.base_seed)
+    strings = []
+    for _ in range(len(lay.inputs)):
+        bits = np.array(["0"] * lay.n)
+        bits[rng.choice(lay.n, size=lay.n // 2, replace=False)] = "1"
+        strings.append("".join(bits))
+    same = strings == lay.inputs
+    for K in (3, 4):
+        parts = pt.make_patches(lay.n, logical_couplers(lay, lay.n), K, seed=lay.base_seed, balance_tol=1, top_n=5)
+        same &= [frozenset(tuple(sorted(e)) for e in b) for b, _ in parts] == [p["boundary"] for p in lay.partitions[K]]
+    report("[9] --register recipe reproduces the release's inputs and K = 3, 4 partitions", same, "identical" if same else "differs")
     print("ALL OK" if ok else "SOME CHECKS FAILED")
     raise SystemExit(0 if ok else 1)
 
@@ -3568,6 +3780,16 @@ def main():
     r = sub.add_parser("run", help="clean-qubit emulation of the released circuits")
     r.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
     r.add_argument("--backend", choices=["exact", "ace"], default="ace")
+    r.add_argument("--register", default="release", choices=["release"] + sorted(REGISTERS),
+                   help="release (default): the experiment's 61-qubit register; nighthawk88: an 88-qubit "
+                        "Nighthawk sub-register built with the release's own recipe (mirror only; with --backend ace "
+                        "the four-patch preset that fits one 8 GB GPU: 102 sites, lrc 4 lrr 5, widths 28/27/27/27); "
+                        "nighthawk88d: 88 qubits with disabled sites placed on the seams, 11 boundary qubits "
+                        "instead of 17 (114 sites, lrc 4 lrr 5, widths 28/23/25/27)")
+    r.add_argument("--transpile-max-width", dest="transpile_max_width", type=int, default=None,
+                   help="exact engine: no ACE patch wider than this (logical qubits + error-detection ancilla)")
+    r.add_argument("--transpile-max-wide", dest="transpile_max_wide", type=int, default=None,
+                   help="with --transpile-max-width W: at most this many patches at W, the others <= W-1")
     r.add_argument("--families", default="mirror,patched",
                    help="comma list of mirror, patched, full, fxeb (full: unscored d36 samples; "
                         "fxeb: forward XEB vs an exact reference, n <= ~34)")
