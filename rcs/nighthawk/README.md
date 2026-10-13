@@ -672,3 +672,7 @@ All identifiers below were checked against the arXiv abstract pages and, where g
 <a id="ref-12"></a>**[12]** I. L. Markov, A. Fatima, S. V. Isakov, S. Boixo, "Quantum Supremacy Is Both Closer and Farther than It Appears," [arXiv:1807.10749](https://arxiv.org/abs/1807.10749) (2018). — *Trading circuit fidelity for simulation cost; cost linear in target fidelity.*
 
 **Software and data (not on arXiv):** [BlueQubitDev/rcs-nighthawk](https://github.com/BlueQubitDev/rcs-nighthawk) (including `contraction_cost/`) · [unitaryfund/pyqrack](https://github.com/unitaryfund/pyqrack) · [vm6502q/pyqrack-examples](https://github.com/vm6502q/pyqrack-examples) (upstream `nn_qab.py`) · [twobombs/thereminq-examples](https://github.com/twobombs/thereminq-examples) (`rcs/nighthawk`, `rcs/nn_qab`)
+
+
+<img width="1496" height="1012" alt="10617" src="https://github.com/user-attachments/assets/b2b3fc5c-3232-4c47-b804-90d778cdcbc3" />
+<img width="1920" height="1160" alt="10618" src="https://github.com/user-attachments/assets/95c5d3e7-7773-4d16-baf1-1e61e303d93d" />
