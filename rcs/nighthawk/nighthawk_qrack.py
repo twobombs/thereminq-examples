@@ -50,6 +50,16 @@ Subcommands
   aceplan   every distinct ACE layout of the register: seams, simulator widths and
             worst-case dense memory, ranked as --ace-max-width ranks them.
   seamgap   data-only analysis of the release (numpy), unchanged.
+  layoutsearch
+            iterate to a register + ACE placement: one CP-SAT model picks which lattice
+            sites to use (--region rect|convex|free|fixed, broken qubits disabled by
+            default) and which patch bulk or seam each goes to, under the width caps,
+            for each ACE geometry (--geometries SIZE:LRC:LRR[:t] ... or auto with
+            --patches); --candidates diverse layouts per geometry; every candidate is
+            re-checked through RegisterLayout (no coupler between patches, caps, counts),
+            then scored by a short mirror run (--test-depths, --test-instances,
+            --test-twirls, geometric mean of the plain-mean survival); --save-best NAME
+            writes the winner to nighthawk_registers.json for --register NAME.
 
 Backends
   exact   QrackSimulator. Patched circuits factorise, and QUnit keeps the patches
@@ -102,7 +112,11 @@ Larger registers (--register NAME, mirror family only): a Nighthawk sub-register
           (the device's broken qubits 17, 55, 62 and corner sites), chosen so the four patches meet
           in short diagonal seams, all four at broken qubit 55: 114 sites, lrc 4 lrr 5, flat, widths
           28/23/25/27, 11 boundary qubits, couplers 108 inside / 42 through a boundary / 0 between.
-          No device data exists for either: summaries show survival and the fitted decay only.
+          nighthawk88e: found by layoutsearch from nighthawk88d: also 11 boundary qubits, but 36
+          couplers through a boundary instead of 42; first CPU check d4/d6 0.287/0.143 against
+          0.030/0.0071 for nighthawk88d. Registers saved by layoutsearch (nighthawk_registers.json
+          next to the script, or files in $NIGHTHAWK_REGISTERS) are loaded like built-in ones.
+          No device data exists for any of them: summaries show survival and the fitted decay only.
           --transpile-max-width W [--transpile-max-wide N]: the same width caps for any exact placement.
 
 Examples
@@ -111,6 +125,9 @@ Examples
   python nighthawk_qrack.py hwxeb    --repo rcs-nighthawk --cpu
   python nighthawk_qrack.py run --backend ace --register nighthawk88 --theta nnqab --depths 4 6 8 10 12 \
          --mirror-estimator prob --ace-gpu --gpus 0-5 --per-gpu 1 --out mirror88_clvk.jsonl
+  python nighthawk_qrack.py layoutsearch --n 88 --geometries 114:4:5 102:4:5 --region convex \
+         --hint nighthawk88e --candidates 3 --cpsat-time 600 --test-depths 4 8 --test-jobs 3 --cpu \
+         --save-best nighthawk88x
   python nighthawk_qrack.py run      --repo rcs-nighthawk --backend ace --families mirror \\
          --depths 4 8 16 24 36 --out clean_ace.jsonl
   python nighthawk_qrack.py run      --repo rcs-nighthawk --backend ace --families mirror \\
@@ -308,7 +325,19 @@ REGISTERS = {
         # 2-3, 3-0 only); the placement puts each qubit straight into its patch's bulk or seam group.
         ace=dict(width=114, lrc=4, lrr=5, torus=False, max_width=28, max_wide=1,
                  site=[10, 11, 12, 13, 34, 35, 36, 37, 38, 15, 16, 14, 39, 40, 41, 62, 63, 9, 5, 17, 18, 19, 42, 64, 65, 86, 33, 6, 7, 20, 21, 22, 43, 66, 87, 61, 8, 29, 30, 44, 45, 46, 67, 68, 31, 32, 53, 54, 69, 70, 91, 23, 0, 4, 55, 56, 57, 92, 93, 94, 95, 47, 1, 2, 28, 58, 59, 3, 24, 25, 26, 52, 60, 27, 48, 49, 50, 51, 72, 73, 74, 75, 76, 77, 78, 79, 100, 101])),
+    "nighthawk88e": dict(
+        n=88, rows=(0, 11), cols=(0, 9), drop=[0, 1, 8, 9, 10, 11, 17, 20, 21, 55, 62, 79, 80, 81, 82, 83, 89, 90, 91, 92, 93, 99, 100, 101, 102, 103, 109, 110, 111, 112, 113, 119],
+        about="88 qubits, 11 boundary qubits like nighthawk88d but 36 couplers through a boundary instead of 42 "
+              "(per colour 8/9/10/9); found by layoutsearch warm-started from nighthawk88d (convex region, "
+              "broken qubits disabled, all four patches meet at broken qubit 55)",
+        # 114 sites, lrc 4 lrr 5, flat; widths 25/28/25/25 incl. ancilla; couplers 112 / 36 / 0 (148).
+        # First CPU check (nnqab, prob, 3 instances x 40 runs): d4 0.287, d6 0.143 against 0.030, 0.0071
+        # for nighthawk88d on the same settings.
+        ace=dict(width=114, lrc=4, lrr=5, torus=False, max_width=28, max_wide=1,
+                 site=[15, 16, 17, 18, 19, 20, 21, 22, 43, 44, 45, 10, 11, 46, 67, 68, 69, 70, 14, 12, 13, 0, 1, 23, 47, 91, 92, 42, 34, 35, 36, 2, 3, 24, 25, 71, 66, 37, 38, 39, 40, 26, 27, 48, 49, 50, 41, 62, 63, 64, 51, 72, 73, 74, 4, 9, 65, 86, 87, 75, 76, 77, 78, 28, 5, 6, 33, 61, 7, 8, 29, 30, 31, 32, 53, 54, 55, 56, 57, 58, 59, 60, 81, 82, 83, 84, 105, 106])),
 }
+
+BUILTIN_REGISTERS = frozenset(REGISTERS)
 
 
 def _load_release_module(repo, name):
@@ -3602,6 +3631,491 @@ def cmd_aceplan(a):
         print(f"(this machine: {ram:,.0f} GB RAM)")
 
 
+# ================================================================== layoutsearch
+# Joint search for a register and its ACE placement: which sites of the 12 x 10 Nighthawk
+# lattice to use (n of them), and which ACE group (a patch's bulk, or a seam) each one goes to,
+# in one CP-SAT model. Candidates are verified, registered and scored by short mirror runs.
+
+LS_OBJECTIVES = ("seam", "bcz", "couplers", "balance")
+
+
+def ace_groups(row, edges):
+    """Sites grouped by the set of simulators that hold them (as _exact_on_register), the
+    patches (simulators that own a bulk group), and which group pairs ACE couples."""
+    sids = [frozenset(sid for sid, _ in u) for u in row["unpack"]]
+    groups = {}
+    for i, s_ in enumerate(sids):
+        groups.setdefault(s_, []).append(i)
+    G = sorted(groups, key=lambda g: (len(g), sorted(g)))
+    patch = sorted({next(iter(g)) for g in G if len(g) == 1})
+    eset = {tuple(sorted(e)) for e in edges}
+    ok = {}
+    for a_ in range(len(G)):
+        for b_ in range(a_, len(G)):
+            ga, gb = groups[G[a_]], groups[G[b_]]
+            ok[a_, b_] = ok[b_, a_] = any((min(i, j), max(i, j)) in eset for i in ga for j in gb if i != j)
+    return G, groups, patch, ok
+
+
+def lattice_info(repo=None):
+    L = json.loads((find_repo(repo) / "data/layout.json").read_text())
+    R, C = L["device_lattice"]["rows"], L["device_lattice"]["cols"]
+    return R, C, {(p // C, p % C) for p in L["dropped_physical_qubits"]}, L
+
+
+def search_layout(row, edges, n, *, R=12, C=10, broken=frozenset(), broken_policy="disable",
+                  region="convex", window=None, fixed=None, max_width=None, max_wide=None,
+                  objective=("seam", "bcz", "couplers"), nogoods=(), diversity=4, hint=None,
+                  time_s=120.0, workers=None, seed=0, trim=0, min_boundary=0):
+    """One CP-SAT solve of the joint model. region: rect (a rectangle of the lattice, chosen by
+    the solver; holes only at broken sites, plus up to `trim` sites taken off its border),
+    convex (every row and column of the region is one unbroken run; holes only at broken
+    sites), free (any connected set), fixed (exactly the cells in `fixed`). nogoods: earlier solutions' seam-cell sets; a new solution differs
+    from each in at least `diversity` seam cells. hint: {cell: group key} warm start.
+    Returns a dict (cells, groups per cell, metrics, solver status) or None."""
+    from ortools.sat.python import cp_model
+    G, groups, patch, ok = ace_groups(row, edges)
+    r0, r1, c0, c1 = window or (0, R - 1, 0, C - 1)
+    cells = [(r, c) for r in range(r0, r1 + 1) for c in range(c0, c1 + 1)]
+    idx = {p: i for i, p in enumerate(cells)}
+    V, NG = len(cells), len(G)
+    E = [(idx[(r, c)], idx[(r + dr, c + dc)]) for (r, c) in cells for dr, dc in ((0, 1), (1, 0))
+         if (r + dr, c + dc) in idx]
+    seamg = [g for g in range(NG) if len(G[g]) > 1]
+    m = cp_model.CpModel()
+    reg = [m.NewBoolVar("") for _ in range(V)]
+    inc = [m.NewBoolVar("") for _ in range(V)]
+    for i, p in enumerate(cells):
+        if p in broken and broken_policy == "disable":
+            m.Add(inc[i] == 0)
+        elif region != "rect":
+            m.Add(inc[i] == reg[i])
+        if region == "fixed":
+            m.Add(inc[i] == int(p in fixed))
+    m.Add(sum(inc) == n)
+    if region == "rect":
+        rows_, cols_ = list(range(r0, r1 + 1)), list(range(c0, c1 + 1))
+        inr = {r: m.NewBoolVar("") for r in rows_}
+        inc_c = {c: m.NewBoolVar("") for c in cols_}
+        for line in (rows_, cols_):
+            var = inr if line is rows_ else inc_c
+            for a_ in range(len(line)):
+                for b_ in range(a_ + 2, len(line)):
+                    for mid in range(a_ + 1, b_):
+                        m.AddBoolOr([var[line[a_]].Not(), var[line[b_]].Not(), var[line[mid]]])
+        edge_r = {r: m.NewBoolVar("") for r in rows_}     # first or last row of the rectangle
+        edge_c = {c: m.NewBoolVar("") for c in cols_}
+        for var, ed, line in ((inr, edge_r, rows_), (inc_c, edge_c, cols_)):
+            for k, r in enumerate(line):
+                outs = [var[line[k - 1]].Not()] if k > 0 else []
+                outs2 = [var[line[k + 1]].Not()] if k + 1 < len(line) else []
+                # ed <=> var and (previous out or next out); at the window edge the line is a border
+                if k == 0 or k + 1 == len(line):
+                    m.Add(ed[r] == var[r])
+                else:
+                    m.AddBoolOr([outs[0], outs2[0]]).OnlyEnforceIf(ed[r])
+                    m.AddImplication(ed[r], var[r])
+                    m.AddBoolOr([var[r].Not(), var[line[k - 1]], var[line[k + 1]], ed[r]])
+                    m.AddBoolOr([var[r].Not(), var[line[k - 1]].Not(), var[line[k + 1]].Not(), ed[r].Not()])
+        holes = []
+        for i, (r, c) in enumerate(cells):
+            m.AddBoolAnd([inr[r], inc_c[c]]).OnlyEnforceIf(reg[i])
+            m.AddBoolOr([inr[r].Not(), inc_c[c].Not()]).OnlyEnforceIf(reg[i].Not())
+            if not ((r, c) in broken and broken_policy == "disable"):
+                h = m.NewBoolVar("")                         # a trimmed site: in the rectangle, unused
+                m.Add(inc[i] == reg[i] - h)
+                m.AddBoolOr([edge_r[r], edge_c[c]]).OnlyEnforceIf(h)
+                holes.append(h)
+        m.Add(sum(holes) <= int(trim))
+    if region == "convex":
+        lines = [[idx[(r, c)] for c in range(c0, c1 + 1)] for r in range(r0, r1 + 1)] + \
+                [[idx[(r, c)] for r in range(r0, r1 + 1)] for c in range(c0, c1 + 1)]
+        for L_ in lines:
+            for a_ in range(len(L_)):
+                for b_ in range(a_ + 2, len(L_)):
+                    for mid in range(a_ + 1, b_):
+                        m.AddBoolOr([reg[L_[a_]].Not(), reg[L_[b_]].Not(), reg[L_[mid]]])
+        for i, p in enumerate(cells):                       # a disabled broken site only inside
+            if p in broken and broken_policy == "disable":
+                r, c = p
+                for q in ((r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)):
+                    if q in idx:
+                        m.AddImplication(reg[i], reg[idx[q]])
+                    else:
+                        m.Add(reg[i] == 0)
+    x = {(v, g): m.NewBoolVar("") for v in range(V) for g in range(NG)}
+    for v in range(V):
+        m.Add(sum(x[v, g] for g in range(NG)) == inc[v])
+    for g in range(NG):
+        m.Add(sum(x[v, g] for v in range(V)) <= len(groups[G[g]]))
+    bad = [(a_, b_) for a_ in range(NG) for b_ in range(NG) if not ok[a_, b_]]
+    for u, v in E:
+        for a_, b_ in bad:
+            m.AddBoolOr([x[u, a_].Not(), x[v, b_].Not()])
+    seam = [sum(x[v, g] for g in seamg) for v in range(V)]
+    B = sum(seam)
+    if min_boundary:
+        m.Add(B >= int(min_boundary))
+    used_e, bcz = [], []
+    for u, v in E:
+        b_ = m.NewBoolVar("")
+        m.AddBoolAnd([inc[u], inc[v]]).OnlyEnforceIf(b_)
+        m.AddBoolOr([inc[u].Not(), inc[v].Not()]).OnlyEnforceIf(b_.Not())
+        used_e.append(b_)
+        t_ = m.NewBoolVar("")                               # coupler in use and touching a seam
+        m.Add(t_ <= b_)
+        m.Add(t_ >= seam[u] + b_ - 1)
+        m.Add(t_ >= seam[v] + b_ - 1)
+        m.Add(t_ <= seam[u] + seam[v])
+        bcz.append(t_)
+    widths = [sum(x[v, g] for v in range(V) for g in range(NG) if p in G[g]) for p in patch]
+    if max_width:
+        cap = int(max_width) - 1
+        for w in widths:
+            m.Add(w <= cap)
+        if max_wide is not None:
+            big = [m.NewBoolVar("") for _ in widths]
+            for w, b_ in zip(widths, big):
+                m.Add(w <= cap - 1 + b_)
+            m.Add(sum(big) <= int(max_wide))
+    if region != "fixed":                                   # connected: single-commodity flow
+        root = [m.NewBoolVar("") for _ in range(V)]
+        m.Add(sum(root) == 1)
+        for v in range(V):
+            m.AddImplication(root[v], inc[v])
+        f = {}
+        for u, v in E:
+            for a_, b_ in ((u, v), (v, u)):
+                f[a_, b_] = m.NewIntVar(0, n, "")
+                m.Add(f[a_, b_] <= n * inc[a_])
+                m.Add(f[a_, b_] <= n * inc[b_])
+        inn, out = defaultdict(list), defaultdict(list)
+        for (a_, b_), var in f.items():
+            out[a_].append(var)
+            inn[b_].append(var)
+        for v in range(V):
+            m.Add(sum(inn[v]) - sum(out[v]) == inc[v] - n * root[v])
+    for S in nogoods:
+        Sv = {idx[p] for p in S if p in idx}
+        m.Add(sum(1 - seam[v] for v in Sv) + sum(seam[v] for v in range(V) if v not in Sv) >= int(diversity))
+    wmax, wmin = m.NewIntVar(0, n, ""), m.NewIntVar(0, n, "")
+    m.AddMaxEquality(wmax, widths)
+    m.AddMinEquality(wmin, widths)
+    terms = dict(seam=B, bcz=sum(bcz), couplers=-sum(used_e), balance=wmax - wmin)
+    obj = 0
+    for k, name in enumerate(objective):
+        obj += (512 ** (len(objective) - 1 - k)) * terms[name]
+    m.Minimize(obj)
+    if hint:
+        key_of = {G[g]: g for g in range(NG)}
+        for v, p in enumerate(cells):
+            gk = hint.get(p)
+            m.AddHint(inc[v], int(gk is not None))
+            for g in range(NG):
+                m.AddHint(x[v, g], int(gk is not None and key_of.get(gk) == g))
+    sol = cp_model.CpSolver()
+    sol.parameters.max_time_in_seconds = float(time_s)
+    sol.parameters.num_workers = int(workers or max(1, min(16, os.cpu_count() or 1)))
+    sol.parameters.random_seed = int(seed)
+    st_ = sol.Solve(m)
+    if st_ not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None if st_ != cp_model.INFEASIBLE else dict(status="INFEASIBLE")
+    gof = {}
+    for v, p in enumerate(cells):
+        if sol.Value(inc[v]):
+            gof[p] = G[next(g for g in range(NG) if sol.Value(x[v, g]))]
+    return dict(status=sol.StatusName(st_), objective=sol.ObjectiveValue(), bound=sol.BestObjectiveBound(),
+                cells=gof, seam=sum(1 for g in gof.values() if len(g) > 1),
+                bcz=int(sum(sol.Value(t_) for t_ in bcz)), couplers=int(sum(sol.Value(b_) for b_ in used_e)),
+                widths=[sum(1 for g in gof.values() if p in g) + 1 for p in patch],
+                seconds=round(sol.WallTime(), 1))
+
+
+def register_from_cells(gof, row, edges, cols_dev):
+    """REGISTERS entry for a solved layout: the bounding window, the device sites dropped from
+    it, and the ACE site of every logical qubit (logical order = row-major, as RegisterLayout)."""
+    G, groups, patch, ok = ace_groups(row, edges)
+    used = sorted(gof)
+    r0, r1 = min(r for r, _ in used), max(r for r, _ in used)
+    c0, c1 = min(c for _, c in used), max(c for _, c in used)
+    drop = [r * cols_dev + c for r in range(r0, r1 + 1) for c in range(c0, c1 + 1) if (r, c) not in gof]
+    free = {k: list(v) for k, v in groups.items()}
+    site = [free[gof[p]].pop(0) for p in used]
+    return dict(n=len(used), rows=[r0, r1], cols=[c0, c1], drop=drop), site
+
+
+def verify_register(name, spec, repo=None):
+    """Independent check of a registered layout through the normal code path: RegisterLayout
+    rebuilds the register and its couplers from the release's code; every coupler must share a
+    simulator (no 'cross'), the widths must respect the caps, and the counts must match."""
+    ace = spec["ace"]
+    lay = RegisterLayout(repo, name)
+    row = layout_row(ace["width"], ace["lrc"], ace["lrr"], ace["torus"], {})
+    cp = logical_couplers(lay, lay.n)
+    site = ace["site"]
+    st_ = placement_stats(row, site, cp)
+    w = collections.Counter(sid for x_ in site for sid, _ in row["unpack"][x_])
+    patches = sorted({next(iter(frozenset(s for s, _ in u))) for u in row["unpack"] if len(u) == 1})
+    widths = [w[p] + 1 for p in patches]
+    problems = []
+    if len(set(site)) != len(site):
+        problems.append("two logical qubits on one ACE site")
+    if st_["cross"]:
+        problems.append(f"{st_['cross']} coupler(s) between patches")
+    W, N = ace.get("max_width"), ace.get("max_wide")
+    if W and (max(widths) > W or (N is not None and sum(1 for x_ in widths if x_ == W) > N)):
+        problems.append(f"widths {widths} break the caps {W}/{N}")
+    if lay.n != spec["n"] or len(site) != lay.n:
+        problems.append("qubit count mismatch")
+    return dict(ok=not problems, problems=problems, exact=st_["exact"], replica=st_["replica"],
+                cross=st_["cross"], seam=st_["seam_used"], widths=widths, couplers=len(cp),
+                partitions_ok=all(len(lay.partitions[K]) > 0 for K in (3, 4)))
+
+
+def _registry_path():
+    return Path(__file__).resolve().parent / "nighthawk_registers.json"
+
+
+def _register_files():
+    files = [_registry_path()]
+    env = os.environ.get("NIGHTHAWK_REGISTERS")
+    if env:
+        files += [Path(p) for p in env.split(os.pathsep) if p]
+    return files
+
+
+def load_register_files():
+    """REGISTERS entries from nighthawk_registers.json next to the script and the files in
+    $NIGHTHAWK_REGISTERS (os.pathsep-separated). Built-in names are never overridden."""
+    for f in _register_files():
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        for k, v in data.items():
+            if k not in BUILTIN_REGISTERS:
+                REGISTERS[k] = v
+
+
+def save_register(path, name, entry):
+    path = Path(path)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        data = {}
+    data[name] = entry
+    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(data, indent=1))
+    os.replace(tmp, path)
+
+
+def parse_geometries(spec_list, n, max_width, patches, torus_mode, limit):
+    """'SIZE:LRC:LRR[:t]' entries, or 'auto': every ACE register of n..n+40 sites with the
+    requested patch count whose patches can hold n qubits under the width cap, one per
+    distinct group structure, most bulk capacity first."""
+    out = []
+    for tok in spec_list:
+        if tok != "auto":
+            f = tok.split(":")
+            out.append((int(f[0]), int(f[1]), int(f[2]), len(f) > 3 and f[3] in ("t", "torus")))
+            continue
+        seen, cands = set(), []
+        tor = {"flat": (False,), "torus": (True,), "any": (False, True)}[torus_mode]
+        for size in range(n, n + 41):
+            for torus in tor:
+                for lrc in range(1, 9):
+                    for lrr in range(1, 9):
+                        try:
+                            row = layout_row(size, lrc, lrr, torus, {})
+                        except Exception:
+                            continue
+                        sids = collections.Counter(frozenset(s for s, _ in u) for u in row["unpack"])
+                        bulk = {next(iter(k)): v for k, v in sids.items() if len(k) == 1}
+                        if patches and len(bulk) != patches:
+                            continue
+                        cap = (max_width - 1) if max_width else 10 ** 9
+                        width = {p: sum(v for k, v in sids.items() if p in k) for p in bulk}
+                        if sum(min(cap, width[p]) for p in bulk) < n or size < n:
+                            continue
+                        sig = (torus, tuple(sorted((len(k), v) for k, v in sids.items())))
+                        if sig in seen:
+                            continue
+                        seen.add(sig)
+                        cands.append((-sum(min(cap, v) for v in bulk.values()), size, row["lrc"], row["lrr"], torus))
+        cands.sort()
+        out += [(s_, a_, b_, t_) for _, s_, a_, b_, t_ in cands[:limit]]
+    return out
+
+
+def score_records(path, depths):
+    """Plain mean survival over instances per depth, and the score: geometric mean over the
+    test depths (floor 1e-9, so a zero cannot hide behind others)."""
+    per = defaultdict(list)
+    for fn in [Path(path)] + sorted(Path(path).parent.glob(Path(path).stem + ".w*.jsonl")):
+        try:
+            for line in fn.read_text().splitlines():
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("family") == "mirror" and r.get("depth") in depths:
+                    per[r["depth"]].append(float(r["fidelity"]))
+        except OSError:
+            pass
+    means = {d: (sum(v) / len(v)) for d, v in per.items() if v}
+    if len(means) < len(depths):
+        return means, None
+    return means, math.exp(sum(math.log(max(means[d], 1e-9)) for d in depths) / len(depths))
+
+
+def cmd_layoutsearch(a):
+    import subprocess
+    from concurrent.futures import ThreadPoolExecutor
+    if not a.max_width or a.max_width < 2:
+        raise SystemExit("--max-width must be given (patch width cap incl. the ancilla)")
+    R, C, broken, L = lattice_info(a.repo)
+    objective = tuple(a.objective.split(","))
+    if any(o not in LS_OBJECTIVES for o in objective):
+        raise SystemExit(f"--objective: choose from {','.join(LS_OBJECTIVES)}")
+    window = None
+    if a.window:
+        rr, cc = a.window.split(",")
+        window = tuple(map(int, rr.split("-"))) + tuple(map(int, cc.split("-")))
+    fixed = None
+    if a.region == "fixed":
+        if a.fixed_register:
+            if a.fixed_register != "release" and a.fixed_register not in REGISTERS:
+                raise SystemExit(f"--fixed-register: unknown register {a.fixed_register}")
+            spec = REGISTERS[a.fixed_register] if a.fixed_register != "release" else None
+            if spec is None:
+                fixed = {(p // C, p % C) for p in L["logical_to_physical"]}
+            else:
+                (fr0, fr1), (fc0, fc1) = spec["rows"], spec["cols"]
+                dr = set(spec.get("drop") or [])
+                fixed = {(r, c) for r in range(fr0, fr1 + 1) for c in range(fc0, fc1 + 1) if r * C + c not in dr}
+                if spec.get("drop") is None:
+                    fixed = set(sorted(fixed)[:spec["n"]])
+        elif window:
+            fixed = {(r, c) for r in range(window[0], window[1] + 1) for c in range(window[2], window[3] + 1)
+                     if (r, c) not in broken}
+        else:
+            raise SystemExit("--region fixed needs --window or --fixed-register")
+        if len(fixed) != a.n:
+            raise SystemExit(f"--region fixed: the region has {len(fixed)} sites, not --n {a.n}")
+    hint = None
+    if a.hint:
+        hs = REGISTERS[a.hint]
+        lay_h = RegisterLayout(a.repo, a.hint)
+        row_h = layout_row(hs["ace"]["width"], hs["ace"]["lrc"], hs["ace"]["lrr"], hs["ace"]["torus"], {})
+        hint = {(p // C, p % C): frozenset(s for s, _ in row_h["unpack"][x_])
+                for p, x_ in zip(lay_h.l2p, hs["ace"]["site"])}
+    geoms = parse_geometries(a.geometries, a.n, a.max_width, a.patches, a.torus, a.max_geometries)
+    if not geoms:
+        raise SystemExit("no ACE geometry fits; relax --max-width or --patches, or give --geometries")
+    outdir = Path(a.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    regfile = outdir / "registers.json"
+    log = outdir / "layoutsearch.jsonl"
+    prefix = a.prefix or f"ls{a.n}"
+    print(f"# layoutsearch n={a.n}, region {a.region}" + (f" (trim {a.trim})" if a.region == "rect" else "")
+          + (f" window {window}" if window else "")
+          + f", broken qubits {a.broken}, caps {a.max_width}/{a.max_wide}, objective {','.join(objective)}, "
+            f"{len(geoms)} geometr{'y' if len(geoms) == 1 else 'ies'}, {a.candidates} candidate(s) each", flush=True)
+    cands = []
+    for size, lrc, lrr, torus in geoms:
+        row = layout_row(size, lrc, lrr, torus, {})
+        lrc, lrr = row["lrc"], row["lrr"]                   # identical layouts fold to the smallest lrc+lrr
+        edges = ace_coupling_edges(row, size, torus, {}, ())
+        prev = []
+        for c in range(a.candidates):
+            res = search_layout(row, edges, a.n, R=R, C=C, broken=broken, broken_policy=a.broken,
+                                region=a.region, window=window, fixed=fixed, max_width=a.max_width,
+                                max_wide=a.max_wide, objective=objective, nogoods=prev, diversity=a.diversity,
+                                hint=hint if c == 0 else None, time_s=a.cpsat_time, workers=a.workers, seed=c,
+                                trim=a.trim, min_boundary=a.min_boundary)
+            geo = f"{size} sites lrc {lrc} lrr {lrr}{' torus' if torus else ''}"
+            if res is None or "cells" not in res:
+                print(f"  {geo}: {'infeasible' if res else 'no solution in time'}"
+                      + (" (no further distinct layout)" if c else ""), flush=True)
+                break
+            prev.append({p for p, g in res["cells"].items() if len(g) > 1})
+            spec, site = register_from_cells(res["cells"], row, edges, C)
+            name = f"{prefix}-{size}-{lrc}{lrr}{'t' if torus else ''}-c{c}"
+            entry = dict(spec, about=f"layoutsearch: n={a.n}, {geo}, region {a.region}, objective {','.join(objective)}",
+                         ace=dict(width=size, lrc=lrc, lrr=lrr, torus=torus, max_width=a.max_width,
+                                  max_wide=a.max_wide, site=site))
+            REGISTERS[name] = entry
+            save_register(regfile, name, entry)
+            ver = verify_register(name, entry, a.repo)
+            rec = dict(name=name, geometry=dict(size=size, lrc=lrc, lrr=lrr, torus=torus), cpsat=dict(
+                status=res["status"], seconds=res["seconds"], seam=res["seam"], bcz=res["bcz"],
+                couplers=res["couplers"], widths=res["widths"]), verify=ver, spec=spec)
+            cands.append(rec)
+            print(f"  {name}: {res['status'].lower()} in {res['seconds']} s -- {res['seam']} boundary qubits, "
+                  f"{res['bcz']} of {res['couplers']} couplers through a boundary, widths {res['widths']}; "
+                  f"verify {'OK' if ver['ok'] else 'FAILED: ' + '; '.join(ver['problems'])} "
+                  f"({ver['exact']}/{ver['replica']}/{ver['cross']})", flush=True)
+    good = [c for c in cands if c["verify"]["ok"]]
+    if a.test_depths and good:
+        env = dict(os.environ)
+        env["NIGHTHAWK_REGISTERS"] = os.pathsep.join([str(regfile.resolve())] + ([env["NIGHTHAWK_REGISTERS"]]
+                                                     if env.get("NIGHTHAWK_REGISTERS") else []))
+        if a.cpu:
+            os.makedirs("/tmp/no-icd", exist_ok=True)
+            env.setdefault("OCL_ICD_VENDORS", "/tmp/no-icd")
+        print(f"# circuit tests: mirror, depths {a.test_depths}, {a.test_instances} instance(s) x "
+              f"{a.test_twirls} twirls x 10 inputs, theta {a.theta}, {'CPU' if a.cpu else 'OpenCL'}", flush=True)
+
+        def test(c):
+            out = outdir / f"{c['name']}.jsonl"
+            cmd = [sys.executable, os.path.abspath(__file__), "run", "--backend", "ace", "--register", c["name"],
+                   "--theta", a.theta, "--mirror-estimator", "prob", "--instances", str(a.test_instances),
+                   "--twirls", str(a.test_twirls), "--out", str(out), "--depths", *map(str, a.test_depths)]
+            if a.repo:
+                cmd += ["--repo", a.repo]
+            cmd += ["--cpu"] if a.cpu else ["--ace-gpu"]
+            t0 = time.time()
+            p = subprocess.run(cmd, env=env, capture_output=True, text=True)
+            c["test"] = dict(seconds=round(time.time() - t0, 1), returncode=p.returncode)
+            means, score = score_records(out, a.test_depths)
+            c["test"].update(means={str(k): v for k, v in sorted(means.items())}, score=score)
+            if p.returncode != 0:
+                c["test"]["stderr"] = p.stderr[-2000:]
+            return c
+
+        with ThreadPoolExecutor(max_workers=max(1, a.test_jobs)) as ex:
+            for c in ex.map(test, good):
+                t_ = c["test"]
+                print(f"  {c['name']}: " + (f"score {t_['score']:.4g}  " if t_["score"] is not None else "no score  ")
+                      + "  ".join(f"d{d} {v:.4g}" for d, v in t_["means"].items()) + f"  ({t_['seconds']} s)"
+                      + ("" if t_["returncode"] == 0 else f"  exit {t_['returncode']}"), flush=True)
+    for c in cands:
+        with open(log, "a") as fh:
+            fh.write(json.dumps(c) + "\n")
+
+    def key(c):
+        sc = c.get("test", {}).get("score")
+        return (sc is None, -(sc or 0), c["cpsat"]["seam"], c["cpsat"]["bcz"], -c["cpsat"]["couplers"])
+    ranked = sorted(good, key=key)
+    if not ranked:
+        raise SystemExit("no verified candidate")
+    print(f"\n== ranking ({'measured score' if a.test_depths else 'CP-SAT objective'}) ==")
+    print("name                             boundary  bnd CZ/couplers  widths            score")
+    for c in ranked:
+        sc = c.get("test", {}).get("score")
+        print(f"{c['name']:<32} {c['cpsat']['seam']:>8}  {c['cpsat']['bcz']:>6}/{c['cpsat']['couplers']:<8}  "
+              f"{str(c['cpsat']['widths']):<16}  {'' if sc is None else f'{sc:.4g}'}")
+    best = ranked[0]
+    print(f"\nbest: {best['name']}  (registers in {regfile}, log in {log})")
+    if a.save_best:
+        if a.save_best in BUILTIN_REGISTERS:
+            raise SystemExit(f"--save-best: {a.save_best} is a built-in register name")
+        entry = dict(REGISTERS[best["name"]])
+        entry["about"] = entry["about"] + f"; selected from {len(cands)} candidates as {best['name']}"
+        save_register(_registry_path(), a.save_best, entry)
+        print(f"saved as --register {a.save_best} in {_registry_path()}")
+
+
 # ================================================================== selftest
 def cmd_selftest(a):
     from pyqrack import QrackSimulator
@@ -3687,6 +4201,25 @@ def cmd_selftest(a):
         parts = pt.make_patches(lay.n, logical_couplers(lay, lay.n), K, seed=lay.base_seed, balance_tol=1, top_n=5)
         same &= [frozenset(tuple(sorted(e)) for e in b) for b, _ in parts] == [p["boundary"] for p in lay.partitions[K]]
     report("[9] --register recipe reproduces the release's inputs and K = 3, 4 partitions", same, "identical" if same else "differs")
+    # [10] layoutsearch's joint model, held to the release's own sites, reaches the exact engine's
+    # optimum, and its placement passes the independent check (no coupler between patches)
+    try:
+        import ortools  # noqa: F401
+        R_, C_, broken, _ = lattice_info(lay.repo)
+        row = layout_row(75, 4, 5, True, {})
+        edges = ace_coupling_edges(row, 75, True, {}, ())
+        cp = logical_couplers(lay, lay.n)
+        res = search_layout(row, edges, lay.n, R=R_, C=C_, broken=broken, region="fixed",
+                            fixed={(p // C_, p % C_) for p in lay.l2p}, max_width=32, max_wide=3, time_s=90)
+        site_e, _ = _exact_on_register(row, 75, cp, edges, (), 90, 32, 3)
+        se = placement_stats(row, site_e, cp)
+        sj = placement_stats(row, register_from_cells(res["cells"], row, edges, C_)[1], cp) if res and "cells" in res else None
+        good = bool(sj) and sj["cross"] == 0 and sj["seam_used"] == se["seam_used"] == res["seam"]
+        report("[10] layoutsearch joint model vs exact engine, release register on 75 sites (lrc 4 lrr 5, torus)", good,
+               f"{sj['seam_used'] if sj else '-'} / {se['seam_used']} boundary qubits, "
+               f"{sj['replica'] if sj else '-'} / {se['replica']} couplers through a boundary")
+    except ImportError:
+        print("[10] OR-Tools not installed: layoutsearch check skipped")
     print("ALL OK" if ok else "SOME CHECKS FAILED")
     raise SystemExit(0 if ok else 1)
 
@@ -3757,6 +4290,7 @@ def cmd_seamgap(a):
 
 # ================================================================== CLI
 def main():
+    load_register_files()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -3785,7 +4319,9 @@ def main():
                         "Nighthawk sub-register built with the release's own recipe (mirror only; with --backend ace "
                         "the four-patch preset that fits one 8 GB GPU: 102 sites, lrc 4 lrr 5, widths 28/27/27/27); "
                         "nighthawk88d: 88 qubits with disabled sites placed on the seams, 11 boundary qubits "
-                        "instead of 17 (114 sites, lrc 4 lrr 5, widths 28/23/25/27)")
+                        "instead of 17 (114 sites, lrc 4 lrr 5, widths 28/23/25/27); nighthawk88e: as 88d with 36 "
+                        "couplers through a boundary instead of 42 (found by layoutsearch); plus any register "
+                        "saved by layoutsearch")
     r.add_argument("--transpile-max-width", dest="transpile_max_width", type=int, default=None,
                    help="exact engine: no ACE patch wider than this (logical qubits + error-detection ancilla)")
     r.add_argument("--transpile-max-wide", dest="transpile_max_wide", type=int, default=None,
@@ -3935,6 +4471,61 @@ def main():
     p.add_argument("--top", type=int, default=25, help="without --max-width, list this many (default 25)")
     p.add_argument("--tiling", action="store_true", help="count seam couplers after --ace-tiling placement")
 
+    ls = sub.add_parser("layoutsearch", help="CP-SAT search for a register + ACE placement, verified and "
+                                              "ranked by short mirror runs; the best is saved as a --register")
+    ls.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
+    ls.add_argument("--n", type=int, required=True, help="logical qubits")
+    ls.add_argument("--geometries", nargs="+", default=["auto"],
+                    help="ACE registers to try, SIZE:LRC:LRR[:t] (t = torus), or auto (default): every distinct "
+                         "geometry of n..n+40 sites with --patches patches that can hold n qubits under the cap")
+    ls.add_argument("--patches", type=int, default=None, help="with auto: number of patches (2, 3, 4, ...)")
+    ls.add_argument("--torus", choices=["flat", "torus", "any"], default="flat", help="with auto (default flat)")
+    ls.add_argument("--max-geometries", dest="max_geometries", type=int, default=4,
+                    help="with auto: try this many geometries, most bulk capacity first (default 4)")
+    ls.add_argument("--max-width", dest="max_width", type=int, default=28,
+                    help="patch width cap incl. the error-detection ancilla (default 28: 2 GiB fp32)")
+    ls.add_argument("--max-wide", dest="max_wide", type=int, default=1,
+                    help="patches allowed at --max-width, the others <= max-width - 1 (default 1)")
+    ls.add_argument("--region", choices=["rect", "convex", "free", "fixed"], default="rect",
+                    help="rect (default): a rectangle of the lattice chosen by the solver, holes only at broken "
+                         "qubits plus up to --trim sites off its border; convex: every row and column one unbroken "
+                         "run (allows thin necks: patches joined by one or two qubits, i.e. nearly separate "
+                         "circuits, when n is small against the lattice); free: any connected set (same, more so); "
+                         "fixed: exactly --window's sites, or --fixed-register's (placement only)")
+    ls.add_argument("--trim", type=int, default=0,
+                    help="with rect: sites that may be left out along the rectangle's border (default 0)")
+    ls.add_argument("--min-boundary", dest="min_boundary", type=int, default=0,
+                    help="at least this many boundary qubits (a floor against trivially decoupled patches)")
+    ls.add_argument("--window", default=None, help="restrict the region to rows-cols, e.g. 0-9,1-9")
+    ls.add_argument("--fixed-register", dest="fixed_register", default=None,
+                    help="with --region fixed: use this register's sites (release, nighthawk88, ...)")
+    ls.add_argument("--broken", choices=["disable", "use"], default="disable",
+                    help="the device's broken qubits (17, 55, 62): disabled, as on ibm_phoenix (default), or used")
+    ls.add_argument("--objective", default="seam,bcz,couplers",
+                    help="lexicographic, from " + ",".join(LS_OBJECTIVES) + ": seam = boundary qubits, bcz = "
+                         "couplers through a boundary, couplers = couplers kept (maximised), balance = widest minus "
+                         "narrowest patch (default seam,bcz,couplers)")
+    ls.add_argument("--candidates", type=int, default=2,
+                    help="distinct layouts per geometry (each later one differs from every earlier one in at "
+                         "least --diversity boundary sites; default 2)")
+    ls.add_argument("--diversity", type=int, default=4)
+    ls.add_argument("--hint", default=None, help="warm-start the first solve from this register's layout")
+    ls.add_argument("--cpsat-time", dest="cpsat_time", type=float, default=300.0,
+                    help="seconds per CP-SAT solve (default 300; FEASIBLE results are best found, not proven)")
+    ls.add_argument("--workers", type=int, default=None, help="CP-SAT threads (default: cores, at most 16)")
+    ls.add_argument("--test-depths", dest="test_depths", type=int, nargs="*", default=[4, 8],
+                    help="mirror depths of the circuit test (default 4 8; none = rank by the CP-SAT objective only)")
+    ls.add_argument("--test-instances", dest="test_instances", type=int, default=1)
+    ls.add_argument("--test-twirls", dest="test_twirls", type=int, default=4,
+                    help="twirls per input (10 inputs) in the circuit test (default 4: 40 runs per point)")
+    ls.add_argument("--test-jobs", dest="test_jobs", type=int, default=1, help="candidates tested in parallel")
+    ls.add_argument("--theta", choices=["haar", "nnqab"], default="nnqab")
+    ls.add_argument("--cpu", action="store_true", help="circuit tests on CPU (OpenCL hidden)")
+    ls.add_argument("--outdir", default="layoutsearch", help="candidate registers, test records and the log")
+    ls.add_argument("--prefix", default=None, help="candidate name prefix (default ls<n>)")
+    ls.add_argument("--save-best", dest="save_best", default=None,
+                    help="save the best candidate as this --register name in nighthawk_registers.json")
+
     t = sub.add_parser("selftest", help="conventions and exactness checks")
     t.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
     t.add_argument("--n", type=int, default=14, help="register for the exact mirror checks")
@@ -3957,7 +4548,7 @@ help per command: python3 nighthawk_qrack.py <command> -h""")
     a = ap.parse_args()
     ensure_isolated(a)
     dict(seamgap=cmd_seamgap, verify=cmd_verify, hwxeb=cmd_hwxeb, run=cmd_run, selftest=cmd_selftest,
-         aceplan=cmd_aceplan)[a.cmd](a)
+         aceplan=cmd_aceplan, layoutsearch=cmd_layoutsearch)[a.cmd](a)
 
 
 if __name__ == "__main__":
