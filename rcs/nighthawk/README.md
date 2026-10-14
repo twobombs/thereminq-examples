@@ -38,7 +38,7 @@ Ref. [[1]](#ref-1) reports forward RCS on 61 qubits of the 120-qubit IBM Nightha
 
 There is **no noise model**. Any deviation from F = 1 under `run` is attributable to the simulator backend or to sampling, not to an assumed device error.
 
-> **Version note.** This HOWTO describes `nighthawk_qrack.py` at 4555 lines and `nighthawk_graph.py` at 1329 lines (13 October 2026). Earlier revisions contained a noise-model audit (`--preset r2`, `--stochastic`, `--edge-layers`); those flags no longer exist. Tiling version 2 (`--ace-tiling-version 2`) reproduces the config tags of runs made before tiling version 3 became the default.
+> **Version note.** This HOWTO describes `nighthawk_qrack.py` at 4658 lines and `nighthawk_graph.py` at 1329 lines (13 October 2026). Earlier revisions contained a noise-model audit (`--preset r2`, `--stochastic`, `--edge-layers`); those flags no longer exist. Tiling version 2 (`--ace-tiling-version 2`) reproduces the config tags of runs made before tiling version 3 became the default.
 
 ---
 
@@ -312,6 +312,7 @@ Enumerates every distinct ACE layout of the register holding the first `--n` log
 | `--transpile-max-width W`, `--transpile-max-wide N` | off | `exact` engine: patch width cap incl. the ancilla, and how many patches may reach it (Sec. 2.9) |
 | `--mirror-estimator` | `shots` | `prob`: per circuit run, the probability ACE returns the prepared string (chain rule with forced measurement), so there is no shot noise and no shot floor; `shots`: sample with `measure_shots` at the paper's budgets |
 | `--ace-gpu-shots` | off | with `--ace-gpu`: draw shots on the GPU instead of a CPU copy of the final state |
+| `--gtt GB` (`-gtt`), `--vram-gb` | off, 8 | with `--ace-gpu`: VRAM oversubscription, up to GB of host memory per worker mapped by the GPU (Sec. 8.8) |
 
 **Sampling and scope:** `--depths`, `--K`, `--instances` (3), `--partitions`, `--shots` (`paper` = Appendix-D budgets for mirror/patched, 4096 for `fxeb`, 100 000 per pub for `full`; or an integer), `--twirls` (64), `--exact-probs`, `--sizes` (`27-34`, `20,27-36`), `--n`, `--pubs`, `--cache`, `--cpu`, `--ref-gpu` (exact `fxeb` reference on OpenCL).
 
@@ -399,7 +400,7 @@ The cloverleaf emulates one Nighthawk chip as ACE patches joined by seams. The *
 | woven CZ | `--loom ghost` (default): as ACE replicates a boundary qubit in both patches next to a seam, each chip also holds a **ghost** of every partner its links touch, on a free ACE site coupled to the anchor. Single-qubit gates and twirl Paulis go to every copy of a qubit; the link CZ is applied exactly on both chips (a with ghost(b), ghost(a) with b), so entanglement crosses the link; the partner's own CZs with its chip neighbours reach the ghost as the mean-field phase π·P(1) of that neighbour. Links are placed only where both chips have ghost room under their width caps (`--ghost-max-width`, default the register's own caps). `--loom mean`: no ghosts; the mean-field decoupling exp(iπ n_a n_b) ≈ exp(iπ(n_a⟨n_b⟩ + ⟨n_a⟩n_b)) on both sides, chips in a product state. `--loom sample`: Z kicks drawn from P(1). All exact when a partner is in a basis state. CZ layers are diagonal, so marginals read before a layer hold for all of it: one round trip per chip per layer that needs one, chips in parallel. Records carry `ghost_drift`, the mean \|P(1) of a ghost − P(1) of its real qubit\| |
 | estimator | nighthawk_qrack's `prob` estimator per chip; the field's survival is the product of the chips' probabilities of their part of the prepared string |
 
-**Field options** (shared by every subcommand): `--chips` (`nighthawk88e*2`, `release,nighthawk88d`, `rect:r0-r1,c0-c1` …; any `--register` name, layoutsearch-saved ones included), `--arrangement RxC`, `--links K|all` per neighbouring chip pair (facing border sites, evenly spaced, each on a CZ colour free at both ends, so a cycle still applies one colour and every qubit meets at most one CZ per cycle; `--link-rows`/`--link-cols` by hand), `--loom ghost|mean|sample`, `--ghost-max-width`, `--backend ace|exact`, `--chip-ace` for rect chips, `--cpu`/`--ace-gpu`, `--gpus`, `--chips-per-gpu` (default 1: one chip per 8 GB die), `--theta`, `--twirls`.
+**Field options** (shared by every subcommand): `--chips` (`nighthawk88e*2`, `release,nighthawk88d`, `rect:r0-r1,c0-c1` …; any `--register` name, layoutsearch-saved ones included), `--arrangement RxC`, `--links K|all` per neighbouring chip pair (facing border sites, evenly spaced, each on a CZ colour free at both ends, so a cycle still applies one colour and every qubit meets at most one CZ per cycle; `--link-rows`/`--link-cols` by hand), `--loom ghost|mean|sample`, `--ghost-max-width`, `--gtt GB` / `--vram-gb` (Sec. 8.8), `--backend ace|exact`, `--chip-ace` for rect chips, `--cpu`/`--ace-gpu`, `--gpus`, `--chips-per-gpu` (default 1: one chip per 8 GB die), `--theta`, `--twirls`.
 
 | Subcommand | |
 |---|---|
@@ -558,6 +559,21 @@ make -j$(nproc) qrack_pinvoke && sudo make install     # /usr/local/lib/qrack/li
 ```
 
 Before a long GPU run, run the reproducer and one ACE point on the target device against a CPU run of the same circuits.
+
+### 8.8 VRAM oversubscription: `--gtt`
+
+An ACE patch is a dense state of 2^w amplitudes at 8 bytes: 28 qubits are 2 GiB, 29 are 4 GiB, 30 are 8 GiB, and Qrack composes into the widest patch through a buffer of the same size. Qrack places each state itself (`QEngineOCL::SetDevice`): in device memory when three times its size fits the device's global memory, otherwise in host RAM that the GPU maps over PCIe (`CL_MEM_USE_HOST_PTR`; on amdgpu, the GTT). On an 8 GB V340 die, states up to 28 qubits stay in VRAM and 29-qubit and wider states are host-mapped. Every allocation, host-mapped ones included, counts against one per-device ceiling, `QRACK_MAX_ALLOC_MB`, which defaults to the device's memory; without raising it, a patch that would spill is refused ("VRAM limits exceeded").
+
+`--gtt GB` (with `--ace-gpu`; `-gtt` also accepted) raises each worker's ceiling to `--vram-gb` + GB and sets `QRACK_QPAGER_DEVICES_HOST_POINTER=1`, so paged states go to host memory too. The model of where a worker's memory goes, `die_split`, sums the patch states and the compose buffer by Qrack's rule; the preflight prints it per worker and stops when the VRAM part exceeds the die (less a 0.5 GiB reserve) or the host part exceeds `--gtt`. `layoutsearch --gtt GB [--max-width 29|30]` judges candidates by the same split, and `nighthawk_cloverfield.py --gtt GB` uses it for ghost room instead of the register's width caps. The numbers are those of a VRAM-only run (only the memory placement differs), so the config tag is unchanged; records carry `gtt_gb`.
+
+| Field (nighthawk88e chips) | Ghost links, VRAM only | `--gtt 8` | `--gtt 16` |
+|---|---|---|---|
+| 2 chips side by side | 3 (5.8 GiB per chip, all VRAM) | 5: chip 0 at 25/28/29/26 = 2.8 GiB VRAM + 8 GiB GTT | 6: a 30-wide patch, 2.8 GiB VRAM + 16 GiB GTT |
+| 4 chips, 2 × 2 | 10 (6.5 GiB per chip) | 14: three chips at 4.5 GiB VRAM + 8 GiB GTT each | — |
+
+Verified on PoCL with Qrack 10.13.2 + the async fix: a 24-qubit entangled state (128 MiB) fails under a 61 MB ceiling and runs under 563 MB, in exactly the environment the loom builds for a chip worker (`QRACK_MAX_ALLOC_MB`, `QRACK_QPAGER_DEVICES_HOST_POINTER`, device pinning); both selftests pass. Not yet measured on the V340s: how much slower host-mapped patches are. Every gate on a 29- or 30-wide patch then streams its state over the card's PCIe 3.0 x8 link, shared by the card's two dies, so expect those patches to run at PCIe rather than HBM speed.
+
+Host-mapped buffers are exactly the `USE_HOST_PTR` path of defect B (Sec. 8.7): use the Qrack build with the async fix (or `QRACK_OCL_SYNC=1`). The GTT itself is bounded by the kernel: `cat /sys/class/drm/card*/device/mem_info_gtt_total` shows it per die, and the `amdgpu.gttsize` (MiB) and `ttm.pages_limit` module parameters raise it. The host RAM behind the GTT also counts against `--mem-budget-gb`.
 
 ---
 

@@ -51,6 +51,10 @@ Field
                 evenly spaced, or every one (--link-rows/--link-cols pick them by hand);
                 each takes a CZ colour (A-D) free on both of its qubits, so a cycle still
                 applies one colour and every qubit meets at most one CZ per cycle
+  --gtt GB           VRAM oversubscription per chip worker: up to GB of host memory its GPU
+                maps over PCIe (Qrack's ceiling QRACK_MAX_ALLOC_MB raised to --vram-gb + GB);
+                ghost room is then judged by the VRAM / GTT split instead of the register's
+                width caps, so wider patches and more ghost links fit on 8 GB dies
 
 Subcommands
   plan          the field: chips, qubits, couplers per colour, links, ACE presets and
@@ -229,8 +233,15 @@ class GhostRoom:
         self.used = set(site)
         self.width = Counter(sid for x in site for sid in self.sids[x])
         self.patches = sorted({next(iter(s_)) for s_ in self.sids if len(s_) == 1})
-        W = opts.get("ghost_max_width") or a.transpile_max_width
-        N = opts.get("ghost_max_wide") if opts.get("ghost_max_width") else a.transpile_max_wide
+        # admission: explicit --ghost-max-width caps; with --gtt the die split (VRAM + host-mapped
+        # memory) instead of the register's own width caps; otherwise those caps (one 8 GB die)
+        self.mem = (float(opts.get("vram_gb") or 8.0), float(opts["gtt"])) if opts.get("gtt") is not None else None
+        if opts.get("ghost_max_width"):
+            W, N = opts.get("ghost_max_width"), opts.get("ghost_max_wide")
+        elif self.mem is None:
+            W, N = a.transpile_max_width, a.transpile_max_wide
+        else:
+            W, N = None, None
         self.W, self.N = W, N
 
     def widths(self, extra=()):
@@ -252,6 +263,8 @@ class GhostRoom:
             w = self.widths([x])
             if self.W and (max(w) > self.W or (self.N is not None and sum(1 for v in w if v == self.W) > self.N)):
                 continue
+            if self.mem is not None and not nq.die_split(w, *self.mem)["fits"]:
+                continue
             ok.append((len(self.sids[x]) > 1, max(w), x))
         if not ok:
             return False
@@ -267,6 +280,9 @@ class GhostRoom:
             return None
         g = [2 ** w * 8 / 2 ** 30 for w in self.widths()]
         return sum(g) + max(g)
+
+    def split(self, vram_gb=8.0, gtt_gb=0.0):
+        return None if self.exact else nq.die_split(self.widths(), vram_gb, gtt_gb)
 
 
 # ================================================================== the field
@@ -520,7 +536,8 @@ class ChipSim:
     def info(self):
         g = self.eng.geometry() if self.backend == "ace" else {}
         return dict(n=self.n, pid=os.getpid(), geometry={k: v for k, v in g.items() if k != "ace_map"},
-                    ace_map=g.get("ace_map"), device=os.environ.get("NIGHTHAWK_ISOLATED"), ghosts=self.ghost)
+                    ace_map=g.get("ace_map"), device=os.environ.get("NIGHTHAWK_ISOLATED"), ghosts=self.ghost,
+                    alloc_mb=os.environ.get("QRACK_MAX_ALLOC_MB"), gtt_gb=os.environ.get("NIGHTHAWK_GTT_GB"))
 
     def marg(self, q):
         if self.backend == "ace":
@@ -808,8 +825,10 @@ def run_point(field, loom, d, inst, a, log=None):
 # ================================================================== run / status / summarize
 def build_field(a):
     nq.load_register_files()
+    import re
     toks = []
-    for t in a.chips.split(","):
+    # rect:r0-r1,c0-c1 contains a comma itself: take those tokens whole
+    for t in re.findall(r"rect:\d+-\d+,\d+-\d+(?:\*\d+)?|[^,]+", a.chips):
         if "*" in t:
             name, k = t.rsplit("*", 1)
             toks += [name] * int(k)
@@ -827,7 +846,8 @@ def engine_opts(a):
     return dict(backend=a.backend, cpu=a.cpu, ace_gpu=a.ace_gpu, ace_host_pointer=getattr(a, "ace_host_pointer", False),
                 chip_ace=getattr(a, "chip_ace", None), max_width=getattr(a, "chip_max_width", None),
                 max_wide=getattr(a, "chip_max_wide", None), ghost_max_width=getattr(a, "ghost_max_width", None),
-                ghost_max_wide=getattr(a, "ghost_max_wide", None))
+                ghost_max_wide=getattr(a, "ghost_max_wide", None), gtt=getattr(a, "gtt", None),
+                vram_gb=getattr(a, "vram_gb", 8.0))
 
 
 def cfg_tag(field, a):
@@ -872,7 +892,10 @@ def worker_env_for(a, device):
         env["OCL_ICD_VENDORS"] = "/tmp/no-icd"
         env["NIGHTHAWK_ISOLATED"] = "cpu"
         return env
-    return nq.worker_env(device, argparse.Namespace(gpu_isolation=a.gpu_isolation))
+    env = nq.worker_env(device, argparse.Namespace(gpu_isolation=a.gpu_isolation))
+    if getattr(a, "gtt", None):
+        nq.gtt_env(env, float(a.vram_gb or 8.0), float(a.gtt))
+    return env
 
 
 def start_chips(field, a, loom_index):
@@ -952,6 +975,7 @@ def cmd_run(a):
                             chips = start_chips(field, a, li)
                             log(f"# loom {li}: chips " + ", ".join(
                                 f"{c.spec['name']} pid {c.info['pid']} on {c.info['device'] or 'cpu'}"
+                                + (f" [GTT {c.info['gtt_gb']} GB, QRACK_MAX_ALLOC_MB={c.info['alloc_mb']}]" if c.info.get("gtt_gb") else "")
                                 + (f" ({c.info['ghosts']['count']} ghosts"
                                    + (f", patch widths {c.info['ghosts']['widths']}" if c.info['ghosts'].get('widths') else "")
                                    + ")" if c.info.get("ghosts", {}).get("count") else "") for c in chips))
@@ -1055,21 +1079,28 @@ def cmd_plan(a):
         print(f"  chip {cu} site {field.cells[cu][field.local[u]]} -- chip {cv} site {field.cells[cv][field.local[v]]}"
               f"  colour {col}")
     opts = engine_opts(a)
-    total = []
+    total, splits = [], []
     for c, spec in enumerate(field.specs):
         widths, gb = chip_memory(spec, opts)
         ng = 0
         if field.rooms is not None and not field.rooms[c].exact:
             widths, gb, ng = field.rooms[c].widths(), field.rooms[c].gib(), len(field.rooms[c].sites)
         total.append(gb or 0)
+        sp = nq.die_split(widths, a.vram_gb or 8.0, a.gtt or 0.0) if widths else None
+        if sp:
+            splits.append(sp)
         print(f"chip {c}: {spec['name']}, {field.chip_n[c]} qubits"
               + (f" + {ng} ghosts" if ng else "")
-              + (f", patch widths {widths} (incl. ancilla), peak about {gb:.1f} GiB fp32" if widths else ""))
+              + (f", patch widths {widths} (incl. ancilla), peak about {gb:.1f} GiB fp32" if widths else "")
+              + (f"\n        on one die: {nq.describe_split(sp, a.vram_gb or 8.0, a.gtt or 0.0)}" if sp else ""))
     if any(total):
         per = a.chips_per_gpu
-        print(f"one loom = {len(field.specs)} chip workers; with {per} chip(s) per {a.die_gb:g} GB device "
-              f"{'fits' if max(total) * per <= a.die_gb else 'DOES NOT FIT'}; "
-              f"devices per loom: {math.ceil(len(field.specs) / per)}")
+        ok = all(sp["fits"] for sp in splits) and per == 1 if splits else max(total) * per <= a.die_gb
+        gtt_host = sum(sp["gtt"] for sp in splits)
+        print(f"one loom = {len(field.specs)} chip workers, {per} chip(s) per {a.vram_gb or a.die_gb:g} GB device: "
+              f"{'fits' if ok else 'DOES NOT FIT'}"
+              + (f" (host memory mapped as GTT: {gtt_host:.1f} GiB per loom)" if gtt_host else "")
+              + f"; devices per loom: {math.ceil(len(field.specs) / per)}")
     if a.png:
         draw_field(field, a.png)
         print(f"drawn: {a.png}")
@@ -1321,6 +1352,12 @@ def add_field_args(p):
                    help="--loom ghost: patch width cap with the ghosts in (default: the chip register's own caps, "
                         "e.g. 28 with one patch at 28 for nighthawk88e); links whose ghost would break it are skipped")
     p.add_argument("--ghost-max-wide", dest="ghost_max_wide", type=int, default=None)
+    p.add_argument("--gtt", "-gtt", dest="gtt", type=float, default=None, metavar="GB",
+                   help="VRAM oversubscription: each chip worker may use up to GB of host memory that its GPU maps "
+                        "over PCIe (GTT). Qrack keeps a patch state in VRAM when 3x its size fits the die, else in "
+                        "host memory; QRACK_MAX_ALLOC_MB is raised to VRAM + GB. Ghost room is then judged by this "
+                        "split instead of the register's width caps, so wider patches and more ghost links fit")
+    p.add_argument("--vram-gb", dest="vram_gb", type=float, default=8.0, help="VRAM per chip worker's die (default 8)")
 
 
 def main():

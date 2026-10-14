@@ -119,6 +119,15 @@ Larger registers (--register NAME, mirror family only): a Nighthawk sub-register
           No device data exists for any of them: summaries show survival and the fitted decay only.
           --transpile-max-width W [--transpile-max-wide N]: the same width caps for any exact placement.
 
+VRAM oversubscription (--gtt GB, with --ace-gpu): Qrack keeps a state vector in device memory
+          when 3x its size fits the device, else in host RAM the GPU maps over PCIe (GTT), but
+          counts both against one ceiling, QRACK_MAX_ALLOC_MB (default: the device's memory).
+          --gtt GB raises that ceiling to --vram-gb + GB per worker and puts paged states in host
+          memory, so patches wider than an 8 GB V340 die holds (29: 4 GiB, 30: 8 GiB) run with
+          the excess in host RAM. The preflight prints each worker's VRAM / GTT split and stops if
+          it cannot fit; layoutsearch --gtt judges candidates by the same split. Same numbers as
+          VRAM-only runs, so the config tag is unchanged; the records carry gtt_gb.
+
 Examples
   python nighthawk_qrack.py verify   --repo rcs-nighthawk
   python nighthawk_qrack.py selftest --repo rcs-nighthawk
@@ -680,6 +689,45 @@ def amp_bytes():
     """Bytes per complex amplitude of this Qrack build (fp16 4, fp32 8, fp64 16)."""
     from pyqrack.qrack_system import Qrack
     return 2 ** (Qrack.fppow - 2)
+
+
+# ================================================================== VRAM + GTT
+# Where Qrack keeps an OpenCL state vector (QEngineOCL::SetDevice): in device memory when
+# three times its size fits the device's global memory, otherwise in host RAM that the GPU
+# maps over PCIe (CL_MEM_USE_HOST_PTR; on amdgpu the GTT). Every allocation, host-mapped
+# ones included, counts against one per-device ceiling, QRACK_MAX_ALLOC_MB (default: the
+# device's global memory), so without raising it a state that would spill to the GTT is
+# refused ("VRAM limits exceeded"). --gtt GB raises the ceiling to VRAM + GB and puts paged
+# states (QPager) in host memory too.
+GTT_RESERVE_GB = 0.5          # driver, kernels and Qrack's small buffers on the die
+
+
+def die_split(widths, vram_gb=8.0, gtt_gb=0.0, reserve_gb=GTT_RESERVE_GB):
+    """One worker's ACE patches, fully entangled, on one OpenCL die: every patch state plus
+    the compose buffer (a state the size of the widest patch), each placed by Qrack's rule.
+    Returns dict(vram, gtt, total GiB, fits, limit_mb) for a die of vram_gb with gtt_gb of
+    host memory allowed."""
+    gib = 2 ** 30
+    states = [2.0 ** w * amp_bytes() / gib for w in widths] + ([2.0 ** max(widths) * amp_bytes() / gib] if widths else [])
+    vram = sum(x for x in states if 3 * x <= vram_gb)
+    gtt = sum(x for x in states if 3 * x > vram_gb)
+    return dict(vram=vram, gtt=gtt, total=vram + gtt, fits=vram <= vram_gb - reserve_gb and gtt <= gtt_gb,
+                limit_mb=int((vram_gb + gtt_gb) * 1024))
+
+
+def gtt_env(env, vram_gb, gtt_gb):
+    """Environment additions for --gtt: Qrack's per-device allocation ceiling at VRAM + GTT,
+    paged states in host memory. Variables the user set explicitly win."""
+    if gtt_gb:
+        env.setdefault("QRACK_MAX_ALLOC_MB", str(int((vram_gb + gtt_gb) * 1024)))
+        env.setdefault("QRACK_QPAGER_DEVICES_HOST_POINTER", "1")
+        env["NIGHTHAWK_GTT_GB"] = str(gtt_gb)
+    return env
+
+
+def describe_split(sp, vram_gb, gtt_gb):
+    return (f"VRAM {sp['vram']:.2f} of {vram_gb:g} GiB (-{GTT_RESERVE_GB:g} reserve), GTT {sp['gtt']:.2f} of "
+            f"{gtt_gb:g} GiB -> {'fits' if sp['fits'] else 'DOES NOT FIT'}")
 
 
 def dense_gb(widths):
@@ -1446,6 +1494,8 @@ class AceEngine:
                        if getattr(self.a, "ace_transpile", False) else {}),
                     **{attr: bool(getattr(self.a, attr, dflt)) for attr, _, dflt in ACE_OPTS
                        if bool(getattr(self.a, attr, dflt)) != dflt},
+                    **({"gtt_gb": float(self.a.gtt), "vram_gb": float(getattr(self.a, "vram_gb", 8.0) or 8.0)}
+                       if getattr(self.a, "gtt", None) and getattr(self.a, "ace_gpu", False) and not self.a.cpu else {}),
                     ace_map=hashlib.sha1(json.dumps(self.idx).encode()).hexdigest()[:10])
 
     def reset(self):
@@ -2936,6 +2986,24 @@ def mem_total_gb():
     return None
 
 
+def gpu_die_check(lay, n, a, row, size):
+    """--ace-gpu: where the patches go on one die (VRAM / GTT) when fully entangled; stop
+    before any work if they cannot fit even with --gtt."""
+    if a.cpu or not getattr(a, "ace_gpu", False) or getattr(a, "ace_host_pointer", False):
+        return
+    vram, gtt = float(getattr(a, "vram_gb", 8.0) or 8.0), float(getattr(a, "gtt", 0) or 0)
+    w = active_widths(lay, n, a, row, size)
+    sp = die_split(w, vram, gtt)
+    print(f"# die n={n}: patches {w} fully entangled: {describe_split(sp, vram, gtt)}"
+          + (f"; QRACK_MAX_ALLOC_MB={sp['limit_mb']}" if gtt else ""), flush=True)
+    if not sp["fits"] and not getattr(a, "worker", False):
+        need = max(0.0, sp["gtt"])
+        raise SystemExit(f"n={n}: the patches need {sp['vram']:.2f} GiB of VRAM and {need:.2f} GiB of host-mapped "
+                         f"memory on one {vram:g} GB die: " + (f"give --gtt {math.ceil(need)} (or more)" if sp["vram"] <=
+                         vram - GTT_RESERVE_GB else "the VRAM part alone is too large; use narrower patches "
+                         "(--transpile-max-width) or --ace-host-pointer (every state in host memory)"))
+
+
 def ace_preflight(lay, a, sizes):
     """--ace-max-width: print the layout each register size gets and check the
     worst-case dense memory of all workers against this machine's RAM.
@@ -2954,6 +3022,7 @@ def ace_preflight(lay, a, sizes):
                   f"lrc {a.lrc} lrr {a.lrr}{' torus' if a.ace_torus else ''}, "
                   f"{len(ex)} sites excluded: exact/replica/cross {f(t)}, simulator widths {row['widths']}",
                   flush=True)
+            gpu_die_check(lay, n, a, row, size)
         return
     if getattr(a, "ace_tiling", False) and not a.ace_max_width:
         for n in sizes:
@@ -3058,6 +3127,17 @@ def active_dense_gb(lay, n, a, row, size):
             (1 if bool(getattr(a, "ace_boundary_rep", False)) else 0)
     widths = [used[sid] + extra for sid in total if used[sid]]
     return dense_gb(widths) if widths else 0.0
+
+
+def active_widths(lay, n, a, row, size):
+    """Widths of the ACE simulators that hold circuit qubits (+ ancilla), as active_dense_gb
+    counts them; the crossbar simulator is left out (it holds seam replicas only)."""
+    idx = set(place(lay, n, a, row, size))
+    used = collections.Counter(sid for q, entries in enumerate(row["unpack"]) if q in idx for sid, _ in entries)
+    patches = {next(iter({sid for sid, _ in e})) for e in row["unpack"] if len(e) == 1}
+    extra = (1 if bool(getattr(a, "ace_error_detection", True)) else 0) + \
+            (1 if bool(getattr(a, "ace_boundary_rep", False)) else 0)
+    return [used[p] + extra for p in sorted(patches) if used[p]]
 
 
 def point_mem_gb(lay, a, key, variants=None):
@@ -4047,12 +4127,20 @@ def cmd_layoutsearch(a):
             REGISTERS[name] = entry
             save_register(regfile, name, entry)
             ver = verify_register(name, entry, a.repo)
+            if a.gtt is not None or a.vram_gb is not None:
+                vg = a.vram_gb or 8.0
+                sp = die_split(ver["widths"], vg, a.gtt or 0.0)
+                ver["die"] = dict(sp, vram_gb=vg, gtt_gb=a.gtt or 0.0)
+                if not sp["fits"]:
+                    ver["ok"] = False
+                    ver["problems"].append(f"die: {describe_split(sp, vg, a.gtt or 0.0)}")
             rec = dict(name=name, geometry=dict(size=size, lrc=lrc, lrr=lrr, torus=torus), cpsat=dict(
                 status=res["status"], seconds=res["seconds"], seam=res["seam"], bcz=res["bcz"],
                 couplers=res["couplers"], widths=res["widths"]), verify=ver, spec=spec)
             cands.append(rec)
             print(f"  {name}: {res['status'].lower()} in {res['seconds']} s -- {res['seam']} boundary qubits, "
-                  f"{res['bcz']} of {res['couplers']} couplers through a boundary, widths {res['widths']}; "
+                  f"{res['bcz']} of {res['couplers']} couplers through a boundary, widths {res['widths']}"
+                  + (f", VRAM {ver['die']['vram']:.1f} + GTT {ver['die']['gtt']:.1f} GiB" if "die" in ver else "") + "; "
                   f"verify {'OK' if ver['ok'] else 'FAILED: ' + '; '.join(ver['problems'])} "
                   f"({ver['exact']}/{ver['replica']}/{ver['cross']})", flush=True)
     good = [c for c in cands if c["verify"]["ok"]]
@@ -4073,7 +4161,7 @@ def cmd_layoutsearch(a):
                    "--twirls", str(a.test_twirls), "--out", str(out), "--depths", *map(str, a.test_depths)]
             if a.repo:
                 cmd += ["--repo", a.repo]
-            cmd += ["--cpu"] if a.cpu else ["--ace-gpu"]
+            cmd += ["--cpu"] if a.cpu else ["--ace-gpu"] + (["--gtt", str(a.gtt), "--vram-gb", str(a.vram_gb or 8.0)] if a.gtt else [])
             t0 = time.time()
             p = subprocess.run(cmd, env=env, capture_output=True, text=True)
             c["test"] = dict(seconds=round(time.time() - t0, 1), returncode=p.returncode)
@@ -4413,6 +4501,13 @@ def main():
                    help="run QrackAceBackend on OpenCL too (off by default: tiled placements reset Vega10/20 "
                         "dies under rusticl/radeonsi; they run on clvk/RADV). Shots are drawn on a CPU copy "
                         "unless --ace-gpu-shots")
+    r.add_argument("--gtt", "-gtt", dest="gtt", type=float, default=None, metavar="GB",
+                   help="--ace-gpu: allow VRAM oversubscription with up to GB of host memory per worker that the GPU "
+                        "maps over PCIe (GTT): states Qrack places in host memory (> 1/3 of the die) or pages no longer "
+                        "hit the die's allocation ceiling (QRACK_MAX_ALLOC_MB = VRAM + GB). Slower than VRAM; same "
+                        "numbers, so not part of the config tag")
+    r.add_argument("--vram-gb", dest="vram_gb", type=float, default=8.0,
+                   help="device memory per worker's die for the --gtt plan (default 8: one V340 die)")
     r.add_argument("--ace-host-pointer", dest="ace_host_pointer", action="store_true",
                    help="ace with --ace-gpu: keep simulator states in host RAM, read by the GPU over PCIe "
                         "(GTT) instead of VRAM; same numbers, so not part of the config tag")
@@ -4484,6 +4579,12 @@ def main():
                     help="with auto: try this many geometries, most bulk capacity first (default 4)")
     ls.add_argument("--max-width", dest="max_width", type=int, default=28,
                     help="patch width cap incl. the error-detection ancilla (default 28: 2 GiB fp32)")
+    ls.add_argument("--gtt", "-gtt", dest="gtt", type=float, default=None, metavar="GB",
+                    help="judge candidates by the die split instead of 8 GB VRAM alone: --vram-gb of device memory plus "
+                         "GB of host memory mapped over PCIe (use with a larger --max-width, e.g. 29 or 30)")
+    ls.add_argument("--vram-gb", dest="vram_gb", type=float, default=None,
+                    help="judge candidates against one GPU die of this size (default 8 when --gtt is given; "
+                         "no die check otherwise, e.g. for CPU runs)")
     ls.add_argument("--max-wide", dest="max_wide", type=int, default=1,
                     help="patches allowed at --max-width, the others <= max-width - 1 (default 1)")
     ls.add_argument("--region", choices=["rect", "convex", "free", "fixed"], default="rect",
@@ -4546,6 +4647,8 @@ up to 3 parents up, via $NIGHTHAWK_REPO or --repo):
 help per command: python3 nighthawk_qrack.py <command> -h""")
         return
     a = ap.parse_args()
+    if getattr(a, "gtt", None) and not getattr(a, "cpu", False):
+        gtt_env(os.environ, float(getattr(a, "vram_gb", 8.0) or 8.0), float(a.gtt))   # inherited by re-exec and workers
     ensure_isolated(a)
     dict(seamgap=cmd_seamgap, verify=cmd_verify, hwxeb=cmd_hwxeb, run=cmd_run, selftest=cmd_selftest,
          aceplan=cmd_aceplan, layoutsearch=cmd_layoutsearch)[a.cmd](a)
