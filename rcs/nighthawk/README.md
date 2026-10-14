@@ -34,6 +34,7 @@ Ref. [[1]](#ref-1) reports forward RCS on 61 qubits of the 120-qubit IBM Nightha
 6. Runs a **data-only** analysis of the release (`seamgap`).
 7. Runs the mirror family on **larger sub-registers** of the Nighthawk lattice built with the release's own recipe (`--register`, up to 88 qubits on one 8 GB GPU).
 8. **Searches** register and placement together with CP-SAT, verifies every candidate and ranks them by short circuit tests (`layoutsearch`).
+9. **Weaves several chips into one** with `nighthawk_cloverfield.py`: isolated chip workers, the loom doing all IO between them (Sec. 6.8).
 
 There is **no noise model**. Any deviation from F = 1 under `run` is attributable to the simulator backend or to sampling, not to an assumed device error.
 
@@ -386,6 +387,52 @@ python3 nighthawk_qrack.py layoutsearch --n 88 --geometries 114:4:5 102:4:5 --re
 python3 nighthawk_qrack.py layoutsearch --n 68 --patches 3 --region rect --trim 3 \
     --cpsat-time 300 --test-depths 4 8 --test-instances 2 --cpu
 ```
+
+### 6.8 `nighthawk_cloverfield.py` — several chips woven into one virtual chip
+
+The cloverleaf emulates one Nighthawk chip as ACE patches joined by seams. The **cloverfield** puts two or more of those chips side by side and connects them with inter-chip couplers, as IBM plans to link Nighthawk chips with l-couplers: one register, one circuit, one mirror survival. `nighthawk_cloverfield.py` sits next to `nighthawk_qrack.py` and imports it; the chips, circuits, estimator and ACE presets are nighthawk_qrack's own.
+
+| Part | Role |
+|---|---|
+| chip worker | one process per chip, isolated to one OpenCL device (or the CPU) exactly as nighthawk_qrack's workers are; holds that chip's simulator (its register's ACE preset, or an exact `QrackSimulator` for small chips) and never sees another chip; executes gate batches and answers marginal and probability queries over a pipe |
+| loom | the coordinator, building no simulator itself (OpenCL hidden). Generates the whole field's circuit with the release's recipe on the global register (colours A–D, the K = 3 pseudo-patch rotation, the input strings), cuts each cycle into per-chip batches, and does **all IO between chips** |
+| woven CZ | `--loom ghost` (default): as ACE replicates a boundary qubit in both patches next to a seam, each chip also holds a **ghost** of every partner its links touch, on a free ACE site coupled to the anchor. Single-qubit gates and twirl Paulis go to every copy of a qubit; the link CZ is applied exactly on both chips (a with ghost(b), ghost(a) with b), so entanglement crosses the link; the partner's own CZs with its chip neighbours reach the ghost as the mean-field phase π·P(1) of that neighbour. Links are placed only where both chips have ghost room under their width caps (`--ghost-max-width`, default the register's own caps). `--loom mean`: no ghosts; the mean-field decoupling exp(iπ n_a n_b) ≈ exp(iπ(n_a⟨n_b⟩ + ⟨n_a⟩n_b)) on both sides, chips in a product state. `--loom sample`: Z kicks drawn from P(1). All exact when a partner is in a basis state. CZ layers are diagonal, so marginals read before a layer hold for all of it: one round trip per chip per layer that needs one, chips in parallel. Records carry `ghost_drift`, the mean \|P(1) of a ghost − P(1) of its real qubit\| |
+| estimator | nighthawk_qrack's `prob` estimator per chip; the field's survival is the product of the chips' probabilities of their part of the prepared string |
+
+**Field options** (shared by every subcommand): `--chips` (`nighthawk88e*2`, `release,nighthawk88d`, `rect:r0-r1,c0-c1` …; any `--register` name, layoutsearch-saved ones included), `--arrangement RxC`, `--links K|all` per neighbouring chip pair (facing border sites, evenly spaced, each on a CZ colour free at both ends, so a cycle still applies one colour and every qubit meets at most one CZ per cycle; `--link-rows`/`--link-cols` by hand), `--loom ghost|mean|sample`, `--ghost-max-width`, `--backend ace|exact`, `--chip-ace` for rect chips, `--cpu`/`--ace-gpu`, `--gpus`, `--chips-per-gpu` (default 1: one chip per 8 GB die), `--theta`, `--twirls`.
+
+| Subcommand | |
+|---|---|
+| `plan` | chips, qubits, intra-chip and link CZs per colour, the links, each chip's patch widths and peak memory, devices per loom; `--png` draws the field |
+| `run` | mirror points (`--depths`, `--instances`), chip workers per loom, `--parallel` looms at once, resumable JSONL in nighthawk_qrack's mirror record format (nighthawk_graph.py views 1–2 read it), `--status`, `--summarize`, `--retry-failed` |
+| `linksearch` | the same chips at several link counts (`--link-counts 0 2 4 all`): survival against links |
+| `layoutsearch` | nighthawk_qrack's chip-level search, unchanged (chips are cloverleaves; the loom does not change them) |
+| `selftest` | below |
+
+**Verification** (`selftest`, CPU):
+
+| # | Check | Result |
+|---|---|---|
+| 1 | field `nighthawk88e*2`, 4 links: every colour a matching, inputs and K = 3 cuts deterministic | 176 qubits, 4 links, 300 couplers |
+| 2a | one chip, no links: the loom's op stream against nighthawk_qrack's own engine calls (d = 4, 20 runs; exact, RNG-free) | 20 618 ops, identical |
+| 2b | the same point through a worker process against nighthawk_qrack in-process | 0.375971 vs 0.375882 (Qrack's own RNG in ACE reset/measurement is unseeded: ≈ 10⁻⁴ between processes) |
+| 3 | woven CZ on \|+⟩ against \|0⟩, \|1⟩, \|+⟩ (exact ⟨X⟩ +1, −1, 0) | +1, −1, 0 |
+| 4 | CZ·CZ = I across a link on \|+⟩\|+⟩ (exact ⟨X⟩ = +1) | ghost +1; mean-field −1 (two mean-field "CZ"s give \|−⟩\|−⟩) |
+| 5 | loom error alone: two exact 9-qubit chips, 2 links, mirror survival at d = 8 / 12 / 16 | no links 1 / 1 / 1; mean-field 0.773 / 0.773 / 0.067; **ghost 1.000 / 0.989 / 0.656** |
+
+First field runs (CPU, `nnqab`, 2 twirls × 10 inputs per point, 3 instances; plain means): two `nighthawk88e` chips, 176 qubits. With ghost room under the chips' caps (28, one patch at 28) three of the requested four links fit, each chip carrying 3 ghosts at patch widths 25/28/27/26 (peak ≈ 5.8 GiB, one chip per 8 GB die). On those same three links: ghost 0.079 / 0.017 against mean-field 0.056 / 0.015 at d = 4 / 6 (instance scatter is large at d = 6). The field's survival includes both chips' own seam losses, which dominate at these depths; the loom's own share is what selftest [5] isolates. Each link count rebuilds the global circuit (the K = 3 cuts are computed on the field's coupling graph), as a differently linked device would.
+
+```bash
+python3 nighthawk_cloverfield.py plan --chips nighthawk88e*2 --links 4 --png field.png
+python3 nighthawk_cloverfield.py run  --chips nighthawk88e*2 --links 4 --theta nnqab --depths 4 6 8 10 12 \
+        --ace-gpu --gpus 0-5 --out field88e2.jsonl        # 3 looms x 2 chips on six dies
+python3 nighthawk_cloverfield.py run  --chips nighthawk88e*2 --links 4 --theta nnqab --depths 4 6 8 10 12 \
+        --out field88e2.jsonl --status --summarize
+python3 nighthawk_cloverfield.py linksearch --chips nighthawk88e*2 --link-counts 0 2 4 all --theta nnqab \
+        --depths 4 8 --twirls 4 --cpu
+```
+
+The ghost link carries entanglement across the link but approximates the partner's own CZs with its chip neighbours by mean-field phases, the same compromise ACE makes for a boundary replica; `ghost_drift` in each record measures how far the ghosts wander from their real qubits. Larger ghost regions (a ghost of the partner's neighbours as well) would push that approximation one coupler further out, at the cost of more ghost room per link.
 
 ---
 
