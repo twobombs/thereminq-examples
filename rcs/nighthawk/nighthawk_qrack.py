@@ -344,6 +344,93 @@ REGISTERS = {
         # for nighthawk88d on the same settings.
         ace=dict(width=114, lrc=4, lrr=5, torus=False, max_width=28, max_wide=1,
                  site=[15, 16, 17, 18, 19, 20, 21, 22, 43, 44, 45, 10, 11, 46, 67, 68, 69, 70, 14, 12, 13, 0, 1, 23, 47, 91, 92, 42, 34, 35, 36, 2, 3, 24, 25, 71, 66, 37, 38, 39, 40, 26, 27, 48, 49, 50, 41, 62, 63, 64, 51, 72, 73, 74, 4, 9, 65, 86, 87, 75, 76, 77, 78, 28, 5, 6, 33, 61, 7, 8, 29, 30, 31, 32, 53, 54, 55, 56, 57, 58, 59, 60, 81, 82, 83, 84, 105, 106])),
+    "nighthawk61r2": dict(
+        n=61, rows=(1, 8), cols=(2, 9), drop=[17, 55, 62],
+        about="the release's own 61 qubits (bit-for-bit the same mirror circuits) as two patches: 6 boundary "
+              "qubits, the proven minimum of any balanced two-way split, placed for the fewest circuit CZs "
+              "through the boundary (layoutsearch --cz-weights mirror)",
+        # 77 sites, lrc 5 lrr 6, flat; widths 35/34 incl. ancilla (256 + 128 GiB fp32: too large for a
+        # 320 GB host), 34/33 with --no-ace-error-detection (128 + 64 GiB). Couplers 83 / 19 / 0; boundary
+        # CZs per mirror circuit (forward half) d4..d20: 8 12 14 16 19 25 34 (three-patch: 11 18 24 27 27 40 49).
+        ace=dict(width=77, lrc=5, lrr=6, torus=False, max_width=35, max_wide=1,
+                 site=[6, 7, 8, 9, 10, 0, 1, 11, 12, 13, 14, 5, 2, 3, 4, 15, 28, 29, 16, 17, 18, 19, 20, 30, 31, 32,
+                       27, 21, 22, 23, 24, 33, 34, 35, 25, 26, 39, 40, 36, 37, 38, 41, 42, 43, 44, 50, 51, 52, 49, 45,
+                       46, 47, 48, 53, 54, 55, 56, 60, 61, 62, 63])),
+    "nighthawk61w": dict(
+        n=61, rows=(0, 10), cols=(2, 7), drop=[17, 52, 55, 57, 62],
+        about="61 qubits, 11 x 6 window, two patches joined by a 3-qubit waist on row 5 (broken qubits 55 and "
+              "62 plus border sites 52 and 57 left out); same recipe and CZ count as the release (221 CZs at "
+              "d = 20), but a different register: its narrowest cut is 3 qubits, the 8 x 8 window's is 8",
+        # 75 sites, lrc 8 lrr 4, flat; widths 33/33 incl. ancilla (64 + 64 GiB fp32), couplers 93 / 7 / 0.
+        # Boundary CZs per mirror circuit (forward half) d4..d20, d36: 1 3 6 6 7 12 13, 27.
+        ace=dict(width=75, lrc=8, lrr=4, torus=False, max_width=34, max_wide=1,
+                 site=[9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+                       48, 49, 50, 51, 52, 69, 8, 23, 38, 0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26, 27, 28, 29, 30, 31,
+                       32, 33, 34, 35, 36, 37, 54, 55, 56, 57, 58, 59, 60])),
+    "nighthawk2p28": dict(
+        n=28, rows=(1, 4), cols=(2, 9), drop=[17, 47, 48, 49],
+        about="two-patch ladder: the release's first 28 logical qubits, 3 boundary qubits (proven minimum "
+              "under the width cap), placed for the fewest circuit CZs through the boundary",
+        # 39 sites, lrc 6 lrr 2, flat; widths 15/18 incl. ancilla; couplers 32 / 11 / 0.
+        # Boundary CZs per mirror circuit (forward half) d4..d20: 5 7 8 9 10 13 18.
+        ace=dict(width=39, lrc=6, lrr=2, torus=False, max_width=19, max_wide=1,
+                 site=[7, 8, 9, 10, 11, 0, 1, 12, 13, 14, 15, 6, 2, 3, 4, 16, 17, 18, 19, 5, 20, 21, 22, 33, 34, 32, 23, 24])),
+    "nighthawk2p32": dict(
+        n=32, rows=(1, 5), cols=(2, 9), drop=[17, 53, 54, 55, 56, 57, 58, 59],
+        about="two-patch ladder: the release's first 32 logical qubits, 3 boundary qubits (proven minimum "
+              "under the width cap), placed for the fewest circuit CZs through the boundary",
+        # 44 sites, lrc 5 lrr 3, flat; widths 18/19 incl. ancilla; couplers 39 / 11 / 0.
+        # Boundary CZs per mirror circuit (forward half) d4..d20: 5 8 10 10 12 15 20.
+        ace=dict(width=44, lrc=5, lrr=3, torus=False, max_width=21, max_wide=1,
+                 site=[6, 7, 8, 9, 10, 0, 1, 11, 12, 13, 14, 5, 2, 3, 4, 15, 28, 29, 16, 17, 18, 19, 20, 30, 31, 27, 21, 22, 23, 24, 25, 32])),
+    "nighthawk2p36": dict(
+        n=36, rows=(1, 5), cols=(2, 9), drop=[17, 55, 58, 59],
+        about="two-patch ladder: the release's first 36 logical qubits, 3 boundary qubits (proven minimum "
+              "under the width cap), placed for the fewest circuit CZs through the boundary",
+        # 50 sites, lrc 5 lrr 4, flat; widths 20/21 incl. ancilla; couplers 45 / 12 / 0.
+        # Boundary CZs per mirror circuit (forward half) d4..d20: 5 8 11 12 14 20 25.
+        ace=dict(width=50, lrc=5, lrr=4, torus=False, max_width=23, max_wide=1,
+                 site=[6, 7, 8, 9, 10, 0, 1, 11, 12, 13, 14, 5, 2, 3, 4, 26, 27, 28, 15, 16, 17, 18, 19, 29, 30, 25, 20, 21, 22, 23, 24, 31, 32, 33, 36, 37])),
+    "nighthawk2p40": dict(
+        n=40, rows=(1, 6), cols=(2, 9), drop=[17, 55, 62, 65, 66, 67, 68, 69],
+        about="two-patch ladder: the release's first 40 logical qubits, 3 boundary qubits (proven minimum "
+              "under the width cap), placed for the fewest circuit CZs through the boundary",
+        # 51 sites, lrc 8 lrr 2, flat; widths 22/23 incl. ancilla; couplers 52 / 12 / 0.
+        # Boundary CZs per mirror circuit (forward half) d4..d20: 4 4 7 10 13 19 21.
+        ace=dict(width=51, lrc=8, lrr=2, torus=False, max_width=25, max_wide=1,
+                 site=[9, 10, 11, 12, 13, 0, 1, 14, 15, 16, 17, 8, 2, 3, 4, 18, 19, 20, 25, 5, 6, 7, 26, 21, 22, 42, 27, 28, 29, 30, 31, 23, 24, 43, 32, 33, 34, 35, 44, 45])),
+    "nighthawk2p45": dict(
+        n=45, rows=(1, 6), cols=(2, 9), drop=[17, 55, 62],
+        about="two-patch ladder: the release's first 45 logical qubits, 4 boundary qubits (proven minimum "
+              "under the width cap), placed for the fewest circuit CZs through the boundary",
+        # 60 sites, lrc 5 lrr 5, flat; widths 26/25 incl. ancilla; couplers 61 / 12 / 0.
+        # Boundary CZs per mirror circuit (forward half) d4..d20: 7 8 8 10 11 15 20.
+        ace=dict(width=60, lrc=5, lrr=5, torus=False, max_width=27, max_wide=1,
+                 site=[6, 7, 8, 9, 10, 0, 1, 11, 12, 13, 14, 5, 2, 3, 4, 26, 27, 28, 15, 16, 17, 18, 19, 29, 30, 31, 25, 20, 21, 22, 23, 32, 33, 34, 24, 36, 37, 38, 46, 47, 35, 39, 40, 41, 42])),
+    "nighthawk2p49": dict(
+        n=49, rows=(1, 7), cols=(2, 9), drop=[17, 55, 62, 76, 77, 78, 79],
+        about="two-patch ladder: the release's first 49 logical qubits, 4 boundary qubits (proven minimum "
+              "under the width cap), placed for the fewest circuit CZs through the boundary",
+        # 63 sites, lrc 4 lrr 6, flat; widths 27/28 incl. ancilla; couplers 64 / 15 / 0.
+        # Boundary CZs per mirror circuit (forward half) d4..d20: 6 9 12 13 17 21 29.
+        ace=dict(width=63, lrc=4, lrr=6, torus=False, max_width=29, max_wide=1,
+                 site=[5, 6, 7, 8, 9, 0, 1, 10, 11, 12, 23, 4, 2, 3, 14, 24, 25, 26, 13, 15, 16, 17, 18, 27, 28, 22, 19, 20, 21, 32, 33, 29, 30, 41, 34, 35, 36, 37, 42, 43, 31, 38, 39, 50, 51, 44, 45, 46, 47])),
+    "nighthawk2p53": dict(
+        n=53, rows=(1, 7), cols=(2, 9), drop=[17, 55, 62],
+        about="two-patch ladder: the release's first 53 logical qubits, 5 boundary qubits (proven minimum "
+              "under the width cap), placed for the fewest circuit CZs through the boundary",
+        # 65 sites, lrc 6 lrr 4, flat; widths 30/30 incl. ancilla; couplers 72 / 15 / 0.
+        # Boundary CZs per mirror circuit (forward half) d4..d20: 8 10 12 15 19 24 34.
+        ace=dict(width=65, lrc=6, lrr=4, torus=False, max_width=31, max_wide=1,
+                 site=[7, 8, 9, 10, 11, 0, 1, 12, 13, 14, 15, 6, 2, 3, 4, 16, 17, 18, 33, 19, 5, 20, 21, 34, 35, 36, 32, 22, 23, 24, 25, 37, 38, 39, 26, 27, 28, 29, 40, 41, 45, 30, 31, 46, 47, 42, 43, 44, 58, 48, 49, 50, 51])),
+    "nighthawk2p57": dict(
+        n=57, rows=(1, 8), cols=(2, 9), drop=[17, 55, 62, 86, 87, 88, 89],
+        about="two-patch ladder: the release's first 57 logical qubits, 5 boundary qubits (proven minimum "
+              "under the width cap), placed for the fewest circuit CZs through the boundary",
+        # 72 sites, lrc 4 lrr 7, flat; widths 32/32 incl. ancilla; couplers 76 / 18 / 0.
+        # Boundary CZs per mirror circuit (forward half) d4..d20: 7 10 12 17 20 25 34.
+        ace=dict(width=72, lrc=4, lrr=7, torus=False, max_width=33, max_wide=1,
+                 site=[5, 6, 7, 8, 9, 0, 1, 10, 11, 12, 23, 4, 2, 3, 14, 24, 25, 26, 13, 15, 16, 17, 18, 27, 28, 22, 19, 20, 21, 32, 33, 29, 30, 41, 34, 35, 36, 37, 42, 43, 31, 38, 39, 50, 51, 44, 45, 46, 40, 52, 53, 54, 55, 47, 48, 59, 60])),
 }
 
 BUILTIN_REGISTERS = frozenset(REGISTERS)
@@ -440,14 +527,17 @@ def apply_register_preset(a, lay):
 
 
 def preset_placement(lay, n, a, row, size):
-    """The stored placement of the register's ACE preset, when this run uses exactly that preset."""
+    """The stored placement of the register's ACE preset, when this run uses exactly that preset.
+    Switching seam error detection off keeps it: the sites and patches are unchanged, each patch
+    only loses its ancilla (one qubit narrower, half the memory)."""
     if is_release(lay):
         return None
     ace = REGISTERS[layout_id(lay)].get("ace")
     if not ace or n != lay.n or size != ace["width"] or (row["lrc"], row["lrr"]) != (ace["lrc"], ace["lrr"]):
         return None
+    opts = {k: v for k, v in ace_opts(a).items() if k != "is_error_detection"}
     if bool(getattr(a, "ace_torus", False)) != ace["torus"] or parse_exclude(getattr(a, "ace_exclude", None)) \
-            or ace_opts(a) or transpile_caps(a) != (ace["max_width"], ace["max_wide"]) \
+            or opts or transpile_caps(a) != (ace["max_width"], ace["max_wide"]) \
             or (getattr(a, "transpile_engine", "exact") or "exact") != "exact":
         return None
     return list(ace["site"])
@@ -1901,6 +1991,125 @@ def cmd_hwxeb(a):
         print("wrote", a.out)
 
 
+# ================================================================== danmodel: Dan Strano's ACE XEB calculator
+# The "XEB prediction calculator" sheet of Dan Strano's ACE spreadsheet (QrackAceBackend, PyQrack
+# 2.28.2, error detection on, torus, SDRP off, native SWAP; nn_qab circuits of 10-27 qubits, 2-3
+# patches, fitted at depth 12 and over depths 14-22): x = (bulk / (boundary * patches))^(2/3),
+# XEB_12 = tanh(slope * x + intercept), XEB(d) = XEB_12 ^ ((d / 12)^p).
+DAN_MODEL = dict(power=2 / 3, slope=0.1653638846, intercept=-0.0378757892, depth_power=1.60569, d0=12)
+LADDER = ("nighthawk2p28", "nighthawk2p32", "nighthawk2p36", "nighthawk2p40", "nighthawk2p45", "nighthawk2p49",
+          "nighthawk2p53", "nighthawk2p57", "nighthawk61r2")
+
+
+def dan_xeb(bulk, boundary, patches, depth, m=DAN_MODEL):
+    """Dan's calculator. No boundary (one exact patch): 1. A non-positive depth-12 XEB: 0."""
+    if boundary <= 0 or patches <= 1:
+        return 1.0
+    x = (bulk / (boundary * patches)) ** m["power"]
+    x12 = math.tanh(m["slope"] * x + m["intercept"])
+    return 0.0 if x12 <= 0 else x12 ** ((depth / m["d0"]) ** m["depth_power"])
+
+
+def device_mirror(repo=None):
+    """ibm_phoenix mirror survival per depth from the release's counts (inverse-variance mean over
+    instances, as hwxeb), or {} without the release."""
+    try:
+        ms = json.loads((find_repo(repo) / "data/counts/mirror_survival.json").read_text())["depths"]
+    except (OSError, ValueError, SystemExit):
+        return {}
+    out = {}
+    for d, e in ms.items():
+        h, s = np.asarray(e["hits"], float).sum(-1), np.asarray(e["shots"], float).sum(-1)
+        p = h / s
+        out[int(d)] = inverse_variance_mean(p, np.sqrt(np.maximum(p * (1 - p), 1e-12) / s))[0]
+    return out
+
+
+def register_dan_inputs(name, repo=None, error_detection=True):
+    """(n, bulk, boundary, patches, widths) of a register's stored ACE placement."""
+    spec = REGISTERS[name]
+    ace = spec["ace"]
+    row = layout_row(ace["width"], ace["lrc"], ace["lrr"], ace["torus"], {})
+    sids = [frozenset(s for s, _ in u) for u in row["unpack"]]
+    site = ace["site"]
+    B = sum(1 for x in site if len(sids[x]) > 1)
+    patches = {next(iter(sids[x])) for x in site if len(sids[x]) == 1}
+    widths = [sum(1 for x in site if p in sids[x]) + (1 if error_detection else 0) for p in sorted(patches)]
+    return spec["n"], spec["n"] - B, B, len(patches), widths
+
+
+def cmd_danmodel(a):
+    depths = a.depths or [4, 6, 8, 10, 12, 16, 20, 36]
+    dev = device_mirror(a.repo) if a.device else {}
+    rows = []
+    if a.inputs:
+        groups, seen = {}, {}
+        for path in a.inputs:
+            for f in record_files(path):
+                try:
+                    lines = f.read_text().splitlines()
+                except OSError:
+                    continue
+                for line in lines:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if r.get("family") not in ("mirror", "fxeb") or "fidelity" not in r or "ace_seam_used" not in r:
+                        continue
+                    seen[(path, r["cfg"], r["n"], r["family"], r["depth"], r["instance"])] = r
+        for (path, cfg, n, fam, d, i), r in seen.items():
+            k = (path, cfg, r.get("theta", "haar"), fam, n, r["ace_seam_used"], r.get("ace_sims_used", 2), d)
+            groups.setdefault(k, []).append(r)
+        for (path, cfg, theta, fam, n, B, P, d), rs in sorted(groups.items(), key=lambda kv: (kv[0][4], kv[0][0], kv[0][7])):
+            v = np.array([r["fidelity"] for r in rs], float)
+            se = float(v.std(ddof=1) / math.sqrt(len(v))) if len(v) > 1 else float(rs[0].get("se", float("nan")))
+            rows.append(dict(source=Path(path).name, cfg=cfg, theta=theta, family=fam, n=n, bulk=n - B, boundary=B,
+                             patches=P, depth=d, instances=len(v), measured=float(v.mean()), se=se,
+                             dan=dan_xeb(n - B, B, P, d), device=dev.get(d) if n == 61 and fam == "mirror" else None))
+    else:
+        for name in a.registers or LADDER:
+            if name not in REGISTERS or "ace" not in REGISTERS[name]:
+                raise SystemExit(f"danmodel: {name} is not a register with a stored ACE placement")
+            n, bulk, B, P, w = register_dan_inputs(name, a.repo)
+            for d in depths:
+                rows.append(dict(source=name, n=n, bulk=bulk, boundary=B, patches=P, widths=w, depth=d,
+                                 dan=dan_xeb(bulk, B, P, d), device=dev.get(d) if n == 61 else None))
+    if not rows:
+        raise SystemExit("danmodel: no mirror/fxeb ACE records in the given files")
+    x_of = lambda r: (r["bulk"] / (r["boundary"] * r["patches"])) ** DAN_MODEL["power"] if r["boundary"] else float("inf")
+    print("# Dan's calculator: x = (bulk/(boundary*patches))^(2/3); XEB_12 = tanh(%.6f x %+.6f); "
+          "XEB(d) = XEB_12^((d/12)^%.5f)" % (DAN_MODEL["slope"], DAN_MODEL["intercept"], DAN_MODEL["depth_power"]))
+    hdr = f"{'source':<26} {'n':>3} {'bulk':>4} {'bnd':>3} {'P':>2} {'x':>6} {'d':>3}  {'Dan XEB':>10}"
+    if a.inputs:
+        hdr += f"  {'theta':>5} {'fam':>6} {'inst':>4}  {'measured':>18}  {'meas/Dan':>8}"
+    if dev:
+        hdr += f"  {'ibm_phoenix':>11}"
+    print(hdr)
+    last = None
+    for r in rows:
+        if last is not None and (r["source"], r["n"]) != last:
+            print()
+        last = (r["source"], r["n"])
+        s = (f"{r['source'][:26]:<26} {r['n']:>3} {r['bulk']:>4} {r['boundary']:>3} {r['patches']:>2} "
+             f"{x_of(r):>6.3f} {r['depth']:>3}  {r['dan']:>10.4g}")
+        if a.inputs:
+            ratio = r["measured"] / r["dan"] if r["dan"] > 0 else float("nan")
+            s += (f"  {r['theta']:>5} {r['family']:>6} {r['instances']:>4}  "
+                  f"{r['measured']:>9.4g} +/- {r['se']:<6.2g}  {ratio:>8.3g}")
+        if dev:
+            s += f"  {r['device']:>11.4g}" if r.get("device") is not None else f"  {'':>11}"
+        print(s)
+    if a.csv:
+        import csv
+        keys = sorted({k for r in rows for k in r})
+        with open(a.csv, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=keys)
+            w.writeheader()
+            w.writerows(rows)
+        print("wrote", a.csv)
+
+
 # ================================================================== run: clean-qubit emulation
 def ace_geometry(lay, lrc, lrr, torus):
     """Boundary qubits, bulk components and bulk-to-boundary ratio of the ACE register
@@ -3023,6 +3232,7 @@ def ace_preflight(lay, a, sizes):
                   f"{len(ex)} sites excluded: exact/replica/cross {f(t)}, simulator widths {row['widths']}",
                   flush=True)
             gpu_die_check(lay, n, a, row, size)
+            host_plan(lay, n, a, row, size)
         return
     if getattr(a, "ace_tiling", False) and not a.ace_max_width:
         for n in sizes:
@@ -3072,6 +3282,76 @@ def mem_available_gb():
     except OSError:
         pass
     return None
+
+
+def swap_free_gb():
+    try:
+        for line in open("/proc/meminfo"):
+            if line.startswith("SwapFree:"):
+                return int(line.split()[1]) / 1048576
+    except OSError:
+        pass
+    return None
+
+
+def host_available_gb(swap_gb=None):
+    """MemAvailable, plus up to swap_gb of free swap when --swap-gb is given."""
+    avail = mem_available_gb()
+    if avail is None or not swap_gb:
+        return avail
+    return avail + min(float(swap_gb), swap_free_gb() or 0.0)
+
+
+# Qrack refuses (or tries to elide) a QEngineCPU / QPager wider than QRACK_MAX_CPU_QB /
+# QRACK_MAX_PAGING_QB; the build-time defaults are not documented, and no run here has gone past
+# 28 qubits per patch. Wider CPU patches get both raised (setdefault: an explicit value wins).
+QRACK_CPU_CAP_FROM = 28
+
+
+def lift_qrack_cpu_caps(widest):
+    cap = str(max(int(widest) + 2, 40))
+    set_ = {}
+    for var in ("QRACK_MAX_CPU_QB", "QRACK_MAX_PAGING_QB"):
+        if var not in os.environ:
+            os.environ[var] = cap
+            set_[var] = cap
+    return set_
+
+
+def host_plan(lay, n, a, row, size):
+    """CPU runs: dense states of the active patches, Qrack's compose transient (the widest
+    patch is rebuilt one qubit wider while its old state is still held: + half its new size),
+    against RAM and the swap --swap-gb allows. Prints only; it never stops the run."""
+    if getattr(a, "ace_gpu", False):
+        return
+    w = active_widths(lay, n, a, row, size)
+    if not w:
+        return
+    if max(w) > QRACK_CPU_CAP_FROM:
+        lifted = lift_qrack_cpu_caps(max(w))
+        if lifted:
+            print("# qrack: " + ", ".join(f"{k}={v}" for k, v in lifted.items())
+                  + f" (patches up to {max(w)} qubits on the CPU engine)", flush=True)
+    states = dense_gb(w)
+    compose = 0.5 * dense_gb([max(w)])
+    worst = 1.0 + states + compose
+    ram = mem_total_gb() or 0.0
+    swap_cap = float(getattr(a, "swap_gb", 0) or 0.0)
+    swap_now = swap_free_gb() or 0.0
+    use = min(swap_cap, swap_now)
+    print(f"# host: patches {w}: dense {states:,.0f} GiB + compose transient {compose:,.0f} GiB = worst case "
+          f"{worst:,.0f} GiB per worker; RAM {ram:,.0f} GiB" + (f" + swap {use:,.0f} GiB (--swap-gb {swap_cap:g}, "
+          f"{swap_now:,.0f} GiB free)" if swap_cap else ""), flush=True)
+    if worst > 0.9 * ram:
+        if not swap_cap:
+            print(f"# WARNING: the worst case exceeds RAM; give --swap-gb GB to plan with swap, or deep points will "
+                  f"reach the OOM killer", flush=True)
+        elif worst > 0.95 * (ram + use):
+            print(f"# WARNING: the worst case exceeds RAM + the swap allowed ({ram + use:,.0f} GiB): deep points may "
+                  f"still be killed", flush=True)
+        else:
+            print(f"# note: about {max(0.0, states - 0.9 * ram):,.0f} GiB of the dense states will live in swap at "
+                  f"full width; every gate pass over the widest patch then streams through it", flush=True)
 
 
 def rss_gb_of(pid):
@@ -3163,8 +3443,9 @@ class MemLedger:
     processes outside the ledger (an older run, the OS) are respected through (b).
     Dead workers' reservations are dropped automatically."""
 
-    def __init__(self, budget_gb, path=None):
+    def __init__(self, budget_gb, path=None, swap_gb=None):
         self.budget = float(budget_gb)
+        self.swap_gb = swap_gb                      # --swap-gb: free swap counts as available, up to this
         self.dir = Path(path or os.environ.get("NIGHTHAWK_MEM_LEDGER") or "/tmp/nighthawk_mem_ledger")
         self.dir.mkdir(parents=True, exist_ok=True)
         self.mine = self.dir / str(os.getpid())
@@ -3193,7 +3474,7 @@ class MemLedger:
                 ent = self._entries()
                 ent.pop(os.getpid(), None)
                 pending = sum(max(0.0, g - rss_gb_of(pid)) for pid, g in ent.items())
-                avail = mem_available_gb()
+                avail = host_available_gb(self.swap_gb)
                 if sum(ent.values()) + gb > self.budget:
                     return False
                 if avail is not None and gb + pending > 0.95 * avail:
@@ -3211,7 +3492,7 @@ def make_ledger(a):
     if not getattr(a, "mem_budget_gb", 0):
         return None
     import atexit
-    led = MemLedger(a.mem_budget_gb, getattr(a, "mem_ledger", None))
+    led = MemLedger(a.mem_budget_gb, getattr(a, "mem_ledger", None), getattr(a, "swap_gb", None))
     atexit.register(led.release)
     return led
 
@@ -3310,7 +3591,8 @@ def next_point(a, remaining, cur, est, ledger):
         if waiting and remaining:
             if not ledger.noted:
                 print(f"# waiting for memory (budget {ledger.budget:g} GiB, available "
-                      f"{mem_available_gb() or 0:.0f} GiB)", flush=True)
+                      f"{host_available_gb(ledger.swap_gb) or 0:.0f} GiB"
+                      + (" incl. swap" if ledger.swap_gb else "") + ")", flush=True)
                 ledger.noted = True
             time.sleep(15)
     return None
@@ -3716,7 +3998,36 @@ def cmd_aceplan(a):
 # lattice to use (n of them), and which ACE group (a patch's bulk, or a seam) each one goes to,
 # in one CP-SAT model. Candidates are verified, registered and scored by short mirror runs.
 
-LS_OBJECTIVES = ("seam", "bcz", "couplers", "balance")
+LS_OBJECTIVES = ("seam", "bcz", "cz", "couplers", "balance")
+
+
+def release_prefix_spec(L, N, C):
+    """REGISTERS entry for the release's first N logical qubits: the bounding window of those
+    sites, with every other window site (the broken qubits among them) dropped. At N = 61 it is
+    the release itself; below, RegisterLayout builds that register's own circuits by the
+    release's recipe (its own K = 3, 4 partitions)."""
+    l2p = L["logical_to_physical"]
+    if not 0 < N <= len(l2p):
+        raise SystemExit(f"release:N needs 1 <= N <= {len(l2p)}")
+    cells = {(p // C, p % C) for p in l2p[:N]}
+    r0, r1 = min(r for r, _ in cells), max(r for r, _ in cells)
+    c0, c1 = min(c for _, c in cells), max(c for _, c in cells)
+    drop = [r * C + c for r in range(r0, r1 + 1) for c in range(c0, c1 + 1) if (r, c) not in cells]
+    return dict(n=N, rows=[r0, r1], cols=[c0, c1], drop=drop,
+                about=f"the release's first {N} logical qubits")
+
+
+def mirror_cz_weights(lay, depths, C):
+    """{frozenset({cell_u, cell_v}): CZs the register's mirror circuits apply on that coupler},
+    summed over the forward halves of `depths` (the inverse half repeats them). The CZ pattern
+    (colour schedule plus the rotating pseudo-patch cuts) does not depend on the instance."""
+    w = defaultdict(int)
+    cell = [(p // C, p % C) for p in lay.l2p]
+    for d in depths:
+        for _, es in mirror_cycles(lay, d, 0):
+            for u, v in es:
+                w[frozenset((cell[u], cell[v]))] += 1
+    return dict(w)
 
 
 def ace_groups(row, edges):
@@ -3746,7 +4057,7 @@ def lattice_info(repo=None):
 def search_layout(row, edges, n, *, R=12, C=10, broken=frozenset(), broken_policy="disable",
                   region="convex", window=None, fixed=None, max_width=None, max_wide=None,
                   objective=("seam", "bcz", "couplers"), nogoods=(), diversity=4, hint=None,
-                  time_s=120.0, workers=None, seed=0, trim=0, min_boundary=0):
+                  time_s=120.0, workers=None, seed=0, trim=0, min_boundary=0, cz_weight=None):
     """One CP-SAT solve of the joint model. region: rect (a rectangle of the lattice, chosen by
     the solver; holes only at broken sites, plus up to `trim` sites taken off its border),
     convex (every row and column of the region is one unbroken run; holes only at broken
@@ -3848,6 +4159,9 @@ def search_layout(row, edges, n, *, R=12, C=10, broken=frozenset(), broken_polic
         m.Add(t_ >= seam[v] + b_ - 1)
         m.Add(t_ <= seam[u] + seam[v])
         bcz.append(t_)
+    czw = [int((cz_weight or {}).get(frozenset((cells[u], cells[v])), 0)) for u, v in E]
+    if "cz" in objective and not cz_weight:
+        raise SystemExit("objective cz needs circuit weights (--cz-weights)")
     widths = [sum(x[v, g] for v in range(V) for g in range(NG) if p in G[g]) for p in patch]
     if max_width:
         cap = int(max_width) - 1
@@ -3881,10 +4195,13 @@ def search_layout(row, edges, n, *, R=12, C=10, broken=frozenset(), broken_polic
     wmax, wmin = m.NewIntVar(0, n, ""), m.NewIntVar(0, n, "")
     m.AddMaxEquality(wmax, widths)
     m.AddMinEquality(wmin, widths)
-    terms = dict(seam=B, bcz=sum(bcz), couplers=-sum(used_e), balance=wmax - wmin)
-    obj = 0
-    for k, name in enumerate(objective):
-        obj += (512 ** (len(objective) - 1 - k)) * terms[name]
+    terms = dict(seam=B, bcz=sum(bcz), cz=sum(w_ * t_ for w_, t_ in zip(czw, bcz)), couplers=-sum(used_e),
+                 balance=wmax - wmin)
+    span = {"cz": max(512, 2 * sum(czw) + 1)}               # each term must stay below one step of the previous
+    obj, scale = 0, 1
+    for name in reversed(objective):
+        obj += scale * terms[name]
+        scale *= span.get(name, 512)
     m.Minimize(obj)
     if hint:
         key_of = {G[g]: g for g in range(NG)}
@@ -3907,6 +4224,7 @@ def search_layout(row, edges, n, *, R=12, C=10, broken=frozenset(), broken_polic
     return dict(status=sol.StatusName(st_), objective=sol.ObjectiveValue(), bound=sol.BestObjectiveBound(),
                 cells=gof, seam=sum(1 for g in gof.values() if len(g) > 1),
                 bcz=int(sum(sol.Value(t_) for t_ in bcz)), couplers=int(sum(sol.Value(b_) for b_ in used_e)),
+                cz=int(sum(w_ * sol.Value(t_) for w_, t_ in zip(czw, bcz))),
                 widths=[sum(1 for g in gof.values() if p in g) + 1 for p in patch],
                 seconds=round(sol.WallTime(), 1))
 
@@ -4063,6 +4381,12 @@ def cmd_layoutsearch(a):
         window = tuple(map(int, rr.split("-"))) + tuple(map(int, cc.split("-")))
     fixed = None
     if a.region == "fixed":
+        if a.fixed_register and a.fixed_register.startswith("release:"):
+            # the release's first N logical qubits (row-major in its window), as a register of its own
+            N = int(a.fixed_register.split(":", 1)[1])
+            name = f"_release_first_{N}"
+            REGISTERS[name] = release_prefix_spec(L, N, C)
+            a.fixed_register = name
         if a.fixed_register:
             if a.fixed_register != "release" and a.fixed_register not in REGISTERS:
                 raise SystemExit(f"--fixed-register: unknown register {a.fixed_register}")
@@ -4082,6 +4406,21 @@ def cmd_layoutsearch(a):
             raise SystemExit("--region fixed needs --window or --fixed-register")
         if len(fixed) != a.n:
             raise SystemExit(f"--region fixed: the region has {len(fixed)} sites, not --n {a.n}")
+    cz_weight = None
+    if a.cz_weights:
+        if a.region != "fixed" or not a.fixed_register:
+            raise SystemExit("--cz-weights needs --region fixed --fixed-register (the circuits must be known)")
+        kind, _, ds = a.cz_weights.partition(":")
+        if kind != "mirror":
+            raise SystemExit("--cz-weights: mirror[:D1,D2,...]")
+        lay_w = Layout(a.repo) if a.fixed_register == "release" else RegisterLayout(a.repo, a.fixed_register)
+        wd = [int(x) for x in ds.split(",")] if ds else [4, 6, 8, 10, 12, 16, 20]
+        cz_weight = mirror_cz_weights(lay_w, wd, C)
+        if "cz" not in objective:
+            objective = tuple(o if o != "bcz" else "cz" for o in objective)
+            if "cz" not in objective:
+                objective = objective[:1] + ("cz",) + objective[1:]
+        print(f"# circuit weights: mirror depths {wd}, {sum(cz_weight.values())} CZs (forward halves)", flush=True)
     hint = None
     if a.hint:
         hs = REGISTERS[a.hint]
@@ -4112,7 +4451,7 @@ def cmd_layoutsearch(a):
                                 region=a.region, window=window, fixed=fixed, max_width=a.max_width,
                                 max_wide=a.max_wide, objective=objective, nogoods=prev, diversity=a.diversity,
                                 hint=hint if c == 0 else None, time_s=a.cpsat_time, workers=a.workers, seed=c,
-                                trim=a.trim, min_boundary=a.min_boundary)
+                                trim=a.trim, min_boundary=a.min_boundary, cz_weight=cz_weight)
             geo = f"{size} sites lrc {lrc} lrr {lrr}{' torus' if torus else ''}"
             if res is None or "cells" not in res:
                 print(f"  {geo}: {'infeasible' if res else 'no solution in time'}"
@@ -4135,11 +4474,12 @@ def cmd_layoutsearch(a):
                     ver["ok"] = False
                     ver["problems"].append(f"die: {describe_split(sp, vg, a.gtt or 0.0)}")
             rec = dict(name=name, geometry=dict(size=size, lrc=lrc, lrr=lrr, torus=torus), cpsat=dict(
-                status=res["status"], seconds=res["seconds"], seam=res["seam"], bcz=res["bcz"],
+                status=res["status"], seconds=res["seconds"], seam=res["seam"], bcz=res["bcz"], cz=res["cz"],
                 couplers=res["couplers"], widths=res["widths"]), verify=ver, spec=spec)
             cands.append(rec)
             print(f"  {name}: {res['status'].lower()} in {res['seconds']} s -- {res['seam']} boundary qubits, "
-                  f"{res['bcz']} of {res['couplers']} couplers through a boundary, widths {res['widths']}"
+                  f"{res['bcz']} of {res['couplers']} couplers through a boundary"
+                  + (f" ({res['cz']} circuit CZs)" if cz_weight else "") + f", widths {res['widths']}"
                   + (f", VRAM {ver['die']['vram']:.1f} + GTT {ver['die']['gtt']:.1f} GiB" if "die" in ver else "") + "; "
                   f"verify {'OK' if ver['ok'] else 'FAILED: ' + '; '.join(ver['problems'])} "
                   f"({ver['exact']}/{ver['replica']}/{ver['cross']})", flush=True)
@@ -4183,16 +4523,19 @@ def cmd_layoutsearch(a):
 
     def key(c):
         sc = c.get("test", {}).get("score")
-        return (sc is None, -(sc or 0), c["cpsat"]["seam"], c["cpsat"]["bcz"], -c["cpsat"]["couplers"])
+        return (sc is None, -(sc or 0), c["cpsat"]["seam"], c["cpsat"]["cz"] if cz_weight else 0,
+                c["cpsat"]["bcz"], -c["cpsat"]["couplers"])
     ranked = sorted(good, key=key)
     if not ranked:
         raise SystemExit("no verified candidate")
     print(f"\n== ranking ({'measured score' if a.test_depths else 'CP-SAT objective'}) ==")
-    print("name                             boundary  bnd CZ/couplers  widths            score")
+    print("name                             boundary  bnd CZ/couplers  widths            "
+          + ("circuit CZs  " if cz_weight else "") + "score")
     for c in ranked:
         sc = c.get("test", {}).get("score")
         print(f"{c['name']:<32} {c['cpsat']['seam']:>8}  {c['cpsat']['bcz']:>6}/{c['cpsat']['couplers']:<8}  "
-              f"{str(c['cpsat']['widths']):<16}  {'' if sc is None else f'{sc:.4g}'}")
+              f"{str(c['cpsat']['widths']):<16}  " + (f"{c['cpsat']['cz']:>11}  " if cz_weight else "")
+              + f"{'' if sc is None else f'{sc:.4g}'}")
     best = ranked[0]
     print(f"\nbest: {best['name']}  (registers in {regfile}, log in {log})")
     if a.save_best:
@@ -4508,6 +4851,10 @@ def main():
                         "numbers, so not part of the config tag")
     r.add_argument("--vram-gb", dest="vram_gb", type=float, default=8.0,
                    help="device memory per worker's die for the --gtt plan (default 8: one V340 die)")
+    r.add_argument("--swap-gb", dest="swap_gb", type=float, default=None, metavar="GB",
+                   help="CPU runs larger than RAM: count up to GB of free swap as available memory (the "
+                        "--mem-budget-gb ledger and the preflight plan), and lift Qrack's CPU qubit ceilings. "
+                        "Slower once states page; same numbers, so not part of the config tag")
     r.add_argument("--ace-host-pointer", dest="ace_host_pointer", action="store_true",
                    help="ace with --ace-gpu: keep simulator states in host RAM, read by the GPU over PCIe "
                         "(GTT) instead of VRAM; same numbers, so not part of the config tag")
@@ -4599,13 +4946,19 @@ def main():
                     help="at least this many boundary qubits (a floor against trivially decoupled patches)")
     ls.add_argument("--window", default=None, help="restrict the region to rows-cols, e.g. 0-9,1-9")
     ls.add_argument("--fixed-register", dest="fixed_register", default=None,
-                    help="with --region fixed: use this register's sites (release, nighthawk88, ...)")
+                    help="with --region fixed: use this register's sites (release, release:N = the release's first N "
+                         "logical qubits, nighthawk88, ...)")
     ls.add_argument("--broken", choices=["disable", "use"], default="disable",
                     help="the device's broken qubits (17, 55, 62): disabled, as on ibm_phoenix (default), or used")
     ls.add_argument("--objective", default="seam,bcz,couplers",
                     help="lexicographic, from " + ",".join(LS_OBJECTIVES) + ": seam = boundary qubits, bcz = "
                          "couplers through a boundary, couplers = couplers kept (maximised), balance = widest minus "
-                         "narrowest patch (default seam,bcz,couplers)")
+                         "narrowest patch, cz = CZs through a boundary in the circuits (needs --cz-weights) "
+                         "(default seam,bcz,couplers)")
+    ls.add_argument("--cz-weights", dest="cz_weights", default=None, metavar="mirror[:D,...]",
+                    help="with --region fixed: weight each coupler by the CZs the register's mirror circuits apply on "
+                         "it (forward halves, summed over depths D; default 4,6,8,10,12,16,20) and rank by those "
+                         "(objective term cz, replacing bcz)")
     ls.add_argument("--candidates", type=int, default=2,
                     help="distinct layouts per geometry (each later one differs from every earlier one in at "
                          "least --diversity boundary sites; default 2)")
@@ -4626,6 +4979,20 @@ def main():
     ls.add_argument("--prefix", default=None, help="candidate name prefix (default ls<n>)")
     ls.add_argument("--save-best", dest="save_best", default=None,
                     help="save the best candidate as this --register name in nighthawk_registers.json")
+
+    dm = sub.add_parser("danmodel", help="Dan Strano's ACE XEB calculator: predictions per register and depth, "
+                                         "or against measured mirror/fxeb records")
+    dm.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
+    dm.add_argument("--in", dest="inputs", nargs="+", default=None, metavar="JSONL",
+                    help="run outputs: each measured point is compared with the calculator at its own bulk, "
+                         "boundary and patch counts (worker files included)")
+    dm.add_argument("--registers", nargs="+", default=None,
+                    help="without --in: registers to predict (default: the two-patch ladder nighthawk2p28 ... "
+                         "nighthawk2p57, nighthawk61r2)")
+    dm.add_argument("--depths", type=int, nargs="+", default=None, help="without --in (default 4 6 8 10 12 16 20 36)")
+    dm.add_argument("--device", action=argparse.BooleanOptionalAction, default=True,
+                    help="add ibm_phoenix's mirror survival at n = 61 (default on)")
+    dm.add_argument("--csv", default=None, help="also write the rows as CSV")
 
     t = sub.add_parser("selftest", help="conventions and exactness checks")
     t.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
@@ -4651,7 +5018,7 @@ help per command: python3 nighthawk_qrack.py <command> -h""")
         gtt_env(os.environ, float(getattr(a, "vram_gb", 8.0) or 8.0), float(a.gtt))   # inherited by re-exec and workers
     ensure_isolated(a)
     dict(seamgap=cmd_seamgap, verify=cmd_verify, hwxeb=cmd_hwxeb, run=cmd_run, selftest=cmd_selftest,
-         aceplan=cmd_aceplan, layoutsearch=cmd_layoutsearch)[a.cmd](a)
+         aceplan=cmd_aceplan, layoutsearch=cmd_layoutsearch, danmodel=cmd_danmodel)[a.cmd](a)
 
 
 if __name__ == "__main__":
