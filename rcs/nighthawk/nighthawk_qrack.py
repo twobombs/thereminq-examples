@@ -3811,9 +3811,10 @@ def cmd_run(a):
         fams_ = a.families.split(",")
         if a.families == "mirror,patched":           # the default: patched circuits need exact patch references
             a.families = "mirror"
-        elif any(f != "mirror" for f in fams_):
-            raise SystemExit(f"--register {layout_id(lay)}: only --families mirror (no device data, no exact "
-                             f"reference at {lay.n} qubits)")
+        elif any(f not in ("mirror", "fxeb") for f in fams_) or ("fxeb" in fams_ and lay.n > 36):
+            raise SystemExit(f"--register {layout_id(lay)}: only --families mirror"
+                             + (", fxeb" if lay.n <= 36 else f" (no exact reference at {lay.n} qubits)")
+                             + " (registers have no device data)")
         if apply_register_preset(a, lay) and not a.worker and not (a.summarize or a.pack or getattr(a, "status", False)):
             ace = REGISTERS[layout_id(lay)]["ace"]
             print(f"# register {layout_id(lay)}: {REGISTERS[layout_id(lay)]['about']}", flush=True)
