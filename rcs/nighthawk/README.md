@@ -4,208 +4,71 @@
 
 | | |
 |---|---|
-| Script | [`rcs/nighthawk/nighthawk_qrack.py`](https://github.com/twobombs/thereminq-examples/tree/main/rcs/nighthawk) (ThereminQ examples) |
-| Analysis | `rcs/nighthawk/nighthawk_graph.py` — harvest, comparison views, CSV export |
-| Companion data | [`BlueQubitDev/rcs-nighthawk`](https://github.com/BlueQubitDev/rcs-nighthawk) |
-| Paper under study | Sedrakyan et al., [arXiv:2609.28657](https://arxiv.org/abs/2609.28657) (preprint, v1) [[1]](#ref-1) |
-| Simulator | [Qrack / PyQrack](https://github.com/unitaryfund/pyqrack) — `QrackSimulator`, `QrackAceBackend` [[10]](#ref-10) |
+| Script | [`rcs/nighthawk/nighthawk_qrack.py`](https://github.com/twobombs/thereminq-examples/tree/main/rcs/nighthawk) (ThereminQ examples), 5026 lines, 16 October 2026 |
+| Companions | `nighthawk_graph.py` (harvest, views, CSV) · `nighthawk_cloverfield.py` (several chips, one virtual chip) · [`rcs/nn_qab/`](https://github.com/twobombs/thereminq-examples/tree/main/rcs/nn_qab) |
+| Methodology | [`METHODOLOGY.md`](METHODOLOGY.md): every procedure behind the code and the experiments |
+| Data | [`BlueQubitDev/rcs-nighthawk`](https://github.com/BlueQubitDev/rcs-nighthawk), the authors' release |
+| Paper | Sedrakyan et al., [arXiv:2609.28657](https://arxiv.org/abs/2609.28657) (preprint, v1) [[1]](#ref-1) |
+| Simulator | [Qrack / PyQrack](https://github.com/unitaryfund/pyqrack): `QrackSimulator` (exact), `QrackAceBackend` (ACE, approximate) [[10]](#ref-10) |
 | Acceleration | OpenCL or CPU. **No CUDA.** |
-| Companion | [`rcs/nn_qab/`](https://github.com/twobombs/thereminq-examples/tree/main/rcs/nn_qab) — ACE bulk-to-boundary sweeps on `nn_qab`'s torus circuits, same estimator |
 
 ---
 
-## Abstract
+## Overview
 
-### What this is
+BlueQubit ran 61-qubit random circuits on IBM's `ibm_phoenix` and estimated their fidelity from two proxies, patched XEB and mirror survival. This script runs the released circuits on ideal qubits in PyQrack, either exactly or with ACE, Qrack's seam-partitioned approximate simulator. There is no noise model: every loss of fidelity comes from the simulation method, which is the object of study.
 
-`nighthawk_qrack.py` is a simulator-side companion to BlueQubit's 61-qubit random-circuit sampling (RCS) experiment on IBM's Nighthawk processor `ibm_phoenix` ([arXiv:2609.28657](https://arxiv.org/abs/2609.28657), Ref. [[1]](#ref-1)). It works directly on the authors' [public release](https://github.com/BlueQubitDev/rcs-nighthawk) and runs every circuit on [PyQrack](https://github.com/unitaryfund/pyqrack), either exactly or with Qrack's approximate, seam-partitioned simulator `QrackAceBackend` (ACE, [Sec. 2.6](#26-ace-seams-simulators-and-placement)). There is no noise model: every loss of fidelity in these runs comes from the simulation method itself, which is the thing under study.
+| Tool | Does |
+|---|---|
+| `verify` | regenerates every released circuit bit for bit and compares it with the released QASM |
+| `selftest` | conventions and exactness checks |
+| `hwxeb` | re-scores the measured hardware bitstrings with PyQrack's ideal distributions |
+| `run` | emulates mirror, patched, full and forward-XEB (`fxeb`) circuits, exactly or with ACE |
+| `aceplan` | lists every ACE layout of a register |
+| `layoutsearch` | CP-SAT search for a register and its ACE placement, verified and tested |
+| `danmodel` | Dan Strano's ACE XEB calculator, alone or against measured points |
+| `seamgap` | data-only analysis of the release |
+| `nighthawk_cloverfield.py` | chips in isolated workers, joined by a coordinator (the *loom*) |
+| `nighthawk_graph.py` | harvests every run, views 1–11, CSV export |
 
-### What it does
+No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit statement is a proxy measurement or an extrapolation.
 
-- **Regenerates** every released circuit bit for bit and checks it against the released OpenQASM.
-- **Re-scores** the measured hardware bitstrings against PyQrack's ideal distributions.
-- **Emulates** the circuits on ideal qubits with the paper's own estimators (patched XEB, mirror survival), exactly or with ACE.
-- **Measures ACE against ground truth**: for registers of up to 34 qubits, every ACE sample is scored by forward XEB against an exact reference.
-- **Places circuits on ACE** and searches registers and placements with CP-SAT ([Sec. 2.8](#28-bespoke-registers---ace-transpile), [Sec. 6.7](#67-layoutsearch--iterate-to-a-register-and-placement)).
-- **Weaves several chips into one** with [`nighthawk_cloverfield.py`](#68-nighthawk_cloverfieldpy--several-chips-woven-into-one-virtual-chip), the "cloverfield".
+### Key results
 
-### Key findings
-
-**Placement matters more than layout.** ACE's default numbering puts most of the 8×8 window's couplers across simulators. Re-placing the logical qubits as compact tiles raises the forward XEB at 27 qubits and depth 8 from 0.008 to 0.32, at unchanged memory ([Sec. 9.2](#92-placement-dominates-layout-n--27)). Across ten configurations the XEB is predicted best by the couplers across simulators and the number of simulators in use; among tilings without such couplers, by the number of qubits on seam sites ([Sec. 9.3](#93-what-predicts-the-xeb)). Halving the seam qubits at 28 qubits raises the depth-12 XEB 3.6-fold ([Sec. 9.5](#95-tiling-version-3)).
-
-**A seam has a price per cycle that no ACE setting removes.** Near Porter–Thomas (depth ≥ 12) the tiled emulator at 27–29 qubits loses 0.24–0.31 per cycle (b), against the device's 0.137 at 61 qubits, and the gap grows with depth ([Sec. 9.4](#94-size-and-depth-dependence-44-tiling-v2)). The boundary repetition code, seam error detection and crossbars do not lower it; switching error detection off only adds a constant ≈ 0.01 ([Sec. 9.5](#95-tiling-version-3)). Under the weaker single-qubit angles of the `nn_qab` benchmark, tiled ACE reaches XEB 0.435 ± 0.037 at 27 qubits, depth 12, well above `nn_qab`'s own register geometries ([Sec. 9.7](#97-cross-check-with-the-nn_qab-ensemble)).
-
-**At the full 61 qubits, losses follow the boundary, not depth.** The paper's mirror circuits, with the `nn_qab` single-qubit angles, now run on a three-patch ACE register with 9 boundary qubits. Their survival lies above `ibm_phoenix` at depths 4–6, at 0.3–0.4× the device at depths 8–12, and about 160× below it at depth 20. It tracks the cumulative number of CZs through a boundary: about 0.26 nats per boundary CZ past depth 12. The device ran the Haar-angle circuits, so the comparison is one of shape ([Sec. 9.8](#98-mirror-at-the-full-register-61-qubits), [Sec. 9.9](#99-outlook-how-close-can-ace-come-at-61-qubits)).
-
-**Two patches help where the register has a narrow waist.** On IBM's own 61 qubits a two-way split needs at least 6 boundary qubits and gains little over three patches. On a 61-qubit register whose patches meet at a 3-qubit waist, 13 CZs cross the seam at depth 20 instead of 49. A 45-qubit version of it survives 0.90 / 0.88 / 0.12 at depths 8 / 12 / 20 with the device's angle ensemble, against `ibm_phoenix`'s 0.109 / 0.062 / 0.021. That register is easier to simulate classically than IBM's window, so this is a result about chip architecture, not a win on the device's register ([Sec. 9.11](#911-two-patches-at-61-qubits)).
-
-**Larger registers fit one 8 GB GPU.** Sub-registers of the 12 × 10 Nighthawk lattice up to 88 qubits fit one V340 die as four patches ([Sec. 2.9](#29-width-caps-and-larger-registers---transpile-max-width---register), [Sec. 9.10](#910-larger-registers-on-one-8-gb-gpu)). Placing disabled sites on the seams cuts the boundary from 17 to 11 qubits. The `layoutsearch` tool found `nighthawk88e`, which scores 10–20× higher than its starting point at depths 4–6 ([Sec. 6.7](#67-layoutsearch--iterate-to-a-register-and-placement)). With `--gtt`, patches too wide for the die spill into host memory the GPU maps over PCIe ([Sec. 8.8](#88-vram-oversubscription---gtt)).
-
-**Several chips become one virtual chip.** In the cloverfield, each chip runs in its own isolated worker process, and a coordinator, the *loom*, does all IO between them. A link between chips is applied exactly through *ghost* replicas, the way ACE replicates a boundary qubit, and carries entanglement across. The loom itself needs about 45 MiB ([Sec. 6.8](#68-nighthawk_cloverfieldpy--several-chips-woven-into-one-virtual-chip)).
-
-**Qrack's OpenCL engine needed two fixes.** Two host-memory lifetime defects corrupted or crashed deep ACE points on GPU. They were traced and fixed without serialising dispatch, and GPU runs reproduce the CPU path ([Sec. 8.7](#87-qracks-opencl-engine-host-memory-defects-and-the-fix), [Sec. 8.3](#83-ace-and-the-reference-on-gpu)).
-
-### What cannot be checked
-
-No XEB can be scored on the full 61-qubit circuits. The release's own cost estimate puts one exact amplitude of the 36-cycle circuit at about 10²² multiply-adds, so every 61-qubit statement here is a proxy measurement or an extrapolation ([Sec. 8.6](#86-what-can-be-verified-at-61-qubits), [Sec. 10](#10-limitations)).
-
----
-
-## 1. Purpose and scope
-
-Ref. [[1]](#ref-1) reports forward RCS on 61 qubits of the 120-qubit IBM Nighthawk r2 processor (`ibm_phoenix`), with native CZ gates on a square lattice, and estimates the circuit fidelity at 36 cycles from two proxy families: *patched* circuits scored with a normalised linear cross-entropy benchmark (XEB), and *mirror* circuits scored by echo survival. BlueQubit released the circuits, layout, partitions and measured bitstrings as `rcs-nighthawk`.
-
-`nighthawk_qrack.py` does the following against that release, without a QPU:
-
-1. **Regenerates** every released circuit bit-for-bit from `data/layout.json` and checks it against the released OpenQASM (`verify`).
-2. **Re-scores** the measured `ibm_phoenix` bitstrings with PyQrack ideal patch distributions and rebuilds the paper's F(d) points, exponential fit and collision ratios (`hwxeb`).
-3. **Emulates** the released circuits on ideal ("clean") qubits and scores them with the paper's estimators (`run --families mirror,patched,full`). With `--backend ace` the only error left is shot noise plus ACE's seam approximation; with `--backend exact` the result must give F = 1.
-4. **Measures ACE directly** (`run --families fxeb`): the unpatched forward circuit on the first n logical qubits, sampled by ACE and scored by forward linear XEB against an exact reference. This is the only family in which the approximation is measured against ground truth rather than through a proxy.
-5. **Chooses and places the ACE register** (`aceplan`, `--ace-max-width`, `--ace-tiling`): every distinct ACE layout is enumerated, and logical qubits can be re-placed onto ACE sites to keep couplers inside one simulator.
-6. Runs a **data-only** analysis of the release (`seamgap`).
-7. Runs the mirror family on **larger sub-registers** of the Nighthawk lattice built with the release's own recipe (`--register`, up to 88 qubits on one 8 GB GPU).
-8. **Searches** register and placement together with CP-SAT, verifies every candidate and ranks them by short circuit tests (`layoutsearch`).
-9. **Weaves several chips into one** with `nighthawk_cloverfield.py`: isolated chip workers, the loom doing all IO between them (Sec. 6.8).
-
-There is **no noise model**. Any deviation from F = 1 under `run` is attributable to the simulator backend or to sampling, not to an assumed device error.
-
-> **Version note.** This HOWTO describes `nighthawk_qrack.py` at 4805 lines and `nighthawk_graph.py` at 1329 lines (13 October 2026). Earlier revisions contained a noise-model audit (`--preset r2`, `--stochastic`, `--edge-layers`); those flags no longer exist. Tiling version 2 (`--ace-tiling-version 2`) reproduces the config tags of runs made before tiling version 3 became the default.
-
----
-
-## 2. Background
-
-### 2.1 Random-circuit sampling and linear XEB
-
-Each cycle applies a Haar-random single-qubit gate to every qubit, then a layer of CZ gates on one of four coupler colourings `A, B, C, D` in fixed order. The linear XEB was introduced as a fidelity proxy for such circuits by Boixo et al. [[2]](#ref-2) and used for the 53-qubit Sycamore experiment [[3]](#ref-3). Its relationship to the true fidelity, and the regimes in which it is and is not a reliable estimator, are analysed in [[4]](#ref-4) and [[5]](#ref-5).
-
-### 2.2 Patched circuits (Eq. (1)–(2) of Ref. [1])
-
-A patched circuit removes every CZ that crosses a partition boundary, so the 61-qubit register factorises into K independent patches whose ideal output distributions p_r are exactly computable. The estimator is the product over patches of the normalised patch XEB:
-
-```
-F_patched = Π_r  mean_s [ (2^{n_r} · p_r(x_r^{(s)}) − 1) / (2^{n_r} · Σ_x p_r(x)² − 1) ]
-```
-
-where x_r^{(s)} is the restriction of shot s to patch r. The standard error uses a second-order delta method on the product of means (`_delta_se`). Patch circuits as a fidelity proxy trace back to the "patch" and "elided" circuits of [[3]](#ref-3).
-
-### 2.3 Mirror circuits
-
-A mirror circuit runs U for d/2 cycles and then U† for d/2 cycles, so the ideal output is the input string; the fidelity proxy is the survival probability. This is the circuit mirroring of Proctor et al. [[6]](#ref-6), developed into scalable randomized benchmarking in [[7]](#ref-7) and extended to universal gate sets in [[8]](#ref-8). In the release the forward half is **pseudo-patched**: at each cycle the CZs crossing *one* of the five K=3 boundary sets are removed, rotating to the next partition every cycle (`rotate_every=1`); `mirror_cycles` reproduces this exactly.
-
-### 2.4 Pauli-frame twirling
-
-Optional gate twirling surrounds each CZ with random Paulis P_a ⊗ P_b before and the propagated correction `(P_a Z^[P_b∈{X,Y}]) ⊗ (P_b Z^[P_a∈{X,Y}])` after, an exact identity for ideal gates (`cz_layer`); this is the randomized-compiling construction of Wallman and Emerson [[9]](#ref-9). On ACE its role is to randomise the *coherent* seam error so that the forward and inverse halves of a mirror cannot cancel it. On the exact backend it is disabled.
-
-### 2.5 Forward XEB against an exact reference (`fxeb`)
-
-For first-n truncations small enough to hold exactly, the forward circuit is sampled by the backend under test and every sample is scored against the exact output distribution p of the same gates:
-
-```
-XEB = (N · mean_s p(x^{(s)}) − 1) / (N · Σ_x p(x)² − 1),     N = 2^n
-```
-
-i.e. Eq. (1) with the whole register as a single patch. The denominator is the ideal XEB (collision ratio): ≈ 1 for Porter–Thomas outputs, larger for concentrated ones. No twirling is applied, so a coherent approximation keeps whatever XEB it earns. The reference is a dense `QrackSimulator`; its probabilities are read into one float buffer (`out_probs_np`) and every sum over them is taken in float64, so float32 storage does not bias the estimator (Sec. 8.4).
-
-### 2.6 ACE: seams, simulators and placement
-
-`QrackAceBackend` partitions a rectangular register into bulk *chunks*, each held exactly by its own simulator, separated by *seam* sites whose qubits are replicated in the adjacent simulators (plus, on builds with crossbars, a shared boundary simulator). `long_range_columns` / `long_range_rows` (`--lrc`, `--lrr`) and `is_torus` set the layout. A CZ falls into one of three classes:
-
-| Class | Definition | Treatment in ACE |
+| Finding | Numbers | § |
 |---|---|---|
-| *exact* | both ends are bulk qubits of the same simulator | applied exactly |
-| *replica* | a seam qubit is involved, but the ends share a simulator | applied on the replica, reconciled at the seam |
-| *cross* | the ends share no simulator | approximated across simulators |
+| Placement matters more than layout | n = 27, d = 8 forward XEB: 0.008 device placement → 0.321 tiled, same memory | 6.1 |
+| A seam costs fidelity every cycle, and no ACE setting removes it | decay b = 0.24–0.31 per cycle at n = 27–29 against the device's 0.137 at n = 61 | 6.2 |
+| At 61 qubits the loss follows CZs through a boundary, not depth | three patches: 2.3× the device at d = 4–6, 1/160 at d = 20; ≈ 0.26 nats per boundary CZ | 6.5 |
+| Two patches on IBM's own register and circuits match the device at shallow depth | Haar θ, d = 4 / 6: 0.226 / 0.128 against 0.214 / 0.154 | 6.8 |
+| A register with a 3-qubit waist keeps the boundary nearly closed | 45-qubit version, d = 8 / 12 / 20: 0.90 / 0.88 / 0.12 against the device's 0.109 / 0.062 / 0.021; classically easier register | 6.8 |
+| Dan's calculator holds at the edge of its data and overestimates beyond it | 28 qubits: fxeb within 10 %; 36–45 qubits at d = 20: 0.002–0.05 of the prediction | 6.9 |
+| 88 qubits fit one 8 GB GPU; disabled sites on the seams shrink the boundary | boundary 17 → 11 qubits; `nighthawk88e` 10–20× `nighthawk88d` at d = 4–6 | 6.7 |
+| A ghost link carries entanglement between chips | loom-only error, d = 8 / 12 / 16: ghost 1.000 / 0.989 / 0.656, mean-field 0.773 / 0.773 / 0.067 | 3.5 |
+| Qrack's OpenCL engine had three host-memory defects | fixed without serialising dispatch; GPU reproduces CPU | 5.3 |
 
-Two properties of the Nighthawk window matter here. First, a simulator's width is its bulk **plus every seam replica it carries plus one**: a two-chunk split of the 8×8 register with one seam column yields two 37-qubit simulators, not two 32-qubit halves, and is out of reach of a dense state on a 310 GiB host. Second, ACE numbers its chunks along a folded one-dimensional chain, so on the device grid a chunk is a set of row strips; with the device-geometry placement most vertical couplers become *cross* couplers even where no seam separates them. For the default `--lrc 4 --lrr 4` at n = 61 the split is 33 exact / 30 replica / 39 cross out of 102 couplers.
+---
 
-**Tiling** (`--ace-tiling`) keeps ACE's layout and memory unchanged and instead searches, by deterministic simulated annealing, for the placement of logical qubits onto ACE sites that minimises a weighted coupler/site cost. For the same 4/4 layout at n = 61, tiling version 2 reaches 61 / 41 / 0. Couplers are then no longer ACE-grid neighbours; ACE applies them exactly inside a simulator and through its seam machinery otherwise.
-
-| Version | Cost | Search |
-|---|---|---|
-| 2 | 10 × cross + 1 × replica | one annealing run from the device placement |
-| 3 (default) | 20 × cross + 1 × replica + 6 × (logical qubits on seam sites) + 2 × (simulators holding bulk qubits) | three restarts: one from the device placement, two from the best (n−1)-qubit tiling extended by one qubit; results cached in `nighthawk_tiles.json` |
-
-The version-3 weights follow the measurements of Sec. 9.3–9.4. A trial weighting that favoured fewer simulators over fewer seam qubits placed all 18 qubits of an n = 18 register in one simulator using four seam sites, and lowered the d = 12 XEB from 0.48 to 0.06 (single instance, 1000 shots); the seam term was raised accordingly.
-
-### 2.7 Relation to approximate-simulation baselines
-
-The quantity compared throughout is a per-cycle decay b = −d ln F / dd. A classical method that loses fidelity at a controlled rate per gate, and is matched against a device on that rate, is the framing of Zhou, Stoudenmire and Waintal for truncated matrix-product-state simulation [[11]](#ref-11). The exact alternative to ACE's approximate seams — Schrödinger–Feynman path summation across a cut, with simulation cost scaling linearly in the fraction of paths kept and hence in the target fidelity — is that of Markov et al. [[12]](#ref-12). On this lattice roughly two CZs cross the best bipartition per cycle, so the number of paths grows as about 2^(2d); this is used only as a shallow-depth reference, not at d = 36.
-
-### 2.8 Bespoke registers: `--ace-transpile`
-
-Inside a patch the bulk is a dense state vector, so every pair of its qubits is a coupler; only the boundary has geometry. Following `rcs/mirror_nighthawk.py` in [`vm6502q/pyqrack-examples`](https://github.com/vm6502q/pyqrack-examples), `--ace-transpile` takes the coupling map of an ACE register of any size (`get_logical_coupling_map()`, or the pairs sharing a simulator), removes chosen sites (`--ace-exclude`, to shape the boundary), and places the circuit's qubits on it. The placement is routing-free — every circuit coupler is a coupler of the register — so the released gates, Pauli twirling, `--variants` and the estimators apply unchanged; routing would insert SWAPs and change the circuit, and is not done. For these circuits (CZ between fresh random single-qubit gates) Qiskit's gate-level optimisations have nothing to cancel; their gain applies to circuits with SWAP-type gates such as the `nn_qab` set.
-
-Three placement engines are provided. `exact` (default; needs OR-Tools) solves the placement with CP-SAT: inside a patch every site is equivalent, so the sites are grouped by the simulators that hold them (one patch's bulk, or the seam between two patches), and each logical qubit is given a group within the group capacities such that every circuit coupler lands on a pair of groups the register couples (ACE's own coupling map, which couples a seam site to both its patches and to seam sites of the same boundary). The objective is lexicographic: fewest qubits on seam sites (the smallest boundaries), then the most even patch widths, then the fewest circuit couplers touching a seam. `anneal` applies the tiling cost of Sec. 2.6 to the same register and exclusions, starting from the VF2 layout when Qiskit finds one; it is not guaranteed optimal. `vf2` is Qiskit's VF2Layout with a target that charges couplers and qubits on seam sites; on ACE's dense coupling graph its search must be bounded and it ranks only the layouts it reaches. Measured placements of the 61-qubit circuit:
-
-| Register (flat) | Engine | exact / replica / cross CZ | qubits on seams | active dense memory |
-|---|---|---|---|---|
-| 64 sites, lrc 4 lrr 4 | vf2 | no routing-free layout within the search bound | — | — |
-| 64 sites, lrc 4 lrr 4 | anneal | 63 / 38 / 1 | 12 | 0.05 GiB |
-| 64 sites, lrc 4 lrr 7, error detection off | anneal | 84 / 18 / 0 | 6 | 192 GiB |
-| 75 sites, lrc 4 lrr 5 (`mirror_nighthawk.py`) | anneal | 74 / 28 / 0 | 9 | 0.56 GiB |
-| 75 sites, lrc 4 lrr 5, its first 7 exclusions | anneal, `--transpile-allow-cross` | 76 / 24 / 2 | 8 | 0.66 GiB |
-| 75 sites, lrc 4 lrr 5, its current 11 exclusions (64 sites left) | anneal, `--transpile-allow-cross` | 76 / 25 / 1 | 8 | 0.44 GiB |
-| 75 sites, lrc 4 lrr 5, its current 11 exclusions | anneal | refused: the annealer ends with one coupler (34–41) joining two patches with no seam | — | — |
-| 75 sites, lrc 4 lrr 5, its 11 exclusions with seam site 69 reopened | anneal | 72 / 30 / 0 | 9 | 0.50 GiB |
-| 75 sites, lrc 4 lrr 5, its current 11 exclusions | vf2 | none found within the time bound | — | — |
-| **75 sites, lrc 4 lrr 5, its current 11 exclusions** | **exact (default)** | **74 / 28 / 0, proven optimal; boundaries 4 / 3 / 2, bulk 18 / 16 / 18** | **9** | **0.50 GiB** |
-| 75 sites, lrc 4 lrr 5, no exclusions | exact | 73 / 29 / 0 (8 seam qubits, fewer than the balanced optimum of 9) | 8 | 0.77 GiB |
-
-At n = 27 VF2 placed the circuit with 9–10 qubits on seams (17 exact / 24 replica CZ on 64 sites) where the tiling uses 3, and in the n = 18 smoke test it scored 0.26 against 0.60–0.69 for the annealed placements. The 75-site register (three 31-site simulators) holds up to ≈ 30 qubits in a single exact simulator, so its `fxeb` scores below n ≈ 30 are trivially exact; its comparisons are meaningful at the full 61 qubits, where it reaches 24–28 replica couplers at under 1 GiB, against 18 at 192 GiB for the two-patch register. `mirror_nighthawk.py` builds its backend with Qrack's default `is_torus=True`; add the `torus` token to match it (the torus does not change these placements).
-
-The current `mirror_nighthawk.py` excludes 11 sites (74, 59, 44, 73, 69, 54, 68, 67, 64, 63, 62: six of the fifteen seam sites and five bulk sites), leaving exactly 64 sites for its 64-wire circuit, whose three dead qubits are idle wires the transpiler places like any other. On that register Qiskit's VF2 search stops at its time bound without a layout (its `NO_SOLUTION_FOUND` is not a proof), and `optimization_level=3` routes; on that script's gate set (SWAP, iSWAP and their CZ products) absorbs SWAPs into the qubit permutation. Measured on its own circuits, transpiling took 64–72 s per circuit and reduced the two-qubit gates from 141 to 83 at d = 4 and from 432 to 271 at d = 12, with none between simulators and 49–56 % touching a seam replica; all nine remaining seam sites hold a qubit. With `--ace-transpile` the 61 live qubits are placed once per register (cached), the three spare sites are free, and twirled circuits are not re-transpiled.
-
-A placement may not join two patches that share no seam site: such a coupler is a contact between patches for which ACE keeps no boundary replica. The `exact` engine never produces one (it is outside the register's coupling map); the annealer weights it 1000 (against 20 in the tiling cost), and a placement that still contains one is refused, naming the coupler and the excluded seam sites that could be reopened; `--transpile-allow-cross` (token `xok`) accepts it. On the 11-exclusion register the annealer stops at such a placement, but CP-SAT shows the register is not the cause: the balanced three-way split of the Nighthawk graph needs at least 9 boundary qubits (proven, any register), and the register's open seam sites — four between patches 0 and 1, three between 1 and 2, two between 2 and 0 — hold exactly such a split, with 28 replica couplers and none across.
-
-First mirror comparison at n = 61 (nnqab θ, one instance, 1000 shots, 4 twirls per point; placement effects beyond the coupler counts are visible, so treat it as indicative):
-
-| Placement | exact / replica / cross | F, d = 4 | F, d = 6 |
-|---|---|---|---|
-| anneal, 11 exclusions, `xok` | 76 / 25 / 1 | 0.897 ± 0.010 | 0.118 ± 0.010 |
-| anneal, 11 exclusions with 69 reopened | 72 / 30 / 0 | 0.799 ± 0.013 | 0.086 ± 0.009 |
-| exact, 11 exclusions | 74 / 28 / 0 | 0.646 ± 0.015 | 0.388 ± 0.015 |
-| exact, no exclusions | 73 / 29 / 0 | 0.121 ± 0.010 | 0.056 ± 0.007 |
-
-The full mirror sweep on the exact 11-exclusion placement is in Sec. 9.8.
-
-### 2.9 Width caps and larger registers: `--transpile-max-width`, `--register`
-
-A patch is a dense state, so its width (bulk + seam replicas + ACE's error-detection ancilla) sets the memory: 8 bytes per amplitude in fp32, 1 GiB at 27 qubits, 2 GiB at 28. `--transpile-max-width W [--transpile-max-wide N]` adds this as a hard constraint to the `exact` engine: no patch wider than W, at most N patches at W, the others ≤ W − 1. Together with an ACE register of more sites than qubits, it lets the engine trade boundary qubits against memory.
-
-`--register NAME` replaces the release's 61-qubit register with a larger sub-register of the 12 × 10 Nighthawk lattice, built with the release's own code and seed: `rect_matchings` and `remove_qubits` for the coupling graph, `make_patches(seed=2025, balance_tol=1, top_n=5)` for the K = 3 and K = 4 partitions the mirror circuits rotate through, and the release's recipe for the ten input strings (selftest [9] checks that this recipe reproduces the release). Only the `mirror` family runs on these registers, and there is no device data for them. With `--backend ace` and no explicit `--ace-transpile`, each register applies a stored ACE preset that fits one 8 GB GPU:
-
-| Register | Sites used | ACE register | Patch widths (incl. ancilla) | Boundary qubits | exact / replica / cross CZ | Peak memory |
-|---|---|---|---|---|---|---|
-| `release` | the experiment's 61 | per flags | — | — | — | — |
-| `nighthawk88` | rows 0–9 × cols 1–9 (88 of 90; the three broken qubits used) | 102 sites, lrc 4 lrr 5, flat | 28 / 27 / 27 / 27 | 17 | 102 / 55 / 0 | ≈ 7 GiB |
-| `nighthawk88d` | whole lattice, 32 sites disabled (broken 17, 55, 62 + 29 corner sites) | 114 sites, lrc 4 lrr 5, flat | 28 / 23 / 25 / 27 | 11 | 108 / 42 / 0 | ≈ 5.3 GiB |
-| `nighthawk88e` | whole lattice, 32 sites disabled, found by `layoutsearch` from `nighthawk88d` (Sec. 6.7) | 114 sites, lrc 4 lrr 5, flat | 25 / 28 / 25 / 25 | 11 | 112 / 36 / 0 | ≈ 4.8 GiB |
-
-In `nighthawk88d` the region and the four-way split were chosen together by CP-SAT, under two constraints: every row and every column of the region is one unbroken run, so the only holes are broken qubits; and seams join only ring neighbours (0–1, 1–2, 2–3, 3–0), as in ACE's flat four-patch registers. Without the first constraint the optimum is trivial: four patches joined by three single qubits (B = 3, the minimum for a connected register), i.e. four nearly independent circuits. The cuts run along the lattice diagonals and all four patches meet at broken qubit 55. Per full A–B–C–D cycle 42 CZs pass through a boundary, against 55 in `nighthawk88` (11/11/10/10 against 14/14/14/13 per colour). Both placements are stored in the script, since CP-SAT needs minutes to find them; `RegisterLayout` accepts a window plus a list of dropped device sites, so further registers are a dictionary entry.
+## 1. Installation and requirements
 
 ```bash
-python3 nighthawk_qrack.py run --backend ace --register nighthawk88d --theta nnqab \
-    --depths 4 6 8 10 12 16 20 --mirror-estimator prob --order shallow \
-    --ace-gpu --gpus 0-5 --per-gpu 1 --stagger 20 --max-rss-gb 16 --out mirror88d_clvk.jsonl
+git clone https://github.com/twobombs/thereminq-examples
+cd thereminq-examples/rcs/nighthawk
+git clone https://github.com/BlueQubitDev/rcs-nighthawk     # circuits, layout, hardware counts
+pip install numpy pyqrack matplotlib ortools qiskit
 ```
 
----
-
-## 3. Requirements
-
-| Component | Notes |
+| Component | Needed for |
 |---|---|
-| Python | ≥ 3.9 (uses `argparse.BooleanOptionalAction`) |
-| numpy | required by every subcommand |
-| matplotlib | `nighthawk_graph.py` only (Tk for the interactive viewer) |
-| OR-Tools | `--ace-transpile` with the default `exact` engine, `--register` presets, `layoutsearch` (`python3 -m pip install ortools`) |
-| PyQrack | required by `hwxeb`, `run`, `selftest`, `aceplan`; **not** by `verify` or `seamgap`. The `ace` backend needs a PyQrack build that ships `QrackAceBackend`; exact references above 32 qubits need Qrack built in >32-qubit mode |
-| Qrack shared library | if `/usr/local/lib/qrack/libqrack_pinvoke.so` exists, the script exports it as `PYQRACK_SHARED_LIB_PATH` |
-| Qiskit | only for `--ace-transpile` |
-| GPU | OpenCL (select with `QRACK_OCL_DEFAULT_DEVICE`) or `--cpu`. No CUDA path is used. See Sec. 8.3 for ACE on GPU and Sec. 8.7 for the Qrack build to use |
+| Python ≥ 3.9 | everything (`argparse.BooleanOptionalAction`) |
+| numpy | every subcommand |
+| PyQrack | `hwxeb`, `run`, `selftest`, `aceplan`, `danmodel`; not `verify` or `seamgap`. ACE needs a build with `QrackAceBackend`; exact references above 32 qubits need Qrack built for > 32 qubits |
+| OR-Tools | the `exact` placement engine, `--register` presets, `layoutsearch` |
+| Qiskit | `--ace-transpile` |
+| matplotlib | `nighthawk_graph.py` (Tk for the viewer) |
+| GPU | OpenCL (`QRACK_OCL_DEFAULT_DEVICE`) or `--cpu`; use the Qrack build of §5.3 |
 
-The header block every PyQrack script in this repository carries:
+Every PyQrack script in the repository carries:
 
 ```python
 QRACK_LIB_PATH = "/usr/local/lib/qrack/libqrack_pinvoke.so"
@@ -213,358 +76,321 @@ if os.path.exists(QRACK_LIB_PATH):
     os.environ["PYQRACK_SHARED_LIB_PATH"] = QRACK_LIB_PATH
 ```
 
-### 3.1 Environment variables
+The release is found via `--repo`, `$NIGHTHAWK_REPO`, or a `data/layout.json` / `rcs-nighthawk/` in the working directory, next to the script, or up to three parents up.
 
-| Variable | Effect |
+| Release path | Used by |
 |---|---|
-| `QRACK_OCL_DEFAULT_DEVICE` | OpenCL device index; the launcher sets it per worker from `--gpus` |
-| `QRACK_QUNITMULTI_DEVICES`, `QRACK_QPAGER_DEVICES` | devices Qrack may spread units and pages over; the launcher pins both to the worker's device unless set by the user, so ACE patches do not land on other cards of a mixed host. For single-process runs set all three by hand: Qrack's own default device is not necessarily device 0 |
-| `QRACK_MAX_CPU_QB` | upper bound on qubits for CPU state vectors |
-| `QRACK_MAX_ALLOC_MB` | Qrack's memory ceiling |
-| `NIGHTHAWK_REPO` | location of the `rcs-nighthawk` checkout if `--repo` is not given |
-| `NIGHTHAWK_TILE_CACHE` | tiling cache file (default `nighthawk_tiles.json` next to the script) |
-| `NIGHTHAWK_MEM_LEDGER` | memory-reservation directory shared by all runs (default `/tmp/nighthawk_mem_ledger`) |
-| `QRACK_OCL_SYNC` | Qrack ≥ 10.13.2: `1` finishes the OpenCL queue after every dispatch. Avoids the defects of Sec. 8.7 by serialising; not needed with the async fix |
-| `OCL_ICD_VENDORS` | for CPU runs, point it at an empty directory (`/tmp/no-icd`) so that no OpenCL platform is initialised and no GPU memory is taken |
-
----
-
-## 4. Installation
-
-```bash
-git clone https://github.com/twobombs/thereminq-examples
-cd thereminq-examples/rcs/nighthawk
-git clone https://github.com/BlueQubitDev/rcs-nighthawk     # circuits, layout, hardware counts
-pip install numpy pyqrack matplotlib                        # present in the ThereminQ container
-```
-
-The release is found via `--repo`, `$NIGHTHAWK_REPO`, or a `data/layout.json` (or `rcs-nighthawk/` clone) in the working directory, next to the script, or up to three parents up.
-
-| Path in the release | Used by |
-|---|---|
-| `data/layout.json` | all (qubit map, matchings, schedule, partitions, seeds, depths, mirror input strings) |
+| `data/layout.json` | all: qubit map, matchings, schedule, partitions, seeds, depths, mirror inputs |
 | `data/circuits/manifest.json`, `data/circuits/**.qasm` | `verify`, `selftest`, `seamgap` |
-| `data/counts/patched_K{K}_d{d}.npz`, `data/counts/mirror_survival.json` | `hwxeb`, `selftest` |
+| `data/counts/patched_K{K}_d{d}.npz`, `data/counts/mirror_survival.json` | `hwxeb`, `selftest`, `danmodel` |
 | `data/results/patch_xeb.json`, `data/results/fidelity_vs_depth.json` | `hwxeb`, `run --summarize`, `selftest`, `seamgap`, graph tool |
 
----
+| Environment variable | Effect |
+|---|---|
+| `QRACK_OCL_DEFAULT_DEVICE`, `QRACK_QUNITMULTI_DEVICES`, `QRACK_QPAGER_DEVICES` | device index, and the devices Qrack may spread units and pages over; the launcher pins all three per worker. For single-process runs set all three: Qrack's default device need not be 0 |
+| `QRACK_MAX_CPU_QB`, `QRACK_MAX_PAGING_QB` | qubit ceilings of the CPU engine and QPager; raised automatically for patches over 28 qubits (§5.5) |
+| `QRACK_MAX_ALLOC_MB` | per-device allocation ceiling (§5.4) |
+| `QRACK_OCL_SYNC` | Qrack ≥ 10.13.2: `1` finishes the queue after every dispatch (§5.3) |
+| `OCL_ICD_VENDORS` | for CPU runs, an empty directory (`/tmp/no-icd`): no OpenCL platform, no GPU memory taken |
+| `NIGHTHAWK_REPO` | release location |
+| `NIGHTHAWK_TILE_CACHE` | tiling cache (default `nighthawk_tiles.json` next to the script) |
+| `NIGHTHAWK_MEM_LEDGER` | memory-reservation directory shared by all runs (default `/tmp/nighthawk_mem_ledger`) |
+| `NIGHTHAWK_REGISTERS` | extra register files, besides `nighthawk_registers.json` next to the script |
 
-## 5. Recommended workflow
+### 1.1 Quick start
 
 ```bash
-# 1  circuits are regenerated exactly (no Qrack needed)
-python3 nighthawk_qrack.py verify
-# 2  conventions and exactness checks
-python3 nighthawk_qrack.py selftest
-# 3  the paper's hardware numbers, re-scored with PyQrack as reference
-python3 nighthawk_qrack.py hwxeb --cpu --cache patch_cache
-# 4  which ACE layouts exist, ranked by couplers across simulators (after tiling)
-python3 nighthawk_qrack.py aceplan --n 27 --tiling
-# 5  layout scan at one size against the exact reference
-for L in "4 4" "2 7" "1 7" "4 3" "2 2"; do set -- $L
+python3 nighthawk_qrack.py verify                                   # circuits vs released QASM
+python3 nighthawk_qrack.py selftest                                 # ≈ 1 min
+python3 nighthawk_qrack.py hwxeb --cpu --cache patch_cache          # the paper's numbers, PyQrack reference
+python3 nighthawk_qrack.py aceplan --n 27 --tiling                  # ACE layouts, ranked
+for L in "4 4" "2 7" "1 7" "4 3" "2 2"; do set -- $L                # layouts against the exact reference
   python3 nighthawk_qrack.py run --backend ace --families fxeb --n 27 --depths 8 12 \
     --lrc $1 --lrr $2 --ace-tiling --cpu --out tile_${1}_${2}.jsonl &
 done; wait
-# 6  size sweep, two tilings against one shared reference, memory-aware workers
 python3 nighthawk_qrack.py run --backend ace --families fxeb --sizes 27-34 --depths 12 16 20 \
-  --variants 4/4:t3 4/4:t2 --gpus 0 --per-gpu 4 --mem-budget-gb 280 --max-rss-gb 280 \
-  --out big_var.jsonl
-# 7  everything collected so far, side by side
-python3 nighthawk_graph.py --table harvest.csv
-python3 nighthawk_graph.py                  # interactive viewer
+  --variants 4/4:t3 4/4:t2 --gpus 0 --per-gpu 4 --mem-budget-gb 280 --out big_var.jsonl
+python3 nighthawk_graph.py --table harvest.csv                      # everything, side by side
 ```
-
-Mirror and patched emulation of the released 61-qubit circuits (the proxy families of Ref. [[1]](#ref-1)) remain available as before, e.g. `run --backend ace --families mirror --sizes 27-36,61 --depths 4 6 8 12` and `run --backend exact --families patched --depths 20 36`.
 
 ---
 
-## 6. Subcommand reference
+## 2. Method
 
-### 6.1 `verify` — circuit regeneration
+### 2.1 Circuits and estimators
 
-Rebuilds every released circuit from `layout.json` exactly as `rcs/circuits.py` does and compares it gate-by-gate with the released QASM: SplitMix64 hash of `(seed, instance, cycle, qubit, k)` → Haar angles (φ, θ, λ) applied as `rz(φ)·rx(θ)·rz(λ)`; seeds `2025 + k·1000003` (full, patched) and `2025` with instance `k` (mirror); mirror, patched K=3/K=4 over all partitions and instances, and full circuits at d = 4, 8, …, 40. Angles are compared modulo 2π within `--tol` (default `1e-9` rad) and CZ counts against `manifest.json`. Exit status is 0 only if every circuit is identical and none in the manifest was left unregenerated.
+Each cycle applies a Haar-random single-qubit gate to every qubit (`rz(φ)·rx(θ)·rz(λ)`), then CZs on one of four coupler colourings `A, B, C, D` in fixed order. Linear XEB as a fidelity proxy follows [[2]](#ref-2), [[3]](#ref-3); its limits are analysed in [[4]](#ref-4), [[5]](#ref-5).
 
-### 6.2 `selftest` — conventions and exactness
+| Family | Circuit | Score |
+|---|---|---|
+| `patched` | every CZ crossing a K-patch partition removed; patches independent, n = 61 only | F = Π_r mean_s [(2^{n_r} p_r(x_r) − 1) / (2^{n_r} Σ p_r² − 1)], delta-method σ (Eq. (1)–(2) of [[1]](#ref-1)) |
+| `mirror` | U for d/2 cycles, then U† for d/2: depth d counts both halves. The forward half is pseudo-patched: each cycle drops the CZs crossing one of the five K = 3 boundary sets, rotating ([[6]](#ref-6)–[[8]](#ref-8)) | survival of the prepared input string |
+| `fxeb` | unpatched forward circuit on the first n qubits | XEB = (N · mean_s p(x_s) − 1) / (N Σ p² − 1), N = 2^n, against an exact reference; sums in float64 |
+| `full` | unpatched forward circuit, release seed | stored only |
 
-| # | Check | Pass criterion |
+`--theta nnqab` replaces the Haar θ with the `nn_qab` ensemble (sin θ uniform): a variant, not the released circuits.
+
+**Pauli-frame twirling** [[9]](#ref-9) surrounds each CZ with random Paulis and their propagated correction, an identity for ideal gates. On ACE it randomises the coherent seam error, so the forward and inverse halves of a mirror cannot cancel it. It is off on the exact backend and in `fxeb`.
+
+**Mirror estimators.** `shots` samples at the paper's budgets. `prob` takes, per run, the probability ACE returns the prepared string (chain rule with forced measurement): no shot noise, no shot floor. A forced outcome below 10⁻⁶ counts the run as survival 0 and rebuilds the backend (`prob_errors` in the record).
+
+### 2.2 ACE: seams, simulators, placement
+
+`QrackAceBackend` splits a rectangular register into bulk *patches*, each held exactly by its own dense simulator, joined by *seam* sites whose qubits are replicated in both neighbouring patches (plus, with crossbars, a shared boundary simulator). `--lrc`, `--lrr` (`long_range_columns`, `long_range_rows`) and `is_torus` set the layout.
+
+| CZ class | Definition | Treatment |
+|---|---|---|
+| exact | both ends bulk qubits of one simulator | applied exactly |
+| replica | a seam qubit involved, ends share a simulator | applied on the replica, reconciled at the seam |
+| cross | ends share no simulator | approximated across simulators |
+
+A patch's width is its bulk plus every seam replica it carries plus one error-detection ancilla, and its memory is 8 bytes × 2^width (§5.1). ACE numbers patches along a folded chain, so on the device grid a patch is a set of row strips. With the device placement most vertical couplers become cross couplers, which is why the placement engines exist:
+
+| Engine | Flag | Method |
+|---|---|---|
+| tiling v3 (default tiling) | `--ace-tiling` | deterministic annealing of 20 × cross + 1 × replica + 6 × (qubits on seams) + 2 × (simulators with bulk); three restarts; cached in `nighthawk_tiles.json` |
+| tiling v2 | `--ace-tiling-version 2` | 10 × cross + 1 × replica, one run; reproduces older config tags |
+| exact (default transpile engine) | `--ace-transpile` | CP-SAT: sites grouped by the simulators holding them; lexicographic: fewest seam qubits, even patches, fewest seam couplers; proven optimal |
+| anneal | `--transpile-engine anneal` | the tiling cost on the transpile register |
+| vf2 | `--transpile-engine vf2` | Qiskit VF2Layout, bounded search |
+| joint | `layoutsearch` (§3.4) | register and placement in one CP-SAT model |
+
+Placements are routing-free: every circuit coupler is a coupler of the register, so the released gates, twirling and estimators apply unchanged. A coupler joining two patches that share no seam is refused unless `--transpile-allow-cross` (token `xok`). `--ace-exclude` removes sites from the coupling map, and `--transpile-max-width W [--transpile-max-wide N]` caps patch widths (incl. ancilla) for the exact engine.
+
+### 2.3 Registers
+
+`--register NAME` replaces the release's register with a sub-register of the 12 × 10 Nighthawk lattice. The circuits are built by the release's own code and seed: `rect_matchings`, `remove_qubits`, `make_patches(seed=2025, balance_tol=1, top_n=5)` for the K = 3, 4 partitions, and the release's input-string recipe (selftest [9]). Registers have no device data; they run `mirror`, and `fxeb` up to 36 qubits. Each carries a stored ACE preset (geometry, caps, placement).
+
+| Register | Qubits | Region | ACE geometry | Patch widths incl. ancilla | Boundary qubits | exact / replica / cross | Couplers through a boundary | Dense memory |
+|---|---|---|---|---|---|---|---|---|
+| `release` (three-patch preset, §6.5) | 61 | the experiment's 8 × 8 window | 75 sites, lrc 4 lrr 5, torus, 11 exclusions | ≤ 25 | 9 | 74 / 28 / 0 | 28 | 0.50 GiB |
+| `nighthawk88` | 88 | rows 0–9 × cols 1–9, broken qubits used | 102 sites, lrc 4 lrr 5 | 28 / 27 / 27 / 27 | 17 | 102 / 55 / 0 | 55 per A–D cycle (14 / 14 / 14 / 13) | ≈ 7 GiB |
+| `nighthawk88d` | 88 | whole lattice, 32 sites disabled (17, 55, 62 + 29 corners); every row and column one run; ring seams | 114 sites, lrc 4 lrr 5 | 28 / 23 / 25 / 27 | 11 | 108 / 42 / 0 | 42 (11 / 11 / 10 / 10) | ≈ 5.3 GiB |
+| `nighthawk88e` | 88 | as 88d, seams moved by `layoutsearch` | 114 sites, lrc 4 lrr 5 | 25 / 28 / 25 / 25 | 11 | 112 / 36 / 0 | 36 (8 / 9 / 10 / 9) | ≈ 4.8 GiB |
+| `nighthawk61r2` | 61 | the release's own qubits: identical mirror circuits, angles, inputs | 77 sites, lrc 5 lrr 6 | 35 / 34 (34 / 33 without error detection) | 6 (proven minimum, balanced) | 83 / 19 / 0 | 19 | 384 GiB (192) |
+| `nighthawk61w` | 61 | rows 0–10 × cols 2–7 minus 17, 52, 55, 57, 62: a 3-qubit waist on row 5 | 75 sites, lrc 8 lrr 4 | 33 / 33 | 3 | 93 / 7 / 0 | 7 | 128 GiB |
+| `nighthawk2p28` … `nighthawk2p57` | 28–57 | the release's first n qubits | §6.9 | §6.9 | 3–5 | §6.9 | 11–18 | 2 MiB – 64 GiB |
+
+The 88-qubit, 61-qubit and ladder registers were found with `layoutsearch`. In `nighthawk88d` all four patches meet at broken qubit 55. Without the one-run-per-row constraint the optimum is four patches joined by three single qubits: nearly independent circuits.
+
+### 2.4 Dan Strano's ACE XEB calculator
+
+The calculator sheet of Dan Strano's ACE spreadsheet predicts XEB from three counts and the depth. It was fitted on `nn_qab` circuits of 10–27 qubits with 2–3 patches (PyQrack 2.28.2, error detection on, torus, SDRP off):
+
+```
+x       = (bulk / (boundary · patches))^(2/3)
+XEB(12) = tanh(0.1653638846 · x − 0.0378757892)
+XEB(d)  = XEB(12) ^ ((d / 12)^1.60569)
+```
+
+The depth exponent p = 1.60569 is the "gain" exponent his zero-noise extrapolation needs (`qem/richardson_nn_hamming_weight.py`): unitary folding by λ multiplies depth by λ, so the Richardson fit is done in λ^p. `danmodel` reproduces his worked example exactly (52 bulk, 7 boundary, 2 patches, d = 36 → 0.0019774).
+
+### 2.5 Relation to other approximate methods
+
+Throughout, the figure compared with the device is a per-cycle decay b = −d ln F / dd, as in matching a truncated simulation's error per gate to a device [[11]](#ref-11). The exact alternative to ACE's seams is Schrödinger–Feynman path summation across a cut, whose cost scales with the fidelity kept [[12]](#ref-12). Two CZs cross the best bipartition of this lattice per cycle, so paths grow as 2^(2d): a shallow-depth reference only.
+
+---
+
+## 3. Commands
+
+### 3.1 `verify`, `selftest`, `hwxeb`, `aceplan`, `seamgap`
+
+`verify` rebuilds every circuit as `rcs/circuits.py` does: SplitMix64 hash of (seed, instance, cycle, qubit, k) → (φ, θ, λ); seeds 2025 + k·1000003 (full, patched) and 2025 with instance k (mirror); all families and partitions, full circuits at d = 4, 8, …, 40. Angles are compared modulo 2π within `--tol` (1e-9 rad) and CZ counts against `manifest.json`. It exits 0 only if every circuit is identical.
+
+| selftest | Check | Pass |
 |---|---|---|
 | 1 | angle hash + pseudo-patch rotation vs `mirror/d08_instance1.qasm` | identical |
 | 2 | `u_angles` → Qrack `u` equals the Haar matrix | overlap within 1e-5 of 1 |
-| 3 | exact mirror, first `--n` qubits, d = 12, all 10 inputs | \|1 − F\| < 1e-4 |
-| 4 | Pauli-frame twirl is an identity (exact backend) | \|1 − F\| < 1e-4 |
-| 5 | PyQrack patch ideal XEB vs the release (Aer, double) | max diff < 1e-3 |
+| 3 | exact mirror, first `--n` qubits, d = 12, 10 inputs | \|1 − F\| < 1e-4 |
+| 4 | twirl is an identity (exact) | \|1 − F\| < 1e-4 |
+| 5 | PyQrack patch ideal XEB vs the release | max diff < 1e-3 |
 | 6 | Eq. (1)–(2) on the hardware counts vs the release | within 0.05 σ |
 | 7 | ideal samples score F = 1 | within 4 σ |
-| 8 | ACE register geometry | grid size, `is_torus`, nearest-neighbour couplers |
-| 9 | `--register` recipe applied to the release's own register | inputs and K = 3, 4 partitions identical to `layout.json` |
-| 10 | `layoutsearch`'s joint model held to the release's sites (75 sites, lrc 4 lrr 5, torus) against the `exact` placement engine | same number of boundary qubits, no coupler between patches (needs OR-Tools; ≈ 1 min) |
+| 8 | ACE register geometry | grid, torus, nearest-neighbour couplers |
+| 9 | `--register` recipe on the release's own register | inputs and partitions identical |
+| 10 | `layoutsearch` joint model vs the exact engine, release register, 75 sites | same boundary count, no cross coupler |
 
-### 6.3 `hwxeb` — the paper's numbers with PyQrack as reference
+| Command | Does |
+|---|---|
+| `hwxeb` | ideal patch distributions with `QrackSimulator` (renormalised in float64, cacheable with `--cache`), Eq. (1)–(2) per (K, d) next to the release's values, mirror refit, F(36), error per qubit per cycle |
+| `aceplan` | every distinct ACE layout of the first `--n` qubits (`--torus any\|true`), with cross and seam couplers, seam qubits, widths, worst-case memory; `--tiling` scores after tiling, `--max-width W` marks `run --ace-max-width W`'s pick |
+| `seamgap` | NumPy only: CZ counts per family and depth, the fit at d = 36 and at the gate-count-equivalent depth, corrections for missing CZs, ln F = a + β·cycles + γ·CZ, K = 3 vs K = 4 ratio and its ε_CZ, per-cycle error budget |
 
-Loads the measured `ibm_phoenix` bitstrings, computes every patch's ideal distribution with `QrackSimulator` (renormalised in float64, also when read from `--cache`), and applies Eq. (1)–(2); per (K, d) it prints the inverse-variance fidelity and mean collision ratio next to the release's, then refits the mirror survival data and reports F(36) and error per qubit per cycle. PyQrack's float32 builds are expected to agree with the release to about 1e-5 in ideal XEB.
-
-### 6.4 `aceplan` — ACE layouts of the register
-
-Enumerates every distinct ACE layout of the register holding the first `--n` logical qubits (all `lrc`, `lrr`; non-torus by default, `--torus any|true` to include torus layouts) and prints, per layout, the couplers across simulators, couplers on a seam, seam qubits, simulator count, simulator widths and worst-case dense memory, ranked by couplers across simulators. `--tiling` scores each layout after tiling (version 3; about 1–2 s per layout); `--max-width W` marks the layout `run --ace-max-width W` would pick.
-
-### 6.5 `run` — clean-qubit emulation
-
-**Families** (`--families`, comma list):
-
-| Family | What runs | Score |
-|---|---|---|
-| `mirror` | pseudo-patched U(d/2) then exact inverse, ten released inputs, shots split across inputs (and twirls on ACE) | survival, binomial σ |
-| `patched` | K-patch circuit on the 61-qubit register (n = 61 only) | Eq. (1)–(2), delta-method σ |
-| `full` | unpatched forward circuit, release seed, `--pubs` pubs | none (stored only) |
-| `fxeb` | unpatched forward circuit on the first n qubits, release seed per instance | forward XEB vs exact reference (Sec. 2.5); also linear XEB, HOG fraction, ideal XEB |
-
-**Backend and layout flags:**
+### 3.2 `run`
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--backend` | `ace` | `exact` or `ace` |
-| `--lrc`, `--lrr` | `4`, `4` | ACE `long_range_columns`, `long_range_rows`, or `auto` (two-patch rule of `nn_qab.py`) |
-| `--ace-torus` | off | `is_torus=True` (the device patch is not a torus) |
+| `--families` | `mirror,patched` | comma list of §2.1 families |
+| `--register` | `release` | a register of §2.3 with its ACE preset |
+| `--theta` | `haar` | `nnqab`: variant ensemble |
+| `--depths`, `--instances`, `--K`, `--partitions` | release's, 3, 3 4, all 5 | scope |
+| `--sizes`, `--n` | — | first-n truncations, e.g. `27-34`, `20,27-36` |
+| `--shots` | `paper` | Appendix-D budgets for mirror and patched, 4096 for `fxeb`, 100 000 per pub for `full`; or an integer |
+| `--twirls`, `--exact-probs`, `--pubs`, `--cache` | 64, on | twirls per input on ACE; exact patch probabilities; full-circuit pubs; patch cache |
+| `--mirror-estimator` | `shots` | `prob`: §2.1 |
+| `--lrc`, `--lrr`, `--ace-torus` | 4, 4, off | ACE layout; `auto` = `nn_qab.py`'s two-patch rule |
 | `--geometry` | `manual` | `nnqab`: rows whole, two patches, highest bulk-to-boundary ratio, torus |
-| `--ace-max-width W` | none | fewest couplers across simulators with every internal simulator ≤ W qubits |
-| `--ace-torus-search` | `flat` | layouts `--ace-max-width` may use: `flat`, `torus`, `any` |
-| `--ace-layout` | `grid` | `grid` (8×8 for every n) or `strip` (smallest R×8 strip holding the first n) |
-| `--ace-tiling` | off | place logical qubits as compact tiles (Sec. 2.6) |
-| `--ace-transpile` | off | place logical qubits on a register and coupling map of your choosing (Sec. 2.8); needs Qiskit |
-| `--ace-width W`, `--ace-exclude a,b,…` | — | with `--ace-transpile`: ACE register size in sites, and sites removed from its coupling map |
-| `--transpile-engine` | `exact` | `exact`: CP-SAT placement, fewest seam qubits, then even patches, then fewest seam couplers (needs OR-Tools); `anneal`: the tiling cost annealed on that register; `vf2`: Qiskit's VF2Layout as is |
-| `--transpile-allow-cross` | off | accept placements in which a coupler joins two patches that share no seam site (refused by default) |
-| `--transpile-seed`, `--transpile-trials`, `--transpile-calls` | 0, 2000, 2·10⁶ | VF2Layout seed, layouts scored, isomorphism-search bound |
-| `--ace-tiling-version` | `3` | `2` reproduces earlier tiled runs and their config tags |
-| `--ace-gpu`, `--ace-host-pointer` | off | ACE on OpenCL; keep simulator states in host memory. See Sec. 8.3 |
-| `--ace-boundary-rep`, `--no-ace-error-detection`, `--no-ace-crossbars` | Qrack defaults (off, on, on) | ACE's boundary repetition code, seam error detection (detect-and-post-select) and crossbar simulator; non-default settings enter the config tag and the record |
-| `--theta` | `haar` | `nnqab`: sin θ uniform — a variant ensemble, not the released circuits |
-| `--register` | `release` | a larger Nighthawk sub-register with its ACE preset (Sec. 2.9); mirror only |
-| `--transpile-max-width W`, `--transpile-max-wide N` | off | `exact` engine: patch width cap incl. the ancilla, and how many patches may reach it (Sec. 2.9) |
-| `--mirror-estimator` | `shots` | `prob`: per circuit run, the probability ACE returns the prepared string (chain rule with forced measurement), so there is no shot noise and no shot floor; `shots`: sample with `measure_shots` at the paper's budgets |
-| `--ace-gpu-shots` | off | with `--ace-gpu`: draw shots on the GPU instead of a CPU copy of the final state |
-| `--gtt GB` (`-gtt`), `--vram-gb` | off, 8 | with `--ace-gpu`: VRAM oversubscription, up to GB of host memory per worker mapped by the GPU (Sec. 8.8) |
-| `--swap-gb GB` | off | CPU runs larger than RAM: the memory ledger counts up to GB of free swap, the preflight plans RAM + swap (compose transient included), Qrack's CPU qubit ceilings are raised (Sec. 9.11) |
+| `--ace-max-width W`, `--ace-torus-search`, `--ace-layout` | —, `flat`, `grid` | fewest cross couplers with every simulator ≤ W; layouts it may use; `strip` = smallest R × 8 strip |
+| `--ace-tiling`, `--ace-tiling-version` | off, 3 | §2.2 |
+| `--ace-transpile`, `--ace-width`, `--ace-exclude`, `--transpile-engine` | off, —, —, `exact` | §2.2 |
+| `--transpile-allow-cross`, `--transpile-max-width`, `--transpile-max-wide` | off | §2.2 |
+| `--transpile-seed`, `--transpile-trials`, `--transpile-calls` | 0, 2000, 2·10⁶ | VF2 seed and bounds |
+| `--ace-boundary-rep`, `--no-ace-error-detection`, `--no-ace-crossbars` | off, on, on | ACE switches; non-defaults enter the config tag |
+| `--variants SPEC …` | — | several ACE configurations scored against one exact reference (below) |
+| `--cpu`, `--ace-gpu`, `--ref-gpu`, `--ace-gpu-shots`, `--ace-host-pointer` | — | engine placement (§5.2) |
+| `--gtt GB`, `--vram-gb` | off, 8 | VRAM oversubscription (§5.4) |
+| `--swap-gb GB` | off | CPU runs larger than RAM (§5.5) |
+| `--gpus`, `--per-gpu` | —, 3 | `len(gpus) × per_gpu` workers through a claim-file queue |
+| `--stagger`, `--init-gap` | 20 s, 10 s | spacing of worker starts and OpenCL inits |
+| `--max-attempts`, `--retry-failed` | 2 | take-overs of a dead worker's point; clear failed marks |
+| `--max-rss-gb` | off | per-worker memory cap: the point is marked failed |
+| `--mem-budget-gb`, `--mem-ledger` | off, `/tmp/nighthawk_mem_ledger` | machine-wide budget shared by all runs (§5.1) |
+| `--order` | `deep` | `shallow`: cheapest points first |
+| `--gpu-isolation` | `auto` | every GPU worker sees one OpenCL device; required for clvk |
+| `--status`, `--summarize`, `--pack` | — | point list with progress and ETA; summary tables; rebuild release-format files |
 
-**Sampling and scope:** `--depths`, `--K`, `--instances` (3), `--partitions`, `--shots` (`paper` = Appendix-D budgets for mirror/patched, 4096 for `fxeb`, 100 000 per pub for `full`; or an integer), `--twirls` (64), `--exact-probs`, `--sizes` (`27-34`, `20,27-36`), `--n`, `--pubs`, `--cache`, `--cpu`, `--ref-gpu` (exact `fxeb` reference on OpenCL).
+**Shared reference.** `--variants 4/4:t3 4/4:t2 …` samples each `fxeb` point with every listed configuration and scores all of them against one exact reference. The tokens are lrc/lrr, then `torus`, `untiled`, `tiled`, `t2`, `t3`, `rep`, `noed`, `noxbar`, `tx` (exact), `txa` (anneal), `vf2`, `w<N>`, `ex<a+b+…>`, `xok`. Records stay per variant.
 
-**Shared reference.** `--variants 4/4:t3 4/4:t2 4/3:t3 …` (lrc/lrr, then `torus`, `untiled`, `tiled`, `t2`, `t3`, the ACE options `rep`, `noed`, `noxbar`, and the transpile placements `tx` (exact), `txa` (anneal) or `vf2`, with `w<N>`, `ex<a+b+…>` and `xok` for `--transpile-allow-cross`) samples each `fxeb` point with every listed ACE configuration and scores all of them against **one** exact reference. Records, bitstrings and config tags stay per variant; only the claims are shared under a group tag. At n = 33–34, where the reference dominates the cost, this compares configurations for the price of one.
+**Resumability.** A configuration is tagged `<backend>-<sha1[:8]>` over backend, shots, twirls, ACE parameters, tiling version and exact-probs mode, not the register size, so sweeps extend and resume per point. `--gtt` and `--swap-gb` do not change the tag. Bitstrings are written before the JSONL record, and the claim is marked done last. To drop a pending point, write `failed: …` into its claim file under `<out>_shots/<cfg>/claims/`.
 
-**Workers and memory.**
+### 3.3 `danmodel`
 
-| Flag | Default | Meaning |
+| Mode | Command | Output |
 |---|---|---|
-| `--gpus`, `--per-gpu` | none, `3` | launch `len(gpus) × per_gpu` workers through a claim-file queue |
-| `--stagger`, `--init-gap` | `20`, `10` s | spacing of worker starts and of OpenCL initialisations |
-| `--max-attempts`, `--retry-failed` | `2` | take-overs of a point whose worker died; clear failed marks |
-| `--max-rss-gb` | off | per-worker resident-memory cap (watchdog marks the point failed and exits) |
-| `--mem-budget-gb` | off | machine-wide budget shared by all workers and runs using the same ledger |
-| `--mem-ledger` | `/tmp/nighthawk_mem_ledger` | reservation directory |
-| `--order` | `deep` | `deep`: most expensive points first (no lone tail); `shallow`: cheapest first, for early results |
-| `--status` | — | list every point of the configuration (done with F, running with progress and ETA, failed, pending); reads files only, safe while a run is going; give the run's own flags |
-| `--gpu-isolation` | `auto` | every GPU worker sees exactly one OpenCL device. Required for clvk (one device per context): its workers get only clvk's ICD and the Vulkan device-select layer pinned to their card's PCI address |
+| prediction | `danmodel [--registers …] [--depths …]` | bulk, boundary, patches, x and predicted XEB per register and depth; default the two-patch ladder, d = 4 … 36 |
+| comparison | `danmodel --in run.jsonl …` | every measured mirror or `fxeb` point next to the prediction at its own seam and patch counts; plain mean over instances, worker files included |
 
-A point marked failed (twice-died workers, or an exception) is skipped by every worker; `--retry-failed` clears the marks once, at launcher start. To drop pending points deliberately, write `failed: …` into their claim files under `<out>_shots/<cfg>/claims/`. With `--mirror-estimator prob`, a forced outcome whose probability is below 10⁻⁶ counts the run as failed (survival 0) and rebuilds the backend; the number of such runs is recorded (`prob_errors`).
+Both modes add `ibm_phoenix`'s mirror survival at n = 61 (`--no-device` to omit) and write CSV with `--csv`.
 
-With a budget, a worker takes a point only if its estimated peak fits both the budget (all reservations plus this point) and `MemAvailable` after the not-yet-allocated part of other reservations; otherwise it takes a smaller point or waits. The estimate is 1 GiB of overhead, the engines' worst case, and for `fxeb` the reference at 1.5 × 2ⁿ amplitudes (state + probability buffer). For fp32 builds this is 12 · 2ⁿ bytes: 1.5 GiB at n = 27, 48 GiB at n = 32, 193 GiB at n = 34. The ledger tracks host RAM only: with `--ref-gpu` or `--ace-gpu`, size `--per-gpu` to the card's memory yourself (≈ 8 · 2ⁿ bytes per reference while it is built, ≈ 0.15 GiB of ACE engines and ≈ 0.3 GiB of driver context per worker).
+### 3.4 `layoutsearch`
 
-**Resumability.** Every configuration is tagged `<backend>-<sha1[:8]>` over backend, shots, twirls, ACE parameters, tiling version and exact-probs mode, but *not* the register size, so a sweep can be extended and resumes per (n, point). Bitstrings are written atomically *before* the JSONL record, and the claim is marked done last.
+One CP-SAT model chooses n sites of the 12 × 10 lattice and an ACE group (a patch's bulk or a seam) for each:
 
-### 6.6 `seamgap` — data-only analysis
-
-NumPy only: CZ counts per family and depth, the paper's fit at d = 36 and at the gate-count-equivalent depth, the fit corrected for missing CZs at three Pauli error rates, a weighted regression ln F = a + β·cycles + γ·CZ, the K=3 vs K=4 ratio and its implied ε_CZ, and a per-cycle error budget.
-
-### 6.7 `layoutsearch` — iterate to a register and placement
-
-`layoutsearch` finds a register (which sites of the 12 × 10 lattice to use) and its ACE placement (which patch bulk or seam each site goes to) in **one** CP-SAT model, then checks every candidate independently and ranks the candidates by short mirror runs.
-
-1. **Propose.** For each ACE geometry, the model chooses n sites and a group per site, subject to the group capacities, ACE's coupling map (every lattice coupler between two used sites must join groups that share a simulator), the patch width caps, connectivity of the register, and the region rule. The objective is lexicographic, set by `--objective` (default: fewest boundary qubits, then fewest couplers through a boundary, then most couplers kept). `--candidates K` repeats the solve with no-good cuts, so each later layout differs from every earlier one in at least `--diversity` boundary sites; `--hint REGISTER` warm-starts the first solve.
-2. **Verify.** Each candidate is written as a register entry (window, dropped device sites, ACE site list) and rebuilt through the normal code path (`RegisterLayout` with the release's `rect_matchings`/`remove_qubits`/`make_patches`): no two qubits on one site, no coupler between patches, widths within the caps, counts consistent. Failed candidates are not tested.
-3. **Test.** Every verified candidate runs as `run --register <candidate> --mirror-estimator prob` at `--test-depths` with `--test-instances` × `--test-twirls` × 10 inputs, in `--test-jobs` parallel processes. The score is the geometric mean, over the test depths, of the plain-mean survival over instances.
-4. **Select.** Candidates are ranked by score (by the CP-SAT objective when `--test-depths` is empty); `--save-best NAME` writes the winner to `nighthawk_registers.json` next to the script, after which `run --register NAME` uses it with its stored placement.
+| Step | |
+|---|---|
+| propose | group capacities, ACE's coupling map, width caps, connectivity, region rule; lexicographic `--objective`; `--candidates` with no-good cuts at `--diversity` boundary sites; `--hint` warm start |
+| verify | each candidate rebuilt through `RegisterLayout`: one qubit per site, no cross coupler, widths within caps |
+| test | `run --register <candidate> --mirror-estimator prob` at `--test-depths`; score = geometric mean of the plain-mean survival |
+| select | ranked by score (by the objective without tests); `--save-best NAME` writes `nighthawk_registers.json` |
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--n` | required | logical qubits |
-| `--geometries` | `auto` | `SIZE:LRC:LRR[:t]` list, or `auto`: every distinct ACE geometry of n … n+40 sites with `--patches` patches (`--torus flat\|torus\|any`) that can hold n qubits under the cap; `--max-geometries` (4) with the most bulk capacity |
-| `--max-width`, `--max-wide` | 28, 1 | patch width cap incl. the ancilla, and how many patches may reach it |
-| `--region` | `rect` | `rect`: a rectangle chosen by the solver, holes only at broken qubits plus up to `--trim` sites off its border; `convex`: every row and column one unbroken run; `free`: any connected set; `fixed`: `--window`'s sites or `--fixed-register`'s (placement only) |
-| `--broken` | `disable` | the broken qubits 17, 55, 62 stay unused (as on `ibm_phoenix`), or `use` |
-| `--window`, `--min-boundary` | — | bound the region to `rows,cols` (e.g. `0-9,1-9`); floor on boundary qubits |
-| `--objective` | `seam,bcz,couplers` | lexicographic order from `seam`, `bcz` (couplers through a boundary), `cz` (CZs through a boundary in the circuits, needs `--cz-weights`), `couplers` (kept), `balance` (widest − narrowest patch) |
-| `--cz-weights` | — | `mirror[:D,...]`, with `--region fixed --fixed-register`: weight each coupler by the CZs the register's mirror circuits apply on it (forward halves, summed over depths D, default 4–20); `cz` replaces `bcz` in the objective (Sec. 9.11) |
-| `--candidates`, `--diversity`, `--hint` | 2, 4, — | layouts per geometry, minimum difference in boundary sites, warm start |
-| `--cpsat-time`, `--workers` | 300 s, cores ≤ 16 | per solve; a FEASIBLE result is the best found, not a proven optimum |
-| `--test-depths`, `--test-instances`, `--test-twirls`, `--test-jobs` | `4 8`, 1, 4, 1 | the circuit test; empty `--test-depths` skips it |
-| `--theta`, `--cpu` | `nnqab`, off | test ensemble; CPU tests hide OpenCL (`OCL_ICD_VENDORS`) |
-| `--outdir`, `--prefix`, `--save-best` | `layoutsearch`, `ls<n>`, — | candidates (`registers.json`), test records, `layoutsearch.jsonl` log; final register name |
+| `--geometries`, `--patches`, `--torus`, `--max-geometries` | `auto`, —, `flat`, 4 | `SIZE:LRC:LRR[:t]`, or every geometry of n … n+40 sites with that many patches |
+| `--max-width`, `--max-wide` | 28, 1 | patch width cap incl. ancilla, patches allowed at the cap |
+| `--region` | `rect` | `rect` (holes only at broken qubits plus `--trim` border sites), `convex`, `free`, `fixed` |
+| `--fixed-register`, `--window` | — | with `fixed`: a register's sites, `release`, or `release:N` (the release's first N qubits) |
+| `--broken`, `--min-boundary` | `disable`, 0 | broken qubits 17, 55, 62 unused or used; floor on boundary qubits |
+| `--objective` | `seam,bcz,couplers` | order from `seam` (boundary qubits), `bcz` (couplers through a boundary), `cz` (circuit CZs through a boundary), `couplers` (kept), `balance` |
+| `--cz-weights` | — | `mirror[:D,…]`: weight couplers by the CZs the register's mirror circuits apply on them (depths 4–20 by default); `cz` replaces `bcz` |
+| `--candidates`, `--diversity`, `--hint` | 2, 4, — | |
+| `--cpsat-time`, `--workers` | 300 s, ≤ 16 | a FEASIBLE result is the best found, not proven |
+| `--test-depths`, `--test-instances`, `--test-twirls`, `--test-jobs`, `--theta`, `--cpu` | `4 8`, 1, 4, 1, `nnqab`, off | the circuit test; empty `--test-depths` skips it |
+| `--gtt`, `--vram-gb` | — | judge candidates by the die split (§5.4) |
+| `--outdir`, `--prefix`, `--save-best` | `layoutsearch`, `ls<n>`, — | outputs |
 
-**Region choice matters more than the solver.** With few qubits on a large lattice, `convex` and `free` regions let the solver join patches through one- or two-site necks: at n = 49 `convex` returned a two-patch register with **one** boundary qubit (2 couplers through it), i.e. two nearly independent circuits, which survive a mirror trivially. `rect` (default) forbids that; with `--trim` it may still remove border sites where a seam meets the edge, which is the intended use of disabled sites on a seam (Sec. 2.9). Use `--min-boundary` as an extra floor when comparing very different shapes.
+`convex` and `free` regions let the solver join patches through one- or two-site necks, i.e. nearly separate circuits that survive a mirror trivially. `rect` forbids necks except where trimmed border sites meet a seam. The solver also puts everything in one patch when the width cap allows it: cap the widest patch below n.
 
-**Verification of the tool** (CPU, 2-core container unless noted):
-
-| Check | Result |
+| Tool check (CPU) | Result |
 |---|---|
-| Release register held fixed, 75 sites lrc 4 lrr 5 torus, against the `exact` engine on the same inputs (selftest [10]) | both 8 boundary qubits, proven optimal in ≈ 30 s each; the joint model needs 26 couplers through a boundary where the `exact` engine (which ranks patch balance second) uses 29 |
-| n = 88, 114 sites, `convex`, warm start from `nighthawk88d` | 11 boundary qubits kept, couplers through a boundary 42 → 36 (`nighthawk88e`); a second, diverse candidate: 13 / 38 |
-| n = 49, 55-site two-patch against 75-site three-patch geometry, `rect --trim 2`, test d = 4, 6 (1 instance × 20 runs) | two patches: 3 boundary qubits (the seam runs through broken qubit 55, with the two trimmed sites on the same row), score 0.94; three patches: 6 boundary qubits, score 0.59; reproduces the earlier 49-qubit result (Sec. 9.9) |
-| `auto` geometries, n = 49, two patches | 3 geometries enumerated and solved in ≈ 1 min |
-| saved register round trip (`--save-best`, then `run --register`) | stored placement applied; d = 4, 6 survival identical to the test (1.000, 0.8867) |
-| existing configurations | config tags unchanged (`ace-4b19e847`, `ace-96ac82e2`); selftest ALL OK |
+| release register, 75 sites, against the exact engine (selftest [10]) | both 8 boundary qubits, proven optimal, ≈ 30 s; 26 vs 29 couplers through a boundary |
+| n = 88, `convex`, warm start from `nighthawk88d` | 11 boundary qubits kept, 42 → 36 couplers through a boundary (`nighthawk88e`) |
+| n = 49, two vs three patches, `rect --trim 2`, d = 4, 6 | 3 vs 6 boundary qubits, score 0.94 vs 0.59 |
+| `--save-best` round trip | stored placement applied, survival identical (1.000, 0.8867) |
+| balanced two-way split of the release register | 6 boundary qubits proven minimal; 128 circuit CZs through the boundary over d = 4–20 (196 for three patches) |
 
-```bash
-# from the best known 88-qubit layout: three diverse candidates per geometry, tested at d = 4 and 8
-python3 nighthawk_qrack.py layoutsearch --n 88 --geometries 114:4:5 102:4:5 --region convex \
-    --hint nighthawk88e --candidates 3 --cpsat-time 600 --test-depths 4 8 --test-jobs 3 --cpu \
-    --save-best nighthawk88x
-# a fresh 68-qubit three-patch search on rectangles, geometries enumerated
-python3 nighthawk_qrack.py layoutsearch --n 68 --patches 3 --region rect --trim 3 \
-    --cpsat-time 300 --test-depths 4 8 --test-instances 2 --cpu
-```
+### 3.5 `nighthawk_cloverfield.py`
 
-### 6.8 `nighthawk_cloverfield.py` — several chips woven into one virtual chip
-
-The cloverleaf emulates one Nighthawk chip as ACE patches joined by seams. The **cloverfield** puts two or more of those chips side by side and connects them with inter-chip couplers, as IBM plans to link Nighthawk chips with l-couplers: one register, one circuit, one mirror survival. `nighthawk_cloverfield.py` sits next to `nighthawk_qrack.py` and imports it; the chips, circuits, estimator and ACE presets are nighthawk_qrack's own.
+The cloverfield puts two or more chips side by side, joined by inter-chip couplers, as IBM plans with l-couplers: one register, one circuit, one survival.
 
 | Part | Role |
 |---|---|
-| chip worker | one process per chip, isolated to one OpenCL device (or the CPU) exactly as nighthawk_qrack's workers are; holds that chip's simulator (its register's ACE preset, or an exact `QrackSimulator` for small chips) and never sees another chip; executes gate batches and answers marginal and probability queries over a pipe |
-| loom | the coordinator, building no simulator itself (OpenCL hidden). Generates the whole field's circuit with the release's recipe on the global register (colours A–D, the K = 3 pseudo-patch rotation, the input strings), cuts each cycle into per-chip batches, and does **all IO between chips** |
-| woven CZ | `--loom ghost` (default): as ACE replicates a boundary qubit in both patches next to a seam, each chip also holds a **ghost** of every partner its links touch, on a free ACE site coupled to the anchor. Single-qubit gates and twirl Paulis go to every copy of a qubit; the link CZ is applied exactly on both chips (a with ghost(b), ghost(a) with b), so entanglement crosses the link; the partner's own CZs with its chip neighbours reach the ghost as the mean-field phase π·P(1) of that neighbour. Links are placed only where both chips have ghost room under their width caps (`--ghost-max-width`, default the register's own caps). `--loom mean`: no ghosts; the mean-field decoupling exp(iπ n_a n_b) ≈ exp(iπ(n_a⟨n_b⟩ + ⟨n_a⟩n_b)) on both sides, chips in a product state. `--loom sample`: Z kicks drawn from P(1). All exact when a partner is in a basis state. CZ layers are diagonal, so marginals read before a layer hold for all of it: one round trip per chip per layer that needs one, chips in parallel. Records carry `ghost_drift`, the mean \|P(1) of a ghost − P(1) of its real qubit\| |
-| estimator | nighthawk_qrack's `prob` estimator per chip; the field's survival is the product of the chips' probabilities of their part of the prepared string |
+| chip worker | one isolated process per chip and device; its register's ACE preset (or an exact simulator); executes gate batches and answers marginal and probability queries over a pipe |
+| loom | the coordinator; builds no simulator (OpenCL hidden); generates the field's circuit by the release's recipe and does all IO between chips; ≈ 45 MiB |
+| `--loom ghost` (default) | each chip holds a ghost of every partner its links touch; single-qubit gates and twirls go to every copy; the link CZ is exact on both chips; the partner's other CZs reach the ghost as a mean-field phase π·P(1). Records carry `ghost_drift` |
+| `--loom mean`, `--loom sample` | mean-field phases only (chips in a product state); Z kicks drawn from P(1) |
+| estimator | `prob` per chip; the field's survival is the product |
 
-**Field options** (shared by every subcommand): `--chips` (`nighthawk88e*2`, `release,nighthawk88d`, `rect:r0-r1,c0-c1` …; any `--register` name, layoutsearch-saved ones included), `--arrangement RxC`, `--links K|all` per neighbouring chip pair (facing border sites, evenly spaced, each on a CZ colour free at both ends, so a cycle still applies one colour and every qubit meets at most one CZ per cycle; `--link-rows`/`--link-cols` by hand), `--loom ghost|mean|sample`, `--ghost-max-width`, `--gtt GB` / `--vram-gb` (Sec. 8.8), `--backend ace|exact`, `--chip-ace` for rect chips, `--cpu`/`--ace-gpu`, `--gpus`, `--chips-per-gpu` (default 1: one chip per 8 GB die), `--theta`, `--twirls`.
+Options: `--chips` (`nighthawk88e*2`, `release,nighthawk88d`, `rect:r0-r1,c0-c1`, any register), `--arrangement RxC`, `--links K|all`, `--link-rows`, `--link-cols`, `--loom`, `--ghost-max-width`, `--gtt`, `--vram-gb`, `--backend`, `--chip-ace`, `--cpu`, `--ace-gpu`, `--gpus`, `--chips-per-gpu`, `--theta`, `--twirls`. Subcommands: `plan` (links, widths, memory; `--png`), `run`, `linksearch` (survival against link count), `layoutsearch` (passed to nighthawk_qrack), `selftest`.
 
-| Subcommand | |
-|---|---|
-| `plan` | chips, qubits, intra-chip and link CZs per colour, the links, each chip's patch widths and peak memory, devices per loom; `--png` draws the field |
-| `run` | mirror points (`--depths`, `--instances`), chip workers per loom, `--parallel` looms at once, resumable JSONL in nighthawk_qrack's mirror record format (nighthawk_graph.py views 1–2 read it), `--status`, `--summarize`, `--retry-failed` |
-| `linksearch` | the same chips at several link counts (`--link-counts 0 2 4 all`): survival against links |
-| `layoutsearch` | nighthawk_qrack's chip-level search, unchanged (chips are cloverleaves; the loom does not change them) |
-| `selftest` | below |
-
-**Verification** (`selftest`, CPU):
-
-| # | Check | Result |
+| selftest | Check | Result |
 |---|---|---|
-| 1 | field `nighthawk88e*2`, 4 links: every colour a matching, inputs and K = 3 cuts deterministic | 176 qubits, 4 links, 300 couplers |
-| 2a | one chip, no links: the loom's op stream against nighthawk_qrack's own engine calls (d = 4, 20 runs; exact, RNG-free) | 20 618 ops, identical |
-| 2b | the same point through a worker process against nighthawk_qrack in-process | 0.375971 vs 0.375882 (Qrack's own RNG in ACE reset/measurement is unseeded: ≈ 10⁻⁴ between processes) |
-| 3 | woven CZ on \|+⟩ against \|0⟩, \|1⟩, \|+⟩ (exact ⟨X⟩ +1, −1, 0) | +1, −1, 0 |
-| 4 | CZ·CZ = I across a link on \|+⟩\|+⟩ (exact ⟨X⟩ = +1) | ghost +1; mean-field −1 (two mean-field "CZ"s give \|−⟩\|−⟩) |
-| 5 | loom error alone: two exact 9-qubit chips, 2 links, mirror survival at d = 8 / 12 / 16 | no links 1 / 1 / 1; mean-field 0.773 / 0.773 / 0.067; **ghost 1.000 / 0.989 / 0.656** |
-
-First field runs (CPU, `nnqab`, 2 twirls × 10 inputs per point, 3 instances; plain means): two `nighthawk88e` chips, 176 qubits. With ghost room under the chips' caps (28, one patch at 28) three of the requested four links fit, each chip carrying 3 ghosts at patch widths 25/28/27/26 (peak ≈ 5.8 GiB, one chip per 8 GB die). On those same three links: ghost 0.079 / 0.017 against mean-field 0.056 / 0.015 at d = 4 / 6 (instance scatter is large at d = 6). The field's survival includes both chips' own seam losses, which dominate at these depths; the loom's own share is what selftest [5] isolates. Each link count rebuilds the global circuit (the K = 3 cuts are computed on the field's coupling graph), as a differently linked device would.
-
-```bash
-python3 nighthawk_cloverfield.py plan --chips nighthawk88e*2 --links 4 --png field.png
-python3 nighthawk_cloverfield.py run  --chips nighthawk88e*2 --links 4 --theta nnqab --depths 4 6 8 10 12 \
-        --ace-gpu --gpus 0-5 --out field88e2.jsonl        # 3 looms x 2 chips on six dies
-python3 nighthawk_cloverfield.py run  --chips nighthawk88e*2 --links 4 --theta nnqab --depths 4 6 8 10 12 \
-        --out field88e2.jsonl --status --summarize
-python3 nighthawk_cloverfield.py linksearch --chips nighthawk88e*2 --link-counts 0 2 4 all --theta nnqab \
-        --depths 4 8 --twirls 4 --cpu
-```
-
-The ghost link carries entanglement across the link but approximates the partner's own CZs with its chip neighbours by mean-field phases, the same compromise ACE makes for a boundary replica; `ghost_drift` in each record measures how far the ghosts wander from their real qubits. Larger ghost regions (a ghost of the partner's neighbours as well) would push that approximation one coupler further out, at the cost of more ghost room per link.
+| 1 | field `nighthawk88e*2`, 4 links: colours are matchings, deterministic cuts | 176 qubits, 300 couplers |
+| 2a | one chip, no links: loom op stream vs nighthawk_qrack's own calls | 20 618 ops, identical |
+| 2b | the same through a worker process | 0.375971 vs 0.375882 (Qrack's RNG unseeded) |
+| 3 | woven CZ on \|+⟩ against \|0⟩, \|1⟩, \|+⟩ | ⟨X⟩ = +1, −1, 0 |
+| 4 | CZ·CZ = I across a link | ghost +1; mean-field −1 |
+| 5 | loom error alone: two exact 9-qubit chips, 2 links, d = 8 / 12 / 16 | no links 1 / 1 / 1; mean-field 0.773 / 0.773 / 0.067; ghost 1.000 / 0.989 / 0.656 |
 
 ---
 
-## 7. Outputs
+## 4. Outputs
 
-### 7.1 JSONL record (`run`)
-
-Schematic `fxeb` record from a `--variants` run (values illustrative):
+`fxeb` record from a `--variants` run (values illustrative):
 
 ```json
-{"cfg": "ace-fd29e9a4", "n": 30, "family": "fxeb", "K": 0, "depth": 12, "partition": 0, "instance": 1,
- "seconds": 612.4, "fidelity": 0.0689, "se": 0.0085, "xeb_linear": 0.104, "ideal_xeb": 1.39, "hog": 0.494,
- "shots": 4096, "ace_seconds": 41.3, "ref_seconds": 1142.2, "ref_shared": 2,
- "ace_register": 64, "ace_lrc": 4, "ace_lrr": 4, "ace_torus": false, "ace_widths": [23, 23, 20, 19, 16],
+{"cfg": "ace-fd29e9a4", "n": 30, "family": "fxeb", "depth": 12, "instance": 1, "theta": "haar",
+ "fidelity": 0.0689, "se": 0.0085, "xeb_linear": 0.104, "ideal_xeb": 1.39, "hog": 0.494, "shots": 4096,
+ "ace_seconds": 41.3, "ref_seconds": 1142.2, "ref_shared": 2, "ace_widths": [23, 23, 20, 19, 16],
  "ace_couplers": {"exact": 34, "replica": 13, "cross": 0}, "ace_seam_used": 5, "ace_sims_used": 2,
  "ace_tiling": true, "ace_tiling_version": 3, "ace_map": "…", "shots_file": "…"}
 ```
 
-Every record carries `theta` (`haar` or `nnqab`), the single-qubit ensemble of its circuits. `ace_map` is a hash of the placement; the graph tool uses it to verify recomputed coupler splits. Mirror records carry `hits`, `shots_per_input`; patched records `patch_fidelity`, `patch_ideal_xeb`.
+Mirror records add `survival`, `hits` and `shots_per_input`; patched records add `patch_fidelity` and `patch_ideal_xeb`. `ace_map` hashes the placement. Bitstrings land per point under `<shots-dir>/<cfg>/points/n{n}/` and are merged into the release's own layout under `<cfg>/release/` (`counts/…`, `samples/…`), so BlueQubit's scripts read them unchanged; bit q is logical qubit q.
 
-### 7.2 Bitstrings in the release's own layout
+**Means.** `run --summarize` reports inverse-variance means. These weight each instance by its shot noise, which grows with its own XEB, so they sit below the average over circuits when instances differ. The graph tool and `danmodel` report plain means with the instance-scatter error, which is the quantity to quote.
 
-Per-point files under `<shots-dir>/<cfg>/points/n{n}/` are merged into `<shots-dir>/<cfg>/release/` (`counts/patched_K{K}_d{d}.npz`, `counts/mirror_survival.json`, `counts/mirror_shots_d{dd}.npz`, `samples/full_d{d}.npz`) so BlueQubit's analysis scripts read them unchanged. Truncated registers get an `_n{n}` suffix; bit q is logical qubit q (little-endian).
+| Run (§6.3) | inverse-variance mean | plain mean |
+|---|---|---|
+| tiled, 20 circuits | 0.343 | 0.435 ± 0.037 |
+| untiled, 20 circuits | 0.125 | 0.153 ± 0.014 |
 
-### 7.3 Summary tables (`run --summarize`)
-
-Per n and family: F_sim ± σ (and F_hardware at n = 61); the mirror fit and per-cycle decay b(N) with a non-negative fit b = u·N + v·CZ/cycle extrapolated to N = 61; for `fxeb`, XEB (inverse-variance over instances), linear XEB, HOG, ideal XEB and the device fit at the same depth. With `--variants`, one block per variant.
-
-**Weighting.** The inverse-variance mean weights each instance by its shot-noise 1/σ², and for forward XEB that σ grows with the instance's own XEB and output concentration. When instances differ strongly, the weighted mean is therefore biased low: for the 20-circuit `nn_qab`-ensemble run of Sec. 9.7 it gives 0.343 (tiled) and 0.125 (untiled), against plain means over circuits of 0.435 ± 0.037 and 0.153 ± 0.014. The quantity of interest is the average over circuits, as in `nn_qab`; quote the plain mean with its instance-scatter error (`nighthawk_graph.py --table`, views 8–11).
-
-### 7.4 `nighthawk_graph.py`
-
-With no `--out`, every `*.jsonl` in the working directory is harvested (worker files folded in) and configurations are labelled from their records (`ace 4/4 tiled v3`, `ace 2/7 untiled`, …).
-
-| View | Content |
+| `nighthawk_graph.py` view | Content |
 |---|---|
 | 1–7 | device fidelity, mirror decay, b(N), bitstring diagnostics, release data, run cost |
-| 8 | `fxeb`: XEB vs depth, one panel per n, every configuration |
-| 9 | `fxeb`: XEB vs n, one panel per depth |
-| 10 | `fxeb`: per-cycle decay b(N) per configuration, extrapolated to 61, against the device |
-| 11 | `fxeb`: XEB at one (n, d) against exact/replica/cross couplers, seam qubits used, simulators used and widest simulator, with rank correlations |
+| 8, 9 | `fxeb` XEB against depth (per n) and against n (per depth) |
+| 10 | per-cycle decay b(N) per configuration, extrapolated to 61 |
+| 11 | XEB at one (n, d) against coupler classes, seam qubits, simulators, widest simulator, with rank correlations |
 
-Views 8–11 and the `--table` comparison show one single-qubit ensemble at a time (`--theta haar|nnqab|all`, default `haar`), since XEB values of different ensembles are not comparable; configurations of the `nn_qab` ensemble are labelled `[θ nnqab]`. Records written before the `theta` field existed are classified by their ideal XEB at d ≥ 8 (> 5 for the concentrated `nn_qab` outputs). `--table FILE` writes every point as CSV (coupler splits recomputed for older records where the placement hash matches) and prints a per-(n, d) ranking and each configuration's b. In views 8–11, points are plain means over instances with the standard error from the instance scatter, which exceeds shot noise; `run --summarize` uses inverse-variance weights.
+Views 8–11 and `--table FILE` (CSV of every point) show one ensemble at a time (`--theta haar|nnqab|all`), since XEB values of different ensembles are not comparable.
 
 ---
 
-## 8. Interpretation and practical notes
+## 5. Hardware and memory
 
-### 8.1 Expected outcomes
+### 5.1 Memory rule
 
-| Backend / family | Expected | A deviation means |
+| Item | Size (fp32) |
+|---|---|
+| dense patch of w qubits | 8 · 2^w bytes: 1 GiB at 27, 2 at 28, 4 at 29, 8 at 30, 64 at 33, 128 at 34, 256 at 35 |
+| compose transient | Qrack rebuilds the widest patch one qubit wider while holding the old state: + half the new size |
+| exact `fxeb` reference | 12 · 2^n bytes (state + probability buffer): 1.5 GiB at 27, 48 at 32, 193 at 34 |
+| point estimate for the ledger | 1 GiB + engines' worst case + reference |
+
+With `--mem-budget-gb`, a worker takes a point only if all reservations plus this one fit the budget, and the point fits `MemAvailable` (plus allowed swap, §5.5) after the unallocated part of other reservations. Otherwise it takes a smaller point or waits. A point larger than the budget is marked failed. Runs sharing one ledger must use the same budget. The ledger tracks host memory only.
+
+### 5.2 GPU
+
+| Check | CPU | GPU (NVIDIA CMP 50HX, OpenCL) |
 |---|---|---|
-| `exact`, any | F = 1 (b = 0) up to shot noise | a pipeline or convention error; run `selftest` |
-| `ace`, mirror | F < 1, decaying with depth | ACE's seam error per cycle; compare b_ace to the device's b |
-| `ace`, patched | ≤ 1 | ACE's seams are set by the layout, not by the partitions |
-| `ace`, fxeb | XEB < 1, decaying with depth | measured approximation error against ground truth |
-| `hwxeb` | matches the release to ≪ 1 σ | Qrack and the release's reference agree |
+| tiled v2, n = 27, d = 12 / 16 / 20 (± 0.009) | 0.158 / 0.063 / 0.024 | 0.146 / 0.063 / 0.033 |
 
-A clean-qubit simulator whose decay is *slower* than the device's is a statement about that backend's approximation cost on the paper's own proxies, not a spoofing result; the limits of these proxies as certificates are discussed in [[4]](#ref-4) and [[5]](#ref-5).
+| Cost on the CMP 50HX (10 GB) | Value |
+|---|---|
+| `fxeb` point, two variants, n = 27–28 | ≈ 10 min per worker (3 workers) |
+| same, n = 29 | ≈ 13 min per worker (2 workers) |
+| exact reference alone, n = 27 | ≈ 10 s |
+| device memory per worker | ≈ 8 · 2^n bytes for the reference while built + ≈ 0.5 GiB engines and context |
+| workers per card | ≤ 4 at n = 27, ≤ 2 at 28–29, 1 at 30, none beyond (10 at n = 27 and 3 at n = 28 failed) |
 
-### 8.2 Depth window
+ACE is not faster on GPU: its simulators are small, its work is many short kernels with read-backs and host-side seam logic, and workers on one card queue. The useful split is ACE on CPU workers and `--ref-gpu` for the reference. Device indices follow Qrack's start-up listing and can change with drivers. Check one point against the CPU on every new device.
 
-At d ≤ 8 the n = 27–30 outputs are still concentrated (ideal XEB 3–4 at d = 8, ≈ 66 at d = 4), the normalised XEB is dominated by few heavy bitstrings and is non-monotonic in depth; rank configurations on d ≥ 12, where the ideal XEB is 1.0–1.6. Because ACE's decay is not a single exponential (Sec. 9.4), b must be compared at matched depth windows across sizes.
+VRAM does not help patches larger than a die. Six V340 dies hold ≈ 45 GiB, a sixth of a 35-qubit patch, and the overflow sits in host RAM behind PCIe 3.0 x8 links (≈ 20 GB/s in total), no faster than NVMe swap.
 
-### 8.3 ACE and the reference on GPU
+### 5.3 Qrack's OpenCL engine: defects and fix
 
-Both engines run on OpenCL devices: the exact `fxeb` reference with `--ref-gpu` (an ordinary dense state vector) and ACE with `--ace-gpu`. Tiled ACE was validated on an NVIDIA CMP 50HX (TU102, 10 GB, NVIDIA OpenCL): the v2-tiled n = 27 points reproduce the CPU run on the same circuits (d = 12, 16, 20: 0.146, 0.063, 0.033 on GPU against 0.158, 0.063, 0.024 on CPU; inverse-variance means, ±0.009). Before using another OpenCL device for tiled ACE, run one point against a CPU run of the same circuits.
-
-GPU execution of ACE is not faster here: its simulators are small (≤ 23 qubits for tiled 4/4), its work is many short kernels with frequent read-backs and host-side seam logic, and workers sharing one card queue on it, whereas CPU workers run on separate cores. On the CMP 50HX an n = 27–28 `fxeb` point with two variants took ≈ 10 min per worker with three workers, an n = 29 point ≈ 13 min with two; the n = 27 reference alone took ≈ 10 s. The useful split is ACE on CPU workers and the reference on a GPU, unless CPU cores are the scarcer resource.
-
-**Device memory.** Device memory is not tracked by the memory ledger. Concurrent references on one 10 GB card failed with `QrackSimulator C++ library raised exception` (ten workers at n = 27; three at n = 28) and completed when rerun with one worker. Per worker, budget ≈ 8 · 2ⁿ bytes for the reference while it is built plus ≈ 0.5 GiB of ACE engines and driver context: on a 10 GB card ≤ 4 workers at n = 27, ≤ 2 at n = 28–29, 1 at n = 30, none beyond.
-
-**Selecting a device.** Indices follow Qrack's start-up listing (all OpenCL platforms in one list; check before long runs, as driver changes reorder it). `--gpus N` pins each worker fully to device N (Sec. 3.1); for single-process runs set `QRACK_OCL_DEFAULT_DEVICE`, `QRACK_QUNITMULTI_DEVICES` and `QRACK_QPAGER_DEVICES` together, since Qrack's own default device need not be 0.
-
-### 8.4 Precision
-
-The exact reference is held in float32. Floating-point storage keeps ~7 significant digits at any magnitude, so 2⁻³⁴-scale probabilities are not degraded by their size; CZs are sign flips and add no rounding; accumulated single-qubit rounding at d = 20, n = 34 is of order 10⁻⁶–10⁻⁵ relative per probability, ~10⁻⁵ in XEB, against a per-instance shot noise of ~0.015 at 4096 shots. All sums over 2ⁿ probabilities are taken in float64 and sampled probabilities are divided by the float64 total. The measured ideal XEB at d = 20 (1.02–1.05) is consistent with Porter–Thomas.
-
-### 8.5 Shot floor
-
-At 4096 shots the per-instance standard error is ≈ 0.015, so XEB below ≈ 0.03 is unresolved; d = 16–20 points at n ≥ 30 need ≥ 16 384 shots to enter a decay fit.
-
-### 8.6 What can be verified at 61 qubits
-
-Scoring a sample by XEB needs the ideal probability of each sampled bitstring. The release contains every bitstring of the 61-qubit circuits that were sampled — all 10⁶ samples of the full d = 36 circuit (all distinct) and every shot of every patched circuit, as 61-bit integers, stored sorted so that shot order is not recoverable — but for mirror circuits only the number of shots that returned the prepared string. No probability of the full 61-qubit circuit is computed in Ref. [[1]](#ref-1) or here: the headline fidelity is inferred from the patched and mirror proxies under the assumption that the full circuit decays at the same rate per cycle, and every 61-qubit statement in this document is a proxy measurement or an extrapolation of b(N) (Sec. 10).
-
-The release's `contraction_cost/results/depth_sweep.json` gives BlueQubit's best-found single-amplitude contraction cost of the full circuits (cotengra/kahypar, unlimited memory, following the methodology of [[4]](#ref-4)); the authors note every value is an upper bound on the optimal path cost:
-
-| Depth | 20 | 28 | 32 | 36 | 40 |
-|---|---|---|---|---|---|
-| log₁₀ C_amp (complex multiply-adds) | 13.0 | 17.6 | 19.8 (repeat 20.0) | 21.8 (repeat 22.0) | 22.0 (repeat 22.1) |
-| largest intermediate tensor | 2³⁴ | 2⁴⁹ | 2⁵⁶ | 2⁶⁴ | 2⁶⁵ |
-
-Their sampling-cost model W = 8 κ N_s F C_amp (κ = 10, frugal rejection sampling), on Frontier at 20 % of 1.685 × 10¹⁸ FLOP/s, gives — evaluated here for N_s = 10⁶ and F(36) = 0.326 × 0.8717³⁶ ≈ 2.3 × 10⁻³ — W ≈ 1.2 × 10²⁷ FLOPs, ≈ 115 years (≈ 160 years with the repeat search). The intermediate of 2⁶⁴ entries (≈ 128 EiB in complex64) exceeds any machine, so a real contraction must slice, which raises the cost. Verification is costlier still in kind: it needs exact amplitudes (≈ 5 × 10²² FLOPs, ≈ 2 days on Frontier each, before batching) for ≈ 1/F² ≈ 2 × 10⁵ sampled bitstrings to resolve F. Within the cost model of the release, the 61-qubit, 36-cycle samples cannot be scored directly.
-
-### 8.7 Qrack's OpenCL engine: host-memory defects and the fix
-
-Deep ACE mirror points on GPU (61 qubits, d ≥ 8) crashed or returned wrong values on several OpenCL platforms while the same points ran cleanly on CPU. A 16-qubit reproducer without ACE (`qrack_ocl_repro.py`: one `QrackSimulator`, 20 layers of U + CZ, `prob()` on two qubits, CPU and OpenCL in separate processes) shows it on PoCL with Qrack 10.13.1:
+A 16-qubit reproducer (`qrack_ocl_repro.py`: 20 layers of U + CZ, `prob()` on two qubits), PoCL, Qrack 10.13.1:
 
 | Engine | prob(q3) / prob(q10) |
 |---|---|
@@ -573,15 +399,19 @@ Deep ACE mirror points on GPU (61 qubits, d ≥ 8) crashed or returned wrong val
 | OpenCL, `DISABLE_OOO_OCL` | 1.0 / 1.0 (wrong) |
 | OpenCL, synchronous dispatch | 0.414847 / 0.430348 |
 
-Tracing `QEngineOCL` (`src/qengine/opencl.cpp`) found three defects, all on the application side of the OpenCL API:
-
-| | Defect | Where |
+| | Defect in `QEngineOCL` (`src/qengine/opencl.cpp`) | Where |
 |---|---|---|
-| A | non-blocking buffer writes (`DISPATCH_WRITE`) read from stack arrays that go out of scope before the write executes; the OpenCL specification requires the host pointer to stay valid until completion | `Dispose(perm)`, `DecomposeDispose` (its argument block is overwritten while the first write is queued) |
-| B | buffers created with `CL_MEM_USE_HOST_PTR` (CPU devices and integrated GPUs) have their host memory freed while kernels using them are still queued | `Dispose`, `Compose` |
-| C | the `_PopQueue` completion callback is registered on an empty `cl::Event` before the kernel is enqueued; `clSetEventCallback` returns `CL_INVALID_EVENT` every time (1099 of 1099 registrations), so the callback never runs | `DispatchQueue` |
+| A | non-blocking writes read stack arrays that go out of scope before the write runs | `Dispose(perm)`, `DecomposeDispose` |
+| B | `CL_MEM_USE_HOST_PTR` buffers have their host memory freed while kernels are queued | `Dispose`, `Compose` |
+| C | the completion callback is registered on an empty event: `CL_INVALID_EVENT` in 1099 of 1099 registrations | `DispatchQueue` |
 
-Fixing A and B together, with dispatch still asynchronous, restores correct results; either alone does not, nor does `DISABLE_OOO_OCL`. Upstream Qrack 10.13.2 (unitaryfoundation/qrack `cf53586`) adds an opt-in `QRACK_OCL_SYNC=1`, which finishes the queue after every dispatch; the maintainer does not intend to change the asynchronous path further. ThereminQ therefore carries `qrack_ocl_async_fix.patch` (one file, applies to 10.13.1 and 10.13.2): each asynchronous write copies its argument block to the heap and frees it from the write's completion callback, a `USE_HOST_PTR` buffer owns its host memory through a `clSetMemObjectDestructorCallback` holder, and the dead callback is removed. Validated on PoCL on top of 10.13.2: the reproducer exact in 5 of 5 runs, ACE mirror points d = 4 and 6 × 3 instances at 640 runs each equal to the CPU on the same build within 3 × 10⁻⁴, and 185 s against 198 s with `QRACK_OCL_SYNC=1`.
+Fixing A and B together restores correct results with asynchronous dispatch; neither alone does. Upstream Qrack 10.13.2 (`cf53586`) adds opt-in `QRACK_OCL_SYNC=1` and keeps the asynchronous path as is. `qrack_ocl_async_fix.patch` copies each write's arguments to the heap, gives `USE_HOST_PTR` buffers a destructor-callback owner, and removes the dead callback.
+
+| Validation of the patch (PoCL, 10.13.2) | Result |
+|---|---|
+| reproducer | exact in 5 of 5 runs |
+| ACE mirror, d = 4 and 6, 3 instances × 640 runs | equal to the CPU within 3 × 10⁻⁴ |
+| wall time against `QRACK_OCL_SYNC=1` | 185 s vs 198 s |
 
 ```bash
 git clone https://github.com/unitaryfoundation/qrack && cd qrack && git checkout cf53586f
@@ -591,280 +421,425 @@ cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_CUDA=OFF -DENABLE_OPENCL=ON -DQBCAPPOW
 make -j$(nproc) qrack_pinvoke && sudo make install     # /usr/local/lib/qrack/libqrack_pinvoke.so
 ```
 
-Before a long GPU run, run the reproducer and one ACE point on the target device against a CPU run of the same circuits.
+### 5.4 VRAM oversubscription: `--gtt`
 
-### 8.8 VRAM oversubscription: `--gtt`
+Qrack keeps a state in device memory when three times its size fits, else in host RAM mapped over PCIe (the GTT on amdgpu). Every allocation counts against `QRACK_MAX_ALLOC_MB`, which defaults to the device's memory, so a spilling patch is refused unless the ceiling is raised. On an 8 GB V340 die, states up to 28 qubits stay in VRAM.
 
-An ACE patch is a dense state of 2^w amplitudes at 8 bytes: 28 qubits are 2 GiB, 29 are 4 GiB, 30 are 8 GiB, and Qrack composes into the widest patch through a buffer of the same size. Qrack places each state itself (`QEngineOCL::SetDevice`): in device memory when three times its size fits the device's global memory, otherwise in host RAM that the GPU maps over PCIe (`CL_MEM_USE_HOST_PTR`; on amdgpu, the GTT). On an 8 GB V340 die, states up to 28 qubits stay in VRAM and 29-qubit and wider states are host-mapped. Every allocation, host-mapped ones included, counts against one per-device ceiling, `QRACK_MAX_ALLOC_MB`, which defaults to the device's memory; without raising it, a patch that would spill is refused ("VRAM limits exceeded").
+`--gtt GB` (with `--ace-gpu`) raises each worker's ceiling to `--vram-gb` + GB and sets `QRACK_QPAGER_DEVICES_HOST_POINTER=1`. The preflight prints each worker's VRAM / host split and stops if the VRAM part exceeds the die (less 0.5 GiB) or the host part exceeds GB. `layoutsearch --gtt` and `nighthawk_cloverfield.py --gtt` use the same split.
 
-`--gtt GB` (with `--ace-gpu`; `-gtt` also accepted) raises each worker's ceiling to `--vram-gb` + GB and sets `QRACK_QPAGER_DEVICES_HOST_POINTER=1`, so paged states go to host memory too. The model of where a worker's memory goes, `die_split`, sums the patch states and the compose buffer by Qrack's rule; the preflight prints it per worker and stops when the VRAM part exceeds the die (less a 0.5 GiB reserve) or the host part exceeds `--gtt`. `layoutsearch --gtt GB [--max-width 29|30]` judges candidates by the same split, and `nighthawk_cloverfield.py --gtt GB` uses it for ghost room instead of the register's width caps. The numbers are those of a VRAM-only run (only the memory placement differs), so the config tag is unchanged; records carry `gtt_gb`.
+| Two `nighthawk88e` chips | Links |
+|---|---|
+| ghost, VRAM only | 3 (5.8 GiB per chip) |
+| ghost, `--gtt 8` | 5 (chip at 25 / 28 / 29 / 26: 2.8 GiB VRAM + 8 GiB GTT) |
+| ghost, `--gtt 16` | 6 (a 30-wide patch: 2.8 GiB VRAM + 16 GiB GTT) |
+| mean-field | 8 |
+| **Four chips, 2 × 2:** ghost, VRAM only / `--gtt 8` | 10 / 14 |
 
-| Field (nighthawk88e chips) | Ghost links, VRAM only | `--gtt 8` | `--gtt 16` |
-|---|---|---|---|
-| 2 chips side by side | 3 (5.8 GiB per chip, all VRAM) | 5: chip 0 at 25/28/29/26 = 2.8 GiB VRAM + 8 GiB GTT | 6: a 30-wide patch, 2.8 GiB VRAM + 16 GiB GTT |
-| 4 chips, 2 × 2 | 10 (6.5 GiB per chip) | 14: three chips at 4.5 GiB VRAM + 8 GiB GTT each | — |
+Verified on PoCL: a 128 MiB state fails under a 61 MB ceiling and runs under 563 MB in the loom's worker environment. Host-mapped patches run at PCIe speed rather than HBM speed, and they use the `USE_HOST_PTR` path of defect B, so use the patched build. `cat /sys/class/drm/card*/device/mem_info_gtt_total` shows the GTT; `amdgpu.gttsize` and `ttm.pages_limit` raise it.
 
-Verified on PoCL with Qrack 10.13.2 + the async fix: a 24-qubit entangled state (128 MiB) fails under a 61 MB ceiling and runs under 563 MB, in exactly the environment the loom builds for a chip worker (`QRACK_MAX_ALLOC_MB`, `QRACK_QPAGER_DEVICES_HOST_POINTER`, device pinning); both selftests pass. Not yet measured on the V340s: how much slower host-mapped patches are. Every gate on a 29- or 30-wide patch then streams its state over the card's PCIe 3.0 x8 link, shared by the card's two dies, so expect those patches to run at PCIe rather than HBM speed.
+### 5.5 Larger than RAM: `--swap-gb`
 
-Host-mapped buffers are exactly the `USE_HOST_PTR` path of defect B (Sec. 8.7): use the Qrack build with the async fix (or `QRACK_OCL_SYNC=1`). The GTT itself is bounded by the kernel: `cat /sys/class/drm/card*/device/mem_info_gtt_total` shows it per die, and the `amdgpu.gttsize` (MiB) and `ttm.pages_limit` module parameters raise it. The host RAM behind the GTT also counts against `--mem-budget-gb`. For CPU runs larger than RAM, `--swap-gb` lets the ledger count swap (Sec. 9.11).
+| `--swap-gb GB` | Effect |
+|---|---|
+| ledger | counts up to GB of free swap as available |
+| preflight | prints dense states, compose transient, RAM and swap; warns, never stops |
+| Qrack ceilings | for CPU patches over 28 qubits, `QRACK_MAX_CPU_QB` and `QRACK_MAX_PAGING_QB` set to 40 (also without `--swap-gb`); an explicit value wins. Past the ceiling QUnit throws "needed to engage automatic circuit elision" |
+
+| `nighthawk61r2`, error detection on, EPYC | GiB |
+|---|---|
+| dense states, 35 / 34 | 384 |
+| compose transient | 128 |
+| worst case per worker | 513 |
+| RAM + swap (320 GB + 256 GB NVMe RAID0) | 298 + 238 = 536 |
+| state in swap at full width | ≈ 90 |
+
+```bash
+sudo sysctl vm.swappiness=100 vm.page-cluster=6   # swap out eagerly; 64 pages per swap-in
+swapon --show && ulimit -v                         # swap active; must be unlimited
+```
+
+### 5.6 Precision and shot floor
+
+| Quantity | Value |
+|---|---|
+| reference storage | float32; sums over 2^n in float64; sampled probabilities divided by the float64 total |
+| accumulated rounding, d = 20, n = 34 | 10⁻⁶–10⁻⁵ per probability, ≈ 10⁻⁵ in XEB |
+| shot noise per instance, 4096 shots | ≈ 0.015 → XEB below ≈ 0.03 unresolved |
+| shots for d = 16–20 at n ≥ 30 | ≥ 16 384 |
+| ideal XEB at d = 20 | 1.02–1.05 (Porter–Thomas) |
+| ideal XEB at n = 27–30 | ≈ 66 at d = 4, 3–4 at d = 8, 1.0–1.6 at d ≥ 12: rank configurations on d ≥ 12 |
+
+### 5.7 What can be verified at 61 qubits
+
+The release holds every sampled 61-qubit bitstring of the full and patched circuits, but only hit counts for mirrors. No full-circuit probability is computed in [[1]](#ref-1) or here. BlueQubit's single-amplitude contraction cost (`contraction_cost/results/depth_sweep.json`, cotengra/kahypar, upper bounds):
+
+| Depth | 20 | 28 | 32 | 36 | 40 |
+|---|---|---|---|---|---|
+| log₁₀ C_amp (multiply-adds) | 13.0 | 17.6 | 19.8 (20.0) | 21.8 (22.0) | 22.0 (22.1) |
+| largest intermediate | 2³⁴ | 2⁴⁹ | 2⁵⁶ | 2⁶⁴ | 2⁶⁵ |
+
+| Cost at d = 36 (W = 8 κ N_s F C_amp, κ = 10, N_s = 10⁶, F = 2.3 × 10⁻³, Frontier at 20 %) | Value |
+|---|---|
+| sampling | ≈ 1.2 × 10²⁷ FLOPs, ≈ 115 years (≈ 160 with the repeat search) |
+| one exact amplitude | ≈ 5 × 10²² FLOPs, ≈ 2 days |
+| bitstrings needed to resolve F | ≈ 1/F² ≈ 2 × 10⁵ |
+| largest intermediate | 2⁶⁴ entries ≈ 128 EiB: slicing required, raising the cost |
 
 ---
 
-## 9. Results to date
+## 6. Results
 
-Sections 9.1–9.7 are clean-qubit ACE emulations of the released circuit ensemble (Haar single-qubit gates, release seeds), scored by forward XEB against an exact reference, 3 instances, 4096 shots unless noted; Sections 9.8–9.10 are mirror circuits (the `nn_qab` ensemble, `prob` estimator) at 49–88 qubits. The device figure of merit for comparison is the paper's mirror fit F(d) = 0.326 × 0.8717^d, i.e. b_dev = 0.137 per cycle at n = 61. Values from `run --summarize` are inverse-variance means and may lie below the plain mean over circuits (Sec. 7.3); values from the graph tool are plain means. Each table states which.
+| Convention | |
+|---|---|
+| device reference | the paper's mirror fit F(d) = 0.326 × 0.8717^d, b_dev = 0.137 per cycle at n = 61; per-depth device points from the release's counts |
+| §6.1–6.4 | released Haar ensemble unless noted, `fxeb` against the exact reference, 3 instances, 4096 shots, inverse-variance means |
+| §6.5–6.9 | mirror circuits, `prob` estimator, plain means unless noted |
+| PyQrack | 2.28.1 and the version before it; ACE behaviour can change between versions |
 
-### 9.1 Layout choice without tiling
+### 6.1 Layout and placement at n = 27
 
-Ranking the non-torus layouts of the 8×8 window by couplers on a seam, the best layout with all simulators ≤ 33 qubits (5/4) improves on the default 4/4 by one coupler (68 vs 69 of 102). Larger simulators help only on a torus (2/7 torus: 57 of 102, simulators of 33, 33, 25, 25 qubits, 128 GiB dense worst case); layouts with fewer seam qubits on the flat register alternate chunk ownership by row and place every vertical coupler across simulators.
-
-### 9.2 Placement dominates layout (n = 27)
-
-Inverse-variance means over 3 instances (`run --summarize`):
-
-| lrc/lrr | XEB d=8, device placement | XEB d=8, tiled (v2) | XEB d=12, tiled (v2) |
-|---|---|---|---|
-| 4/4 | 0.008 | **0.321** | **0.182** |
-| 4/3 | 0.036 | 0.227 | 0.153 |
-| 2/7 | 0.046 | 0.154 | 0.136 |
-| 1/7 | 0.077 | 0.145 | 0.109 |
-| 2/2 | −0.032 | 0.117 | 0.091 |
-
-Tiling removed every cross coupler in all five layouts at unchanged memory. The widest simulator does not predict the outcome: 2/7 (28-qubit simulators) is below 4/4 (23-qubit simulators).
-
-### 9.3 What predicts the XEB
-
-Over the ten configurations of Sec. 9.2 at n = 27, d = 8 (view 11), Spearman rank correlations of XEB with: simulators holding bulk qubits −0.84, cross couplers −0.80, exact couplers +0.74, logical qubits on seam sites −0.40, replica couplers −0.21, widest simulator −0.15. Removing cross couplers is necessary; among crossing-free tilings the ordering follows seam qubits used (Sec. 9.4).
-
-### 9.4 Size and depth dependence (4/4, tiling v2)
-
-| n | seam qubits / simulators | d = 12 | d = 16 | d = 20 |
+| lrc/lrr | XEB d = 8, device placement | XEB d = 8, tiled v2 | XEB d = 12, tiled v2 | effective bulk / seam qubits |
 |---|---|---|---|---|
-| 27 | 3 / 2 | 0.158 | 0.063 | 0.024 |
-| 28 | 8 / 3 | −0.015 | 0.023 | 0.005 |
-| 29 | 5 / 3 | 0.101 | 0.043 | 0.008 |
-| 30 | 6 / 3 | 0.069 | 0.001 | −0.001 |
+| 4/4 | 0.008 | **0.321** | **0.182** | 8.0 |
+| 4/3 | 0.036 | 0.227 | 0.153 | 8.0 |
+| 2/7 | 0.046 | 0.154 | 0.136 | 5.8 |
+| 1/7 | 0.077 | 0.145 | 0.109 | 3.5 |
+| 2/2 | −0.032 | 0.117 | 0.091 | 0.7 |
 
-(inverse-variance means from `run --summarize`; σ ≈ 0.009 shot noise, instance scatter larger; plain means over circuits may be higher, Sec. 7.3.) At d = 12 the XEB falls monotonically with seam qubits used (3, 5, 6, 8 → 0.158, 0.101, 0.069, −0.015), so the size-to-size variation is dominated by tiling quality rather than by n. The decay is not exponential in depth: at n = 27, b ≈ 0.19 over d = 8–12 and ≈ 0.25 over d = 16–20; over d = 12–20, b ≈ 0.24 at n = 27 and ≈ 0.31 at n = 29, against b_dev = 0.137 at n = 61. At the headline depth the tiled emulator therefore loses fidelity faster per cycle than the device does at more than twice the register size, and the gap widens with depth.
+| Spearman ρ with XEB (10 configurations, d = 8) | ρ |
+|---|---|
+| simulators holding bulk qubits | −0.84 |
+| cross couplers | −0.80 |
+| exact couplers | +0.74 |
+| logical qubits on seams | −0.40 |
+| replica couplers | −0.21 |
+| widest simulator | −0.15 |
 
-### 9.5 Tiling version 3
+| Layout alone, 8 × 8 window, no tiling | Couplers on a seam (of 102) | Simulators |
+|---|---|---|
+| 4/4 (default) | 69 | ≤ 23 qubits |
+| 5/4 (best with all simulators ≤ 33) | 68 | ≤ 33 |
+| 2/7 torus | 57 | 33 / 33 / 25 / 25, 128 GiB |
+| device placement, 4/4, n = 61 | exact / replica / cross 33 / 30 / 39 | — |
+| tiled v2, 4/4, n = 61 | 61 / 41 / 0 | — |
 
-Version 2 occasionally tiled a larger register worse than a smaller one (n = 28: 8 seam qubits after 3 at n = 27). Version 3 (Sec. 2.6) gives, for 4/4:
+Tiling removes every cross coupler at unchanged memory, and the widest simulator does not predict the outcome. Removing cross couplers is necessary; after that the ordering follows the qubits on seams.
+
+### 6.2 Size, depth and tiling version (4/4)
 
 | n | 27 | 28 | 29 | 30 | 31 | 32 | 33 | 34 |
 |---|---|---|---|---|---|---|---|---|
-| v2 exact/replica/cross, seam/sims | 31/10/0, 3/2 | 23/20/0, 8/3 | 27/18/0, 5/3 | 28/19/0, 6/3 | 29/20/0, 7/3 | 22/28/0, 11/3 | 34/18/0, 6/3 | 35/19/0, 6/3 |
-| v3 exact/replica/cross, seam/sims | 32/9/0, 3/2 | 30/13/0, 4/3 | 33/12/0, 4/2 | 34/13/0, 5/2 | 35/14/0, 5/3 | 35/15/0, 6/3 | 35/17/0, 5/3 | 36/18/0, 5/3 |
+| v2: exact/replica/cross, seam/sims | 31/10/0, 3/2 | 23/20/0, 8/3 | 27/18/0, 5/3 | 28/19/0, 6/3 | 29/20/0, 7/3 | 22/28/0, 11/3 | 34/18/0, 6/3 | 35/19/0, 6/3 |
+| v3: exact/replica/cross, seam/sims | 32/9/0, 3/2 | 30/13/0, 4/3 | 33/12/0, 4/2 | 34/13/0, 5/2 | 35/14/0, 5/3 | 35/15/0, 6/3 | 35/17/0, 5/3 | 36/18/0, 5/3 |
 
-The placements are deterministic and were reproduced identically on two machines. Both tilings were sampled on the same circuits and scored against one shared reference per point (`--variants 4/4:t3 4/4:t2`, 3 instances; n = 27–29 on the NVIDIA CMP 50HX with `--ace-gpu --ref-gpu`):
-
-| n | Seam qubits / simulators, v3 vs v2 | d = 12: v3 / v2 | ratio | d = 16: v3 / v2 | d = 20: v3 / v2 |
+| n | seam/sims v3 vs v2 | d = 12: v3 / v2 | d = 16: v3 / v2 | d = 20: v3 / v2 | b over d = 12–20 (v3) |
 |---|---|---|---|---|---|
-| 27 | 3/2 vs 3/2 | 0.165 / 0.146 | 1.1 | 0.062 / 0.063 | 0.026 / 0.033 |
-| 29 | 4/2 vs 5/3 | 0.140 / 0.114 | 1.2 | 0.030 / 0.034 | 0.011 / 0.015 |
-| 28 | 4/3 vs 8/3 | **0.147 / 0.040** | **3.6** | **0.051 / 0.012** | 0.016 / 0.021 |
+| 27 | 3/2 vs 3/2 | 0.165 / 0.146 | 0.062 / 0.063 | 0.026 / 0.033 | 0.23 |
+| 28 | 4/3 vs 8/3 | **0.147 / 0.040** | **0.051 / 0.012** | 0.016 / 0.021 | 0.27 |
+| 29 | 4/2 vs 5/3 | 0.140 / 0.114 | 0.030 / 0.034 | 0.011 / 0.015 | 0.32 |
+| 30 (v2 only) | 6/3 | — / 0.069 | — / 0.001 | — / −0.001 | — |
 
-(inverse-variance means from `run --summarize`; σ ≈ 0.009 shot noise; d = 20 is at the 4096-shot floor.) The prediction holds: where the seam counts agree (n = 27) the tilings coincide; one seam qubit fewer (n = 29) gives a small gain at d = 12 and none resolvable at d = 16; halving the seam qubits (n = 28) raises the XEB 3.6–4.3-fold. With v3 the d = 12 XEB falls smoothly with size (0.165, 0.147, 0.140 at n = 27, 28, 29), so the n = 28 dip of the earlier runs (Sec. 9.4) was a tiling artefact. The per-cycle decay over d = 12–20 rises with n (b ≈ 0.23, 0.27, 0.32) and stays above b_dev = 0.137.
+Both tilings ran on the same circuits against one shared reference. σ ≈ 0.009, and d = 20 is at the 4096-shot floor. Halving the seam qubits (n = 28) raises the XEB 3.6–4.3-fold, and where the seam counts agree the tilings coincide. Over d = 8–12 at n = 27, b ≈ 0.19; over d = 16–20, 0.25: the decay is not a single exponential.
 
-**ACE settings.** The three switches of `QrackAceBackend` were compared on the same circuits as `--variants 4/4:t3 4/4:t3:rep 4/4:t3:noed 4/4:t3:noxbar` (n = 27–28, d = 12 and 16, 5 circuits per point, CMP 50HX, updated PyQrack). Paired per-circuit differences from the default:
-
-| Setting | n=27, d=12 | n=27, d=16 | n=28, d=12 | n=28, d=16 |
+| ACE switch (paired difference from default, 5 circuits) | n = 27, d = 12 | n = 27, d = 16 | n = 28, d = 12 | n = 28, d = 16 |
 |---|---|---|---|---|
-| boundary repetition code on (`rep`) | −0.007 ± 0.010 | +0.009 ± 0.008 | −0.012 ± 0.011 | −0.001 ± 0.008 |
-| seam error detection off (`noed`) | +0.008 ± 0.006 | +0.007 ± 0.009 | +0.029 ± 0.014 | +0.011 ± 0.005 |
-| crossbars off (`noxbar`) | +0.001 ± 0.012 | +0.002 ± 0.009 | −0.020 ± 0.009 | −0.002 ± 0.005 |
+| boundary repetition code on | −0.007 ± 0.010 | +0.009 ± 0.008 | −0.012 ± 0.011 | −0.001 ± 0.008 |
+| seam error detection off | +0.008 ± 0.006 | +0.007 ± 0.009 | +0.029 ± 0.014 | +0.011 ± 0.005 |
+| crossbars off | +0.001 ± 0.012 | +0.002 ± 0.009 | −0.020 ± 0.009 | −0.002 ± 0.005 |
 
-The repetition code and the crossbars have no measurable effect. Disabling ACE's detect-and-post-select step raises the XEB in all four cells, by ≈ +0.010 ± 0.003 combined (an upper bound on significance, since the d = 12 and d = 16 circuits of an instance share their first twelve cycles), most at n = 28 where more qubits sit on seams. The gain is a constant offset: the per-cycle decay from d = 12 to 16 is unchanged (b ≈ 0.27 → 0.25 at n = 27, 0.26 → 0.26 at n = 28). No ACE setting reduces the cost per seam coupler; the remaining lever is structural (Sec. 9.9).
+Only switching error detection off shifts the XEB, by a constant ≈ +0.010 ± 0.003 at n = 27–28. The decay per cycle is unchanged, so no switch lowers the cost of a seam. At 61 qubits error detection matters in the other direction (§6.8).
 
-Because both variants share circuits, the decisive statistic is the *paired* per-circuit difference v3 − v2, in which circuit-to-circuit variation cancels; the CSV from `nighthawk_graph.py --table` carries the per-instance values for it. Sizes n = 30–32 (seam differences 1, 2, 5) are pending on the CPU path; n = 32, with 11 seam qubits under v2 against 6 under v3, is expected to show the largest gap.
+### 6.3 The `nn_qab` ensemble (n = 27, d = 12, plain means)
 
-### 9.6 Cost
-
-The run cost is dominated by the exact reference: about 6.2 × 10³ s for one n = 34, d = 20 point on a 96-thread EPYC host, 1–4 × 10² s per tiled 4/4 point at n = 27. Wider ACE simulators also cost time (tiled 2/7 ≈ 1.8 × 10³ s per point at n = 27). On the CMP 50HX (`--ace-gpu --ref-gpu`, both variants per point) a point took ≈ 10 min at n = 27–28 and ≈ 13 min at n = 29 per worker. Mirror circuits at n = 61 cost ≈ 0.65–4.5 × 10³ s per point untiled (d = 4–20); their cost grows with depth (every twirl runs d/2 forward and d/2 inverse cycles) and is nearly independent of the shot count. On the three-patch register of Sec. 9.8 with the `prob` estimator (640 runs per point, one point per worker) a point took ≈ 6 h at d = 16 and ≈ 11 h at d = 20 on the EPYC; there a three-patch instance can use about 16 threads, so CPU workers stack well for batches but deep points take long.
-
-### 9.7 Cross-check with the `nn_qab` ensemble
-
-The `nn_qab` benchmark ([`rcs/nn_qab/`](https://github.com/twobombs/thereminq-examples/tree/main/rcs/nn_qab)) scores ACE with the same estimator on circuits whose single-qubit θ is drawn with sin θ uniform (`--theta nnqab` here), on ACE's own torus registers with a twelve-gate two-qubit set. Running that θ ensemble on the Nighthawk window (CZ couplers, flat register) separates ensemble, geometry and placement:
-
-```bash
-python3 nighthawk_qrack.py run --backend ace --families fxeb --n 27 --depths 12 \
-  --theta nnqab --instances 20 --variants 4/4:t3 4/4:untiled --ref-gpu --gpus 0 --out nnqab_cross.jsonl
-```
-
-| Configuration (d = 12) | Circuits | Mean XEB (plain mean ± instance-scatter se) | HOG |
+| Configuration | Circuits | XEB | HOG |
 |---|---|---|---|
 | Nighthawk window, 4/4 tiled v3 | 20 | **0.435 ± 0.037** | 0.665 |
 | Nighthawk window, 4/4 device placement | 20 | 0.153 ± 0.014 | 0.500 |
 | `nn_qab` 26 qubits, B-to-B 5.5 (best series) | 100 | 0.241 | — |
 | `nn_qab` 27 qubits, two patches, B-to-B 3.5 | 100 | 0.185 | — |
 | `nn_qab` 27 qubits, three patches, B-to-B 2.0 | 100 | 0.111 | — |
-| Nighthawk window, 4/4 tiled v2, Haar ensemble (Sec. 9.2; inverse-variance mean) | 3 | 0.182 | — |
+| Haar ensemble, 4/4 tiled v2 (inverse-variance) | 3 | 0.182 | — |
 
-Three observations. (i) The ensemble matters: at d = 12 the `nn_qab` outputs are far from Porter–Thomas (ideal XEB ≈ 16 against ≈ 1.5 for the Haar ensemble), and the same tiled layout scores about twice its Haar value. XEB values from the two ensembles are not comparable. (ii) Within the ensemble, placement alone raises the XEB by a factor of 2.85, and tiled ACE on the Nighthawk geometry exceeds every `nn_qab` register geometry by a factor ≥ 1.8; part of this may be the gate set (CZ only, against `nn_qab`'s set including SWAP-type gates that move amplitude across seams), which this run does not separate. (iii) With the device placement the HOG is at chance (0.500) while the XEB is positive: in a concentrated distribution, a sampler that reaches a few very heavy bitstrings raises the probability-weighted score without carrying signal across the rest of the distribution; the tiled sampler has both.
+- **Ensembles don't compare.** `nn_qab` outputs are far from Porter–Thomas at d = 12 (ideal XEB ≈ 16 against ≈ 1.5), so the two ensembles' XEB values cannot be compared directly.
+- **Placement and gate set.** Placement alone gives ×2.85. Tiled ACE on the Nighthawk window beats every `nn_qab` geometry by ≥ ×1.8, which may partly reflect the CZ-only gate set.
+- **HOG at chance.** With the device placement the HOG is at chance while the XEB stays positive: a few very heavy bitstrings carry the score.
 
-The effective bulk-to-boundary ratio of the placed qubits (bulk qubits used over seam qubits used; view 11) carries `nn_qab`'s B-to-B variable over to placed registers; for the five tiled layouts of Sec. 9.2 the d = 12 XEB (inverse-variance means) falls monotonically with it (8.0, 8.0, 5.8, 3.5, 0.7 → 0.182, 0.153, 0.136, 0.109, 0.091).
+### 6.4 Cost
 
-### 9.8 Mirror at the full register (61 qubits)
+| Point | Hardware | Time |
+|---|---|---|
+| `fxeb`, n = 34, d = 20 (reference-dominated) | 96-thread EPYC | ≈ 6.2 × 10³ s |
+| `fxeb`, tiled 4/4, n = 27 | EPYC | 1–4 × 10² s |
+| `fxeb`, tiled 2/7, n = 27 | EPYC | ≈ 1.8 × 10³ s |
+| mirror, n = 61, untiled, d = 4–20, shots | EPYC | 0.65–4.5 × 10³ s |
+| mirror, n = 61, three patches, `prob`, 640 runs, d = 16 / 20 | EPYC, ≈ 16 threads per point | ≈ 6 h / 11 h |
+| mirror, 45-qubit two-patch, 10 runs, d = 8 / 12 / 16 / 20 | 2-core container | 64 s / 340 s / 671 s / 1361 s |
 
-Mirror circuits need no reference, so ACE runs the paper's own proxy on the experiment's register: same 61 qubits, same pseudo-patched circuits, same estimator, no extrapolation. The first runs (Haar θ, shot estimator, device-geometry and untiled 4/4 layouts) fell below the shot floor by d = 6, with flips at d = 4 confined to the layout's seam column. The configuration below uses the three-patch register of Sec. 2.8 (75 sites, lrc 4 lrr 5, torus, the 11 exclusions of `mirror_nighthawk.py`, exact placement: 74 / 28 / 0, 9 boundary qubits), the `nn_qab` single-qubit ensemble and the `prob` estimator, 640 runs per point (10 inputs × 64 twirls), on a 96-thread EPYC (CPU):
+### 6.5 61 qubits, three patches
 
-```bash
-python3 nighthawk_qrack.py run --backend ace --families mirror --sizes 61 --theta nnqab \
-  --depths 4 6 8 10 12 16 20 --lrc 4 --lrr 5 --ace-torus --ace-transpile --ace-width 75 \
-  --ace-exclude 74,59,44,73,69,54,68,67,64,63,62 --mirror-estimator prob --order shallow \
-  --cpu --gpus 0-5 --per-gpu 1 --mem-budget-gb 300 --max-rss-gb 16 --out mirror61_dan_prob_cpu.jsonl
-```
+Placements of the release circuit on the `mirror_nighthawk.py` register (75 sites, lrc 4 lrr 5):
 
-| d | i0 | i1 | i2 | weighted mean (`--summarize`) | plain mean | `ibm_phoenix` mirror | boundary CZs (cumulative, forward half) |
-|---|---|---|---|---|---|---|---|
-| 4 | 0.630 | 0.292 | 0.550 | 0.495 ± 0.007 | 0.491 | 0.214 | 11 |
-| 6 | 0.364 | 0.260 | 0.388 | 0.338 ± 0.006 | 0.337 | 0.154 | 18 |
-| 8 | 0.0126 | 0.0726 | 0.0461 | 0.0309 ± 0.0016 | 0.0438 | 0.109 | 24 |
-| 10 | 0.0119 | 0.0590 | 0.0471 | 0.0305 ± 0.0016 | 0.0393 | 0.081 | 27 |
-| 12 | 0.0108 | 0.0632 | 0.0452 | 0.0238 ± 0.0013 | 0.0397 | 0.062 | 27 |
-| 16 | failed | 1.38 × 10⁻³ | 5.3 × 10⁻⁴ | 5.9 × 10⁻⁴ | 9.5 × 10⁻⁴ | 0.030 | 40 |
-| 20 | 4.6 × 10⁻⁵ | 2.1 × 10⁻⁴ | pending | — | 1.3 × 10⁻⁴ (i0, i1) | 0.021 | 49 |
+| Exclusions | Engine | exact / replica / cross | Seam qubits | Memory | Mirror d = 4 | Mirror d = 6 |
+|---|---|---|---|---|---|---|
+| none, 64 sites lrc 4 lrr 4 | anneal | 63 / 38 / 1 | 12 | 0.05 GiB | — | — |
+| none | exact | 73 / 29 / 0 | 8 | 0.77 GiB | 0.121 ± 0.010 | 0.056 ± 0.007 |
+| first 7 | anneal, `xok` | 76 / 24 / 2 | 8 | 0.66 GiB | — | — |
+| 11 | anneal, `xok` | 76 / 25 / 1 | 8 | 0.44 GiB | 0.897 ± 0.010 | 0.118 ± 0.010 |
+| 11, site 69 reopened | anneal | 72 / 30 / 0 | 9 | 0.50 GiB | 0.799 ± 0.013 | 0.086 ± 0.009 |
+| **11** | **exact, proven optimal** | **74 / 28 / 0** | **9 (4 / 3 / 2 per boundary)** | **0.50 GiB** | **0.646 ± 0.015** | **0.388 ± 0.015** |
+| 11 | vf2 / plain anneal | none within the bound / refused (cross coupler 34–41) | — | — | — | — |
+
+(Mirror columns: `nn_qab` θ, one instance, 1000 shots, 4 twirls.) The 11 exclusions are 74, 59, 44, 73, 69, 54, 68, 67, 64, 63, 62. Any balanced three-way split of the Nighthawk graph needs ≥ 9 boundary qubits.
+
+Sweep on the exact placement (`nn_qab` θ, `prob`, 10 inputs × 64 twirls per point, CPU):
+
+| d | i0 | i1 | i2 | inverse-variance | plain mean | `ibm_phoenix` | ACE / device (plain) | boundary CZs (forward half) |
+|---|---|---|---|---|---|---|---|---|
+| 4 | 0.630 | 0.292 | 0.550 | 0.495 ± 0.007 | 0.491 | 0.214 | 2.3 | 11 |
+| 6 | 0.364 | 0.260 | 0.388 | 0.338 ± 0.006 | 0.337 | 0.154 | 2.2 | 18 |
+| 8 | 0.0126 | 0.0726 | 0.0461 | 0.0309 ± 0.0016 | 0.0438 | 0.109 | 0.40 | 24 |
+| 10 | 0.0119 | 0.0590 | 0.0471 | 0.0305 ± 0.0016 | 0.0393 | 0.081 | 0.49 | 27 |
+| 12 | 0.0108 | 0.0632 | 0.0452 | 0.0238 ± 0.0013 | 0.0397 | 0.062 | 0.64 | 27 |
+| 16 | failed (C++ exception) | 1.38 × 10⁻³ | 5.3 × 10⁻⁴ | 5.9 × 10⁻⁴ | 9.5 × 10⁻⁴ | 0.030 | 1/32 | 40 |
+| 20 | 4.6 × 10⁻⁵ | 2.1 × 10⁻⁴ | — | — | 1.3 × 10⁻⁴ | 0.021 | 1/160 | 49 |
 
 ![61-qubit mirror, every instance](mirror61_dan_instances_d4-20.png)
 
-- ACE lies above the device at d = 4–6 (about 2.2×), crosses it between d = 6 and 8, sits at 0.3–0.4× the device from d = 8 to 12 (instance 1 at 0.7–1.0× of the device points), and falls to 1/30–1/50 at d = 16 and about 1/160 at d = 20.
-- The loss follows the number of CZs through a boundary, not depth. From d = 8 to 12 only three boundary CZs are added and the survival is flat; from d = 12 to 20, 22 more cost a factor of ≈ 310, about 0.26 nats per boundary CZ (i1: 0.29 over d = 12–16, 0.21 over d = 16–20). A single exponential in d is therefore a poor description: the summary's fit, 5.30 × 0.586^d, exceeds 1 at d = 0.
-- Instance 0 is a different curve from d = 8 on (≈ 0.011–0.013 against 0.045–0.073), and it pulls the inverse-variance mean below the plain mean (Sec. 7.3).
-- Points: d = 16 i0 failed with a C++ exception on CPU (cause not yet traced); d = 24 was dropped deliberately, since a d = 20 point already costs ≈ 11 h (d = 16 ≈ 6 h). 8 of the points ran under PyQrack 2.28.1, the others under the version before it (Sec. 10).
-- The device points are the paper's Haar circuits; these are `nn_qab`-ensemble circuits on the same register, so the comparison is of shape, not one-to-one.
+| Loss per boundary CZ | Value |
+|---|---|
+| d = 8 → 12 | +3 boundary CZs, survival flat |
+| d = 12 → 20 | +22 boundary CZs, factor ≈ 310: 0.26 nats per CZ |
+| instance 1, d = 12–16 / 16–20 | 0.29 / 0.21 nats per CZ |
+| single-exponential fit | 5.30 × 0.586^d (exceeds 1 at d = 0) |
+| power-law fit, log(−ln F) vs log d | p = 1.59 (d = 4–20), 1.28 (d ≥ 8); exponent 1.81 against boundary CZs |
 
-### 9.9 Outlook: how close can ACE come at 61 qubits
+The survival follows the boundary-CZ count in steps, not depth. Instance 0 runs on a lower curve from d = 8 on and pulls the inverse-variance mean below the plain mean. These are `nn_qab`-ensemble circuits on the device's register, so the comparison with the Haar-angle device points is one of shape.
 
-Across n = 27–29 the tiled v3 decay per replica coupler (a CZ through a seam replica) is nearly constant: b / replica couplers = 0.23/9, 0.27/13, 0.32/12 ≈ 0.025 per cycle. At matched size the device's error rate (2.25 × 10⁻³ per qubit per cycle) corresponds to b ≈ 0.06 at n = 27–29, so tiled ACE already loses fidelity 4–5 times faster per cycle than the hardware would on the same number of qubits. Extrapolated with that rate:
+### 6.6 Seam cost extrapolated to 61 qubits
 
-| Split of the 8×8 window | couplers between simulators | estimated b at n = 61 | simulator width |
+| n (tiled v3) | b over d = 12–20 | replica couplers | b per replica coupler |
 |---|---|---|---|
-| tiled 4/4 (five simulators) | ≈ 40 | ≈ 1.0 | ≤ 23 |
-| three large tiles | ≈ 16 | ≈ 0.4 | ≈ 22–25 |
-| two halves, one seam line | ≈ 8 | ≈ 0.2 | ≈ 31–33 |
+| 27 | 0.23 | 9 | 0.026 |
+| 28 | 0.27 | 13 | 0.021 |
+| 29 | 0.32 | 12 | 0.027 |
+| device at n = 27–29 (2.25 × 10⁻³ per qubit-cycle) | ≈ 0.06 | — | — |
+
+| Split of the 8 × 8 window | Couplers between simulators | Estimated b at 61 | Measured |
+|---|---|---|---|
+| tiled 4/4, five simulators | ≈ 40 | ≈ 1.0 | — |
+| three large patches | ≈ 16 | ≈ 0.4 | single-exponential b ≈ 0.53 (§6.5) |
+| two halves | ≈ 8 | ≈ 0.2 | §6.8 |
 | device | — | 0.137 | — |
 
-No balanced cut of an eight-wide grid crosses fewer than ≈ 8 couplers, so the device's rate (≲ 5 crossing couplers at 0.025 each) is out of reach of any seam-partitioned layout that fits in memory; a two-way split could come within ≈ 1.5× of it, with two dense ≈ 32-qubit simulators (32–64 GiB each). These estimates rest on three sizes and three to five circuits per point, and b itself grows with depth; mirror runs at the full register test them directly (Sec. 9.8). More shots only lower the measurement floor, and post-selection on ideal probabilities is the spoofing of [[5]](#ref-5), not a fidelity gain.
+| 49-qubit sub-register, same qubits | Patches | Boundary qubits | exact / replica / cross | Mirror d = 4 / 6 (`nn_qab`, 20 runs) |
+|---|---|---|---|---|
+| 55 sites, lrc 5 lrr 4, flat | 28 / 27 | 4 | 64 / 15 / 0 | 0.760 / 0.706 |
+| 75 sites, lrc 4 lrr 5, torus | 23 / 23 / 12 | 6 | 58 / 21 / 0 | 0.206 / 0.234 |
 
-Measured since: the three-patch register with 9 boundary qubits (Sec. 9.8) stays above the shot-limited runs to d = 20, but its decay is a staircase in the boundary-CZ count rather than one rate; the summary's single exponential gives b ≈ 0.53 against the ≈ 0.4 estimated above for three large tiles. A two-way split of the 61-qubit register needs a 35-qubit patch (256 GiB in fp32) and does not fit a GPU. The two-patch effect was measured instead on a 49-qubit sub-register (the largest that fits two patches on one 8 GB die: 55 sites, lrc 5 lrr 4, flat, patches 28 / 27, 4 boundary qubits, 64 / 15 / 0) against a three-patch split of the same qubits (75 sites, lrc 4 lrr 5, torus, 23 / 23 / 12, 6 boundary qubits, 58 / 21 / 0): mirror survival 0.760 / 0.706 at d = 4 / 6 against 0.206 / 0.234 (CPU, `nn_qab` θ, 20 runs per point).
+No balanced cut of an eight-wide grid crosses fewer than ≈ 8 couplers. More shots lower only the floor, and post-selecting on ideal probabilities is the spoofing of [[5]](#ref-5), not a fidelity gain.
 
-### 9.10 Larger registers on one 8 GB GPU
+### 6.7 Larger registers on one 8 GB GPU
 
-How far each patch count reaches on one 8 GB die (fp32, all patches fully entangled, plus Qrack's compose buffer the size of the widest patch), with splits found by CP-SAT over row-major sub-registers of the 12 × 10 lattice:
-
-| Patches | Logical qubits | Boundary qubits | Widest patch (incl. ancilla) |
+| Patches | Logical qubits | Boundary qubits | Widest patch incl. ancilla |
 |---|---|---|---|
 | 2 | 49 | 4 | 28 |
 | 3 (experiment's register) | 61 | 9 | 25 |
 | 3 | 68 | 11 | 28 |
 | 4, widths ≤ 27 | 87 | 16 | 27 |
 | 4 (`nighthawk88`) | 88 | 17 | 28 |
-| 4, disabled sites on the seams (`nighthawk88d`) | 88 | 11 | 28 |
+| 4, disabled sites on the seams (`nighthawk88d`, `nighthawk88e`) | 88 | 11 | 28 |
 
 ![nighthawk88d](nighthawk88d_four_patch_seams.png)
 
-Under clvk each worker sees one die, so six dies run six such registers in parallel. A first CPU check of the two 88-qubit registers (d = 4 and 6, 3 instances × 40 runs, inverse-variance means) does not separate them yet: 0.047 ± 0.009 / 0.0082 ± 0.0020 for `nighthawk88` against 0.030 ± 0.005 / 0.0073 ± 0.0018 for `nighthawk88d`, with instance scatter from 0.018 to 0.20 at d = 4. Following Sec. 9.8 the difference should appear at depth, where 13 fewer boundary CZs per cycle compound; the full run on six V340 dies is next (command in Sec. 2.9).
-
-`layoutsearch`, warm-started from `nighthawk88d`, kept its 11 boundary qubits and moved the seams so that 36 instead of 42 couplers pass through a boundary (8 / 9 / 10 / 9 per colour). On the same CPU check (d = 4 and 6, 3 instances × 40 runs, inverse-variance means) `nighthawk88e` reaches **0.287 ± 0.020 / 0.143 ± 0.012** against 0.030 ± 0.005 / 0.0071 ± 0.0018 for `nighthawk88d`: 10–20× at the same qubit count, more than the 14 % fewer boundary couplers alone would suggest, so where the seams sit relative to the mirror circuits' rotating pseudo-patch cuts matters as well. These are short runs; the depth sweep will tell whether the gain holds.
-
-### 9.11 Two patches at 61 qubits
-
-Sec. 9.8 shows that at 61 qubits the loss follows the CZs that pass through a boundary. Two patches have one seam instead of three, so they are the natural next step. Two registers are built in. Both use the release's recipe, so `--theta haar` gives circuits with the device's own angle ensemble. `layoutsearch --cz-weights mirror` (Sec. 6.7) placed both so that the mirror circuits themselves put the fewest CZs through the boundary.
-
-| | `nighthawk61r2` | `nighthawk61w` |
+| CPU check, `nn_qab` θ, 3 instances × 40 runs, inverse-variance | d = 4 | d = 6 |
 |---|---|---|
-| Register | the release's 61 qubits: bit-for-bit the same mirror circuits, angles and inputs | 11 × 6 window, rows 0–10, columns 2–7; broken qubits 55 and 62 plus border sites 52 and 57 left out, so the patches meet at a 3-qubit waist on row 5 |
-| Boundary qubits | 6, the proven minimum of any balanced two-way split | 3 |
-| Couplers exact / through a boundary | 83 / 19 | 93 / 7 |
-| Patch widths, incl. ancilla | 35 / 34: 256 + 128 GiB, too large for the 320 GB EPYC; 34 / 33 with `--no-ace-error-detection` | 33 / 33: 64 + 64 GiB with error detection on |
-| CZs at d = 20 (forward half) | 221 | 221 |
+| `nighthawk88` | 0.047 ± 0.009 | 0.0082 ± 0.0020 |
+| `nighthawk88d` | 0.030 ± 0.005 | 0.0073 ± 0.0018 |
+| `nighthawk88e` | **0.287 ± 0.020** | **0.143 ± 0.012** |
 
-Boundary CZs per mirror circuit (forward half):
+`nighthawk88e` has 14 % fewer boundary couplers than `nighthawk88d` and scores 10–20× higher. Where the seams sit relative to the mirrors' rotating pseudo-patch cuts matters as well. Instance scatter at d = 4 spans 0.018–0.20.
 
-| d | 4 | 6 | 8 | 10 | 12 | 16 | 20 | 36 |
+### 6.8 Two patches at 61 qubits
+
+| Boundary CZs per mirror (forward half), d | 4 | 6 | 8 | 10 | 12 | 16 | 20 | 36 |
 |---|---|---|---|---|---|---|---|---|
-| three patches (Sec. 9.8) | 11 | 18 | 24 | 27 | 27 | 40 | 49 | 93 |
+| three patches (§6.5) | 11 | 18 | 24 | 27 | 27 | 40 | 49 | 93 |
 | `nighthawk61r2` | 8 | 12 | 14 | 16 | 19 | 25 | 34 | 67 |
 | `nighthawk61w` | 1 | 3 | 6 | 6 | 7 | 12 | 13 | 27 |
 
-**On the release register, two patches gain little, and with error detection they need swap.** On the same settings as Sec. 9.8 (`nn_qab` θ, `prob`, 3 instances × 80 runs, CPU), `nighthawk61r2` gives 0.522 ± 0.019 / 0.354 ± 0.016 at d = 4 / 6 with error detection. That is barely above the three-patch 0.495 / 0.338, although it has a third fewer boundary CZs. With error detection off it gives 0.448 ± 0.017 / 0.207 ± 0.012. With the device's own Haar circuits and error detection on (same run counts), it gives **0.226 ± 0.021 / 0.128 ± 0.014 against `ibm_phoenix`'s 0.214 / 0.154**: level with the device on its own register and circuits at d = 4–6. A seam of 6 qubits across the 8 × 8 window is the floor, so no two-patch split of IBM's register removes the boundary losses. Whether the tie holds at depth is what the run with error detection on (below) measures.
+| Register | θ | Error detection | Runs per point | d = 4 | d = 6 |
+|---|---|---|---|---|---|
+| three patches (§6.5) | `nn_qab` | on | 640 | 0.495 | 0.338 |
+| `nighthawk61r2` | `nn_qab` | on | 240 | 0.522 ± 0.019 | 0.354 ± 0.016 |
+| `nighthawk61r2` | `nn_qab` | off | 240 | 0.448 ± 0.017 | 0.207 ± 0.012 |
+| `nighthawk61r2` | Haar | on | 240 | **0.226 ± 0.021** (plain 0.254) | **0.128 ± 0.014** (plain 0.147) |
+| `nighthawk61w` | both | on | 240 | 1.00000 | 1.00000 |
+| `ibm_phoenix` | Haar | — | — | 0.214 | 0.154 |
 
-**Error detection on at full width: `--swap-gb`.** The 35 / 34 patches hold 384 GiB of dense state. At full width Qrack also briefly holds the widest patch's old state while it composes the new one, 128 GiB more, so the worst case is 513 GiB per worker. The EPYC's 298 GiB of RAM plus 238 GiB of swap (256 GB on the NVMe RAID0) covers it with about 20 GiB to spare. `run --swap-gb GB` does three things:
-- the `--mem-budget-gb` ledger counts up to GB of free swap as available;
-- the preflight prints the plan (dense states, compose transient, RAM, swap) and warns, but never stops;
-- for CPU patches wider than 28 qubits it sets `QRACK_MAX_CPU_QB` and `QRACK_MAX_PAGING_QB` to 40. Qrack's build-time defaults for these ceilings are not documented, and no run here went past 28 qubits per patch. Past the ceiling QUnit throws "QUnit needed to engage automatic circuit elision" (verified with a ceiling of 10 on 12 qubits). An explicitly set value wins. The 33-wide `nighthawk61w` patches get the same raise without `--swap-gb`.
+(Inverse-variance means unless noted.) Two patches on IBM's register, with error detection, match the device at d = 4–6 on its own circuits. A 6-qubit seam is the floor for any balanced split of the 8 × 8 window, so the boundary losses remain. With error detection the run needs swap (§5.5).
 
-The numbers are unchanged, so the config tag is the same with and without swap. At full width about 90 GiB of the states live in swap, so every gate on the 35-qubit patch streams that part from the NVMe array: expect deep points to run several times slower than from RAM. Run d = 8 first and time it before committing the deep points. Kernel settings that help paging of large sequential states:
-
-```bash
-sudo sysctl vm.swappiness=100 vm.page-cluster=6   # swap out eagerly; read 64 pages per swap-in, not 8
-swapon --show                                      # the RAID0 swap active, 256 GB
-ulimit -v                                          # must be unlimited
-```
-
-**A waist register keeps the boundary nearly closed.** `nighthawk61w` gives survival 1.00000 at d = 4 and 6, both ensembles, 3 instances × 80 runs: the 1–3 boundary CZs at those depths are absorbed exactly. Deeper points need the 64 GiB patches. The same construction at 45 qubits (rows 2–11, columns 0–4, a 3-qubit seam, widths 26 / 24, 1 instance × 10 runs, Haar θ, CPU) gives:
+`nighthawk61w` absorbs its 1–3 boundary CZs at d = 4–6 exactly. Its deeper points need the 64 GiB patches. The same construction at 45 qubits (rows 2–11 × cols 0–4, 3-qubit seam, widths 26 / 24, Haar θ, 1 instance × 10 runs) gives:
 
 | d | 8 | 12 | 16 | 20 |
 |---|---|---|---|---|
 | boundary CZs | 5 | 6 | 10 | 11 |
-| 45-qubit waist register, Haar θ | 0.899 ± 0.035 | 0.883 ± 0.036 | 0.164 ± 0.10 | 0.124 ± 0.074 |
+| 45-qubit waist register | 0.899 ± 0.035 | 0.883 ± 0.036 | 0.164 ± 0.10 | 0.124 ± 0.074 |
 | `ibm_phoenix`, 61 qubits | 0.109 | 0.062 | 0.030 | 0.021 |
 
-The d = 16 and 20 runs are bimodal: some inputs survive almost intact, the rest are close to 0. Ten runs leave the mean uncertain to a factor of about 2. The `nn_qab` ensemble scores lower on this register (0.600 / 0.530 at d = 8 / 12) and hit the CPU C++ exception of Sec. 9.8 at d = 16.
+| Comparison | `nighthawk61r2` | `nighthawk61w` |
+|---|---|---|
+| qubits, CZs at d = 20 | 61, 221 | 61, 221 |
+| narrowest cut | 8 (IBM's window) | 3 |
+| what a win shows | ACE against the device on the device's register | ACE on a two-chip register with a narrow link |
 
-**What the comparison means.** The device's mirror fidelity is set by its gate errors, and `nighthawk61w` has the same qubit and CZ count as the release, so the device would score about the same on it. For a classical simulator the waist matters: its narrowest cut is 3 qubits, against 8 for IBM's 8 × 8 window. A number above `ibm_phoenix` on `nighthawk61w` therefore shows what ACE does with a register built from two chips and a narrow link, the architecture IBM plans to couple chips with. It does not show ACE beating the device on the device's own register. That claim needs `nighthawk61r2`.
+The device's fidelity follows its gate count, so it would score about the same on either register. The waist only makes the classical simulation easier. The 45-qubit runs at d = 16–20 are bimodal (inputs survive nearly intact or near 0), so ten runs fix the mean only to a factor of ≈ 2.
 
-Commands for the 320 GB EPYC (CPU, one worker; the scheduler budgets 129 GiB per point for `nighthawk61w` and 385 GiB for `nighthawk61r2` with error detection):
+### 6.9 Two-patch scaling ladder against Dan's calculator
 
-```bash
-# the waist register, device angle ensemble, d = 4..20 (one instance first: about 10 runs per point)
-python3 nighthawk_qrack.py run --backend ace --register nighthawk61w --families mirror --theta haar \
-  --depths 4 6 8 10 12 16 20 --instances 1 --twirls 1 --mirror-estimator prob --order shallow \
-  --cpu --gpus 0 --per-gpu 1 --mem-budget-gb 290 --out mirror61w_haar.jsonl
-# then instances 2 and 3 (same --out, finished points are skipped): --instances 3
-# IBM's register and circuits as two patches, error detection on: 384 GiB of state, RAM + swap
-python3 nighthawk_qrack.py run --backend ace --register nighthawk61r2 --families mirror --theta haar \
-  --depths 4 6 8 10 12 16 20 --instances 1 --twirls 1 --mirror-estimator prob --order shallow \
-  --cpu --gpus 0 --per-gpu 1 --swap-gb 238 --mem-budget-gb 530 --out mirror61r2_haar.jsonl
-# the same with error detection off fits RAM (128 + 64 GiB): add --no-ace-error-detection, drop --swap-gb,
-# --mem-budget-gb 290, and use its own --out
-```
+The release's first n qubits, each split in two by `layoutsearch --fixed-register release:N --cz-weights mirror --objective seam,balance,cz`, with the widest patch capped at n/2 + 5:
 
----
+| n | 28 | 32 | 36 | 40 | 45 | 49 | 53 | 57 | 61 |
+|---|---|---|---|---|---|---|---|---|---|
+| register | `2p28` | `2p32` | `2p36` | `2p40` | `2p45` | `2p49` | `2p53` | `2p57` | `61r2` |
+| boundary qubits (proven minimum) | 3 | 3 | 3 | 3 | 4 | 4 | 5 | 5 | 6 |
+| patch widths incl. ancilla | 15/18 | 18/19 | 20/21 | 22/23 | 26/25 | 27/28 | 30/30 | 32/32 | 35/34 |
+| couplers through the boundary | 11 | 11 | 12 | 12 | 12 | 15 | 15 | 18 | 19 |
+| boundary CZs at d = 20 | 18 | 20 | 25 | 21 | 20 | 29 | 34 | 34 | 34 |
+| Dan's XEB(12) | 0.372 | 0.409 | 0.444 | 0.476 | 0.425 | 0.450 | 0.408 | 0.429 | 0.396 |
+| Dan's XEB at d = 4 / 20 / 36 | 0.844 / 0.106 / 0.0031 | 0.858 / 0.132 / 0.0054 | 0.870 / 0.158 / 0.0088 | 0.881 / 0.186 / 0.0132 | 0.864 / 0.143 / 0.0068 | 0.872 / 0.163 / 0.0095 | 0.857 / 0.130 / 0.0053 | 0.865 / 0.146 / 0.0071 | 0.853 / 0.122 / 0.0045 |
 
-verification and simulation at runtime:
+Measured mirror survival, with Dan's prediction in brackets (CPU, error detection on; 3 instances × 10 runs to n = 36, 1 × 10 at 40–45):
+
+| n | d = 4 | 8 | 12 | 16 | 20 | 36 | fitted p | fitted XEB(12) |
+|---|---|---|---|---|---|---|---|---|
+| **`nn_qab` θ** | | | | | | | | |
+| 28 | 0.593 (0.844) | 0.543 (0.597) | 0.462 (0.372) | 0.354 (0.208) | 0.058 (0.106) | 1.9 × 10⁻⁴ (0.0031) | 1.68 | 0.360 |
+| 32 | 0.730 (0.858) | 0.260 (0.628) | 0.212 (0.409) | 0.135 (0.242) | 0.082 (0.132) | 2.4 × 10⁻⁴ (0.0054) | 1.44 | 0.217 |
+| 36 | 0.765 (0.870) | 0.259 (0.655) | 0.058 (0.444) | 0.019 (0.276) | 2.8 × 10⁻⁴ (0.158) | 8.9 × 10⁻⁵ (0.0088) | 1.68 | 0.100 |
+| 40 | 0.989 (0.881) | 0.319 (0.679) | 0.092 (0.476) | 0.034 (0.308) | 0.0088 (0.186) | 1.6 × 10⁻⁵ (0.0132) | 2.87 | 0.306 |
+| 45 | 0.748 (0.864) | 0.600 (0.640) | 0.103 (0.425) | 0.067 (0.257) | 0.0010 (0.143) | — | 2.89 | 0.166 |
+| **Haar θ** | | | | | | | | |
+| 28 | 0.278 | 0.087 | 0.056 | 0.056 | 9.3 × 10⁻⁴ | 2.7 × 10⁻⁵ | 1.02 | 0.039 |
+| 32 | 0.327 | 0.024 | 0.013 | 0.026 | 0.0037 | 2.7 × 10⁻⁵ | 0.81 | 0.021 |
+| 36 | 0.397 | 0.052 | 0.0041 | 4.0 × 10⁻⁵ | 4.7 × 10⁻⁴ | 2.7 × 10⁻⁶ | 1.01 | 0.005 |
+| 40 | 0.849 | 0.152 | 0.0046 | 0.0012 | 1.5 × 10⁻⁶ | 4.2 × 10⁻⁸ | 2.14 | 0.043 |
+| 45 | 0.319 | 0.0078 | 0.0028 | 0.0055 | — | — | 0.86 | 0.003 |
+| **Dan's calculator** | | | | | | | 1.606 | 0.37–0.48 |
+
+(Fitted p and XEB(12): Dan's form, log(−ln F) linear in log(d/12), from d = 6 on.)
+
+| Forward XEB, `nighthawk2p28`, `nn_qab` θ, 1 instance | d = 4 | d = 12 |
+|---|---|---|
+| `fxeb` against the exact reference | 0.885 ± 0.044 | 0.338 ± 0.016 |
+| Dan's calculator | 0.844 | 0.372 |
+| mirror survival, same register | 0.593 | 0.462 |
+
+- **At 28 qubits the calculator holds.** That is the edge of its data, and the XEB it was fitted on agrees within 10 %.
+- **Above 28 it overestimates, more with size and depth.** At a fixed 3-qubit seam its x grows with the bulk, so the prediction improves. The measurement worsens instead: the fitted XEB(12) falls and p rises to ≈ 2.9. Its single predictor counts seam qubits, not the CZs through them.
+- **Haar losses are 10–100× larger.** A fit on `nn_qab` circuits does not transfer to the device's ensemble.
+- **The runs are short.** Instance scatter is 2–5× at depth, so single points are indicative; the trend holds across sizes in both ensembles.
+
+### 6.10 Cloverfield
+
+| Two `nighthawk88e` chips, 176 qubits, 3 ghost links (CPU, `nn_qab`, 3 instances × 20 runs) | d = 4 | d = 6 |
+|---|---|---|
+| ghost | 0.079 | 0.017 |
+| mean-field | 0.056 | 0.015 |
+
+Each chip carries 3 ghosts at widths 25 / 28 / 27 / 26 (≈ 5.8 GiB, one chip per die). At these depths the chips' own seam losses dominate; selftest [5] isolates the loom's share (§3.5). Each link count rebuilds the global circuit, since the K = 3 cuts follow the field's coupling graph.
+
+Runtime screenshots:
 
 <img width="970" height="403" alt="image" src="https://github.com/user-attachments/assets/717d8289-2a12-4de4-892d-77d5a161f955" />
 <img width="1114" height="327" alt="image" src="https://github.com/user-attachments/assets/b84b32ce-4fae-434b-b06a-62b38d32c4b2" />
 
-## 10. Limitations
+---
 
-- `fxeb` needs an exact 2ⁿ reference and is limited to n ≲ 34–36; statements about n = 61 are extrapolations of b(N).
-- The `full` family cannot be scored at 61 qubits; samples are stored for downstream use only.
-- Patched circuits use the released 61-qubit partitions and run only at n = 61.
-- `QrackAceBackend` is an approximate method whose layout, chunk numbering and seam treatment depend on the PyQrack version; record the version, `--lrc`/`--lrr`, torus setting and tiling version with every published number (all are in each record).
-- Tiling optimises a proxy cost; its weights are calibrated on the 4/4 runs of Sec. 9 and are not claimed optimal.
-- Three instances per point; instance scatter exceeds shot noise, and differences between configurations below ~2σ of the instance-scatter error are not resolved.
-- The ACE-settings comparison ran on an updated PyQrack; compare within one PyQrack version, as ACE's seam treatment and layout can change between versions (the PyQrack version enters neither the config tag nor the records: note it with each run, or use a new `--out` after an upgrade). On the 61-qubit mirror (Sec. 9.8) moving to PyQrack 2.28.1 shifted d = 6 instances 1 and 2 by −0.007 and +0.005 on CPU alone.
-- GPU results depend on the Qrack build (Sec. 8.7): use Qrack with the async fix or `QRACK_OCL_SYNC=1`, and check one point against the CPU on every new device or driver.
-- The `--register` sub-registers have no device data; their statements are about ACE alone. `nighthawk88d` changes the circuit graph (32 disabled sites, 150 couplers), so its fidelity is not comparable one-to-one with `nighthawk88`'s.
-- The v3/v2 comparison (Sec. 9.5) rests on 3 circuits per point; its effect size is approximate until the paired differences and the n = 30–32 points are in.
-- Sections 9.2 and 9.4–9.5 report inverse-variance means from `run --summarize`; the plain means over circuits can be higher (Sec. 7.3) and should be taken from the graph tool for publication.
-- arXiv:2609.28657 is a preprint (v1) and had not been peer reviewed at the time of writing.
+## 7. Run recipes
+
+```bash
+# 61 qubits, three patches (§6.5): EPYC, CPU, six workers
+python3 nighthawk_qrack.py run --backend ace --families mirror --sizes 61 --theta nnqab \
+  --depths 4 6 8 10 12 16 20 --lrc 4 --lrr 5 --ace-torus --ace-transpile --ace-width 75 \
+  --ace-exclude 74,59,44,73,69,54,68,67,64,63,62 --mirror-estimator prob --order shallow \
+  --cpu --gpus 0-5 --per-gpu 1 --mem-budget-gb 300 --max-rss-gb 16 --out mirror61_dan_prob_cpu.jsonl
+
+# 88 qubits on six V340 dies (§6.7)
+python3 nighthawk_qrack.py run --backend ace --register nighthawk88e --theta nnqab \
+  --depths 4 6 8 10 12 16 20 --mirror-estimator prob --order shallow \
+  --ace-gpu --gpus 0-5 --per-gpu 1 --stagger 20 --max-rss-gb 16 --out mirror88e_clvk.jsonl
+
+# the waist register (§6.8): 128 GiB, fits RAM
+python3 nighthawk_qrack.py run --backend ace --register nighthawk61w --families mirror --theta haar \
+  --depths 4 6 8 10 12 16 20 --instances 3 --twirls 1 --mirror-estimator prob --order shallow \
+  --cpu --gpus 0 --per-gpu 1 --mem-budget-gb 290 --out mirror61w_haar.jsonl
+
+# IBM's register as two patches, error detection on (§6.8): RAM + swap, alone on the machine
+python3 nighthawk_qrack.py run --backend ace --register nighthawk61r2 --families mirror --theta haar \
+  --depths 4 6 8 10 12 16 20 --instances 3 --twirls 1 --mirror-estimator prob --order shallow \
+  --cpu --gpus 0 --per-gpu 1 --swap-gb 238 --mem-budget-gb 530 --out mirror61r2_haar.jsonl
+
+# the two-patch ladder (§6.9), then 61 with swap, then the comparison
+for n in 28 32 36 40 45 49 53 57; do for th in nnqab haar; do
+  python3 nighthawk_qrack.py run --backend ace --register nighthawk2p$n --families mirror --theta $th \
+    --depths 4 6 8 10 12 16 20 36 --instances 3 --twirls 1 --mirror-estimator prob --order shallow \
+    --cpu --gpus 0 --per-gpu 1 --mem-budget-gb 290 --out ladder_${n}_$th.jsonl
+done; done
+for th in nnqab haar; do
+  python3 nighthawk_qrack.py run --backend ace --register nighthawk61r2 --families mirror --theta $th \
+    --depths 4 6 8 10 12 16 20 36 --instances 3 --twirls 1 --mirror-estimator prob --order shallow \
+    --cpu --gpus 0 --per-gpu 1 --swap-gb 238 --mem-budget-gb 530 --out ladder_61_$th.jsonl
+done
+python3 nighthawk_qrack.py danmodel --in ladder_*.jsonl --csv ladder_vs_dan.csv
+
+# forward XEB on the ladder (§6.9): references of 3 and 48 GiB
+for n in 28 32; do
+  python3 nighthawk_qrack.py run --backend ace --register nighthawk2p$n --families fxeb --theta nnqab \
+    --depths 4 6 8 10 12 16 20 --instances 3 --order shallow \
+    --cpu --gpus 0 --per-gpu 1 --mem-budget-gb 290 --out fxeb_ladder_${n}_nnqab.jsonl &
+done; wait
+
+# a register search (§3.4)
+python3 nighthawk_qrack.py layoutsearch --n 88 --geometries 114:4:5 102:4:5 --region convex \
+  --hint nighthawk88e --candidates 3 --cpsat-time 600 --test-depths 4 8 --test-jobs 3 --cpu --save-best nighthawk88x
+
+# the cloverfield (§3.5)
+python3 nighthawk_cloverfield.py plan --chips nighthawk88e*2 --links 4 --png field.png
+python3 nighthawk_cloverfield.py run --chips nighthawk88e*2 --links 4 --theta nnqab --depths 4 6 8 10 12 \
+  --ace-gpu --gpus 0-5 --out field88e2.jsonl
+python3 nighthawk_cloverfield.py linksearch --chips nighthawk88e*2 --link-counts 0 2 4 all --theta nnqab \
+  --depths 4 8 --twirls 4 --cpu
+```
+
+Progress of any run: the same command with `--status`. Deep points at 57–61 qubits are the slowest; time one d = 8 point before committing them.
 
 ---
 
-## 11. References
+## 8. Limitations
 
-All identifiers below were checked against the arXiv abstract pages and, where given, the published versions.
+- **Verification.** `fxeb` needs an exact 2^n reference (n ≲ 34–36). The full 61-qubit circuits cannot be scored, and statements at 61 qubits are proxies or extrapolations.
+- **Families.** Patched circuits use the released partitions and run only at n = 61. Registers have no device data.
+- **ACE versions.** ACE's layout, numbering and seam treatment depend on the PyQrack version, which enters neither the config tag nor the records: note it with each run, or use a new `--out` after an upgrade. Moving to 2.28.1 shifted the 61-qubit d = 6 instances by −0.007 and +0.005.
+- **Statistics.** Three instances per point at most; instance scatter exceeds shot noise, and differences below ≈ 2σ of it are not resolved. The ladder, two-patch and waist results rest on 10–240 runs per point.
+- **Weights.** Tiling and layoutsearch optimise proxy costs; their weights are not claimed optimal.
+- **GPU builds.** GPU results depend on the Qrack build (§5.3): check one point against the CPU on every new device or driver.
+- **Comparability.** Registers with disabled sites or waists change the circuit graph, so their fidelities are not comparable one-to-one with the release's.
+- **Open failure.** A CPU-side C++ exception at d = 16 (61-qubit i0, 45-qubit `nn_qab`) is not yet traced.
+- **Preprint.** arXiv:2609.28657 is a preprint (v1), not peer reviewed at the time of writing.
 
-<a id="ref-1"></a>**[1]** T. Sedrakyan *et al.*, "Quantum computational advantage in random-circuit sampling on IBM superconducting quantum computers," [arXiv:2609.28657](https://arxiv.org/abs/2609.28657) (2026). — *The experiment, estimators (Eq. (1)–(2)), partitions, pseudo-patching, shot budgets.*
+---
+
+## 9. References
+
+All identifiers were checked against the arXiv abstract pages and, where given, the published versions.
+
+<a id="ref-1"></a>**[1]** T. Sedrakyan *et al.*, "Quantum computational advantage in random-circuit sampling on IBM superconducting quantum computers," [arXiv:2609.28657](https://arxiv.org/abs/2609.28657) (2026). — *The experiment, estimators, partitions, pseudo-patching, shot budgets.*
 
 <a id="ref-2"></a>**[2]** S. Boixo *et al.*, "Characterizing Quantum Supremacy in Near-Term Devices," [arXiv:1608.00263](https://arxiv.org/abs/1608.00263); *Nature Physics* **14**, 595 (2018). — *Cross-entropy benchmarking as a fidelity proxy.*
 
-<a id="ref-3"></a>**[3]** F. Arute *et al.*, "Quantum supremacy using a programmable superconducting processor," [arXiv:1910.11333](https://arxiv.org/abs/1910.11333); *Nature* **574**, 505 (2019). — *Linear XEB on 53 qubits; patch and elided verification circuits.*
+<a id="ref-3"></a>**[3]** F. Arute *et al.*, "Quantum supremacy using a programmable superconducting processor," [arXiv:1910.11333](https://arxiv.org/abs/1910.11333); *Nature* **574**, 505 (2019). — *Linear XEB on 53 qubits; patch and elided circuits.*
 
-<a id="ref-4"></a>**[4]** A. Morvan *et al.*, "Phase transitions in random circuit sampling," [arXiv:2304.11119](https://arxiv.org/abs/2304.11119); *Nature* **634**, 328 (2024). — *Regimes in which XEB tracks fidelity; weak-link model.*
+<a id="ref-4"></a>**[4]** A. Morvan *et al.*, "Phase transitions in random circuit sampling," [arXiv:2304.11119](https://arxiv.org/abs/2304.11119); *Nature* **634**, 328 (2024). — *Regimes in which XEB tracks fidelity.*
 
 <a id="ref-5"></a>**[5]** X. Gao, M. Kalinowski, C.-N. Chou, M. D. Lukin, B. Barak, S. Choi, "Limitations of Linear Cross-Entropy as a Measure for Quantum Advantage," [arXiv:2112.01657](https://arxiv.org/abs/2112.01657); *PRX Quantum* **5**, 010334 (2024). — *When XEB and fidelity diverge; spoofing by cutting weak links.*
 
@@ -872,14 +847,14 @@ All identifiers below were checked against the arXiv abstract pages and, where g
 
 <a id="ref-7"></a>**[7]** T. Proctor, S. Seritan, K. Rudinger, E. Nielsen, R. Blume-Kohout, K. Young, "Scalable randomized benchmarking of quantum computers using mirror circuits," [arXiv:2112.09853](https://arxiv.org/abs/2112.09853); *Phys. Rev. Lett.* **129**, 150502 (2022). — *Mirror-circuit RB.*
 
-<a id="ref-8"></a>**[8]** J. Hines *et al.*, "Demonstrating Scalable Randomized Benchmarking of Universal Gate Sets," [arXiv:2207.07272](https://arxiv.org/abs/2207.07272); *Phys. Rev. X* **13**, 041030 (2023). — *Mirror RB with continuously parametrised single-qubit gates.*
+<a id="ref-8"></a>**[8]** J. Hines *et al.*, "Demonstrating Scalable Randomized Benchmarking of Universal Gate Sets," [arXiv:2207.07272](https://arxiv.org/abs/2207.07272); *Phys. Rev. X* **13**, 041030 (2023). — *Mirror RB with parametrised single-qubit gates.*
 
 <a id="ref-9"></a>**[9]** J. J. Wallman, J. Emerson, "Noise tailoring for scalable quantum computation via randomized compiling," [arXiv:1512.01098](https://arxiv.org/abs/1512.01098); *Phys. Rev. A* **94**, 052325 (2016). — *Pauli-frame twirling.*
 
-<a id="ref-10"></a>**[10]** D. Strano, B. Bollay, A. Blaauw, N. Shammah, W. J. Zeng, A. Mari, "Exact and approximate simulation of large quantum circuits on a single GPU," [arXiv:2304.14969](https://arxiv.org/abs/2304.14969); *Proc. IEEE QCE 2023*, pp. 949–958. — *Qrack's exact and approximate simulation methods.*
+<a id="ref-10"></a>**[10]** D. Strano, B. Bollay, A. Blaauw, N. Shammah, W. J. Zeng, A. Mari, "Exact and approximate simulation of large quantum circuits on a single GPU," [arXiv:2304.14969](https://arxiv.org/abs/2304.14969); *Proc. IEEE QCE 2023*, pp. 949–958. — *Qrack's methods.*
 
-<a id="ref-11"></a>**[11]** Y. Zhou, E. M. Stoudenmire, X. Waintal, "What limits the simulation of quantum computers?," [arXiv:2002.07730](https://arxiv.org/abs/2002.07730); *Phys. Rev. X* **10**, 041038 (2020). — *Approximate simulation with a controlled error per gate, matched against device fidelity.*
+<a id="ref-11"></a>**[11]** Y. Zhou, E. M. Stoudenmire, X. Waintal, "What limits the simulation of quantum computers?," [arXiv:2002.07730](https://arxiv.org/abs/2002.07730); *Phys. Rev. X* **10**, 041038 (2020). — *Controlled error per gate, matched against device fidelity.*
 
-<a id="ref-12"></a>**[12]** I. L. Markov, A. Fatima, S. V. Isakov, S. Boixo, "Quantum Supremacy Is Both Closer and Farther than It Appears," [arXiv:1807.10749](https://arxiv.org/abs/1807.10749) (2018). — *Trading circuit fidelity for simulation cost; cost linear in target fidelity.*
+<a id="ref-12"></a>**[12]** I. L. Markov, A. Fatima, S. V. Isakov, S. Boixo, "Quantum Supremacy Is Both Closer and Farther than It Appears," [arXiv:1807.10749](https://arxiv.org/abs/1807.10749) (2018). — *Cost linear in target fidelity.*
 
-**Software and data (not on arXiv):** [BlueQubitDev/rcs-nighthawk](https://github.com/BlueQubitDev/rcs-nighthawk) (including `contraction_cost/`) · [unitaryfund/pyqrack](https://github.com/unitaryfund/pyqrack) · [vm6502q/pyqrack-examples](https://github.com/vm6502q/pyqrack-examples) (upstream `nn_qab.py`) · [twobombs/thereminq-examples](https://github.com/twobombs/thereminq-examples) (`rcs/nighthawk`, `rcs/nn_qab`)
+**Software and data:** [BlueQubitDev/rcs-nighthawk](https://github.com/BlueQubitDev/rcs-nighthawk) (incl. `contraction_cost/`) · [unitaryfund/pyqrack](https://github.com/unitaryfund/pyqrack) · [vm6502q/pyqrack-examples](https://github.com/vm6502q/pyqrack-examples) (`nn_qab.py`, `qem/richardson_nn_hamming_weight.py`) · [twobombs/thereminq-examples](https://github.com/twobombs/thereminq-examples) (`rcs/nighthawk`, `rcs/nn_qab`)
