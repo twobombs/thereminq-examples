@@ -1,6 +1,6 @@
 # Methodology: `rcs/nighthawk`
 
-How `nighthawk_qrack.py`, `nighthawk_cloverfield.py` and the experiments of the [README](README.md) work, step by step. The README holds the results; this file holds the procedure that produced them. Constants are quoted from the code (5026 lines, 16 October 2026).
+How `nighthawk_qrack.py`, `nighthawk_cloverfield.py` and the experiments of the [README](README.md) work, step by step. [RESULTS.md](RESULTS.md) holds the results; this file holds the procedure that produced them. Constants are quoted from the code (5026 lines, 16 October 2026).
 
 ---
 
@@ -272,7 +272,7 @@ The plain mean is the quantity of interest (an average over circuits). The inver
 
 ### 7.4 Boundary-CZ count
 
-For a register, placement and depth d: the number of CZs in the mirror's forward half (d/2 cycles, pseudo-patching applied) whose coupler is not exact under the placement. It is instance-independent (§2.3). The counter reproduced the three-patch column of README §6.5 exactly before it was used for new registers. `layoutsearch --cz-weights mirror[:D…]` sums the same counts per coupler over the depths D (default 4, 6, 8, 10, 12, 16, 20) as objective weights.
+For a register, placement and depth d: the number of CZs in the mirror's forward half (d/2 cycles, pseudo-patching applied) whose coupler is not exact under the placement. It is instance-independent (§2.3). The counter reproduced the three-patch column of RESULTS §6 exactly before it was used for new registers. `layoutsearch --cz-weights mirror[:D…]` sums the same counts per coupler over the depths D (default 4, 6, 8, 10, 12, 16, 20) as objective weights.
 
 ---
 
@@ -294,23 +294,23 @@ For a register, placement and depth d: the number of CZs in the mirror's forward
 
 Each row is one experiment as run. "Runs" is per point: instances × (inputs × twirls) for mirrors, instances × shots for `fxeb`.
 
-| # | Question | Register / placement | Family, θ, estimator | Depths | Runs | Hardware | README |
+| # | Question | Register / placement | Family, θ, estimator | Depths | Runs | Hardware | RESULTS § |
 |---|---|---|---|---|---|---|---|
-| E1 | are the circuits the released ones? | release | all, Haar | all | — | any | §3.1 |
-| E2 | does PyQrack reproduce the paper's hardware numbers? | release | patched + mirror counts | all | release data | CPU | §3.1 |
-| E3 | layout or placement? | 8 × 8 window, five lrc/lrr, device vs tiled v2 | `fxeb`, Haar | 8, 12 | 3 × 4096 | CPU | §6.1 |
-| E4 | does tiling v3 beat v2, and how does XEB scale with n and d? | 4/4, v2 and v3 on the same circuits, one shared reference | `fxeb`, Haar | 12, 16, 20 | 3 × 4096 | CMP 50HX (`--ace-gpu --ref-gpu`) | §6.2 |
-| E5 | do ACE's switches change the seam cost? | 4/4 v3 with `rep`, `noed`, `noxbar` variants | `fxeb`, Haar | 12, 16 | 5 × 4096 | CMP 50HX | §6.2 |
-| E6 | does the ensemble matter? | 4/4 tiled v3 vs device placement, n = 27 | `fxeb`, `nn_qab` | 12 | 20 × 4096 | CPU ACE, GPU reference (`--ref-gpu`) | §6.3 |
-| E7 | which 61-qubit placement? | 75 sites, lrc 4 lrr 5, four exclusion / engine settings | mirror, `nn_qab`, shots | 4, 6 | 1 × 1000 shots, 4 twirls | CPU | §6.5 |
-| E8 | how does ACE decay at the full register? | three patches, exact placement, 11 exclusions | mirror, `nn_qab`, `prob` | 4–20 | 3 × (10 × 64) | EPYC, 6 CPU workers | §6.5 |
-| E9 | two or three patches at the same qubits? | 49-qubit sub-register, 55 vs 75 sites | mirror, `nn_qab`, `prob` | 4, 6 | 1 × 20 | CPU | §6.6 |
-| E10 | do disabled sites on the seams help at 88 qubits? | `nighthawk88`, `88d`, `88e` | mirror, `nn_qab`, `prob` | 4, 6 | 3 × (10 × 4) | CPU | §6.7 |
-| E11 | two patches at 61 qubits? | `nighthawk61r2` (error detection on / off), `nighthawk61w`; 45-qubit waist analogue | mirror, `nn_qab` and Haar, `prob` | 4, 6 (61); 8–20 (45) | 3 × (10 × 8); 1 × 10 | container CPU | §6.8 |
-| E12 | does Dan's calculator scale? | `nighthawk2p28` … `2p45` | mirror, `nn_qab` and Haar, `prob`; `fxeb` at 28 | 4–20, 36 | 3 × 10 (≤ 36), 1 × 10 (40, 45); `fxeb` 1 × 4096 | container CPU | §6.9 |
-| E13 | does a ghost link carry entanglement? | two exact 9-qubit chips; two `nighthawk88e` chips | mirror, `nn_qab`, `prob` per chip | 8–16; 4, 6 | selftest; 3 × (10 × 2) | CPU | §3.5, §6.10 |
-| E14 | why do deep GPU points fail? | 16-qubit reproducer; ACE mirror | — | 20 layers; 4, 6 | 5 runs; 3 × 640 | PoCL | §5.3 |
-| E15 | does `--gtt` lift the allocation ceiling? | 24-qubit entangled state | — | — | 1 | PoCL | §5.4 |
+| E1 | are the circuits the released ones? | release | all, Haar | all | — | any | 1 |
+| E2 | does PyQrack reproduce the paper's hardware numbers? | release | patched + mirror counts | all | release data | CPU | 1 |
+| E3 | layout or placement? | 8 × 8 window, five lrc/lrr, device vs tiled v2 | `fxeb`, Haar | 8, 12 | 3 × 4096 | CPU | 2 |
+| E4 | does tiling v3 beat v2, and how does XEB scale with n and d? | 4/4, v2 and v3 on the same circuits, one shared reference | `fxeb`, Haar | 12, 16, 20 | 3 × 4096 | CMP 50HX (`--ace-gpu --ref-gpu`) | 3 |
+| E5 | do ACE's switches change the seam cost? | 4/4 v3 with `rep`, `noed`, `noxbar` variants | `fxeb`, Haar | 12, 16 | 5 × 4096 | CMP 50HX | 3 |
+| E6 | does the ensemble matter? | 4/4 tiled v3 vs device placement, n = 27 | `fxeb`, `nn_qab` | 12 | 20 × 4096 | CPU ACE, GPU reference (`--ref-gpu`) | 4 |
+| E7 | which 61-qubit placement? | 75 sites, lrc 4 lrr 5, four exclusion / engine settings | mirror, `nn_qab`, shots | 4, 6 | 1 × 1000 shots, 4 twirls | CPU | 6 |
+| E8 | how does ACE decay at the full register? | three patches, exact placement, 11 exclusions | mirror, `nn_qab`, `prob` | 4–20 | 3 × (10 × 64) | EPYC, 6 CPU workers | 6 |
+| E9 | two or three patches at the same qubits? | 49-qubit sub-register, 55 vs 75 sites | mirror, `nn_qab`, `prob` | 4, 6 | 1 × 20 | CPU | 7 |
+| E10 | do disabled sites on the seams help at 88 qubits? | `nighthawk88`, `88d`, `88e` | mirror, `nn_qab`, `prob` | 4, 6 | 3 × (10 × 4) | CPU | 8 |
+| E11 | two patches at 61 qubits? | `nighthawk61r2` (error detection on / off), `nighthawk61w`; 45-qubit waist analogue | mirror, `nn_qab` and Haar, `prob` | 4, 6 (61); 8–20 (45) | 3 × (10 × 8); 1 × 10 | container CPU | 9 |
+| E12 | does Dan's calculator scale? | `nighthawk2p28` … `2p45` | mirror, `nn_qab` and Haar, `prob`; `fxeb` at 28 | 4–20, 36 | 3 × 10 (≤ 36), 1 × 10 (40, 45); `fxeb` 1 × 4096 | container CPU | 10 |
+| E13 | does a ghost link carry entanglement? | two exact 9-qubit chips; two `nighthawk88e` chips | mirror, `nn_qab`, `prob` per chip | 8–16; 4, 6 | selftest; 3 × (10 × 2) | CPU | 11 |
+| E14 | why do deep GPU points fail? | 16-qubit reproducer; ACE mirror | — | 20 layers; 4, 6 | 5 runs; 3 × 640 | PoCL | 12 |
+| E15 | does `--gtt` lift the allocation ceiling? | 24-qubit entangled state | — | — | 1 | PoCL | 12 |
 
 ### 9.1 Design rules applied to every experiment
 
@@ -322,7 +322,7 @@ Each row is one experiment as run. "Runs" is per point: instances × (inputs × 
 | ensemble labelling | `--theta nnqab` runs are tagged and never mixed with Haar runs in one table or fit |
 | depth window | ranking on d ≥ 12 for `fxeb` (outputs concentrated below, ideal XEB ≫ 1) |
 | memory planning | widths and peak memory computed before launch (§10.4); points too large for the budget are marked failed, not attempted |
-| register fairness | registers other than the release are compared with the device only together with their narrowest cut (README §6.8) |
+| register fairness | registers other than the release are compared with the device only together with their narrowest cut (RESULTS §9) |
 
 ---
 
@@ -380,14 +380,14 @@ Each row is one experiment as run. "Runs" is per point: instances × (inputs × 
 | Check | Method | Outcome |
 |---|---|---|
 | circuit regeneration | `verify` (§2.4) | every released circuit identical |
-| conventions | selftest [1]–[10] | all pass (README §3.1) |
+| conventions | selftest [1]–[10] | all pass (RESULTS §1) |
 | hardware re-scoring | `hwxeb` against the release | agreement within 0.05 σ; ideal XEB within 10⁻⁵ |
-| ACE on GPU | tiled n = 27 points, CPU vs CMP 50HX | equal within shot noise (README §5.2) |
-| OpenCL fix | 16-qubit reproducer and ACE mirror points, patched build vs CPU | exact, and within 3 × 10⁻⁴ (README §5.3) |
-| loom | op-stream identity, worker vs in-process, CZ algebra, exact-chip mirrors | cloverfield selftest [1]–[5] (README §3.5) |
+| ACE on GPU | tiled n = 27 points, CPU vs CMP 50HX | equal within shot noise (RESULTS §13) |
+| OpenCL fix | 16-qubit reproducer and ACE mirror points, patched build vs CPU | exact, and within 3 × 10⁻⁴ (RESULTS §12) |
+| loom | op-stream identity, worker vs in-process, CZ algebra, exact-chip mirrors | cloverfield selftest [1]–[5] (RESULTS §11) |
 | layoutsearch | joint model vs exact engine on the release; saved-register round trip | selftest [10]; identical survival |
 | sub-registers at N = 61 | `release:61` and `nighthawk61r2` against the release | identical mirror circuits, angles and inputs |
-| boundary-CZ counter | three-patch register | reproduces README §6.5's column |
+| boundary-CZ counter | three-patch register | reproduces RESULTS §6's column |
 | calculator | sheet example | 0.0019774 in both |
 | swap planning | preflight on EPYC-sized memory figures; d = 4–6 with error detection on | plan printed, config tag unchanged |
 
