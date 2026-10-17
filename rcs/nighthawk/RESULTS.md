@@ -2,6 +2,27 @@
 
 Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E18 in its §9); usage is in the [README](README.md). State as of 17 October 2026.
 
+## Index
+
+| § | Experiment | Answer |
+|---|---|---|
+| [1](#1-reproducing-the-release-e1-e2) | E1, E2: reproducing the release | circuits identical; hardware numbers reproduced |
+| [2](#2-layout-and-placement-at-n--27-e3) | E3: layout or placement | placement: 0.008 → 0.321 at n = 27, d = 8 |
+| [3](#3-size-depth-tiling-version-and-ace-switches-e4-e5) | E4, E5: size, depth, tiling, ACE switches | b = 0.23–0.32 per cycle at n = 27–29; no switch lowers it |
+| [4](#4-the-nn_qab-ensemble-e6-n--27-d--12) | E6: ensemble | `nn_qab` scores ≈ 2× Haar; placement ×2.85 |
+| [5](#5-cost) | cost | reference-dominated `fxeb`; 6–11 h per deep 61-qubit mirror point |
+| [6](#6-61-qubits-three-patches-e7-e8) | E7, E8: 61 qubits, three patches | 2.3× the device at d = 4–6, 1/160 at d = 20 |
+| [7](#7-seam-cost-extrapolated-to-61-qubits-two-vs-three-patches-at-49-e9) | seam cost and E9 | ≈ 0.025 per replica coupler per cycle; two patches beat three at 49 qubits |
+| [8](#8-88-qubits-on-one-8-gb-die-e10) | E10: 88 qubits | `nighthawk88e` 10–20× `nighthawk88d` |
+| [9](#9-two-patches-at-61-qubits-e11) | E11: two patches at 61 qubits | level with the device at d = 4–6 on its own circuits |
+| [10](#10-two-patch-ladder-against-dans-calculator-e12-e17-e18) | E12, E17: ladder vs Dan's calculator | in his protocol (XEB): 1.03× at 16 qubits to 0.40× at 28 (d = 12) |
+| [10.1](#101-dans-circuits-past-the-xeb-ceiling-his-mirror-hamming-weight-e18) | E18: his mirror Hamming weight, 16–53 qubits | 0.95–1.11× at d = 4–6 from 36 to 53 qubits; at d = 12 0.58–0.63× at 36–40, 0.91× at 45 (4-qubit seam); folding exponent 0.04–0.41 against his 1.606 |
+| [11](#11-cloverfield-e13) | E13: cloverfield | ghost link 1.000 / 0.989 / 0.656 vs mean-field 0.773 / 0.773 / 0.067 |
+| [12](#12-qracks-opencl-engine-and-vram-oversubscription-e14-e15) | E14, E15: OpenCL and GTT | three defects, fixed; GTT ceiling lifted |
+| [13](#13-tool-validation) | tool validation | GPU = CPU; layoutsearch matches the exact engine |
+| [14](#14-why-dans-calculator-and-our-numbers-differ-e16) | E16: Dan's calculator vs our numbers | the observable: XEB equals a seam-cut sampler's XEB, mirror survival does not |
+| [15](#15-not-yet-measured) | not yet measured | open points |
+
 | Convention | |
 |---|---|
 | device reference | `ibm_phoenix`, 61 qubits: the paper's mirror fit F(d) = 0.326 × 0.8717^d (b_dev = 0.137 per cycle); per-depth points from the release's counts |
@@ -9,26 +30,6 @@ Every measured number of the experiments, grouped by experiment. The procedure b
 | means | "inverse-variance" from `run --summarize`; "plain" = mean over instances with instance-scatter error |
 | fxeb | forward XEB against an exact reference, 4096 shots per instance unless noted |
 | mirror | depth d = d/2 forward + d/2 inverse cycles; `prob` estimator unless noted |
-
-## Index
-
-| § | Experiment | Answer |
-|---|---|---|
-| 1 | E1, E2: reproducing the release | circuits identical; hardware numbers reproduced |
-| 2 | E3: layout or placement | placement: 0.008 → 0.321 at n = 27, d = 8 |
-| 3 | E4, E5: size, depth, tiling, ACE switches | b = 0.23–0.32 per cycle at n = 27–29; no switch lowers it |
-| 4 | E6: ensemble | `nn_qab` scores ≈ 2× Haar; placement ×2.85 |
-| 5 | cost | reference-dominated `fxeb`; 6–11 h per deep 61-qubit mirror point |
-| 6 | E7, E8: 61 qubits, three patches | 2.3× the device at d = 4–6, 1/160 at d = 20 |
-| 7 | seam cost and E9 | ≈ 0.025 per replica coupler per cycle; two patches beat three at 49 qubits |
-| 8 | E10: 88 qubits | `nighthawk88e` 10–20× `nighthawk88d` |
-| 9 | E11: two patches at 61 qubits | level with the device at d = 4–6 on its own circuits |
-| 10 | E12, E17, E18: ladder vs Dan's calculator | in his protocol: 1.03× at 16 qubits to 0.40× at 28 (XEB, d = 12); his Hamming weight to 45 qubits: at d = 12 1.23× at 16, 0.37–0.63× at 28–40, 0.91× at 45 (4-qubit seam); folding exponent 0.04–0.41 against his 1.606 |
-| 11 | E13: cloverfield | ghost link 1.000 / 0.989 / 0.656 vs mean-field 0.773 / 0.773 / 0.067 |
-| 12 | E14, E15: OpenCL and GTT | three defects, fixed; GTT ceiling lifted |
-| 13 | tool validation | GPU = CPU; layoutsearch matches the exact engine |
-| 14 | E16: Dan's calculator vs our numbers | the observable: XEB equals a seam-cut sampler's XEB, mirror survival does not |
-| 15 | not yet measured | open points |
 
 ---
 
