@@ -27,6 +27,10 @@ Figures (one window each; --save writes PNGs too):
      coupler split (exact / replica / cross), seam qubits used, simulators used,
      widest simulator and effective bulk-to-boundary ratio of the placed qubits
      (nn_qab.py's B-to-B), with the rank correlation of each
+ 12  hamming: Dan Strano's mirror Hamming signal 1 - 2h against depth, one panel per
+     register size, folds lambda = 1 / 3 / 5, with his ACE calculator at the depth of U
+ 13  hamming: measured / calculator against register size per depth, and the effective
+     folding exponent q (s(lambda) = s(1)^(lambda^q)) against his gain exponent 1.606
 
 Harvest: with no --out, every *.jsonl in the working directory is read (worker files
 are folded into their main file), so every sweep collected so far is set side by side.
@@ -170,6 +174,9 @@ def read_records(out):
                 continue
             if "cfg" not in r:
                 continue
+            f_ = r.get("fidelity")
+            if isinstance(f_, float) and not math.isfinite(f_):   # a broken run's record (NaN): ignored
+                continue
             r.setdefault("n", 61)
             by[r["cfg"]][(r["n"], r["family"], r["K"], r["depth"], r["partition"], r["instance"])] = r
     return by
@@ -198,7 +205,7 @@ def point_means(recs, n, fam_of):
     """{(fam, d): (F, se)} over instances/partitions, inverse-variance as in the summary."""
     acc = defaultdict(list)
     for (rn, fam, K, d, j, i), r in recs.items():
-        if rn != n or r.get("fidelity") is None:
+        if rn != n or r.get("fidelity") is None or fam == "hamming":   # hamming: K is the fold, views 12-13
             continue
         acc[(fam_of(fam, K), d)].append((r["fidelity"], r["se"]))
     out = {}
@@ -997,6 +1004,126 @@ def write_table(store, path):
 
 
 # ================================================================== figure factory
+# ================================================================== hamming (views 12-13)
+def hamming_points(data):
+    """{(n, d, lam): dict(F, err, k, seam, patches)} over every configuration's hamming records
+    (plain mean over circuits, error = instance scatter / sqrt(k))."""
+    acc, geo = defaultdict(dict), {}
+    for recs in data.values():
+        for (n, fam, K, d, j, i), r in recs.items():
+            if fam != "hamming" or r.get("fidelity") is None:
+                continue
+            lam = int(r.get("fold", K))
+            acc[(n, d, lam)][i] = float(r["fidelity"])
+            if "ace_seam_used" in r:
+                geo[n] = (int(r["ace_seam_used"]), int(r.get("ace_sims_used", 2)))
+    out = {}
+    for (n, d, lam), v in acc.items():
+        x = np.array(list(v.values()))
+        err = float(x.std(ddof=1) / math.sqrt(len(x))) if len(x) > 1 else 0.0
+        seam, P = geo.get(n, (0, 2))
+        out[(n, d, lam)] = dict(F=float(x.mean()), err=err, k=len(x), seam=seam, patches=P)
+    return out
+
+
+def dan_of(n, seam, P, d):
+    return nh.dan_xeb(n - seam, seam, P, d) if seam else float("nan")
+
+
+def fig_hamming(plt, data):
+    pts = hamming_points(data)
+    if not pts:
+        return None
+    sizes = sorted({k[0] for k in pts})
+    nc = min(4, len(sizes))
+    nr = math.ceil(len(sizes) / nc)
+    fig, axs = plt.subplots(nr, nc, figsize=(4.4 * nc, 3.6 * nr + 0.9), squeeze=False)
+    mk = {1: ("o", "C0", 1.0), 3: ("s", "C1", 0.75), 5: ("D", "C2", 0.75)}
+    dmax = max(k[1] for k in pts)
+    for ax, n in zip(axs.flat, sizes):
+        seam = next(pts[k]["seam"] for k in pts if k[0] == n)
+        P = next(pts[k]["patches"] for k in pts if k[0] == n)
+        for lam, (m, c, al) in mk.items():
+            ks = sorted(k[1] for k in pts if k[0] == n and k[2] == lam)
+            if not ks:
+                continue
+            off = {1: 0.0, 3: 0.18, 5: 0.36}[lam]
+            ax.errorbar([d + off for d in ks], [pts[(n, d, lam)]["F"] for d in ks], [pts[(n, d, lam)]["err"] for d in ks],
+                        fmt=m + ("-" if lam == 1 else ""), color=c, ms=4.5, lw=1.2, capsize=2, alpha=al,
+                        label=f"λ = {lam}" + ("" if lam == 1 else " (folded)"))
+        if seam:
+            dd = np.linspace(2, dmax + 2, 60)
+            ax.plot(dd, [dan_of(n, seam, P, d) for d in dd], "k--", lw=1.0, label="Dan's calculator at d")
+            x = ((n - seam) / (seam * P)) ** nh.DAN_MODEL["power"]
+            ax.set_title(f"n = {n}: {seam} seam qubits, {P} patches, x = {x:.2f}", fontsize=9.5)
+        else:
+            ax.set_title(f"n = {n}", fontsize=9.5)
+        ax.set_ylim(0, 1.05)
+        ax.set_xlim(2, dmax + 2)
+        ax.set_xlabel("depth d of U (mirror runs 2·d·λ layers)")
+        ax.set_ylabel("signal 1 − 2h")
+        ax.grid(True, alpha=0.3)
+    for ax in list(axs.flat)[len(sizes):]:
+        ax.set_axis_off()
+    h, l = all_handles(axs.flat)
+    fig.legend(h, l, loc="lower center", ncol=len(l), fontsize=8)
+    fig.suptitle("12  Dan Strano's mirror Hamming signal vs his ACE calculator "
+                 "(--families hamming --protocol nnqab; error bars: circuit scatter)")
+    fig.tight_layout(rect=(0, 0.05, 1, 0.97))
+    return fig
+
+
+def fig_hamming_ratio(plt, data):
+    pts = hamming_points(data)
+    if not pts:
+        return None
+    sizes = sorted({k[0] for k in pts})
+    depths = sorted({k[1] for k in pts})
+    cmap = plt.get_cmap("viridis")
+    col = {d: cmap(0.12 + 0.76 * i / max(1, len(depths) - 1)) for i, d in enumerate(depths)}
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(13, 4.8))
+    for d in depths:
+        ns = [n for n in sizes if (n, d, 1) in pts and pts[(n, d, 1)]["seam"]]
+        dan = [dan_of(n, pts[(n, d, 1)]["seam"], pts[(n, d, 1)]["patches"], d) for n in ns]
+        r = [pts[(n, d, 1)]["F"] / v for n, v in zip(ns, dan)]
+        e = [pts[(n, d, 1)]["err"] / v for n, v in zip(ns, dan)]
+        if ns:
+            a1.errorbar(ns, r, e, fmt="o-", color=col[d], ms=4.5, lw=1.2, capsize=2, label=f"d = {d}")
+    a1.axhline(1, color="k", lw=0.9)
+    a1.axhspan(0.85, 1.15, color="gray", alpha=0.12, lw=0)
+    for n in sizes:
+        seam = next(pts[k]["seam"] for k in pts if k[0] == n)
+        a1.annotate(f"{seam}", (n, 0.02), xycoords=("data", "axes fraction"), ha="center", fontsize=7, color="gray")
+    a1.set_xlabel("register size n (gray numbers: seam qubits)")
+    a1.set_ylabel("measured ÷ Dan's calculator")
+    a1.set_title("Measured signal ÷ calculator, λ = 1 (band: ±15 %)", fontsize=10)
+    a1.grid(True, alpha=0.3)
+    a1.legend(fontsize=8, ncol=2)
+    for d in depths:
+        xs, qs = [], []
+        for n in sizes:
+            s1 = pts.get((n, d, 1), {}).get("F")
+            for lam in (3, 5):
+                s = pts.get((n, d, lam), {}).get("F")
+                if s1 and s and 0 < s < 1 and 0 < s1 <= 0.9:     # near 1 the log-log ratio is noise
+                    xs.append(n + (0.25 if lam == 5 else -0.25))
+                    qs.append(math.log(math.log(s) / math.log(s1)) / math.log(lam))
+        if xs:
+            a2.plot(xs, qs, "o", color=col[d], ms=4.5, label=f"d = {d}")
+    a2.axhline(nh.DAN_MODEL["depth_power"], color="k", ls="--", lw=1.0)
+    a2.text(sizes[0], nh.DAN_MODEL["depth_power"] + 0.04, "Dan's gain exponent 1.606", fontsize=8)
+    a2.axhline(0, color="gray", lw=0.6)
+    a2.set_ylim(-0.4, 1.9)
+    a2.set_xlabel("register size n (left of n: from λ = 3, right: from λ = 5; points with s(1) > 0.9 left out)")
+    a2.set_ylabel("effective folding exponent q")
+    a2.set_title("Folding: s(λ) = s(1)^(λ^q)", fontsize=10)
+    a2.grid(True, alpha=0.3)
+    a2.legend(fontsize=8, ncol=2)
+    fig.suptitle("13  Hamming ladder against Dan's calculator, and how folding scales ACE's loss")
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    return fig
+
+
 class FigFactory:
     """The slice of pyplot the builders use, returning standalone Figures: they embed in
     the Tk viewer or save as PNG without pyplot ever opening a window."""
@@ -1026,6 +1153,8 @@ VIEWS = [
     ("9  fxeb: XEB vs size", "fxn"),
     ("10 fxeb: decay b(N) -> 61", "fxb"),
     ("11 fxeb: what predicts XEB", "fxp"),
+    ("12 hamming: signal vs calculator", "hm"),
+    ("13 hamming: ratio + folding", "hmr"),
 ]
 PER_CFG = {"mbits", "pbits"}
 
@@ -1095,6 +1224,10 @@ class Store:
             return fig_fxeb_bN(F, lay, fvd, data, self.a.fxeb_dmin)
         if view == "fxp":
             return fig_fxeb_predict(F, lay, data, n, depth)
+        if view == "hm":
+            return fig_hamming(F, data)
+        if view == "hmr":
+            return fig_hamming_ratio(F, data)
         c = cfg if cfg in self.data else next(iter(sorted(self.data)), None)
         if c is None:
             return None
