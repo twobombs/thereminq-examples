@@ -120,7 +120,7 @@ def ensemble(recs):
 def describe(cfg, recs, lay):
     """Label a configuration from what its records say rather than by its hash."""
     lab_ = _describe(cfg, recs, lay)
-    return lab_ + ("" if ENSEMBLE.get(cfg, "haar") == "haar" else f" [θ {ENSEMBLE[cfg]}]")
+    return lab_ + ("" if ENSEMBLE.get(cfg, "haar") == "haar" else f" [theta {ENSEMBLE[cfg]}]")
 
 
 def _describe(cfg, recs, lay):
@@ -1050,7 +1050,7 @@ def fig_hamming(plt, data):
             off = {1: 0.0, 3: 0.18, 5: 0.36}[lam]
             ax.errorbar([d + off for d in ks], [pts[(n, d, lam)]["F"] for d in ks], [pts[(n, d, lam)]["err"] for d in ks],
                         fmt=m + ("-" if lam == 1 else ""), color=c, ms=4.5, lw=1.2, capsize=2, alpha=al,
-                        label=f"λ = {lam}" + ("" if lam == 1 else " (folded)"))
+                        label=f"$\\lambda$ = {lam}" + ("" if lam == 1 else " (folded)"))
         if seam:
             dd = np.linspace(2, dmax + 2, 60)
             ax.plot(dd, [dan_of(n, seam, P, d) for d in dd], "k--", lw=1.0, label="Dan's calculator at d")
@@ -1060,8 +1060,8 @@ def fig_hamming(plt, data):
             ax.set_title(f"n = {n}", fontsize=9.5)
         ax.set_ylim(0, 1.05)
         ax.set_xlim(2, dmax + 2)
-        ax.set_xlabel("depth d of U (mirror runs 2·d·λ layers)")
-        ax.set_ylabel("signal 1 − 2h")
+        ax.set_xlabel("depth d of U (mirror runs 2*d*$\\lambda$ layers)")
+        ax.set_ylabel("signal 1 - 2h")
         ax.grid(True, alpha=0.3)
     for ax in list(axs.flat)[len(sizes):]:
         ax.set_axis_off()
@@ -1095,8 +1095,8 @@ def fig_hamming_ratio(plt, data):
         seam = next(pts[k]["seam"] for k in pts if k[0] == n)
         a1.annotate(f"{seam}", (n, 0.02), xycoords=("data", "axes fraction"), ha="center", fontsize=7, color="gray")
     a1.set_xlabel("register size n (gray numbers: seam qubits)")
-    a1.set_ylabel("measured ÷ Dan's calculator")
-    a1.set_title("Measured signal ÷ calculator, λ = 1 (band: ±15 %)", fontsize=10)
+    a1.set_ylabel("measured / Dan's calculator")
+    a1.set_title("Measured signal / calculator, $\\lambda$ = 1 (band: +/-15 %)", fontsize=10)
     a1.grid(True, alpha=0.3)
     a1.legend(fontsize=8, ncol=2)
     for d in depths:
@@ -1114,9 +1114,9 @@ def fig_hamming_ratio(plt, data):
     a2.text(sizes[0], nh.DAN_MODEL["depth_power"] + 0.04, "Dan's gain exponent 1.606", fontsize=8)
     a2.axhline(0, color="gray", lw=0.6)
     a2.set_ylim(-0.4, 1.9)
-    a2.set_xlabel("register size n (left of n: from λ = 3, right: from λ = 5; points with s(1) > 0.9 left out)")
+    a2.set_xlabel("register size n (left of n: from $\\lambda$ = 3, right: from $\\lambda$ = 5; points with s(1) > 0.9 left out)")
     a2.set_ylabel("effective folding exponent q")
-    a2.set_title("Folding: s(λ) = s(1)^(λ^q)", fontsize=10)
+    a2.set_title("Folding: s($\\lambda$) = s(1)^($\\lambda$^q)", fontsize=10)
     a2.grid(True, alpha=0.3)
     a2.legend(fontsize=8, ncol=2)
     fig.suptitle("13  Hamming ladder against Dan's calculator, and how folding scales ACE's loss")
