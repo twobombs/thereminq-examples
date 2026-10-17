@@ -225,6 +225,7 @@ The sequence equals CZ up to global phase (selftest [4]). One generator per (dep
 | Step | Rule |
 |---|---|
 | samples | one forward run, 4096 shots (`measure_shots`) |
+| `--protocol nnqab` | as `nn_qab.py`: θ sin-uniform; each coupler's two-qubit gate drawn uniformly from SWAP, CZ·SWAP, CZ·iSWAP, CZ·iSWAP†, iSWAP, iSWAP†, CX, CY, CZ, anti-CX, anti-CY, anti-CZ by the angle hash (u(seed, instance, cycle, a, b, 4), control a); 2^min(13, n+2) shots; the exact reference applies the same gates. Control: exact backend XEB 1.00 ± 0.02 |
 | reference | exact probabilities p of the same gates; Σp and Σp² in float64 |
 | score | XEB = (N · mean_s p̂(x_s) − 1) / (N Σ p̂² − 1), p̂ = p / Σp, N = 2ⁿ |
 | error | σ = std_s(N p̂(x_s) − 1) / √shots / (N Σ p̂² − 1) |
@@ -311,8 +312,21 @@ Each row is one experiment as run. "Runs" is per point: instances × (inputs × 
 | E13 | does a ghost link carry entanglement? | two exact 9-qubit chips; two `nighthawk88e` chips | mirror, `nn_qab`, `prob` per chip | 8–16; 4, 6 | selftest; 3 × (10 × 2) | CPU | 11 |
 | E14 | why do deep GPU points fail? | 16-qubit reproducer; ACE mirror | — | 20 layers; 4, 6 | 5 runs; 3 × 640 | PoCL | 12 |
 | E15 | does `--gtt` lift the allocation ceiling? | 24-qubit entangled state | — | — | 1 | PoCL | 12 |
+| E16 | why do Dan's calculator and our numbers differ? | his `nn_qab.py` circuits on his strips (10–26 qubits, his lrc/lrr, torus); our release prefixes 16–28 with a 3-qubit seam | XEB, twirled mirror (exact Clifford conjugation), cut-sampler XEB; his gates and CZ only | 12, 20 | 20 circuits (8 at 26); 3 instances / 3 × 10 runs | container CPU | 14 |
+| E17 | do the Nighthawk ladder's numbers conform to Dan's in his own protocol? | `nighthawk2p16`, `2p20`, `2p24`, `2p28` | `fxeb`, `--protocol nnqab` | 12, 16, 20 | 10 circuits (28: 3) × 2^min(13, n+2) shots | container CPU | 10 |
 
-### 9.1 Design rules applied to every experiment
+### 9.1 E16 cross-check procedure
+
+| Step | Procedure (scripts in `dan_crosscheck/`) |
+|---|---|
+| his circuits | `nn_qab.py`'s construction verbatim (`factor_width`, sequence 0 3 2 1 2 1 0 3, torus wrap, random gate from the 12, θ = arcsin(u/π)), seeded per circuit (`random.Random(1000 · seed + c)`) |
+| his XEB | his ACE call (`QrackAceBackend(width, lrc, lrr)`, torus default), 2^min(13, n+2) shots, exact reference, his estimator |
+| twirled mirror for Clifford gates | P_a ⊗ P_b before each gate G, then G (P_a ⊗ P_b) G† after, found by numerical conjugation of the 16 Pauli pairs; inverse half with the inverse gates; survival by the `prob` chain rule; checked: survival 1.000 on the exact simulator for both gate sets |
+| CZ-only arm | the same circuits with every two-qubit gate replaced by CZ |
+| cut sampler | ideal probabilities p; qubits split by the patch that owns them in ACE (seam qubits to their first patch); q = product of the two exact marginals; XEB = (N Σ q p − 1)/(N Σ p² − 1), exact, no sampling |
+| our side | `release:N` registers with `--min-boundary 3`, `run --families fxeb` and `--families mirror --mirror-estimator prob`, and the cut sampler on the same forward circuits |
+
+### 9.2 Design rules applied to every experiment
 
 | Rule | Practice |
 |---|---|

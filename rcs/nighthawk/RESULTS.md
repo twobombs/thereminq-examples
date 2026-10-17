@@ -23,11 +23,12 @@ Every measured number of the experiments, grouped by experiment. The procedure b
 | 7 | seam cost and E9 | ≈ 0.025 per replica coupler per cycle; two patches beat three at 49 qubits |
 | 8 | E10: 88 qubits | `nighthawk88e` 10–20× `nighthawk88d` |
 | 9 | E11: two patches at 61 qubits | level with the device at d = 4–6 on its own circuits |
-| 10 | E12: ladder vs Dan's calculator | holds at 28 qubits, overestimates above |
+| 10 | E12, E17: ladder vs Dan's calculator | in his protocol: 1.03× at 16 qubits to 0.40× at 28 (d = 12); depth power 0.89–1.70 against his 1.606 |
 | 11 | E13: cloverfield | ghost link 1.000 / 0.989 / 0.656 vs mean-field 0.773 / 0.773 / 0.067 |
 | 12 | E14, E15: OpenCL and GTT | three defects, fixed; GTT ceiling lifted |
 | 13 | tool validation | GPU = CPU; layoutsearch matches the exact engine |
-| 14 | not yet measured | open points |
+| 14 | E16: Dan's calculator vs our numbers | the observable: XEB equals a seam-cut sampler's XEB, mirror survival does not |
+| 15 | not yet measured | open points |
 
 ---
 
@@ -334,7 +335,34 @@ The survival steps with the boundary-CZ count rather than with depth. Instance 0
 | Dan's XEB(12) | 0.372 | 0.409 | 0.444 | 0.476 | 0.425 | 0.450 | 0.408 | 0.429 | 0.396 |
 | Dan's XEB at d = 4 / 20 / 36 | 0.844 / 0.106 / 0.0031 | 0.858 / 0.132 / 0.0054 | 0.870 / 0.158 / 0.0088 | 0.881 / 0.186 / 0.0132 | 0.864 / 0.143 / 0.0068 | 0.872 / 0.163 / 0.0095 | 0.857 / 0.130 / 0.0053 | 0.865 / 0.146 / 0.0071 | 0.853 / 0.122 / 0.0045 |
 
-Measured mirror survival (plain means, error detection on, CPU; 3 instances × 10 runs to n = 36, 1 × 10 at 40–45), with Dan's prediction in brackets:
+In Dan's protocol (`run --families fxeb --protocol nnqab`: forward XEB, sin θ-uniform single-qubit gates, his twelve two-qubit gates on the Nighthawk couplers, 2^min(13, n+2) shots; plain means over circuits, CPU), against his calculator:
+
+| Register | n | Seam qubits | Couplers through the boundary | Circuits | d = 12 | d = 16 | d = 20 | Fitted p | Fitted XEB(12) |
+|---|---|---|---|---|---|---|---|---|---|
+| `nighthawk2p16` | 16 | 3 | 6 | 10 | 0.241 ± 0.041 (0.235) | 0.178 ± 0.023 (0.100) | 0.096 ± 0.019 (0.037) | 0.97 | 0.250 |
+| `nighthawk2p20` | 20 | 3 | 9 | 10 | 0.200 ± 0.028 (0.285) | 0.133 ± 0.012 (0.136) | 0.079 ± 0.014 (0.058) | 0.89 | 0.203 |
+| `nighthawk2p24` | 24 | 3 | 8 | 10 | 0.224 ± 0.019 (0.330) | 0.111 ± 0.015 (0.172) | 0.027 ± 0.007 (0.081) | 1.70 | 0.234 |
+| `nighthawk2p28` | 28 | 3 | 11 | 3 | 0.148 ± 0.020 (0.372) | — | 0.025 ± 0.009 (0.106) | 1.29 | 0.148 |
+| **Dan's calculator** | | | | | | | | 1.606 | 0.235–0.372 |
+
+| Measured / Dan, protocol `nnqab` | 16 | 20 | 24 | 28 |
+|---|---|---|---|---|
+| d = 12 | 1.03 | 0.70 | 0.68 | 0.40 |
+| d = 16 | 1.78 | 0.98 | 0.64 | — |
+| d = 20 | 2.58 | 1.36 | 0.34 | 0.24 |
+
+| Same registers, CZ-only gates (default protocol, 3 instances × 4096 shots) | 16 | 20 | 24 | 28 |
+|---|---|---|---|---|
+| d = 12 | 0.455 | 0.451 | 0.642 | 0.539 |
+| d = 20 | 0.341 | 0.256 | 0.172 | 0.219 |
+
+| Seam qubits vs couplers through the boundary | Seam qubits | Couplers through the boundary | Ratio |
+|---|---|---|---|
+| his strips, two patches (10, 14, 22, 26 qubits) | 4 | 12 | 3.0 |
+| his 27 qubits, two / three patches | 6 / 9 | 18 / 30 | 3.0 / 3.3 |
+| our ladder, 16 / 20 / 24 / 28 qubits | 3 | 6 / 9 / 8 / 11 | 2.0 / 3.0 / 2.7 / 3.7 |
+
+Mirror survival (the `ibm_phoenix` comparison proxy, not Dan's observable; plain means, error detection on, CPU; 3 instances × 10 runs to n = 36, 1 × 10 at 40–45), with Dan's prediction in brackets:
 
 | n | d = 4 | 6 | 8 | 10 | 12 | 16 | 20 | 36 | fitted p | fitted XEB(12) |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -380,9 +408,10 @@ Measured mirror survival (plain means, error detection on, CPU; 3 instances × 1
 | worked example (52 / 7 / 2, d = 36) | 0.0019774 (sheet and `danmodel`) |
 | fit form vs calculator form at d = 36 | 0.00252 vs 0.00198 |
 
-- **At 28 qubits, the edge of the calculator's data, it holds.** It agrees in its own variable (XEB within 10 %), and its p and XEB(12) match the fit to the measurements.
-- **Above 28 it overestimates more and more with size and depth.** Its x grows with the bulk, while the measured XEB(12) falls and p rises to ≈ 2.9.
-- **Under Haar the losses are 10–100× larger.** The fit on `nn_qab` circuits does not carry over.
+- **In Dan's protocol the ladder meets his calculator at 16 qubits** (1.03× at d = 12). Its depth power, 0.89–1.70 over 16–28 qubits, brackets his 1.606.
+- **The level parts with size.** At a fixed 3-qubit seam his x grows with the bulk, so his XEB(12) rises from 0.235 to 0.372 between 16 and 28 qubits; the measured XEB(12) stays at 0.15–0.25. The seam qubits touch as many couplers per seam qubit as on his strips (ratio 2–3.7 against 3.0), so the difference is the 2D patch geometry against his 2-wide strips, on which the bulk term was fitted.
+- **For Nighthawk registers his calculator therefore applies with a measured XEB(12)**: his depth power with the anchor of this table. The CZ-only circuits score 2–4× higher XEB than his gate set on the same registers.
+- **Mirror survival is a different observable** (§14) and is kept for the comparison with `ibm_phoenix`. Under Haar angles its losses are 10–100× larger.
 
 ---
 
@@ -472,7 +501,81 @@ Measured mirror survival (plain means, error detection on, CPU; 3 instances × 1
 
 ---
 
-## 14. Not yet measured
+## 14. Why Dan's calculator and our numbers differ (E16)
+
+Dan's calculator (§10) is fitted on `nn_qab.py`; our ladder ran `nighthawk_qrack.py --theta nnqab`. The two procedures differ in these ways:
+
+| Factor | `nn_qab.py` (Dan) | `nighthawk_qrack.py --theta nnqab` (ours) | Tested |
+|---|---|---|---|
+| observable | forward XEB, 8192 shots | mirror survival (ladder); forward XEB (`fxeb`), 4096 shots | yes |
+| two-qubit gates | uniformly random from 12 Cliffords (SWAP, CZ·SWAP, CZ·iSWAP, CZ·iSWAP†, iSWAP, iSWAP†, CX, CY, CZ and the three anti-controlled); SWAP, CZ·iSWAP and CZ·iSWAP† do not entangle | CZ only | yes |
+| lattice | `factor_width` strip (10 → 5 × 2, 22 → 11 × 2, 26 → 13 × 2), torus brick pattern, sequence 0 3 2 1 2 1 0 3 | Nighthawk square lattice, colours A B C D, open edges; mirrors pseudo-patched | yes (both lattices measured) |
+| ACE register | ACE's own geometry, `is_torus` default (on), error detection on | stored two-patch placement, flat, error detection on | — |
+| single-qubit gates | `u(θ, φ, λ)`, sin θ uniform, φ, λ uniform | rz(φ) rx(θ) rz(λ), sin θ uniform, φ, λ uniform: the same distribution | by construction |
+| XEB formula | Σ_b (p_b − 1/N) q_b / Σ_b (p_b − 1/N)² | (N · mean_s p − 1) / (N Σp² − 1): algebraically identical | by construction |
+| depth | d forward layers | mirror: d/2 forward + d/2 inverse | — |
+| PyQrack | 2.28.2 | 2.28.1 | yes |
+| circuits per point | 200, unseeded | 3 instances (fxeb), 3 × 10 runs (mirror) | — |
+
+Reproduction of his sheet with his procedure on our PyQrack (d = 12, 20 circuits):
+
+| Series | his sheet (200 circuits) | ours |
+|---|---|---|
+| 10 qubits, lrc 2 lrr 2 | 0.0939 | 0.085 ± 0.040 |
+| 14 qubits, lrc 3 lrr 2 | 0.1587 | 0.168 ± 0.016 |
+| 22 qubits, lrc 5 lrr 2 | 0.2547 | 0.255 ± 0.015 |
+| 14 qubits, d = 20 | 0.0143 | 0.017 ± 0.004 |
+| 22 qubits, d = 20 | 0.0360 | 0.046 ± 0.008 |
+
+The "cut sampler" draws each patch from its exact marginal, independently of the other patch, with seam qubits assigned to their first patch. Its XEB against the ideal distribution is computed exactly. It is what XEB scores when every correlation across the seam is lost and nothing else is wrong.
+
+Dan's circuits on his strips (20 circuits per cell; 8 at 26 qubits; mirror twirled with the exact Clifford conjugation, d/2 + d/2; exact backend gives survival 1.000):
+
+| n | d | Dan's calculator | XEB, his gates | cut-sampler XEB | XEB, CZ only | mirror, his gates | mirror, CZ only |
+|---|---|---|---|---|---|---|---|
+| 10 | 12 | 0.098 | 0.085 ± 0.040 | 0.370 ± 0.015 | 0.537 ± 0.059 | 0.018 ± 0.007 | 0.608 ± 0.078 |
+| 10 | 20 | 0.005 | −0.028 ± 0.012 | 0.273 ± 0.007 | 0.127 ± 0.018 | 0.005 ± 0.003 | — |
+| 14 | 12 | 0.153 | 0.168 ± 0.016 | 0.286 ± 0.019 | 0.549 ± 0.036 | 0.013 ± 0.004 | 0.103 ± 0.033 |
+| 14 | 20 | 0.014 | 0.017 ± 0.004 | 0.088 ± 0.003 | 0.225 ± 0.025 | < 10⁻³ | — |
+| 22 | 12 | 0.241 | 0.255 ± 0.015 | 0.271 ± 0.013 | 0.558 ± 0.025 | 0.007 ± 0.003 | 0.077 ± 0.020 |
+| 22 | 20 | 0.040 | 0.046 ± 0.008 | 0.048 ± 0.006 | 0.297 ± 0.018 | < 10⁻³ | — |
+| 26 | 12 | 0.279 | 0.253 ± 0.022 | — | — | 0.004 ± 0.002 | — |
+
+Our Nighthawk two-patch registers, 3 seam qubits each (release prefixes; `nn_qab` θ; fxeb 3 instances × 4096 shots; mirror 3 × 10 runs; cut sampler on the same forward circuits):
+
+| Register | n | d | Dan's calculator | fxeb | cut-sampler XEB | mirror |
+|---|---|---|---|---|---|---|
+| `release:16`, 2 patches 10 / 11 | 16 | 12 | 0.235 | 0.455 ± 0.035 | 0.465 ± 0.017 | 1.000 ± 0.000 |
+| | 16 | 20 | 0.037 | 0.341 ± 0.016 | 0.338 ± 0.034 | 0.910 ± 0.044 |
+| `release:20`, 13 / 12 | 20 | 12 | 0.285 | 0.451 ± 0.052 | 0.514 ± 0.008 | 0.652 ± 0.030 |
+| | 20 | 20 | 0.058 | 0.256 ± 0.070 | 0.301 ± 0.033 | 0.355 ± 0.055 |
+| `release:24`, 16 / 12 | 24 | 12 | 0.330 | 0.642 ± 0.173 | 0.632 ± 0.075 | 0.386 ± 0.028 |
+| | 24 | 20 | 0.081 | 0.172 ± 0.009 | 0.329 ± 0.031 | 0.134 ± 0.045 |
+| `nighthawk2p28` | 28 | 12 | 0.372 | 0.539 ± 0.194 | 0.404 ± 0.027 | 0.462 ± 0.054 |
+| | 28 | 20 | 0.106 | 0.219 ± 0.052 | 0.253 ± 0.055 | 0.058 ± 0.048 |
+
+| Same circuit, fxeb / cut-sampler XEB | instance 0 | instance 1 | instance 2 |
+|---|---|---|---|
+| 16 qubits, d = 12 | 0.430 / 0.437 | 0.523 / 0.497 | 0.410 / 0.461 |
+| 16 qubits, d = 20 | 0.328 / 0.333 | 0.320 / 0.400 | 0.373 / 0.281 |
+| 20 qubits, d = 12 | 0.505 / 0.511 | 0.500 / 0.529 | 0.348 / 0.501 |
+| 20 qubits, d = 20 | 0.275 / 0.298 | 0.368 / 0.360 | 0.127 / 0.247 |
+| 24 qubits, d = 12 | 0.612 / 0.655 | 0.955 / 0.750 | 0.359 / 0.491 |
+| 28 qubits, d = 12 | 0.338 / 0.455 | 0.927 / 0.393 | 0.352 / 0.364 |
+
+| Factor | Effect on the delta | Evidence |
+|---|---|---|
+| **observable** | **dominant.** ACE's forward XEB sits at the cut-sampler level, so it cannot see whether correlations survive the seam. It stays flat or rises as the bulk grows. Mirror survival falls with size on both lattices | his strips: XEB 0.085 → 0.253, mirror 0.018 → 0.004 (n = 10 → 26, d = 12); our registers: fxeb ≈ cut-sampler XEB at every size, mirror 1.000 → 0.462 (n = 16 → 28) |
+| gate set | shifts the level. His 12-gate Clifford set lowers ACE's XEB 2–6× and its mirror survival 10–30× against CZ only on the same lattice. Our CZ-only fxeb therefore lies above his calculator at 16–28 qubits | his strips, CZ-only columns |
+| lattice and register | secondary. The same XEB-vs-mirror split appears on his torus strips and on our open Nighthawk patches | both tables |
+| PyQrack version, environment | none | sheet reproduced within 1σ |
+| XEB formula, single-qubit ensemble | none | identical by construction |
+
+- **The calculator's variable is a weak-link variable.** x = (bulk / (boundary · patches))^(2/3) measures how weak the cut is relative to the bulk. XEB that equals the cut sampler's XEB rises with it. This is the mechanism by which a sampler that drops weak links scores on XEB (Gao et al., README ref. [5]). So the calculator predicts ACE's XEB correctly, but at these sizes that XEB does not measure ACE's fidelity across the seam.
+- **Mirror survival cannot be passed by a cut sampler.** It falls with size at a fixed 3-qubit seam, and it is the proxy `ibm_phoenix` is compared on at 61 qubits. The ladder's gap to the calculator above 28 qubits is the gap between XEB and survival.
+- **Neither proxy is the fidelity itself.** At 16 qubits survival is 1.000 while XEB is 0.455: a mirror absorbs a few boundary CZs exactly (as `nighthawk61w` at d = 4–6). At larger sizes it is the stricter of the two.
+
+## 15. Not yet measured
 
 | Point | Status |
 |---|---|

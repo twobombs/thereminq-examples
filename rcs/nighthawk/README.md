@@ -43,7 +43,8 @@ No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit st
 | At 61 qubits the loss follows CZs through a boundary, not depth | three patches: 2.3× the device at d = 4–6, 1/160 at d = 20; ≈ 0.26 nats per boundary CZ | 6 |
 | Two patches on IBM's own register and circuits match the device at shallow depth | Haar θ, d = 4 / 6: 0.226 / 0.128 against 0.214 / 0.154 | 9 |
 | A register with a 3-qubit waist keeps the boundary nearly closed | 45-qubit version, d = 8 / 12 / 20: 0.90 / 0.88 / 0.12 against the device's 0.109 / 0.062 / 0.021; classically easier register | 9 |
-| Dan's calculator holds at the edge of its data and overestimates beyond it | 28 qubits: fxeb within 10 %; 36–45 qubits at d = 20: 0.002–0.05 of the prediction | 10 |
+| In Dan's own protocol (`--protocol nnqab`) the Nighthawk ladder meets his calculator at 16 qubits and falls below it with size | XEB(12) 1.03× at 16 qubits, 0.40× at 28; depth power 0.89–1.70 vs his 1.606 | 10 |
+| Mirror survival is a different observable from his XEB | ACE's XEB equals a seam-cut sampler's XEB at 16–28 qubits; mirror survival falls with size | 14 |
 | 88 qubits fit one 8 GB GPU; disabled sites on the seams shrink the boundary | boundary 17 → 11 qubits; `nighthawk88e` 10–20× `nighthawk88d` at d = 4–6 | 8 |
 | A ghost link carries entanglement between chips | loom-only error, d = 8 / 12 / 16: ghost 1.000 / 0.989 / 0.656, mean-field 0.773 / 0.773 / 0.067 | 11 |
 | Qrack's OpenCL engine had three host-memory defects | fixed without serialising dispatch; GPU reproduces CPU | 12 |
@@ -225,6 +226,7 @@ Throughout, the figure compared with the device is a per-cycle decay b = −d ln
 | `--families` | `mirror,patched` | comma list of §2.1 families |
 | `--register` | `release` | a register of §2.3 with its ACE preset |
 | `--theta` | `haar` | `nnqab`: variant ensemble |
+| `--protocol` | `nighthawk` | `nnqab`: forward XEB scored as `nn_qab.py` scores it (sin θ-uniform single-qubit gates, each coupler's gate drawn from its twelve two-qubit gates, 2^min(13, n+2) shots); points compare one-to-one with Dan's calculator; `fxeb` only |
 | `--depths`, `--instances`, `--K`, `--partitions` | release's, 3, 3 4, all 5 | scope |
 | `--sizes`, `--n` | — | first-n truncations, e.g. `27-34`, `20,27-36` |
 | `--shots` | `paper` | Appendix-D budgets for mirror and patched, 4096 for `fxeb`, 100 000 per pub for `full`; or an integer |
@@ -459,7 +461,7 @@ The release holds every sampled 61-qubit bitstring of the full and patched circu
 
 ## 6. Results
 
-Every measured number is in [RESULTS.md](RESULTS.md), grouped by experiment (E1–E15 of [METHODOLOGY.md](METHODOLOGY.md) §9), with the points not yet measured in its §14.
+Every measured number is in [RESULTS.md](RESULTS.md), grouped by experiment (E1–E15 of [METHODOLOGY.md](METHODOLOGY.md) §9), with the points not yet measured in its §15.
 
 ---
 
@@ -500,12 +502,13 @@ for th in nnqab haar; do
 done
 python3 nighthawk_qrack.py danmodel --in ladder_*.jsonl --csv ladder_vs_dan.csv
 
-# forward XEB on the ladder (RESULTS §10): references of 3 and 48 GiB
-for n in 28 32; do
-  python3 nighthawk_qrack.py run --backend ace --register nighthawk2p$n --families fxeb --theta nnqab \
-    --depths 4 6 8 10 12 16 20 --instances 3 --order shallow \
-    --cpu --gpus 0 --per-gpu 1 --mem-budget-gb 290 --out fxeb_ladder_${n}_nnqab.jsonl &
-done; wait
+# the ladder in Dan's protocol (RESULTS §10): his depths 12-22, 20 circuits per point; references up to 48 GiB (n = 32)
+for n in 16 20 24 28 32; do
+  python3 nighthawk_qrack.py run --backend ace --register nighthawk2p$n --families fxeb --protocol nnqab \
+    --depths 12 14 16 18 20 22 --instances 20 --order shallow \
+    --cpu --gpus 0 --per-gpu 1 --mem-budget-gb 290 --out dan_protocol_${n}.jsonl
+done
+python3 nighthawk_qrack.py danmodel --in dan_protocol_*.jsonl --csv dan_protocol_vs_calculator.csv
 
 # a register search (§3.4)
 python3 nighthawk_qrack.py layoutsearch --n 88 --geometries 114:4:5 102:4:5 --region convex \
