@@ -23,7 +23,7 @@ Every measured number of the experiments, grouped by experiment. The procedure b
 | 7 | seam cost and E9 | ≈ 0.025 per replica coupler per cycle; two patches beat three at 49 qubits |
 | 8 | E10: 88 qubits | `nighthawk88e` 10–20× `nighthawk88d` |
 | 9 | E11: two patches at 61 qubits | level with the device at d = 4–6 on its own circuits |
-| 10 | E12, E17, E18: ladder vs Dan's calculator | in his protocol: 1.03× at 16 qubits to 0.40× at 28 (XEB, d = 12); his Hamming weight to 40 qubits here, 61 on the EPYC: 1.23× at 16 to 0.42× at 40 (d = 12); folding leaves ACE's signal unchanged |
+| 10 | E12, E17, E18: ladder vs Dan's calculator | in his protocol: 1.03× at 16 qubits to 0.40× at 28 (XEB, d = 12); his Hamming weight to 45 qubits: at d = 12 1.23× at 16, 0.37–0.63× at 28–40, 0.91× at 45 (4-qubit seam); folding exponent 0.04–0.41 against his 1.606 |
 | 11 | E13: cloverfield | ghost link 1.000 / 0.989 / 0.656 vs mean-field 0.773 / 0.773 / 0.067 |
 | 12 | E14, E15: OpenCL and GTT | three defects, fixed; GTT ceiling lifted |
 | 13 | tool validation | GPU = CPU; layoutsearch matches the exact engine |
@@ -415,7 +415,7 @@ Mirror survival (the `ibm_phoenix` comparison proxy, not Dan's observable; plain
 
 ### 10.1 Dan's circuits past the XEB ceiling: his mirror Hamming weight (E18)
 
-`run --families hamming --protocol nnqab`: his circuits (the E17 gates and θ) as U U†, folded (U U†)^λ, signal 1 − 2h with h the exact mean fraction of ones (METHODOLOGY §6.4); plain means over circuits, container CPU (2 cores, 7 GiB), error detection on. Dan's calculator in brackets, at the depth d of U.
+`run --families hamming --protocol nnqab`: his circuits (the E17 gates and θ) as U U†, folded (U U†)^λ, signal 1 − 2h with h the exact mean fraction of ones (METHODOLOGY §6.4); plain means over circuits, error detection on; 16–32 container CPU (2 cores, 7 GiB), 36–49 on the EPYC (10 circuits; 45 and 49 still filling). Dan's calculator in brackets, at the depth d of U.
 
 | n | Circuits | d = 4 | 6 | 8 | 10 | 12 | Fitted p | Fitted signal(12) |
 |---|---|---|---|---|---|---|---|---|
@@ -424,17 +424,27 @@ Mirror survival (the `ibm_phoenix` comparison proxy, not Dan's observable; plain
 | 24 | 6 | 0.914 ± 0.026 (0.827) | 0.823 ± 0.053 (0.695) | 0.806 ± 0.051 (0.561) | 0.546 ± 0.082 (0.438) | 0.344 ± 0.076 (0.330) | 2.58 | 0.396 |
 | 28 | 6 | 0.882 ± 0.037 (0.844) | 0.670 ± 0.102 (0.722) | 0.539 ± 0.090 (0.597) | 0.272 ± 0.073 (0.478) | 0.137 ± 0.031 (0.372) | 2.38 | 0.147 |
 | 32 | 6 | 0.904 ± 0.027 (0.858) | 0.641 ± 0.087 (0.746) | 0.537 ± 0.085 (0.628) | 0.309 ± 0.062 (0.514) | 0.210 ± 0.033 (0.409) | 1.90 | 0.213 |
-| 36 | 6 | 0.869 ± 0.044 (0.870) | 0.652 ± 0.094 (0.766) | 0.487 ± 0.091 (0.655) | 0.270 ± 0.043 (0.546) | 0.157 ± 0.012 (0.444) | 2.16 | 0.156 |
-| 40 | 4 | 0.858 ± 0.054 (0.881) | 0.621 ± 0.063 (0.784) | 0.412 ± 0.067 (0.679) | 0.221 ± 0.005 (0.575) | 0.202 ± 0.050 (0.476) | 1.84 | 0.163 |
-| 45–61 | | EPYC (§15) | | | | | | |
+| 36 | 10 | 0.890 ± 0.029 (0.870) | 0.728 ± 0.065 (0.766) | 0.551 ± 0.065 (0.655) | 0.332 ± 0.052 (0.546) | 0.257 ± 0.054 (0.444) | 2.18 | 0.231 |
+| 40 | 10 | 0.897 ± 0.028 (0.881) | 0.766 ± 0.051 (0.784) | 0.590 ± 0.061 (0.679) | 0.369 ± 0.048 (0.575) | 0.301 ± 0.065 (0.476) | 2.26 | 0.267 |
+| 45 (4 seam qubits) | 10 / 10 / 9 / 9 / 5 | 0.959 ± 0.013 (0.864) | 0.802 ± 0.041 (0.755) | 0.759 ± 0.044 (0.640) | 0.450 ± 0.030 (0.528) | 0.385 ± 0.061 (0.425) | 2.34 | 0.374 |
+| 49 (4 seam qubits) | 10 / 9 | 0.858 ± 0.038 (0.872) | 0.762 ± 0.044 (0.769) | running | | | | |
+| 53 (5 seam qubits) | 10 / 8 | 0.935 ± 0.014 (0.857) | 0.740 ± 0.059 (0.745) | running | | | | |
+| 57–61 | | EPYC (§15) | | | | | | |
 | **Dan's calculator** | | | | | | | 1.606 | 0.235–0.476 |
 
-| Measured / Dan, Hamming signal | 16 | 20 | 24 | 28 | 32 | 36 | 40 |
-|---|---|---|---|---|---|---|---|
-| d = 4 | 1.27 | 1.10 | 1.11 | 1.04 | 1.05 | 1.00 | 0.97 |
-| d = 8 | 1.22 | 1.22 | 1.44 | 0.90 | 0.86 | 0.74 | 0.61 |
-| d = 12 | 1.23 | 0.96 | 1.04 | 0.37 | 0.51 | 0.35 | 0.42 |
-| Dan at the mirror's 2d layers instead, d = 12 | 0.0121 | 0.0219 | 0.0344 | 0.0492 | 0.0660 | 0.0846 | 0.1046 |
+| Measured / Dan, Hamming signal | 16 | 20 | 24 | 28 | 32 | 36 | 40 | 45 | 49 | 53 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| d = 4 | 1.27 | 1.10 | 1.11 | 1.04 | 1.05 | 1.02 | 1.02 | 1.11 | 0.98 | 1.09 |
+| d = 6 | 1.33 | 1.07 | 1.18 | 0.93 | 0.86 | 0.95 | 0.98 | 1.06 | 0.99 | 0.99 |
+| d = 8 | 1.22 | 1.22 | 1.44 | 0.90 | 0.86 | 0.84 | 0.87 | 1.19 | — | — |
+| d = 12 | 1.23 | 0.96 | 1.04 | 0.37 | 0.51 | 0.58 | 0.63 | 0.91 (5 circuits) | — | — |
+| Dan at the mirror's 2d layers instead, d = 12 | 0.0121 | 0.0219 | 0.0344 | 0.0492 | 0.0660 | 0.0846 | 0.1046 | 0.0739 | 0.0882 | 0.0651 |
+
+| Same registers, container (6 circuits; 4 at 40) vs EPYC (10 circuits), d = 12 | 36 | 40 |
+|---|---|---|
+| container | 0.157 ± 0.012 | 0.202 ± 0.050 |
+| EPYC | 0.257 ± 0.054 | 0.301 ± 0.065 |
+| circuit-to-circuit spread (std) on the EPYC | 0.17 | 0.21 |
 
 | d = 12, where both exist | 16 | 20 | 24 | 28 |
 |---|---|---|---|---|
@@ -451,8 +461,18 @@ Folding, signal at λ = 1 / 3 / 5 and Dan's Richardson extrapolation (ln signal 
 | 24 | 0.914 / 0.934 / 0.890 → 0.905 | 0.806 / 0.793 / 0.806 → 0.811 | 0.344 / 0.457 / 0.365 → 0.311 |
 | 28 | 0.882 / 0.901 / 0.884 → 0.875 | 0.539 / 0.589 / 0.521 → 0.521 | 0.137 / 0.165 / 0.166 → 0.129 |
 | 32 | 0.904 / 0.919 / 0.916 → 0.899 | 0.537 / 0.530 / 0.514 → 0.539 | 0.210 / 0.157 / 0.156 → 0.229 |
-| 36 | 0.869 / 0.896 / 0.889 → 0.860 | 0.487 / 0.463 / 0.459 → 0.494 | 0.157 / 0.116 / 0.112 → 0.172 |
-| 40 | — | 0.412 / 0.451 / — → 0.405 | — |
+| 36 (EPYC) | 0.890 / 0.907 / 0.902 → 0.885 | 0.551 / 0.501 / 0.527 → 0.570 | 0.257 / 0.170 / 0.185 → 0.294 |
+| 40 (EPYC) | 0.897 / 0.914 / 0.920 → 0.892 | 0.590 / 0.555 / 0.484 → 0.595 | 0.301 / 0.173 / 0.127 → 0.350 |
+| 45 (EPYC) | 0.959 / 0.956 / 0.951 → 0.960 | 0.759 / 0.668 / 0.637 → 0.787 | 0.385 / 0.222 / 0.203 → 0.453 (5 / 10 / 6 circuits) |
+| 49 (EPYC) | 0.858 / 0.809 / 0.906 → 0.880 | running | running |
+| 53 (EPYC) | 0.935 / 0.922 / 0.932 → 0.940 | running | running |
+
+| Effective folding exponent q, s(λ) = s(1)^(λ^q), EPYC | d = 4–6 | d = 8 | d = 10 | d = 12 |
+|---|---|---|---|---|
+| 36 | −0.16 – 0.0 | 0.04–0.13 | 0.06–0.08 | 0.13–0.24 |
+| 40 | −0.17 – 0.03 | 0.10–0.20 | 0.14–0.16 | 0.34–0.35 |
+| 45 | 0.02–0.11 | 0.31–0.35 | 0.26–0.27 | 0.32–0.41 |
+| his gain exponent | 1.606 | 1.606 | 1.606 | 1.606 |
 
 | Seconds per circuit, container CPU | 16 | 20 | 24 | 28 | 32 | 36 | 40 |
 |---|---|---|---|---|---|---|---|
@@ -466,8 +486,9 @@ Folding, signal at λ = 1 / 3 / 5 and Dan's Richardson extrapolation (ln signal 
 | Dan's calculator, d = 4 / 8 / 12 | 0.853 / 0.617 / 0.396 |
 
 - **His Hamming weight reaches where his XEB cannot.** It needs no 2ⁿ reference; at d = 12 it tracks the E17 forward XEB within 0.93–1.54× on the same registers.
-- **The ladder conforms to his calculator at 16–24 qubits** (0.96–1.46× at every depth), as his XEB did at 16. **From 28 qubits on it falls below with depth**, to 0.35–0.51× at d = 12, while the calculator keeps rising with the bulk at a fixed 3-qubit seam: the same parting as E17, now seen to 40 qubits. The fitted depth power is 1.8–2.6 against his 1.606.
-- **Folding does not amplify ACE's error.** λ = 5 is within 11 % of λ = 1 at d ≤ 8; at d = 12 it ranges 0.37–1.21×. A gate-count noise with his gain exponent would give s^(5^1.606) ≈ s^13. His Richardson step therefore returns the λ = 1 value (0.90–1.28× of it): the exponent applies to hardware noise, which grows with every folded gate, not to ACE's seam error.
+- **The ladder conforms to his calculator at d ≤ 6 at every size** (0.86–1.33×), and at all depths at 16–24 qubits. **From 28 qubits on it falls below with depth**: 0.37–0.63× at d = 12 at 28–40 qubits (3-qubit seam), while the calculator keeps rising with the bulk. **At 45 qubits (4-qubit seam) it is back within 0.85–1.19× at every depth** (d = 12 on 5 of 10 circuits). The fitted depth power is 1.8–2.6 against his 1.606.
+- **Ten circuits are the minimum per point.** The circuit-to-circuit spread at d = 12 is 0.17–0.21 (std); with 4–6 circuits the container's 36- and 40-qubit points sat 0.10 below the EPYC's 10-circuit means.
+- **Folding barely amplifies ACE's error.** At d ≤ 6 the signal does not change with λ; at d ≥ 8 it falls with an effective exponent q = 0.04–0.41, against his gain exponent 1.606, which would give s^(3^1.606) ≈ s^5.8 (0.0095 instead of the measured 0.342 at 45 qubits, d = 10). His Richardson step therefore lands within −1 % to +16 % of the λ = 1 value: the exponent describes hardware noise, which grows with every folded gate, and ACE's seam error grows far more slowly.
 
 ---
 
@@ -552,6 +573,7 @@ Folding, signal at λ = 1 / 3 / 5 and Dan's Richardson extrapolation (ln signal 
 | `release:61`, `nighthawk61r2` vs the release | mirror CZs, angles and inputs identical at d = 4, 8, 20 |
 | ACE placements with error detection on vs off | identical site maps (widths 43 / 43 / 8 vs 42 / 42 / 7 on 77 sites) |
 | `--swap-gb` config tag | unchanged (`ace-3189ad58` with and without) |
+| `hamming` on GPU, `nighthawk2p45`, six V340 dies × 3 workers (`--ace-gpu`) | 4–9 W per 100 W card: launch and read-back latency and PCIe traffic dominate; reverted to CPU. The 45-qubit file from that attempt held NaN signals (in 4 of its 13 depth × fold groups) and 9 failed points (worker deaths, C++ exceptions): rerun on CPU |
 | `hamming` (selftest [11]) | exact backend signal 1.000000 at λ = 1, 3; each of the twelve gates' inverses within 1.2 × 10⁻⁷ of identity |
 | `fxeb` on a register | runs from n ≤ 36 (`nighthawk2p28`: 104 s at d = 4, 464 s at d = 12 incl. reference) |
 | existing configurations after each change | tags unchanged; selftest ALL OK |
@@ -645,7 +667,10 @@ Our Nighthawk two-patch registers, 3 seam qubits each (release prefixes; `nn_qab
 | 45-qubit ladder, Haar, d = 20 | not finished |
 | `fxeb` ladder, n = 32 | EPYC (48 GiB reference) |
 | Hamming ladder n = 45–57 and `nighthawk61r2` (E18) | EPYC: README §7 recipe; 57 needs 64 GiB patches, 61 RAM + swap (≈ 385 GiB) |
-| Hamming ladder 16–40 with 10 circuits per point | 6 (4 at 40) measured in the container |
+| Hamming ladder 16–32 with 10 circuits per point | 6 measured in the container (36–45 have 10 on the EPYC) |
+| Hamming, 45 qubits: 9 failed points (worker deaths, C++ exceptions) and 4 NaN records | rerun with `--retry-failed` |
+| Hamming, 49 qubits, instance 4 at d = 6 | ACE returns P(q = 1) = NaN on two bulk qubits of patch 1 (q45, q47) at λ = 1, 3 and 5; reproduced on a second machine (PyQrack 2.28.1, CPU): a property of this circuit on ACE, not of a device or a run. Excluded; the d = 6 points have 9 circuits |
+| Hamming, NaN circuits at 45–53 qubits | 45: instance 2 (d = 8, 10); 49: instance 4 (d = 6, all folds); 53: instances 1, 6 at d = 6 λ = 1 and 1, 3, 4, 5, 6 at d = 6 λ = 3. The NaN always appears on patch 1's bulk or on the lowest seam qubit (45: q38, q40; 49: q45, q47; 53: q45, q48). At 53 qubits, d = 6, λ = 3 only 2 of 7 circuits survive: if the circuits that break are those whose state degrades most, the surviving mean is biased high, so points with many exclusions are reported with their circuit count and not used in fits |
 | `nighthawk88d` / `88e` depth sweep | six V340 dies |
 | tiling v3 vs v2 at n = 30–32 | CPU path |
 | host-mapped (`--gtt`) patch speed on the V340s | not measured |
