@@ -2168,14 +2168,17 @@ def cmd_danmodel(a):
                 groups.items(), key=lambda kv: (kv[0][4], kv[0][0], kv[0][3], kv[0][7], kv[0][8])):
             v = np.array([r["fidelity"] for r in rs], float)
             se = float(v.std(ddof=1) / math.sqrt(len(v))) if len(v) > 1 else float(rs[0].get("se", float("nan")))
-            # hamming: forward d cycles + inverse d cycles, folded lambda times -> 2 d lambda layers
-            layers = 2 * d * fold if fam == "hamming" else d
+            # hamming: d = the depth of U (his script's depth argument), the calculator's depth; the mirror
+            # runs 2 d lambda layers (dan_2d: the calculator at the mirror's 2 d layers, a stricter pairing)
             rows.append(dict(source=Path(path).name, cfg=cfg, theta=theta, family=fam if fam != "hamming" else f"ham{fold}",
-                             n=n, bulk=n - B, boundary=B, patches=P, depth=layers, cycles=d, fold=fold,
+                             n=n, bulk=n - B, boundary=B, patches=P, depth=d, fold=fold,
+                             cycles=d if fam == "hamming" else None, layers=2 * d * fold if fam == "hamming" else d,
                              instances=len(v), measured=float(v.mean()), se=se,
                              # the calculator models an unfolded circuit: folded rows (lambda > 1) get none
-                             dan=dan_xeb(n - B, B, P, layers) if fold <= 1 else None,
-                             device=dev.get(layers) if n == 61 and fam != "fxeb" else None))
+                             dan=dan_xeb(n - B, B, P, d) if fold <= 1 else None,
+                             dan_2d=dan_xeb(n - B, B, P, 2 * d) if fam == "hamming" and fold == 1 else None,
+                             device=dev.get(2 * d if fam == "hamming" else d) if n == 61 and fam != "fxeb" and fold <= 1
+                             else None))
     else:
         for name in a.registers or LADDER:
             if name not in REGISTERS or "ace" not in REGISTERS[name]:
