@@ -2143,6 +2143,7 @@ def cmd_danmodel(a):
     depths = a.depths or [4, 6, 8, 10, 12, 16, 20, 36]
     dev = device_mirror(a.repo) if a.device else {}
     rows = []
+    nonfinite = 0
     if a.inputs:
         groups, seen = {}, {}
         for path in a.inputs:
@@ -2158,6 +2159,9 @@ def cmd_danmodel(a):
                         continue
                     if (r.get("family") not in ("mirror", "fxeb", "hamming") or "fidelity" not in r
                             or "ace_seam_used" not in r):
+                        continue
+                    if not math.isfinite(float(r["fidelity"])):
+                        nonfinite += 1
                         continue
                     fold = r.get("fold", 1) if r["family"] == "hamming" else 0
                     seen[(path, r["cfg"], r["n"], r["family"], r["depth"], fold, r["instance"])] = r
@@ -2187,6 +2191,8 @@ def cmd_danmodel(a):
             for d in depths:
                 rows.append(dict(source=name, n=n, bulk=bulk, boundary=B, patches=P, widths=w, depth=d,
                                  dan=dan_xeb(bulk, B, P, d), device=dev.get(d) if n == 61 else None))
+    if nonfinite:
+        print(f"# {nonfinite} record(s) with a non-finite score skipped")
     if not rows:
         raise SystemExit("danmodel: no mirror/fxeb/hamming ACE records in the given files")
     x_of = lambda r: (r["bulk"] / (r["boundary"] * r["patches"])) ** DAN_MODEL["power"] if r["boundary"] else float("inf")
@@ -2629,6 +2635,10 @@ def run_hamming(lay, eng, d, lam, inst, a):
             for q in reversed(range(len(ang))):
                 eng.g1(q, gate(ang[q]).conj().T)
     ps = [eng.prob1(q) for q in range(n)]
+    bad = [q for q, x in enumerate(ps) if not math.isfinite(x) or x < -1e-6 or x > 1 + 1e-6]
+    if bad:                                  # a broken state (seen on clvk GPU workers): fail, never record
+        raise RuntimeError(f"hamming: P(q = 1) not a probability on {len(bad)} of {n} qubits "
+                           f"(first: q{bad[0]} = {ps[bad[0]]!r})")
     h = float(np.mean(ps))
     return dict(fidelity=1.0 - 2.0 * h, se=0.0, hamming_weight=float(n * h), h=h, fold=int(lam),
                 layers=2 * int(d) * int(lam), estimator="prob")
@@ -2755,6 +2765,7 @@ def record_files(out):
 
 
 _JSONL = {}     # (file, tag) -> [byte offset read so far, inode, {key: record}]
+_BAD_RECORDS = set()   # records skipped for a non-finite score: (file, n, family, K, depth, partition, instance)
 
 
 def load_jsonl(path, tag, n_default):
@@ -2784,6 +2795,10 @@ def load_jsonl(path, tag, n_default):
                 except (json.JSONDecodeError, UnicodeDecodeError):   # a line cut by a killed worker
                     continue
                 if r.get("cfg") == tag:
+                    f_ = r.get("fidelity")
+                    if isinstance(f_, float) and not math.isfinite(f_):
+                        _BAD_RECORDS.add((str(f), r["n"], r["family"], r["K"], r["depth"], r["partition"], r["instance"]))
+                        continue
                     r.setdefault("n", n_default)
                     ent[2][(r["n"], r["family"], r["K"], r["depth"], r["partition"], r["instance"])] = r
             ent[0] += end
@@ -4094,6 +4109,20 @@ def cmd_run(a):
     if not a.worker:
         ace_preflight(lay, a, sizes)
     todo = [k for k in jobs if k not in recs]
+    if not a.worker and not getattr(a, "summarize", False):
+        reopened = 0
+        for k in todo:                              # 'done' but no usable record: the record was NaN
+            cf = claim_file(a, k)
+            try:
+                if cf.read_text().strip() == "done":
+                    os.rename(cf, cf.with_name(cf.name + f".stale{os.getpid()}"))
+                    reopened += 1
+            except OSError:
+                pass
+        if reopened:
+            print(f"# {reopened} point(s) marked done had no usable record (non-finite score, or moved aside): reopened", flush=True)
+    if _BAD_RECORDS and not a.worker:
+        print(f"# {len(_BAD_RECORDS)} record(s) with a non-finite score ignored (rerun to replace them)", flush=True)
     if a.retry_failed and not a.worker:            # once, here; workers never retry failed points
         cleared = 0
         for k in todo:
@@ -4180,7 +4209,9 @@ def cmd_run(a):
             r["shots_file"] = str(f)
         rec = dict(cfg=tag, n=n, family=fam, K=K, depth=d, partition=j, instance=i, theta=a.theta,
                        **({"protocol": a.protocol} if getattr(a, "protocol", "nighthawk") != "nighthawk" else {}),
-                   seconds=round(time.time() - t0, 2), **eng.geometry(), **r)
+                   seconds=round(time.time() - t0, 2),
+                   device="gpu" if (not a.cpu and getattr(a, "ace_gpu", False) and a.backend == "ace") else "cpu",
+                   **eng.geometry(), **r)
         fh.write(json.dumps(rec) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
