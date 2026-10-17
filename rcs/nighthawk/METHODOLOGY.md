@@ -232,7 +232,23 @@ The sequence equals CZ up to global phase (selftest [4]). One generator per (dep
 | also | linear XEB N · mean p̂ − 1, ideal XEB N Σ p̂² − 1, HOG = fraction of samples with p̂ > ln 2 / N |
 | shared reference | with `--variants`, all configurations sample first, then one reference scores them all |
 
-### 6.4 Patched and full
+### 6.4 Mirror Hamming weight (`hamming`, Dan Strano's observable)
+
+The observable of `qem/richardson_nn_hamming_weight.py`, the only one of Dan's estimators that needs no 2ⁿ reference, so the only one that reaches 61 qubits.
+
+| Step | Rule |
+|---|---|
+| circuit | U = the `fxeb` forward circuit of d cycles (same seed, θ and, under `--protocol nnqab`, the same twelve-gate draw as E17), then U†: each cycle's gates inverted in reverse order (iSWAP ↔ iSWAP†; (CZ·iSWAP)⁻¹ = iSWAP† then CZ; (CZ·iSWAP†)⁻¹ = iSWAP then CZ; the other nine self-inverse), then the single-qubit gates' adjoints |
+| folding | M = U U†; scale factor λ = 2k + 1 runs M (M† M)^k = (U U†)^λ: 2·d·λ layers; `--fold` lists λ |
+| input, twirl | \|0…0⟩; no twirling (as his script) |
+| h | mean fraction of ones = Σ_q P(q = 1) / n, read from the backend after the circuit (`prob`, through the ACE register map): the shot-free value of his Hamming-weight estimator. Shots are not drawn because ACE's `measure_shots` clones the backend per shot |
+| score | signal 1 − 2h; ideal 1, fully scrambled 0 |
+| error | se 0 per circuit (no shot noise); spread over instances only |
+| zero-noise | `danmodel`: per (register, d) with ≥ 2 folds, Richardson on ln(signal) in u = λ^p, p = 1.60569, extrapolated to u = 0: y₀ = Σ_i w_i ln s_i, w_i = Π_{j≠i} u_j / (u_j − u_i); mitigated = e^{y₀} |
+| comparison with the calculator | λ = 1 rows at the depth d of U, the depth argument of his script and of his calculator; `dan_2d` in the CSV gives the stricter pairing at the mirror's 2·d layers; folded rows get no prediction, since the calculator models unfolded circuits |
+| control | exact backend: signal 1.000000 at λ = 1, 3 (selftest [11]); every gate's inverse within 1.2 × 10⁻⁷ of identity |
+
+### 6.5 Patched and full
 
 | Family | Rule |
 |---|---|
@@ -314,6 +330,7 @@ Each row is one experiment as run. "Runs" is per point: instances × (inputs × 
 | E15 | does `--gtt` lift the allocation ceiling? | 24-qubit entangled state | — | — | 1 | PoCL | 12 |
 | E16 | why do Dan's calculator and our numbers differ? | his `nn_qab.py` circuits on his strips (10–26 qubits, his lrc/lrr, torus); our release prefixes 16–28 with a 3-qubit seam | XEB, twirled mirror (exact Clifford conjugation), cut-sampler XEB; his gates and CZ only | 12, 20 | 20 circuits (8 at 26); 3 instances / 3 × 10 runs | container CPU | 14 |
 | E17 | do the Nighthawk ladder's numbers conform to Dan's in his own protocol? | `nighthawk2p16`, `2p20`, `2p24`, `2p28` | `fxeb`, `--protocol nnqab` | 12, 16, 20 | 10 circuits (28: 3) × 2^min(13, n+2) shots | container CPU | 10 |
+| E18 | Dan's circuits past the XEB ceiling, up to 61 qubits | `nighthawk2p16` … `2p57`, `nighthawk61r2` | `hamming`, `--protocol nnqab`, λ = 1, 3, 5 | 4–12 cycles (8–120 layers) | 6 circuits (container, 16–36; 4 at 40); EPYC recipe: 10 (≤ 57), 3 (61) | container CPU; EPYC for 45–61 | 10 |
 
 ### 9.1 E16 cross-check procedure
 
@@ -394,7 +411,7 @@ Each row is one experiment as run. "Runs" is per point: instances × (inputs × 
 | Check | Method | Outcome |
 |---|---|---|
 | circuit regeneration | `verify` (§2.4) | every released circuit identical |
-| conventions | selftest [1]–[10] | all pass (RESULTS §1) |
+| conventions | selftest [1]–[11] | all pass (RESULTS §1) |
 | hardware re-scoring | `hwxeb` against the release | agreement within 0.05 σ; ideal XEB within 10⁻⁵ |
 | ACE on GPU | tiled n = 27 points, CPU vs CMP 50HX | equal within shot noise (RESULTS §13) |
 | OpenCL fix | 16-qubit reproducer and ACE mirror points, patched build vs CPU | exact, and within 3 × 10⁻⁴ (RESULTS §12) |

@@ -44,6 +44,7 @@ No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit st
 | Two patches on IBM's own register and circuits match the device at shallow depth | Haar θ, d = 4 / 6: 0.226 / 0.128 against 0.214 / 0.154 | 9 |
 | A register with a 3-qubit waist keeps the boundary nearly closed | 45-qubit version, d = 8 / 12 / 20: 0.90 / 0.88 / 0.12 against the device's 0.109 / 0.062 / 0.021; classically easier register | 9 |
 | In Dan's own protocol (`--protocol nnqab`) the Nighthawk ladder meets his calculator at 16 qubits and falls below it with size | XEB(12) 1.03× at 16 qubits, 0.40× at 28; depth power 0.89–1.70 vs his 1.606 | 10 |
+| Dan's mirror Hamming weight carries his protocol past the XEB ceiling | signal at U's depth d within 0.96–1.46× of his calculator at 16–24 qubits, 0.35–0.51× at d = 12 from 28 to 40; tracks the forward XEB where both exist; folding leaves it unchanged | 10 |
 | Mirror survival is a different observable from his XEB | ACE's XEB equals a seam-cut sampler's XEB at 16–28 qubits; mirror survival falls with size | 14 |
 | 88 qubits fit one 8 GB GPU; disabled sites on the seams shrink the boundary | boundary 17 → 11 qubits; `nighthawk88e` 10–20× `nighthawk88d` at d = 4–6 | 8 |
 | A ghost link carries entanglement between chips | loom-only error, d = 8 / 12 / 16: ghost 1.000 / 0.989 / 0.656, mean-field 0.773 / 0.773 / 0.067 | 11 |
@@ -129,6 +130,7 @@ Each cycle applies a Haar-random single-qubit gate to every qubit (`rz(φ)·rx(�
 | `mirror` | U for d/2 cycles, then U† for d/2: depth d counts both halves. The forward half is pseudo-patched: each cycle drops the CZs crossing one of the five K = 3 boundary sets, rotating ([[6]](#ref-6)–[[8]](#ref-8)) | survival of the prepared input string |
 | `fxeb` | unpatched forward circuit on the first n qubits | XEB = (N · mean_s p(x_s) − 1) / (N Σ p² − 1), N = 2^n, against an exact reference; sums in float64 |
 | `full` | unpatched forward circuit, release seed | stored only |
+| `hamming` | Dan Strano's mirror (`qem/richardson_nn_hamming_weight.py`): the `fxeb` forward circuit U of d cycles, then U†, folded to (U U†)^λ for λ = `--fold`, from \|0…0⟩, no twirling; any n, 61 included | signal 1 − 2h, h = Σ_q P(q = 1) / n taken exactly from the backend (ideal 1) |
 
 `--theta nnqab` replaces the Haar θ with the `nn_qab` ensemble (sin θ uniform): a variant, not the released circuits.
 
@@ -161,7 +163,7 @@ Placements are routing-free: every circuit coupler is a coupler of the register,
 
 ### 2.3 Registers
 
-`--register NAME` replaces the release's register with a sub-register of the 12 × 10 Nighthawk lattice. The circuits are built by the release's own code and seed: `rect_matchings`, `remove_qubits`, `make_patches(seed=2025, balance_tol=1, top_n=5)` for the K = 3, 4 partitions, and the release's input-string recipe (selftest [9]). Registers have no device data; they run `mirror`, and `fxeb` up to 36 qubits. Each carries a stored ACE preset (geometry, caps, placement).
+`--register NAME` replaces the release's register with a sub-register of the 12 × 10 Nighthawk lattice. The circuits are built by the release's own code and seed: `rect_matchings`, `remove_qubits`, `make_patches(seed=2025, balance_tol=1, top_n=5)` for the K = 3, 4 partitions, and the release's input-string recipe (selftest [9]). Registers have no device data; they run `mirror` and `hamming` at any size, and `fxeb` up to 36 qubits. Each carries a stored ACE preset (geometry, caps, placement).
 
 | Register | Qubits | Region | ACE geometry | Patch widths incl. ancilla | Boundary qubits | exact / replica / cross | Couplers through a boundary | Dense memory |
 |---|---|---|---|---|---|---|---|---|
@@ -211,6 +213,7 @@ Throughout, the figure compared with the device is a per-cycle decay b = −d ln
 | 8 | ACE register geometry | grid, torus, nearest-neighbour couplers |
 | 9 | `--register` recipe on the release's own register | inputs and partitions identical |
 | 10 | `layoutsearch` joint model vs the exact engine, release register, 75 sites | same boundary count, no cross coupler |
+| 11 | the twelve `nn_qab` gates undone by their inverses; exact folded mirror, λ = 1, 3 | overlap within 1e-5; signal within 1e-4 of 1 |
 
 | Command | Does |
 |---|---|
@@ -226,7 +229,8 @@ Throughout, the figure compared with the device is a per-cycle decay b = −d ln
 | `--families` | `mirror,patched` | comma list of §2.1 families |
 | `--register` | `release` | a register of §2.3 with its ACE preset |
 | `--theta` | `haar` | `nnqab`: variant ensemble |
-| `--protocol` | `nighthawk` | `nnqab`: forward XEB scored as `nn_qab.py` scores it (sin θ-uniform single-qubit gates, each coupler's gate drawn from its twelve two-qubit gates, 2^min(13, n+2) shots); points compare one-to-one with Dan's calculator; `fxeb` only |
+| `--protocol` | `nighthawk` | `nnqab`: forward XEB scored as `nn_qab.py` scores it (sin θ-uniform single-qubit gates, each coupler's gate drawn from its twelve two-qubit gates, 2^min(13, n+2) shots); points compare one-to-one with Dan's calculator; `fxeb` (n ≤ 36) and `hamming` (any n) |
+| `--fold` | 1 | `hamming`: odd folding factors λ, e.g. `1 3 5` for the zero-noise extrapolation |
 | `--depths`, `--instances`, `--K`, `--partitions` | release's, 3, 3 4, all 5 | scope |
 | `--sizes`, `--n` | — | first-n truncations, e.g. `27-34`, `20,27-36` |
 | `--shots` | `paper` | Appendix-D budgets for mirror and patched, 4096 for `fxeb`, 100 000 per pub for `full`; or an integer |
@@ -262,7 +266,8 @@ Throughout, the figure compared with the device is a per-cycle decay b = −d ln
 | Mode | Command | Output |
 |---|---|---|
 | prediction | `danmodel [--registers …] [--depths …]` | bulk, boundary, patches, x and predicted XEB per register and depth; default the two-patch ladder, d = 4 … 36 |
-| comparison | `danmodel --in run.jsonl …` | every measured mirror or `fxeb` point next to the prediction at its own seam and patch counts; plain mean over instances, worker files included |
+| comparison | `danmodel --in run.jsonl …` | every measured mirror, `fxeb` or `hamming` point next to the prediction at its own seam and patch counts (`hamming` at the depth d of U, as his script labels it, λ = 1 only; the CSV adds `dan_2d` at the mirror's 2·d layers); plain mean over instances, worker files included |
+| zero-noise | the same, on `hamming` runs with ≥ 2 folds | Dan's Richardson extrapolation: ln(signal) extrapolated to λ = 0 in u = λ^1.60569 |
 
 Both modes add `ibm_phoenix`'s mirror survival at n = 61 (`--no-device` to omit) and write CSV with `--csv`.
 
@@ -461,7 +466,7 @@ The release holds every sampled 61-qubit bitstring of the full and patched circu
 
 ## 6. Results
 
-Every measured number is in [RESULTS.md](RESULTS.md), grouped by experiment (E1–E15 of [METHODOLOGY.md](METHODOLOGY.md) §9), with the points not yet measured in its §15.
+Every measured number is in [RESULTS.md](RESULTS.md), grouped by experiment (E1–E18 of [METHODOLOGY.md](METHODOLOGY.md) §9), with the points not yet measured in its §15.
 
 ---
 
@@ -509,6 +514,26 @@ for n in 16 20 24 28 32; do
     --cpu --gpus 0 --per-gpu 1 --mem-budget-gb 290 --out dan_protocol_${n}.jsonl
 done
 python3 nighthawk_qrack.py danmodel --in dan_protocol_*.jsonl --csv dan_protocol_vs_calculator.csv
+
+# Dan's circuits from 16 to 61 qubits (RESULTS §10): his mirror Hamming weight. Folds 3, 5 only at d <= 8:
+# ACE's signal does not change with folding (RESULTS §10), and they cost 3x / 5x. 61 = IBM's register, RAM + swap
+for n in 16 20 24 28 32 36 40 45 49 53 57; do
+  [ $n -le 40 ] && k=10 || k=6
+  python3 nighthawk_qrack.py run --backend ace --register nighthawk2p$n --families hamming --protocol nnqab \
+    --depths 4 6 8 10 12 --fold 1 --instances $k --order shallow \
+    --cpu --gpus 0 --per-gpu 1 --mem-budget-gb 290 --out dan_hamming_${n}.jsonl
+  python3 nighthawk_qrack.py run --backend ace --register nighthawk2p$n --families hamming --protocol nnqab \
+    --depths 4 6 8 --fold 3 5 --instances $k --order shallow \
+    --cpu --gpus 0 --per-gpu 1 --mem-budget-gb 290 --out dan_hamming_${n}.jsonl
+done
+python3 nighthawk_qrack.py run --backend ace --register nighthawk61r2 --families hamming --protocol nnqab \
+  --depths 4 6 8 10 12 --fold 1 --instances 3 --order shallow \
+  --cpu --gpus 0 --per-gpu 1 --swap-gb 238 --mem-budget-gb 530 --out dan_hamming_61.jsonl
+python3 nighthawk_qrack.py run --backend ace --register nighthawk61r2 --families hamming --protocol nnqab \
+  --depths 4 6 --fold 3 5 --instances 3 --order shallow \
+  --cpu --gpus 0 --per-gpu 1 --swap-gb 238 --mem-budget-gb 530 --out dan_hamming_61.jsonl
+python3 nighthawk_qrack.py danmodel --in dan_hamming_*.jsonl --csv dan_hamming_vs_calculator.csv
+python3 dan_crosscheck/analyse_hamming.py dan_hamming_*.jsonl
 
 # a register search (§3.4)
 python3 nighthawk_qrack.py layoutsearch --n 88 --geometries 114:4:5 102:4:5 --region convex \

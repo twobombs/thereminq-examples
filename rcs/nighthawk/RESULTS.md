@@ -1,6 +1,6 @@
 # Results: `rcs/nighthawk`
 
-Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E15 in its §9); usage is in the [README](README.md). State as of 16 October 2026.
+Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E18 in its §9); usage is in the [README](README.md). State as of 17 October 2026.
 
 | Convention | |
 |---|---|
@@ -23,7 +23,7 @@ Every measured number of the experiments, grouped by experiment. The procedure b
 | 7 | seam cost and E9 | ≈ 0.025 per replica coupler per cycle; two patches beat three at 49 qubits |
 | 8 | E10: 88 qubits | `nighthawk88e` 10–20× `nighthawk88d` |
 | 9 | E11: two patches at 61 qubits | level with the device at d = 4–6 on its own circuits |
-| 10 | E12, E17: ladder vs Dan's calculator | in his protocol: 1.03× at 16 qubits to 0.40× at 28 (d = 12); depth power 0.89–1.70 against his 1.606 |
+| 10 | E12, E17, E18: ladder vs Dan's calculator | in his protocol: 1.03× at 16 qubits to 0.40× at 28 (XEB, d = 12); his Hamming weight to 40 qubits here, 61 on the EPYC: 1.23× at 16 to 0.42× at 40 (d = 12); folding leaves ACE's signal unchanged |
 | 11 | E13: cloverfield | ghost link 1.000 / 0.989 / 0.656 vs mean-field 0.773 / 0.773 / 0.067 |
 | 12 | E14, E15: OpenCL and GTT | three defects, fixed; GTT ceiling lifted |
 | 13 | tool validation | GPU = CPU; layoutsearch matches the exact engine |
@@ -322,7 +322,7 @@ The survival steps with the boundary-CZ count rather than with depth. Instance 0
 
 ---
 
-## 10. Two-patch ladder against Dan's calculator (E12)
+## 10. Two-patch ladder against Dan's calculator (E12, E17, E18)
 
 | n | 28 | 32 | 36 | 40 | 45 | 49 | 53 | 57 | 61 |
 |---|---|---|---|---|---|---|---|---|---|
@@ -413,6 +413,62 @@ Mirror survival (the `ibm_phoenix` comparison proxy, not Dan's observable; plain
 - **For Nighthawk registers his calculator therefore applies with a measured XEB(12)**: his depth power with the anchor of this table. The CZ-only circuits score 2–4× higher XEB than his gate set on the same registers.
 - **Mirror survival is a different observable** (§14) and is kept for the comparison with `ibm_phoenix`. Under Haar angles its losses are 10–100× larger.
 
+### 10.1 Dan's circuits past the XEB ceiling: his mirror Hamming weight (E18)
+
+`run --families hamming --protocol nnqab`: his circuits (the E17 gates and θ) as U U†, folded (U U†)^λ, signal 1 − 2h with h the exact mean fraction of ones (METHODOLOGY §6.4); plain means over circuits, container CPU (2 cores, 7 GiB), error detection on. Dan's calculator in brackets, at the depth d of U.
+
+| n | Circuits | d = 4 | 6 | 8 | 10 | 12 | Fitted p | Fitted signal(12) |
+|---|---|---|---|---|---|---|---|---|
+| 16 | 6 | 0.990 ± 0.010 (0.780) | 0.829 ± 0.085 (0.621) | 0.571 ± 0.147 (0.469) | 0.494 ± 0.133 (0.339) | 0.288 ± 0.107 (0.235) | 2.59 | 0.283 |
+| 20 | 6 | 0.887 ± 0.064 (0.807) | 0.707 ± 0.069 (0.662) | 0.633 ± 0.088 (0.520) | 0.439 ± 0.123 (0.392) | 0.275 ± 0.039 (0.285) | 1.93 | 0.305 |
+| 24 | 6 | 0.914 ± 0.026 (0.827) | 0.823 ± 0.053 (0.695) | 0.806 ± 0.051 (0.561) | 0.546 ± 0.082 (0.438) | 0.344 ± 0.076 (0.330) | 2.58 | 0.396 |
+| 28 | 6 | 0.882 ± 0.037 (0.844) | 0.670 ± 0.102 (0.722) | 0.539 ± 0.090 (0.597) | 0.272 ± 0.073 (0.478) | 0.137 ± 0.031 (0.372) | 2.38 | 0.147 |
+| 32 | 6 | 0.904 ± 0.027 (0.858) | 0.641 ± 0.087 (0.746) | 0.537 ± 0.085 (0.628) | 0.309 ± 0.062 (0.514) | 0.210 ± 0.033 (0.409) | 1.90 | 0.213 |
+| 36 | 6 | 0.869 ± 0.044 (0.870) | 0.652 ± 0.094 (0.766) | 0.487 ± 0.091 (0.655) | 0.270 ± 0.043 (0.546) | 0.157 ± 0.012 (0.444) | 2.16 | 0.156 |
+| 40 | 4 | 0.858 ± 0.054 (0.881) | 0.621 ± 0.063 (0.784) | 0.412 ± 0.067 (0.679) | 0.221 ± 0.005 (0.575) | 0.202 ± 0.050 (0.476) | 1.84 | 0.163 |
+| 45–61 | | EPYC (§15) | | | | | | |
+| **Dan's calculator** | | | | | | | 1.606 | 0.235–0.476 |
+
+| Measured / Dan, Hamming signal | 16 | 20 | 24 | 28 | 32 | 36 | 40 |
+|---|---|---|---|---|---|---|---|
+| d = 4 | 1.27 | 1.10 | 1.11 | 1.04 | 1.05 | 1.00 | 0.97 |
+| d = 8 | 1.22 | 1.22 | 1.44 | 0.90 | 0.86 | 0.74 | 0.61 |
+| d = 12 | 1.23 | 0.96 | 1.04 | 0.37 | 0.51 | 0.35 | 0.42 |
+| Dan at the mirror's 2d layers instead, d = 12 | 0.0121 | 0.0219 | 0.0344 | 0.0492 | 0.0660 | 0.0846 | 0.1046 |
+
+| d = 12, where both exist | 16 | 20 | 24 | 28 |
+|---|---|---|---|---|
+| forward XEB, E17 | 0.241 | 0.200 | 0.224 | 0.148 |
+| Hamming signal, E18 | 0.288 | 0.275 | 0.344 | 0.137 |
+| ratio | 1.20 | 1.38 | 1.54 | 0.93 |
+
+Folding, signal at λ = 1 / 3 / 5 and Dan's Richardson extrapolation (ln signal in u = λ^1.60569, to λ = 0):
+
+| n | d = 4 | d = 8 | d = 12 |
+|---|---|---|---|
+| 16 | 0.990 / 0.977 / 0.977 → 0.994 | 0.571 / 0.635 / 0.628 → 0.553 | 0.288 / 0.353 / 0.273 → 0.267 |
+| 20 | 0.887 / 0.933 / 0.884 → 0.871 | 0.633 / 0.520 / 0.569 → 0.677 | 0.275 / 0.118 / 0.103 → 0.352 |
+| 24 | 0.914 / 0.934 / 0.890 → 0.905 | 0.806 / 0.793 / 0.806 → 0.811 | 0.344 / 0.457 / 0.365 → 0.311 |
+| 28 | 0.882 / 0.901 / 0.884 → 0.875 | 0.539 / 0.589 / 0.521 → 0.521 | 0.137 / 0.165 / 0.166 → 0.129 |
+| 32 | 0.904 / 0.919 / 0.916 → 0.899 | 0.537 / 0.530 / 0.514 → 0.539 | 0.210 / 0.157 / 0.156 → 0.229 |
+| 36 | 0.869 / 0.896 / 0.889 → 0.860 | 0.487 / 0.463 / 0.459 → 0.494 | 0.157 / 0.116 / 0.112 → 0.172 |
+| 40 | — | 0.412 / 0.451 / — → 0.405 | — |
+
+| Seconds per circuit, container CPU | 16 | 20 | 24 | 28 | 32 | 36 | 40 |
+|---|---|---|---|---|---|---|---|
+| ACE simulator widths | 17 / 17 / 5 | 19 / 19 / 5 | 21 / 21 / 7 / 5 | 22 / 22 / 4 | 25 / 25 / 5 | 29 / 28 / 6 | 28 / 28 / 4 |
+| d = 12, λ = 1 | 0.1 | 0.2 | 0.6 | 2.7 | 5.8 | 25 | 108 |
+| d = 12, λ = 5 | 0.3 | 1.3 | 3.4 | 14 | 33 | 145 | — |
+
+| `nighthawk61r2` in this protocol | Value |
+|---|---|
+| planner's estimate per point (error detection on) | ≈ 385 GiB: `--swap-gb 238 --mem-budget-gb 530` |
+| Dan's calculator, d = 4 / 8 / 12 | 0.853 / 0.617 / 0.396 |
+
+- **His Hamming weight reaches where his XEB cannot.** It needs no 2ⁿ reference; at d = 12 it tracks the E17 forward XEB within 0.93–1.54× on the same registers.
+- **The ladder conforms to his calculator at 16–24 qubits** (0.96–1.46× at every depth), as his XEB did at 16. **From 28 qubits on it falls below with depth**, to 0.35–0.51× at d = 12, while the calculator keeps rising with the bulk at a fixed 3-qubit seam: the same parting as E17, now seen to 40 qubits. The fitted depth power is 1.8–2.6 against his 1.606.
+- **Folding does not amplify ACE's error.** λ = 5 is within 11 % of λ = 1 at d ≤ 8; at d = 12 it ranges 0.37–1.21×. A gate-count noise with his gain exponent would give s^(5^1.606) ≈ s^13. His Richardson step therefore returns the λ = 1 value (0.90–1.28× of it): the exponent applies to hardware noise, which grows with every folded gate, not to ACE's seam error.
+
 ---
 
 ## 11. Cloverfield (E13)
@@ -496,6 +552,7 @@ Mirror survival (the `ibm_phoenix` comparison proxy, not Dan's observable; plain
 | `release:61`, `nighthawk61r2` vs the release | mirror CZs, angles and inputs identical at d = 4, 8, 20 |
 | ACE placements with error detection on vs off | identical site maps (widths 43 / 43 / 8 vs 42 / 42 / 7 on 77 sites) |
 | `--swap-gb` config tag | unchanged (`ace-3189ad58` with and without) |
+| `hamming` (selftest [11]) | exact backend signal 1.000000 at λ = 1, 3; each of the twelve gates' inverses within 1.2 × 10⁻⁷ of identity |
 | `fxeb` on a register | runs from n ≤ 36 (`nighthawk2p28`: 104 s at d = 4, 464 s at d = 12 incl. reference) |
 | existing configurations after each change | tags unchanged; selftest ALL OK |
 
@@ -587,6 +644,8 @@ Our Nighthawk two-patch registers, 3 seam qubits each (release prefixes; `nn_qab
 | ladder n = 49, 53, 57; n ≥ 40 with 3 instances | EPYC |
 | 45-qubit ladder, Haar, d = 20 | not finished |
 | `fxeb` ladder, n = 32 | EPYC (48 GiB reference) |
+| Hamming ladder n = 45–57 and `nighthawk61r2` (E18) | EPYC: README §7 recipe; 57 needs 64 GiB patches, 61 RAM + swap (≈ 385 GiB) |
+| Hamming ladder 16–40 with 10 circuits per point | 6 (4 at 40) measured in the container |
 | `nighthawk88d` / `88e` depth sweep | six V340 dies |
 | tiling v3 vs v2 at n = 30–32 | CPU path |
 | host-mapped (`--gtt`) patch speed on the V340s | not measured |
