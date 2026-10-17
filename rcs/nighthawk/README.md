@@ -44,7 +44,7 @@ No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit st
 | Two patches on IBM's own register and circuits match the device at shallow depth | Haar θ, d = 4 / 6: 0.226 / 0.128 against 0.214 / 0.154 | 9 |
 | A register with a 3-qubit waist keeps the boundary nearly closed | 45-qubit version, d = 8 / 12 / 20: 0.90 / 0.88 / 0.12 against the device's 0.109 / 0.062 / 0.021; classically easier register | 9 |
 | In Dan's own protocol (`--protocol nnqab`) the Nighthawk ladder meets his calculator at 16 qubits and falls below it with size | XEB(12) 1.03× at 16 qubits, 0.40× at 28; depth power 0.89–1.70 vs his 1.606 | 10 |
-| Dan's mirror Hamming weight carries his protocol past the XEB ceiling | signal at U's depth d within 0.96–1.46× of his calculator at 16–24 qubits, 0.35–0.51× at d = 12 from 28 to 40; tracks the forward XEB where both exist; folding leaves it unchanged | 10 |
+| Dan's mirror Hamming weight carries his protocol past the XEB ceiling | at U's depth d: within 0.86–1.33× of his calculator at d ≤ 6 at every size; at d = 12 0.37–0.63× at 28–40 qubits, 0.91× at 45 (4-qubit seam); tracks the forward XEB where both exist; folding exponent 0.04–0.48 against his 1.606 | 10 |
 | Mirror survival is a different observable from his XEB | ACE's XEB equals a seam-cut sampler's XEB at 16–28 qubits; mirror survival falls with size | 14 |
 | 88 qubits fit one 8 GB GPU; disabled sites on the seams shrink the boundary | boundary 17 → 11 qubits; `nighthawk88e` 10–20× `nighthawk88d` at d = 4–6 | 8 |
 | A ghost link carries entanglement between chips | loom-only error, d = 8 / 12 / 16: ghost 1.000 / 0.989 / 0.656, mean-field 0.773 / 0.773 / 0.067 | 11 |
@@ -259,7 +259,7 @@ Throughout, the figure compared with the device is a per-cycle decay b = −d ln
 
 **Shared reference.** `--variants 4/4:t3 4/4:t2 …` samples each `fxeb` point with every listed configuration and scores all of them against one exact reference. The tokens are lrc/lrr, then `torus`, `untiled`, `tiled`, `t2`, `t3`, `rep`, `noed`, `noxbar`, `tx` (exact), `txa` (anneal), `vf2`, `w<N>`, `ex<a+b+…>`, `xok`. Records stay per variant.
 
-**Resumability.** A configuration is tagged `<backend>-<sha1[:8]>` over backend, shots, twirls, ACE parameters, tiling version and exact-probs mode, not the register size, so sweeps extend and resume per point. `--gtt` and `--swap-gb` do not change the tag. Bitstrings are written before the JSONL record, and the claim is marked done last. To drop a pending point, write `failed: …` into its claim file under `<out>_shots/<cfg>/claims/`.
+**Resumability.** A configuration is tagged `<backend>-<sha1[:8]>` over backend, shots, twirls, ACE parameters, tiling version and exact-probs mode, not the register size, so sweeps extend and resume per point. `--gtt` and `--swap-gb` do not change the tag. Bitstrings are written before the JSONL record, and the claim is marked done last. A record with a non-finite score (NaN) is ignored everywhere and its point reopened on the next run; `hamming` refuses to write one and fails the point instead. Records carry `device` (`cpu` / `gpu`), outside the tag. To drop a pending point, write `failed: …` into its claim file under `<out>_shots/<cfg>/claims/`.
 
 ### 3.3 `danmodel`
 
@@ -378,7 +378,7 @@ With `--mem-budget-gb`, a worker takes a point only if all reservations plus thi
 | per worker | ≈ 8 · 2^n bytes for the reference while built + ≈ 0.5 GiB engines and context |
 | workers per card | ≤ 4 at n = 27, ≤ 2 at 28–29, 1 at 30, none beyond |
 
-ACE is not faster on GPU: its simulators are small, its work is many short kernels with read-backs and host-side seam logic, and workers on one card queue. The useful split is ACE on CPU workers and `--ref-gpu` for the reference. Device indices follow Qrack's start-up listing and can change with drivers. Check one point against the CPU on every new device (the CMP 50HX check: RESULTS §13).
+ACE is not faster on GPU: its simulators are small, its work is many short kernels with read-backs and host-side seam logic, and workers on one card queue. Measured on the V340 dies with the 45-qubit `hamming` ladder (patches 26 / 25, 18 workers): 4–9 W of a 100 W card, so the ladder runs on CPU at every size. The useful split is ACE on CPU workers and `--ref-gpu` for the reference. Device indices follow Qrack's start-up listing and can change with drivers. Check one point against the CPU on every new device (the CMP 50HX check: RESULTS §13).
 
 VRAM does not help patches larger than a die. Six V340 dies hold ≈ 45 GiB, a sixth of a 35-qubit patch, and the overflow sits in host RAM behind PCIe 3.0 x8 links (≈ 20 GB/s in total), no faster than NVMe swap.
 
