@@ -244,6 +244,23 @@ def qrack_g2(sim, g, a, b):
         raise ValueError(f"unknown two-qubit gate {g}")
 
 
+def qrack_g2_inv(sim, g, a, b):
+    """Inverse of qrack_g2: iSWAP <-> iSWAP^dagger, CZ.iSWAP -> iSWAP^dagger then CZ, CZ.iSWAP^dagger ->
+    iSWAP then CZ; the other nine are their own inverses (CZ.SWAP included: CZ commutes with SWAP)."""
+    if g == "iswap":
+        sim.adjiswap(a, b)
+    elif g == "iiswap":
+        sim.iswap(a, b)
+    elif g == "mswap":
+        sim.adjiswap(a, b)
+        sim.mcz([a], b)
+    elif g == "nswap":
+        sim.iswap(a, b)
+        sim.mcz([a], b)
+    else:
+        qrack_g2(sim, g, a, b)
+
+
 def haar_angles(seed, instance, cycle, qubit):
     """(phi, theta, lambda), applied as rz(phi), rx(theta), rz(lambda).
     haar (the paper): cos(theta) uniform on [-1, 1], theta in [0, pi].
@@ -759,6 +776,12 @@ class ExactEngine:
 
     def g2(self, g, a, b):
         qrack_g2(self.sim, g, a, b)
+
+    def g2_inv(self, g, a, b):
+        qrack_g2_inv(self.sim, g, a, b)
+
+    def prob1(self, q):
+        return float(self.sim.prob(q))
 
     def shots(self, s):
         return np.array(self.sim.measure_shots(list(range(self.n)), s), dtype=np.uint64)
@@ -1678,6 +1701,12 @@ class AceEngine:
     def g2(self, g, a, b):
         qrack_g2(self.sim, g, self.idx[a], self.idx[b])
 
+    def g2_inv(self, g, a, b):
+        qrack_g2_inv(self.sim, g, self.idx[a], self.idx[b])
+
+    def prob1(self, q):
+        return float(self.sim.prob(self.idx[q]))
+
     def shots(self, s):
         """s samples of the logical qubits. QrackAceBackend.measure_shots clones the whole
         backend per shot; on the GPU that is new device buffers and copies for every shot
@@ -2127,18 +2156,26 @@ def cmd_danmodel(a):
                         r = json.loads(line)
                     except ValueError:
                         continue
-                    if r.get("family") not in ("mirror", "fxeb") or "fidelity" not in r or "ace_seam_used" not in r:
+                    if (r.get("family") not in ("mirror", "fxeb", "hamming") or "fidelity" not in r
+                            or "ace_seam_used" not in r):
                         continue
-                    seen[(path, r["cfg"], r["n"], r["family"], r["depth"], r["instance"])] = r
-        for (path, cfg, n, fam, d, i), r in seen.items():
-            k = (path, cfg, r.get("theta", "haar"), fam, n, r["ace_seam_used"], r.get("ace_sims_used", 2), d)
+                    fold = r.get("fold", 1) if r["family"] == "hamming" else 0
+                    seen[(path, r["cfg"], r["n"], r["family"], r["depth"], fold, r["instance"])] = r
+        for (path, cfg, n, fam, d, fold, i), r in seen.items():
+            k = (path, cfg, r.get("theta", "haar"), fam, n, r["ace_seam_used"], r.get("ace_sims_used", 2), d, fold)
             groups.setdefault(k, []).append(r)
-        for (path, cfg, theta, fam, n, B, P, d), rs in sorted(groups.items(), key=lambda kv: (kv[0][4], kv[0][0], kv[0][7])):
+        for (path, cfg, theta, fam, n, B, P, d, fold), rs in sorted(
+                groups.items(), key=lambda kv: (kv[0][4], kv[0][0], kv[0][3], kv[0][7], kv[0][8])):
             v = np.array([r["fidelity"] for r in rs], float)
             se = float(v.std(ddof=1) / math.sqrt(len(v))) if len(v) > 1 else float(rs[0].get("se", float("nan")))
-            rows.append(dict(source=Path(path).name, cfg=cfg, theta=theta, family=fam, n=n, bulk=n - B, boundary=B,
-                             patches=P, depth=d, instances=len(v), measured=float(v.mean()), se=se,
-                             dan=dan_xeb(n - B, B, P, d), device=dev.get(d) if n == 61 and fam == "mirror" else None))
+            # hamming: forward d cycles + inverse d cycles, folded lambda times -> 2 d lambda layers
+            layers = 2 * d * fold if fam == "hamming" else d
+            rows.append(dict(source=Path(path).name, cfg=cfg, theta=theta, family=fam if fam != "hamming" else f"ham{fold}",
+                             n=n, bulk=n - B, boundary=B, patches=P, depth=layers, cycles=d, fold=fold,
+                             instances=len(v), measured=float(v.mean()), se=se,
+                             # the calculator models an unfolded circuit: folded rows (lambda > 1) get none
+                             dan=dan_xeb(n - B, B, P, layers) if fold <= 1 else None,
+                             device=dev.get(layers) if n == 61 and fam != "fxeb" else None))
     else:
         for name in a.registers or LADDER:
             if name not in REGISTERS or "ace" not in REGISTERS[name]:
@@ -2148,7 +2185,7 @@ def cmd_danmodel(a):
                 rows.append(dict(source=name, n=n, bulk=bulk, boundary=B, patches=P, widths=w, depth=d,
                                  dan=dan_xeb(bulk, B, P, d), device=dev.get(d) if n == 61 else None))
     if not rows:
-        raise SystemExit("danmodel: no mirror/fxeb ACE records in the given files")
+        raise SystemExit("danmodel: no mirror/fxeb/hamming ACE records in the given files")
     x_of = lambda r: (r["bulk"] / (r["boundary"] * r["patches"])) ** DAN_MODEL["power"] if r["boundary"] else float("inf")
     print("# Dan's calculator: x = (bulk/(boundary*patches))^(2/3); XEB_12 = tanh(%.6f x %+.6f); "
           "XEB(d) = XEB_12^((d/12)^%.5f)" % (DAN_MODEL["slope"], DAN_MODEL["intercept"], DAN_MODEL["depth_power"]))
@@ -2164,14 +2201,36 @@ def cmd_danmodel(a):
             print()
         last = (r["source"], r["n"])
         s = (f"{r['source'][:26]:<26} {r['n']:>3} {r['bulk']:>4} {r['boundary']:>3} {r['patches']:>2} "
-             f"{x_of(r):>6.3f} {r['depth']:>3}  {r['dan']:>10.4g}")
+             f"{x_of(r):>6.3f} {r['depth']:>3}  " + (f"{r['dan']:>10.4g}" if r["dan"] is not None else f"{'-':>10}"))
         if a.inputs:
-            ratio = r["measured"] / r["dan"] if r["dan"] > 0 else float("nan")
+            ratio = r["measured"] / r["dan"] if r["dan"] else float("nan")
             s += (f"  {r['theta']:>5} {r['family']:>6} {r['instances']:>4}  "
                   f"{r['measured']:>9.4g} +/- {r['se']:<6.2g}  {ratio:>8.3g}")
         if dev:
             s += f"  {r['device']:>11.4g}" if r.get("device") is not None else f"  {'':>11}"
         print(s)
+    zne = defaultdict(dict)
+    for r in rows:
+        if r.get("fold"):
+            zne[(r["source"], r["cfg"], r["n"], r["cycles"])][r["fold"]] = r["measured"]
+    zne = {k: v for k, v in zne.items() if len(v) >= 2}
+    if zne:
+        p = DAN_MODEL["depth_power"]
+        print(f"\n# Dan's zero-noise extrapolation of the Hamming-weight signal (qem/richardson_nn_hamming_weight.py): "
+              f"Richardson in u = lambda^{p:g} on ln(signal); ideal 1")
+        print(f"{'source':<26} {'n':>3} {'cycles':>6}  {'signal at lambda = ...':<34} {'mitigated':>9}")
+        for (src, cfg, n, d), by in sorted(zne.items(), key=lambda kv: (kv[0][2], kv[0][0], kv[0][3])):
+            lams = sorted(by)
+            pts = "  ".join(f"{l}:{by[l]:.4f}" for l in lams)
+            if all(by[l] > 0 for l in lams):
+                y0 = math.exp(richardson_lambda_p(lams, [math.log(by[l]) for l in lams], p)[0])
+                mit = f"{y0:>9.4f}"
+            else:
+                mit = f"{'(<= 0)':>9}"
+            print(f"{src[:26]:<26} {n:>3} {d:>6}  {pts:<34} {mit}")
+            for r in rows:
+                if (r["source"], r["cfg"], r["n"], r.get("cycles")) == (src, cfg, n, d) and r.get("fold") == lams[0]:
+                    r["mitigated"] = float(mit) if mit.strip() != "(<= 0)" else None
     if a.csv:
         import csv
         keys = sorted({k for r in rows for k in r})
@@ -2541,6 +2600,51 @@ def run_fxeb_group(lay, engs, d, inst, a):
     return out
 
 
+def run_hamming(lay, eng, d, lam, inst, a):
+    """Dan Strano's mirror observable (qem/richardson_nn_hamming_weight.py): the forward circuit U of d
+    cycles (fxeb_cycles; nn_qab.py's gates under --protocol nnqab), then U^dagger, folded to scale factor
+    lam = 2k + 1 as M (M^dagger M)^k = (U U^dagger)^lam, from |0...0>, no twirling. h = mean fraction of
+    ones, taken exactly as sum_q P(q = 1) / n (the shot-free value of his Hamming-weight estimator; ACE's
+    measure_shots would clone the backend per shot). Score: the signal 1 - 2h (ideal 1)."""
+    n = eng.n
+    cyc = fxeb_cycles(lay, d, inst, n)
+    gates = fxeb_gates(cyc, inst)
+    eng.reset()
+    for _ in range(int(lam)):
+        if gates is None:
+            apply_forward(eng, cyc)
+            apply_inverse(eng, cyc)
+            continue
+        for (ang, es), gs in zip(cyc, gates):
+            for q, t in enumerate(ang):
+                eng.g1(q, gate(t))
+            for (a_, b_), g in zip(es, gs):
+                eng.g2(g, a_, b_)
+        for (ang, es), gs in zip(reversed(cyc), reversed(gates)):
+            for (a_, b_), g in zip(reversed(es), reversed(gs)):
+                eng.g2_inv(g, a_, b_)
+            for q in reversed(range(len(ang))):
+                eng.g1(q, gate(ang[q]).conj().T)
+    ps = [eng.prob1(q) for q in range(n)]
+    h = float(np.mean(ps))
+    return dict(fidelity=1.0 - 2.0 * h, se=0.0, hamming_weight=float(n * h), h=h, fold=int(lam),
+                layers=2 * int(d) * int(lam), estimator="prob")
+
+
+def richardson_lambda_p(lams, ys, p):
+    """Richardson extrapolation to lambda = 0 in u = lambda^p (Dan's qem script; p = 1 is ordinary
+    Richardson): returns (y0, weights)."""
+    u = [float(l) ** p for l in lams]
+    w = []
+    for i, ui in enumerate(u):
+        wi = 1.0
+        for j, uj in enumerate(u):
+            if j != i:
+                wi *= uj / (uj - ui)
+        w.append(wi)
+    return float(sum(wi * yi for wi, yi in zip(w, ys))), w
+
+
 def run_full(lay, eng, d, pub, a):
     """One pub of the unpatched forward circuit (release seed 2025, instance 0), as the
     10 x 100k-shot pubs of the 10^6-sample run. Not scorable at 61 qubits: stored only."""
@@ -2822,12 +2926,16 @@ def summarize(recs, lay, a):
     min_shots = {}
     n_full = defaultdict(int)
     fx = defaultdict(list)
+    hm = defaultdict(list)
     for r in recs.values():
         if r["family"] == "fxeb":
             fx[(r["n"], r["depth"])].append(r)
             continue
         if r["family"] == "full":
             n_full[(r["n"], r["depth"])] += r["shots"]
+            continue
+        if r["family"] == "hamming":
+            hm[(r["n"], r["depth"], r["K"])].append(r["fidelity"])
             continue
         fam = "mirror" if r["family"] == "mirror" else f"{r['K']}-patch"
         by[(r["n"], fam, r["depth"])].append((r["fidelity"], r["se"]))
@@ -2849,6 +2957,14 @@ def summarize(recs, lay, a):
             print(f"{n:<4} {d:>2}  {F:8.5f} +/- {se:.1e}      {np.mean([r['xeb_linear'] for r in v]):8.5f}"
                   f"   {np.mean([r['hog'] for r in v]):.3f}   {np.mean([r['ideal_xeb'] for r in v]):.4f}"
                   f"      {len(v)}          [{A_hw * f_hw ** d:.3e}]")
+    if hm:
+        print(f"\n== mirror Hamming-weight signal 1 - 2h of the {a.backend} backend (Dan Strano's observable; "
+              f"ideal 1; plain means over instances) ==")
+        print("n    d   fold  layers  signal              instances")
+        for (n, d, lam) in sorted(hm):
+            v = np.array(hm[(n, d, lam)])
+            se = v.std(ddof=1) / math.sqrt(len(v)) if len(v) > 1 else float("nan")
+            print(f"{n:<4} {d:>2}  {lam:>4}  {2 * d * lam:>6}  {v.mean():8.5f} +/- {se:.1e}   {len(v)}")
     sizes = sorted({k[0] for k in by})
     b_rows, fit_depths = [], set()
     for n in sizes:
@@ -2962,10 +3078,13 @@ def build_jobs(lay, a, sizes, fams):
             if fam == "patched" and n != lay.n:
                 continue
             ds = a.depths or ([d for d in FULL_DEPTHS if d <= 20] if fam == "fxeb" else
+                              [4, 6, 8, 10, 12] if fam == "hamming" else
                               lay.depths[{"mirror": "mirror", "patched": "patched", "full": "full_sampled"}[fam]])
             for d in ds:
                 if fam == "fxeb":
                     jobs += [(n, "fxeb", 0, d, 0, i) for i in insts]
+                elif fam == "hamming":                      # K slot = folding scale factor lambda
+                    jobs += [(n, "hamming", int(lam), d, 0, i) for lam in (a.fold or [1]) for i in insts]
                 elif fam == "full":
                     jobs += [(n, "full", 0, d, p, 0) for p in range(a.pubs)]
                 elif fam == "mirror":
@@ -3904,8 +4023,9 @@ def cmd_run_group(a, lay):
 
 def cmd_run(a):
     if getattr(a, "protocol", "nighthawk") == "nnqab":
-        if a.families != "fxeb":
-            raise SystemExit("--protocol nnqab scores forward XEB as nn_qab.py does: use --families fxeb")
+        if any(f not in ("fxeb", "hamming") for f in a.families.split(",")):
+            raise SystemExit("--protocol nnqab runs Dan Strano's circuits: --families fxeb (nn_qab.py's XEB, "
+                             "n <= 36) and/or hamming (his mirror Hamming weight, any n)")
         if a.theta != "nnqab":
             print("# --protocol nnqab: single-qubit ensemble set to nnqab (as nn_qab.py)", flush=True)
             a.theta = "nnqab"
@@ -3918,9 +4038,9 @@ def cmd_run(a):
         fams_ = a.families.split(",")
         if a.families == "mirror,patched":           # the default: patched circuits need exact patch references
             a.families = "mirror"
-        elif any(f not in ("mirror", "fxeb") for f in fams_) or ("fxeb" in fams_ and lay.n > 36):
-            raise SystemExit(f"--register {layout_id(lay)}: only --families mirror"
-                             + (", fxeb" if lay.n <= 36 else f" (no exact reference at {lay.n} qubits)")
+        elif any(f not in ("mirror", "fxeb", "hamming") for f in fams_) or ("fxeb" in fams_ and lay.n > 36):
+            raise SystemExit(f"--register {layout_id(lay)}: only --families mirror, hamming"
+                             + (", fxeb" if lay.n <= 36 else f" (no exact reference for fxeb at {lay.n} qubits)")
                              + " (registers have no device data)")
         if apply_register_preset(a, lay) and not a.worker and not (a.summarize or a.pack or getattr(a, "status", False)):
             ace = REGISTERS[layout_id(lay)]["ace"]
@@ -4036,6 +4156,7 @@ def cmd_run(a):
         try:
             r = (run_mirror(lay, eng, d, i, a) if fam == "mirror" else
                  run_fxeb(lay, eng, d, i, a) if fam == "fxeb" else
+                 run_hamming(lay, eng, d, K, i, a) if fam == "hamming" else
                  run_full(lay, eng, d, j, a) if fam == "full" else run_patched(lay, eng, K, d, j, i, a))
         except Exception as err:                    # deterministic (e.g. QRACK_MAX_CPU_QB): do not retry
             import traceback
@@ -4760,6 +4881,27 @@ def cmd_selftest(a):
                f"{sj['replica'] if sj else '-'} / {se['replica']} couplers through a boundary")
     except ImportError:
         print("[10] OR-Tools not installed: layoutsearch check skipped")
+    # [11] --protocol nnqab hamming: each of nn_qab.py's 12 gates undone by qrack_g2_inv, and the
+    # folded mirror (U U^dagger)^lambda returns the exact engine to |0...0> (signal 1)
+    rng = np.random.default_rng(7)
+    worst = 0.0
+    for g in NNQAB_GATES:
+        sim = QrackSimulator(2, is_gpu=False)
+        for q in range(2):
+            sim.u(q, *rng.uniform(0, 2 * math.pi, 3))
+        k0 = np.array(sim.out_ket())
+        qrack_g2(sim, g, 0, 1)
+        qrack_g2_inv(sim, g, 0, 1)
+        worst = max(worst, 1 - abs(np.vdot(k0, np.array(sim.out_ket()))))
+    old = PROTOCOL["mode"]
+    PROTOCOL["mode"] = "nnqab"
+    try:
+        sig = [run_hamming(lay, ExactEngine(a.n, True), 8, lam, 0, ns)["fidelity"] for lam in (1, 3)]
+    finally:
+        PROTOCOL["mode"] = old
+    report(f"[11] nnqab gate inverses (12 gates) and exact folded mirror, first {a.n} qubits, d=8, lambda 1, 3",
+           worst < 1e-5 and all(abs(1 - x) < 1e-4 for x in sig),
+           f"worst 1 - overlap {worst:.1e}, signal {sig[0]:.6f} / {sig[1]:.6f}")
     print("ALL OK" if ok else "SOME CHECKS FAILED")
     raise SystemExit(0 if ok else 1)
 
@@ -4960,6 +5102,9 @@ def main():
                         "numbers, so not part of the config tag")
     r.add_argument("--vram-gb", dest="vram_gb", type=float, default=8.0,
                    help="device memory per worker's die for the --gtt plan (default 8: one V340 die)")
+    r.add_argument("--fold", type=int, nargs="+", default=None, metavar="LAMBDA",
+                   help="hamming: unitary folding scale factors (odd), e.g. 1 3 5 for Dan's zero-noise "
+                        "extrapolation (danmodel then extrapolates in lambda^p, p = 1.60569); default 1")
     r.add_argument("--protocol", choices=["nighthawk", "nnqab"], default="nighthawk",
                    help="nnqab: score forward XEB exactly as rcs/nn_qab.py does (sin-theta-uniform single-qubit gates, "
                         "each coupler's two-qubit gate drawn from nn_qab.py's twelve, 2^min(13, n+2) shots), so points "
