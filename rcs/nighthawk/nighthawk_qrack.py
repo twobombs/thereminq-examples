@@ -198,6 +198,51 @@ def u01_from_key(*parts):
 
 THETA_DIST = {"mode": "haar"}
 
+# --protocol nnqab: forward XEB scored the way rcs/nn_qab.py (vm6502q/pyqrack-examples) scores it, so
+# measured points are on the same footing as Dan Strano's ACE calculator: sin(theta)-uniform single-qubit
+# gates (THETA_DIST nnqab), each coupler's two-qubit gate drawn uniformly from nn_qab.py's twelve,
+# 2^min(13, n + 2) shots, no twirling. The couplers, colour schedule and register stay Nighthawk's.
+PROTOCOL = {"mode": "nighthawk"}
+NNQAB_GATES = ("swap", "pswap", "mswap", "nswap", "iswap", "iiswap", "cx", "cy", "cz", "acx", "acy", "acz")
+
+
+def nnqab_gate(seed, instance, cycle, a, b):
+    """nn_qab.py's random two-qubit gate for coupler (a, b) of a cycle, from the same hash stream."""
+    return NNQAB_GATES[min(11, int(12 * u01_from_key(seed, instance, cycle, a, b, 4)))]
+
+
+def qrack_g2(sim, g, a, b):
+    """nn_qab.py's two-qubit gates (control a, target b), on a QrackSimulator or QrackAceBackend."""
+    if g == "cz":
+        sim.mcz([a], b)
+    elif g == "cx":
+        sim.mcx([a], b)
+    elif g == "cy":
+        sim.mcy([a], b)
+    elif g == "acx":
+        sim.macx([a], b)
+    elif g == "acy":
+        sim.macy([a], b)
+    elif g == "acz":
+        sim.macz([a], b)
+    elif g == "swap":
+        sim.swap(a, b)
+    elif g == "iswap":
+        sim.iswap(a, b)
+    elif g == "iiswap":
+        sim.adjiswap(a, b)
+    elif g == "pswap":
+        sim.mcz([a], b)
+        sim.swap(a, b)
+    elif g == "mswap":
+        sim.mcz([a], b)
+        sim.iswap(a, b)
+    elif g == "nswap":
+        sim.mcz([a], b)
+        sim.adjiswap(a, b)
+    else:
+        raise ValueError(f"unknown two-qubit gate {g}")
+
 
 def haar_angles(seed, instance, cycle, qubit):
     """(phi, theta, lambda), applied as rz(phi), rx(theta), rz(lambda).
@@ -367,6 +412,27 @@ REGISTERS = {
                  site=[9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 39, 40, 41, 42, 43, 44, 45, 46, 47,
                        48, 49, 50, 51, 52, 69, 8, 23, 38, 0, 1, 2, 3, 4, 5, 6, 7, 24, 25, 26, 27, 28, 29, 30, 31,
                        32, 33, 34, 35, 36, 37, 54, 55, 56, 57, 58, 59, 60])),
+    "nighthawk2p16": dict(
+        n=16, rows=(1, 3), cols=(2, 9), drop=[17, 33, 34, 35, 36, 37, 38, 39],
+        about="two-patch ladder below 28: the release's first 16 logical qubits, held to a 3-qubit seam "
+              "(--min-boundary 3), placed for the fewest circuit CZs through the boundary",
+        # 28 sites, lrc 3 lrr 3, flat; widths 10/11 incl. ancilla; 6 couplers through the boundary.
+        ace=dict(width=28, lrc=3, lrr=3, torus=False, max_width=13, max_wide=1,
+                 site=[4, 5, 6, 7, 3, 0, 1, 8, 9, 18, 10, 2, 11, 12, 13, 17])),
+    "nighthawk2p20": dict(
+        n=20, rows=(1, 3), cols=(2, 9), drop=[17, 37, 38, 39],
+        about="two-patch ladder below 28: the release's first 20 logical qubits, held to a 3-qubit seam "
+              "(--min-boundary 3), placed for the fewest circuit CZs through the boundary",
+        # 32 sites, lrc 4 lrr 3, flat; widths 13/12 incl. ancilla; 9 couplers through the boundary.
+        ace=dict(width=32, lrc=4, lrr=3, torus=False, max_width=15, max_wide=1,
+                 site=[5, 6, 7, 4, 0, 1, 2, 8, 9, 10, 12, 3, 13, 14, 15, 11, 21, 20, 16, 17])),
+    "nighthawk2p24": dict(
+        n=24, rows=(1, 4), cols=(2, 9), drop=[17, 43, 44, 45, 46, 47, 48, 49],
+        about="two-patch ladder below 28: the release's first 24 logical qubits, held to a 3-qubit seam "
+              "(--min-boundary 3), placed for the fewest circuit CZs through the boundary",
+        # 38 sites, lrc 8 lrr 1, torus; widths 16/12 incl. ancilla; 8 couplers through the boundary.
+        ace=dict(width=38, lrc=8, lrr=1, torus=True, max_width=17, max_wide=1,
+                 site=[0, 1, 2, 3, 4, 9, 10, 5, 6, 7, 19, 8, 11, 12, 13, 20, 21, 22, 27, 14, 15, 16, 28, 18])),
     "nighthawk2p28": dict(
         n=28, rows=(1, 4), cols=(2, 9), drop=[17, 47, 48, 49],
         about="two-patch ladder: the release's first 28 logical qubits, 3 boundary qubits (proven minimum "
@@ -690,6 +756,9 @@ class ExactEngine:
 
     def cz(self, a, b):
         self.sim.mcz([a], b)
+
+    def g2(self, g, a, b):
+        qrack_g2(self.sim, g, a, b)
 
     def shots(self, s):
         return np.array(self.sim.measure_shots(list(range(self.n)), s), dtype=np.uint64)
@@ -1606,6 +1675,9 @@ class AceEngine:
     def cz(self, a, b):
         self.sim.cz(self.idx[a], self.idx[b])
 
+    def g2(self, g, a, b):
+        qrack_g2(self.sim, g, self.idx[a], self.idx[b])
+
     def shots(self, s):
         """s samples of the logical qubits. QrackAceBackend.measure_shots clones the whole
         backend per shot; on the GPU that is new device buffers and copies for every shot
@@ -1997,7 +2069,7 @@ def cmd_hwxeb(a):
 # patches, fitted at depth 12 and over depths 14-22): x = (bulk / (boundary * patches))^(2/3),
 # XEB_12 = tanh(slope * x + intercept), XEB(d) = XEB_12 ^ ((d / 12)^p).
 DAN_MODEL = dict(power=2 / 3, slope=0.1653638846, intercept=-0.0378757892, depth_power=1.60569, d0=12)
-LADDER = ("nighthawk2p28", "nighthawk2p32", "nighthawk2p36", "nighthawk2p40", "nighthawk2p45", "nighthawk2p49",
+LADDER = ("nighthawk2p16", "nighthawk2p20", "nighthawk2p24", "nighthawk2p28", "nighthawk2p32", "nighthawk2p36", "nighthawk2p40", "nighthawk2p45", "nighthawk2p49",
           "nighthawk2p53", "nighthawk2p57", "nighthawk61r2")
 
 
@@ -2172,6 +2244,7 @@ def cfg_tag(a):
     and one size disagree, e.g. after a change to two_patch_config()."""
     keys = dict(backend=a.backend, shots=a.shots, twirls=a.twirls,
                 **({"theta": a.theta} if getattr(a, "theta", "haar") != "haar" else {}),
+                **({"protocol": a.protocol} if getattr(a, "protocol", "nighthawk") != "nighthawk" else {}),
                 lrc=a.lrc if a.backend == "ace" else None, lrr=a.lrr if a.backend == "ace" else None,
                 exact_probs=a.exact_probs and a.backend == "exact")
     if getattr(a, "ace_torus", False) and a.backend == "ace":
@@ -2375,22 +2448,46 @@ def fxeb_cycles(lay, d, inst, n):
     return build_cycles(lay, d, instance_seed(inst, "full"), inst, n=n)
 
 
-def fxeb_sample(eng, cyc, a):
+def fxeb_gates(cyc, inst):
+    """--protocol nnqab: each coupler's two-qubit gate per cycle; None for the CZ circuits."""
+    if PROTOCOL["mode"] != "nnqab":
+        return None
+    seed = instance_seed(inst, "full")
+    return [[nnqab_gate(seed, inst, c, a_, b_) for a_, b_ in es] for c, (_, es) in enumerate(cyc)]
+
+
+def fxeb_shot_count(a, n):
+    if a.shots != "paper":
+        return int(a.shots)
+    return 1 << min(13, n + 2) if PROTOCOL["mode"] == "nnqab" else FXEB_SHOTS
+
+
+def fxeb_sample(eng, cyc, a, gates=None):
     eng.reset()
-    apply_forward(eng, cyc)
-    return eng.shots(FXEB_SHOTS if a.shots == "paper" else int(a.shots))
+    if gates is None:
+        apply_forward(eng, cyc)
+    else:
+        for (ang, es), gs in zip(cyc, gates):
+            for q, t in enumerate(ang):
+                eng.g1(q, gate(t))
+            for (a_, b_), g in zip(es, gs):
+                eng.g2(g, a_, b_)
+    return eng.shots(fxeb_shot_count(a, eng.n))
 
 
-def fxeb_reference(n, cyc, a):
+def fxeb_reference(n, cyc, a, gates=None):
     """Exact 2^n output probabilities of the forward circuit (one float buffer; n=34:
     128 GiB state + 64 GiB probabilities), with their sum and collision sum."""
     from pyqrack import QrackSimulator
     ref = QrackSimulator(n, is_gpu=not a.cpu and a.ref_gpu)
-    for ang, es in cyc:
+    for c, (ang, es) in enumerate(cyc):
         for q, t in enumerate(ang):
             ref.mtrx(flat(gate(t)), q)
-        for a_, b_ in es:
-            ref.mcz([a_], b_)
+        for k, (a_, b_) in enumerate(es):
+            if gates is None:
+                ref.mcz([a_], b_)
+            else:
+                qrack_g2(ref, gates[c][k], a_, b_)
     p = out_probs_np(ref)
     del ref
     sum_p = float(p.sum(dtype=np.float64))
@@ -2417,8 +2514,9 @@ def run_fxeb(lay, eng, d, inst, a):
     structured (coherent) approximation keeps whatever XEB it earns. The reference is
     an exact QrackSimulator of the same gates."""
     cyc = fxeb_cycles(lay, d, inst, eng.n)
-    sh = fxeb_sample(eng, cyc, a)
-    return fxeb_score(fxeb_reference(eng.n, cyc, a), sh)
+    gates = fxeb_gates(cyc, inst)
+    sh = fxeb_sample(eng, cyc, a, gates)
+    return fxeb_score(fxeb_reference(eng.n, cyc, a, gates), sh)
 
 
 def run_fxeb_group(lay, engs, d, inst, a):
@@ -2426,13 +2524,14 @@ def run_fxeb_group(lay, engs, d, inst, a):
     Samples are drawn first, so only bitstrings are held while the reference is built."""
     n = engs[0].n
     cyc = fxeb_cycles(lay, d, inst, n)
+    gates = fxeb_gates(cyc, inst)
     shots, ace_s = [], []
     for eng in engs:
         t0 = time.time()
-        shots.append(fxeb_sample(eng, cyc, a))
+        shots.append(fxeb_sample(eng, cyc, a, gates))
         ace_s.append(time.time() - t0)
     t0 = time.time()
-    ref = fxeb_reference(n, cyc, a)
+    ref = fxeb_reference(n, cyc, a, gates)
     ref_s = time.time() - t0
     out = []
     for sh, s in zip(shots, ace_s):
@@ -3788,6 +3887,7 @@ def cmd_run_group(a, lay):
                 save_point(f, arrays)
                 r["shots_file"] = str(f)
             rec = dict(cfg=tags[vi], n=n, family=fam, K=K, depth=d, partition=j, instance=i, theta=a.theta,
+                       **({"protocol": a.protocol} if getattr(a, "protocol", "nighthawk") != "nighthawk" else {}),
                        seconds=round(r["ace_seconds"] + r["ref_seconds"] / len(need), 2),
                        **engines[vi].geometry(), **r)
             fh.write(json.dumps(rec) + "\n")
@@ -3803,6 +3903,13 @@ def cmd_run_group(a, lay):
 
 
 def cmd_run(a):
+    if getattr(a, "protocol", "nighthawk") == "nnqab":
+        if a.families != "fxeb":
+            raise SystemExit("--protocol nnqab scores forward XEB as nn_qab.py does: use --families fxeb")
+        if a.theta != "nnqab":
+            print("# --protocol nnqab: single-qubit ensemble set to nnqab (as nn_qab.py)", flush=True)
+            a.theta = "nnqab"
+    PROTOCOL["mode"] = getattr(a, "protocol", "nighthawk")
     THETA_DIST["mode"] = a.theta
     lay = make_layout(a)
     if not is_release(lay):
@@ -3948,6 +4055,7 @@ def cmd_run(a):
             save_point(f, arrays)
             r["shots_file"] = str(f)
         rec = dict(cfg=tag, n=n, family=fam, K=K, depth=d, partition=j, instance=i, theta=a.theta,
+                       **({"protocol": a.protocol} if getattr(a, "protocol", "nighthawk") != "nighthawk" else {}),
                    seconds=round(time.time() - t0, 2), **eng.geometry(), **r)
         fh.write(json.dumps(rec) + "\n")
         fh.flush()
@@ -4852,6 +4960,10 @@ def main():
                         "numbers, so not part of the config tag")
     r.add_argument("--vram-gb", dest="vram_gb", type=float, default=8.0,
                    help="device memory per worker's die for the --gtt plan (default 8: one V340 die)")
+    r.add_argument("--protocol", choices=["nighthawk", "nnqab"], default="nighthawk",
+                   help="nnqab: score forward XEB exactly as rcs/nn_qab.py does (sin-theta-uniform single-qubit gates, "
+                        "each coupler's two-qubit gate drawn from nn_qab.py's twelve, 2^min(13, n+2) shots), so points "
+                        "compare one-to-one with Dan Strano's ACE calculator; --families fxeb only")
     r.add_argument("--swap-gb", dest="swap_gb", type=float, default=None, metavar="GB",
                    help="CPU runs larger than RAM: count up to GB of free swap as available memory (the "
                         "--mem-budget-gb ledger and the preflight plan), and lift Qrack's CPU qubit ceilings. "
