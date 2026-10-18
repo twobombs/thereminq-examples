@@ -2618,25 +2618,33 @@ def run_hamming(lay, eng, d, lam, inst, a):
     n = eng.n
     cyc = fxeb_cycles(lay, d, inst, n)
     gates = fxeb_gates(cyc, inst)
-    eng.reset()
-    for _ in range(int(lam)):
-        if gates is None:
-            apply_forward(eng, cyc)
-            apply_inverse(eng, cyc)
-            continue
-        for (ang, es), gs in zip(cyc, gates):
-            for q, t in enumerate(ang):
-                eng.g1(q, gate(t))
-            for (a_, b_), g in zip(es, gs):
-                eng.g2(g, a_, b_)
-        for (ang, es), gs in zip(reversed(cyc), reversed(gates)):
-            for (a_, b_), g in zip(reversed(es), reversed(gs)):
-                eng.g2_inv(g, a_, b_)
-            for q in reversed(range(len(ang))):
-                eng.g1(q, gate(ang[q]).conj().T)
+    # progress for --status: one "circuit run" per U U^dagger pass, ticked per cycle (2 d per pass);
+    # ACE's later, more entangled cycles are slower, so the ETA runs optimistic early in a pass
+    prog = Progress(a, f"n{n} hamming K{int(lam)} d{d} p0 i{inst}", int(lam), 2 * len(cyc))   # --status label
+    try:
+        eng.reset()
+        for _ in range(int(lam)):
+            if gates is None:
+                apply_forward(eng, cyc, tick=prog.tick)
+                apply_inverse(eng, cyc, tick=prog.tick)
+                continue
+            for (ang, es), gs in zip(cyc, gates):
+                for q, t in enumerate(ang):
+                    eng.g1(q, gate(t))
+                for (a_, b_), g in zip(es, gs):
+                    eng.g2(g, a_, b_)
+                prog.tick()
+            for (ang, es), gs in zip(reversed(cyc), reversed(gates)):
+                for (a_, b_), g in zip(reversed(es), reversed(gs)):
+                    eng.g2_inv(g, a_, b_)
+                for q in reversed(range(len(ang))):
+                    eng.g1(q, gate(ang[q]).conj().T)
+                prog.tick()
+    finally:
+        prog.close()
     ps = [eng.prob1(q) for q in range(n)]
     bad = [q for q, x in enumerate(ps) if not math.isfinite(x) or x < -1e-6 or x > 1 + 1e-6]
-    if bad:                                  # a broken state (seen on clvk GPU workers): fail, never record
+    if bad:                                  # a broken state (seen on GPU and CPU): fail, never record
         raise RuntimeError(f"hamming: P(q = 1) not a probability on {len(bad)} of {n} qubits "
                            f"(first: q{bad[0]} = {ps[bad[0]]!r})")
     h = float(np.mean(ps))
@@ -3663,6 +3671,8 @@ def point_mem_gb(lay, a, key, variants=None):
     their largest patch counts."""
     n, fam, K, d, j, i = key
     amp, gib = amp_bytes(), 2 ** 30
+    if getattr(a, "mem_per_point_gb", None):          # measured peak, given by the user (shallow points)
+        return float(a.mem_per_point_gb)
     if fam == "patched":
         return 1.0 + 2 * 2.0 ** max(len(p) for p in lay.partitions[K][j]["patches"]) * amp / gib
     engines = sum(engine_gb(lay, n, v) for v in (variants or [a]))
@@ -5179,6 +5189,11 @@ def main():
                    help="machine-wide memory budget (GiB) shared by every worker and run using the same "
                         "ledger: a worker takes a point only if its estimated peak fits, else it takes a "
                         "smaller one or waits (0 = off: workers take points regardless of memory)")
+    r.add_argument("--mem-per-point-gb", dest="mem_per_point_gb", type=float, default=None, metavar="GB",
+                   help="book this many GiB per point in the --mem-budget-gb ledger instead of the worst-case "
+                        "estimate (both patches fully entangled). For shallow points, which stay well below it "
+                        "(57 qubits, d = 4-6: ~40 GiB measured against ~81 estimated); pair with --max-rss-gb so a "
+                        "point that grows past it is stopped and can be retried alone. Not in the config tag")
     r.add_argument("--mem-ledger", dest="mem_ledger", default=None,
                    help="reservation directory shared by all runs on this machine "
                         "(default /tmp/nighthawk_mem_ledger, or $NIGHTHAWK_MEM_LEDGER)")
