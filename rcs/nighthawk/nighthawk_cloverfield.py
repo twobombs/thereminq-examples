@@ -40,6 +40,14 @@ Architecture
                 carries what entanglement across the link did to it; the product drops only
                 the correlation between the chips' outcomes, which a perfect mirror returns to
                 zero.
+                --family hamming: Dan Strano's observable instead, (U U^dagger)^lambda from |0...0>
+                (--fold), no twirls; every chip returns P(1) of its own qubits and the field's
+                signal is 1 - 2h, h the mean over all of them: linear in the marginals, so exact
+                given the chips' states. Also per chip and per region (bulk, chip seam, link anchor).
+  protocol      --protocol nighthawk (CZ circuits) or nnqab (nn_qab.py's twelve gates; links and
+                couplers touching a link anchor drawn from cz / acz, the diagonal pair the loom
+                can weave). --cut-links keeps the links' placement, anchors and gate draws but
+                leaves them out of the circuit: the matched baseline of a woven field.
 
 Field
   --chips NAME[,NAME...] or NAME*K   chip registers: any nighthawk_qrack register
@@ -59,7 +67,8 @@ Field
 Subcommands
   plan          the field: chips, qubits, couplers per colour, links, ACE presets and
                 memory per worker, devices needed; --png draws it
-  run           mirror circuits on the field (--depths, --instances, --twirls), loom +
+  run           mirror (default) or Hamming (--family hamming --fold) circuits on the field
+                (--depths, --instances, --twirls), loom +
                 chip workers; --gpus/--chips-per-gpu place the chip workers, --parallel
                 runs several looms at once; resumable JSONL records (nighthawk_graph.py
                 reads them as mirror records); --status, --summarize
@@ -78,6 +87,8 @@ Examples
   python3 nighthawk_cloverfield.py run  --chips nighthawk88e*2 --links 4 --out field88e2.jsonl --summarize
   python3 nighthawk_cloverfield.py linksearch --chips release*2 --link-counts 0 2 4 8 \\
           --depths 4 8 --twirls 4 --cpu
+  python3 nighthawk_cloverfield.py run  --chips nighthawk2p45*4 --arrangement 2x2 --links all --cpu \\
+          --ghost-max-width 28 --ghost-max-wide 2 --family hamming --protocol nnqab --fold 1 3 5 --out h.jsonl
   python3 nighthawk_cloverfield.py selftest
 """
 import argparse
@@ -110,6 +121,42 @@ COLOURS = ("A", "B", "C", "D")
 CHIP_PRESETS = {
     "release": dict(width=75, lrc=4, lrr=5, torus=True, exclude="74,59,44,73,69,54,68,67,64,63,62"),
 }
+# --protocol nnqab: the two diagonal gates of nn_qab.py's twelve. Only these can cross a link or act
+# on a qubit that has a ghost on another chip: the loom forwards a diagonal gate to a chip that holds
+# one of its qubits as a mean-field phase, which a non-diagonal gate has no equivalent of.
+DIAGONAL_G2 = ("cz", "acz")
+
+
+def mean_field_phase(g, role, p_other):
+    """Phase on |1> of the held qubit of diagonal gate g when its partner is absent, from the partner's
+    P(1): the mean-field linearisation of exp(i pi f(n_a, n_b)), f = n_a n_b (cz) or (1 - n_a) n_b
+    (acz: Z on the target when the control is 0). role "a" = control, "b" = target."""
+    if g == "cz":
+        return math.pi * p_other
+    if g == "acz":
+        return -math.pi * p_other if role == "a" else math.pi * (1.0 - p_other)
+    raise ValueError(f"{g} is not diagonal: it cannot be woven as a mean-field phase")
+
+
+def field_gates(field, cyc, inst, protocol):
+    """Two-qubit gate per coupler and cycle; None for the CZ circuits (--protocol nighthawk).
+    --protocol nnqab: nn_qab.py's draw (nighthawk_qrack.nnqab_gate, the same hash stream on the global
+    register, so chip 0 of a field gets the gates a lone chip gets), except on links and on couplers
+    touching a link anchor: there a non-diagonal draw is replaced by cz or acz from a second hash key."""
+    if protocol != "nnqab":
+        return None
+    seed = nq.instance_seed(inst, "full")
+    anchors = field.anchor_set
+    out = []
+    for c, (_, es) in enumerate(cyc):
+        row = []
+        for a_, b_ in es:
+            g = nq.nnqab_gate(seed, inst, c, a_, b_)
+            if (a_ in anchors or b_ in anchors) and g not in DIAGONAL_G2:
+                g = DIAGONAL_G2[min(1, int(2 * nq.u01_from_key(seed, inst, c, a_, b_, 5)))]
+            row.append(g)
+        out.append(row)
+    return out
 
 
 # ================================================================== chips
@@ -291,7 +338,8 @@ class Field:
     nighthawk_qrack's circuit generation (n, schedule, matchings, partitions, inputs)."""
 
     def __init__(self, repo, chip_specs, arrangement=None, links="all", link_rows=None, link_cols=None,
-                 ghost=None):
+                 ghost=None, cut_links=False):
+        self.cut = bool(cut_links)            # links placed (same anchors, same tag base) but not in the circuit
         self.repo = nq.find_repo(repo)
         L = json.loads((self.repo / "data/layout.json").read_text())
         self.R_dev, self.C_dev = L["device_lattice"]["rows"], L["device_lattice"]["cols"]
@@ -335,9 +383,11 @@ class Field:
                     continue
                 d = dc[0] * gc + dc[1]
                 self._link_pair(c, d, horiz, links, link_rows if horiz else link_cols, used)
-        for (u, v, col) in self.links:
-            self.matchings[col].append((u, v))
+        if not self.cut:
+            for (u, v, col) in self.links:
+                self.matchings[col].append((u, v))
         self.link_set = {(min(u, v), max(u, v)) for u, v, _ in self.links}
+        self.anchor_set = frozenset(q for u, v, _ in self.links for q in (u, v))
         # release recipe on the global register: K = 3 pseudo-patch cuts and the inputs
         pt = nq._load_release_module(self.repo, "patching")
         edges = sorted({tuple(sorted(e)) for es in self.matchings.values() for e in es})
@@ -427,7 +477,9 @@ class Field:
         """--loom ghost: per chip, the partner qubits it holds a replica of -- for every link
         (u, v), a ghost of v on u's chip anchored at u, and a ghost of u on v's chip anchored
         at v -- as [(partner global index, anchor local index)]. Ghost j of chip c has local
-        index chip_n[c] + j."""
+        index chip_n[c] + j. --cut-links: none (the links are not in the circuit)."""
+        if self.cut:
+            return [[] for _ in self.lays]
         if self.rooms is not None:
             return [[(q, anc, site) for q, anc, site in gs] for gs in self.ghost_sites]
         plan = [[] for _ in self.lays]
@@ -447,7 +499,7 @@ class Field:
                for col, es in self.matchings.items()}
         return dict(n=self.n, chips=[s["name"] for s in self.specs], chip_n=self.chip_n, arrangement=list(self.arr),
                     links=[[u, v, col] for u, v, col in self.links], couplers_per_colour=per,
-                    skipped_links=len(self.skipped))
+                    skipped_links=len(self.skipped), **({"links_cut": True} if self.cut else {}))
 
     def tag(self):
         return hashlib.sha1(json.dumps(dict(chips=self.specs, arr=self.arr,
@@ -533,10 +585,21 @@ class ChipSim:
             self.eng = nq.ExactEngine(self.n + len(anchors), opts["cpu"])
             self.eng.n = self.n                             # prob_bits marginalises the ghosts
 
+    def seam_qubits(self):
+        """The chip's own logical qubits on ACE seam sites (sites replicated in more than one patch):
+        the chip-internal boundary of the cloverleaf. Exact chips have none."""
+        if self.backend != "ace":
+            return []
+        e = self.eng
+        row = nq.layout_row(e.size, e.lrc, e.lrr, e.torus, e.opts)
+        sids = [frozenset(s for s, _ in u) for u in row["unpack"]]
+        return [q for q in range(self.n) if len(sids[e.idx[q]]) > 1]
+
     def info(self):
         g = self.eng.geometry() if self.backend == "ace" else {}
         return dict(n=self.n, pid=os.getpid(), geometry={k: v for k, v in g.items() if k != "ace_map"},
                     ace_map=g.get("ace_map"), device=os.environ.get("NIGHTHAWK_ISOLATED"), ghosts=self.ghost,
+                    seam=self.seam_qubits(),
                     alloc_mb=os.environ.get("QRACK_MAX_ALLOC_MB"), gtt_gb=os.environ.get("NIGHTHAWK_GTT_GB"))
 
     def marg(self, q):
@@ -555,6 +618,10 @@ class ChipSim:
                 e.pauli(op[1], op[2])
             elif k == "cz":
                 e.cz(op[1], op[2])
+            elif k == "g2":
+                e.g2(op[1], op[2], op[3])
+            elif k == "g2i":
+                e.g2_inv(op[1], op[2], op[3])
             elif k == "ph":
                 e.g1(op[1], np.diag([1.0, np.exp(1j * op[2])]))
             elif k == "reset":
@@ -603,13 +670,25 @@ def cmd_chipworker(a):
             _send(out, ("err", traceback.format_exc()))
 
 
+def _die_with_parent():
+    """Chip worker: SIGTERM when the loom dies (killed, Ctrl-C), instead of finishing a long batch
+    with its patches' memory held until the next pipe read finds the loom gone."""
+    try:
+        import ctypes
+        import signal
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)   # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
 class ChipProc:
     """The loom's handle on one chip worker process."""
 
     def __init__(self, index, spec, repo, opts, env, theta):
         self.index, self.spec = index, spec
         cmd = [sys.executable, os.path.abspath(__file__), "chipworker"]
-        self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+        self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env,
+                                  preexec_fn=_die_with_parent if sys.platform.startswith("linux") else None)
         _send(self.p.stdin, ("init", spec, repo, theta, opts))
         self.info = self.get("ok")[1]
 
@@ -784,6 +863,81 @@ class Loom:
                 errs.append(r[2])
         return P, errs
 
+    def _layer_gates(self, es, gs, queues, srng, inverse=False):
+        """One layer of named two-qubit gates (--protocol nnqab; no twirls). A gate whose qubits are
+        both held on a chip is applied there (its inverse with inverse=True); a diagonal gate reaches a
+        chip that holds only one of its qubits as the mean-field phase of the other's P(1). A
+        non-diagonal gate must be local to one chip with neither qubit ghosted elsewhere: field_gates
+        guarantees that, and a violation raises rather than desynchronising a ghost."""
+        f = self.f
+        need = set()
+        for (u, v), g in zip(es, gs):
+            ru, rv = {c for c, _ in self.reps(u)}, {c for c, _ in self.reps(v)}
+            if g not in DIAGONAL_G2 and not (ru == rv and len(ru) == 1):
+                raise RuntimeError(f"loom: non-diagonal gate {g} on ({u}, {v}) would cross chips or miss a ghost")
+            if ru - rv:
+                need.add(v)
+            if rv - ru:
+                need.add(u)
+        marg = {}
+        ghosted = sorted({q for e in es for q in e if q in self.ghost_of}) if need else []
+        if need:
+            query = [[] for _ in self.chips]
+            for q in sorted(need | set(ghosted)):
+                query[f.chip_of[q]].append(("r", q, f.local[q]))
+            for q in ghosted:
+                for c, l_ in self.ghost_of[q]:
+                    query[c].append(("g", q, l_))
+            res = self._flush(queues, [[x[2] for x in qs] for qs in query])
+            gm = []
+            for c, qs in enumerate(query):
+                for (kind, q, _), p in zip(qs, res[c]):
+                    if kind == "r":
+                        marg[q] = p
+                    else:
+                        gm.append((q, p))
+            self.drift += [abs(p - marg[q]) for q, p in gm]
+        for (a_, b_), g in zip(es, gs):
+            ra, rb = dict(self.reps(a_)), dict(self.reps(b_))
+            for c in sorted(set(ra) | set(rb)):
+                if c in ra and c in rb:              # as nighthawk_qrack: every gate through g2 / g2_inv
+                    queues[c].append(("g2i" if inverse else "g2", g, ra[c], rb[c]))
+                    continue
+                here, role, other = (ra[c], "a", b_) if c in ra else (rb[c], "b", a_)
+                ph = mean_field_phase(g, role, marg[other])
+                if self.mode == "sample":
+                    if srng.random() < abs(ph) / math.pi:
+                        queues[c].append(("p", "z", here))
+                else:
+                    queues[c].append(("ph", here, ph))
+
+    def run_hamming(self, cyc, gates, lam, srng=None, tick=None):
+        """Dan Strano's mirror observable on the field, as nighthawk_qrack.run_hamming: from |0...0>,
+        (U U^dagger)^lam with U the d forward cycles, no twirls. Returns every chip's P(q = 1) of its own
+        qubits (ghosts excluded), read in one round trip."""
+        queues = [[("reset",)] for _ in self.chips]
+        for _ in range(int(lam)):
+            for c_, (ang, es) in enumerate(cyc):
+                for q, t in enumerate(ang):
+                    self._emit1(queues, q, "g", tuple(t), False)
+                if gates is None:
+                    self._layer(es, None, queues, srng)
+                else:
+                    self._layer_gates(es, gates[c_], queues, srng)
+                if tick:
+                    tick()
+            for c_ in reversed(range(len(cyc))):
+                ang, es = cyc[c_]
+                if gates is None:
+                    self._layer(list(reversed(es)), None, queues, srng)
+                else:
+                    self._layer_gates(list(reversed(es)), list(reversed(gates[c_])), queues, srng, inverse=True)
+                for q in reversed(range(len(ang))):
+                    self._emit1(queues, q, "g", tuple(ang[q]), True)
+                if tick:
+                    tick()
+        return self._flush(queues, [list(range(n_)) for n_ in self.f.chip_n])
+
 
 def run_point(field, loom, d, inst, a, log=None):
     """One (depth, instance) point: every input x twirl, as run_mirror_prob."""
@@ -822,6 +976,66 @@ def run_point(field, loom, d, inst, a, log=None):
     return out
 
 
+def hamming_regions(field, seams):
+    """Field qubits by region: link anchors (endpoints of a placed link, cut or not), chip seam (on an
+    ACE seam site of their chip, not an anchor), bulk (the rest). seams: per chip, local seam qubits."""
+    anchor = sorted(field.anchor_set)
+    seam = sorted(field.off[c] + q for c, qs in enumerate(seams) for q in qs
+                  if field.off[c] + q not in field.anchor_set)
+    taken = set(anchor) | set(seam)
+    return dict(bulk=[q for q in range(field.n) if q not in taken], seam=seam, anchor=anchor)
+
+
+def run_point_hamming(field, loom, d, lam, inst, a, seams, log=None):
+    """One (depth, fold, instance) point of the Hamming observable on the field. h is the mean P(1)
+    over the field's own qubits, linear in the chips' marginals, so the field estimator is exact given
+    them (no correlation between chips is dropped, unlike the mirror survival product). A chip whose
+    marginals are not probabilities (NaN, outside [0, 1]) fails the point but is named in the record."""
+    t0 = time.time()
+    cyc = nq.fxeb_cycles(field, d, inst, field.n)
+    gates = field_gates(field, cyc, inst, a.protocol)
+    srng = np.random.default_rng([nq.BASE_SEED, d, inst, int(lam), 13])
+    total, done = [2 * len(cyc) * int(lam)], [0]
+    last = [time.time()]
+
+    def tick():
+        done[0] += 1
+        if log and time.time() - last[0] > 60:
+            el = time.time() - t0
+            log(f"# progress hamming d{d} λ{lam} i{inst}: cycle {done[0]}/{total[0]}, {el / 60:.1f} min, "
+                f"ETA {el / done[0] * (total[0] - done[0]) / 60:.1f} min")
+            last[0] = time.time()
+
+    ps = loom.run_hamming(cyc, gates, lam, srng, tick)
+    out = dict(fold=int(lam), layers=2 * int(d) * int(lam), estimator="prob", seconds=round(time.time() - t0, 2),
+               round_trips=loom.round_trips)
+    if loom.drift:
+        out["ghost_drift"] = float(np.mean(loom.drift))
+        loom.drift = []
+    bad, chip_h = {}, []
+    for c, p in enumerate(ps):
+        b_ = [(q, x) for q, x in enumerate(p) if not math.isfinite(x) or x < -1e-6 or x > 1 + 1e-6]
+        if b_:
+            bad[c] = [[q, repr(x)] for q, x in b_[:8]]
+            chip_h.append(None)
+        else:
+            chip_h.append(float(np.mean(p)))
+    out["chip_h"] = chip_h
+    out["chip_signal"] = [None if h is None else 1.0 - 2.0 * h for h in chip_h]
+    if bad:
+        out.update(fidelity=None, se=None, failed="marginals", bad_qubits={str(c): v for c, v in bad.items()})
+        return out
+    allp = [x for p in ps for x in p]
+    h = float(np.mean(allp))
+    out.update(fidelity=1.0 - 2.0 * h, se=0.0, h=h, hamming_weight=float(field.n * h))
+    for name, qs in hamming_regions(field, seams).items():
+        if qs:
+            hr = float(np.mean([allp[q] for q in qs]))
+            out[f"signal_{name}"] = 1.0 - 2.0 * hr
+            out[f"n_{name}"] = len(qs)
+    return out
+
+
 # ================================================================== run / status / summarize
 def build_field(a):
     nq.load_register_files()
@@ -838,8 +1052,10 @@ def build_field(a):
     arr = tuple(map(int, a.arrangement.lower().split("x"))) if a.arrangement else None
     rows = [int(x) for x in a.link_rows.split(",")] if getattr(a, "link_rows", None) else None
     cols = [int(x) for x in a.link_cols.split(",")] if getattr(a, "link_cols", None) else None
+    # ghost room is judged even with --cut-links, so the cut field places exactly the links (and anchors)
+    # of the woven one it is the baseline of
     ghost = engine_opts(a) if getattr(a, "loom", "mean") == "ghost" and hasattr(a, "backend") else None
-    return Field(a.repo, specs, arr, a.links, rows, cols, ghost=ghost)
+    return Field(a.repo, specs, arr, a.links, rows, cols, ghost=ghost, cut_links=getattr(a, "cut_links", False))
 
 
 def engine_opts(a):
@@ -851,12 +1067,35 @@ def engine_opts(a):
 
 
 def cfg_tag(field, a):
-    keys = dict(field=field.tag(), backend=a.backend, twirls=a.twirls if a.backend == "ace" else 0,
+    """Configuration tag of the records. Keys that change the simulation but were added after the first
+    release (ghost placement under explicit caps, the protocol, cut links, the family) enter the hash
+    only when set, so existing mirror records keep their tag and resume."""
+    fam = getattr(a, "family", "mirror")
+    keys = dict(field=field.tag(), backend=a.backend, twirls=(a.twirls if a.backend == "ace" else 0) if fam == "mirror" else 0,
                 theta=a.theta, loom=a.loom, chip_ace=getattr(a, "chip_ace", None))
+    if a.loom == "ghost" and not field.cut and (getattr(a, "ghost_max_width", None) or getattr(a, "gtt", None) is not None):
+        keys["ghosts"] = [[[q, anc, site] for q, anc, site in gs] for gs in field.ghost_plan()]
+    if getattr(a, "protocol", "nighthawk") != "nighthawk":
+        keys["protocol"] = a.protocol
+    if field.cut:
+        keys["cut_links"] = True
+    if fam != "mirror":
+        keys["family"] = fam
+    if getattr(a, "chip_max_width", None):
+        keys["chip_caps"] = [a.chip_max_width, getattr(a, "chip_max_wide", None)]
     return "field-" + hashlib.sha1(json.dumps(keys, sort_keys=True).encode()).hexdigest()[:8]
 
 
-def load_records(path, tag):
+def point_key(r):
+    """(depth, instance) for mirror records, (depth, fold, instance) for hamming records."""
+    if r.get("family") == "hamming":
+        return (r["depth"], r.get("fold", r.get("K", 1)), r["instance"])
+    return (r["depth"], r["instance"])
+
+
+def load_records(path, tag, family="mirror", drop_failed=False):
+    """Records of one configuration, keyed by point_key; a later line replaces an earlier one (a
+    --retry-failed rerun replaces the failed record). drop_failed: leave failed records out."""
     recs = {}
     try:
         for line in Path(path).read_text().splitlines():
@@ -864,10 +1103,12 @@ def load_records(path, tag):
                 r = json.loads(line)
             except ValueError:
                 continue
-            if r.get("cfg") == tag and r.get("family") == "mirror":
-                recs[(r["depth"], r["instance"])] = r
+            if r.get("cfg") == tag and r.get("family") == family:
+                recs[point_key(r)] = r
     except OSError:
         pass
+    if drop_failed:
+        recs = {k: r for k, r in recs.items() if not r.get("failed")}
     return recs
 
 
@@ -902,25 +1143,58 @@ def start_chips(field, a, loom_index):
     gpus = nq.parse_gpus(a.gpus) if a.gpus else []
     plan = field.ghost_plan() if a.loom == "ghost" else [[] for _ in field.specs]
     chips = []
-    for c, spec in enumerate(field.specs):
-        dev = None
-        if gpus and not a.cpu:
-            slot = loom_index * len(field.specs) + c
-            dev = gpus[(slot // max(1, a.chips_per_gpu)) % len(gpus)]
-        opts = dict(engine_opts(a), ghost_anchors=[anc for _, anc, _ in plan[c]],
-                    ghost_sites=[site for _, _, site in plan[c]])
-        chips.append(ChipProc(c, spec, a.repo, opts, worker_env_for(a, dev), a.theta))
+    try:
+        for c, spec in enumerate(field.specs):
+            dev = None
+            if gpus and not a.cpu:
+                slot = loom_index * len(field.specs) + c
+                dev = gpus[(slot // max(1, a.chips_per_gpu)) % len(gpus)]
+            opts = dict(engine_opts(a), ghost_anchors=[anc for _, anc, _ in plan[c]],
+                        ghost_sites=[site for _, _, site in plan[c]])
+            chips.append(ChipProc(c, spec, a.repo, opts, worker_env_for(a, dev), a.theta))
+    except Exception:
+        for ch in chips:                         # a later chip failed to start: free the earlier ones
+            try:
+                ch.p.kill()
+            except Exception:
+                pass
+        raise
     return chips
 
 
-def cmd_run(a):
+def set_protocol(a):
+    """--protocol nnqab: sin(theta)-uniform single-qubit gates, as nighthawk_qrack sets them."""
+    if getattr(a, "protocol", "nighthawk") == "nnqab":
+        if getattr(a, "family", "mirror") != "hamming":
+            raise SystemExit("--protocol nnqab runs Dan Strano's gates: --family hamming only (the mirror "
+                             "family is twirled CZ circuits)")
+        if a.theta != "nnqab":
+            print("# --protocol nnqab: single-qubit ensemble set to nnqab (as nn_qab.py)", flush=True)
+            a.theta = "nnqab"
     nq.THETA_DIST["mode"] = a.theta
+
+
+def point_label(field, fam, k):
+    return f"n{field.n} mirror d{k[0]} i{k[1]}" if fam == "mirror" else f"n{field.n} hamming d{k[0]} λ{k[1]} i{k[2]}"
+
+
+def cmd_run(a):
+    set_protocol(a)
+    fam = a.family
     field = build_field(a)
     tag = cfg_tag(field, a)
-    depths = a.depths or [4, 6, 8, 10, 12]
-    insts = range(a.instances if a.instances is not None else field.instances)
-    keys = [(d, i) for d in depths for i in insts]
-    recs = load_records(a.out, tag)
+    if fam == "mirror":
+        depths = a.depths or [4, 6, 8, 10, 12]
+        insts = range(a.instances if a.instances is not None else field.instances)
+        keys = [(d, i) for d in depths for i in insts]
+    else:
+        depths = a.depths or [4, 6, 8, 10, 12]
+        folds = a.fold or [1]
+        if any(l < 1 or l % 2 == 0 for l in folds):
+            raise SystemExit("--fold: odd scale factors (1, 3, 5, ...)")
+        insts = range(a.instances if a.instances is not None else 10)
+        keys = [(d, l, i) for d in depths for l in folds for i in insts]
+    recs = load_records(a.out, tag, fam, drop_failed=a.retry_failed)
     failed_path = Path(a.out).with_suffix(".failed.json")
     try:
         failed = set(tuple(x) for x in json.loads(failed_path.read_text()).get(tag, []))
@@ -930,27 +1204,32 @@ def cmd_run(a):
         failed = set()
     desc = field.describe()
     if a.status or a.summarize:
-        print(f"# {tag} ({a.out}): {len(recs)} of {len(keys)} points done"
-              + (f", {len(failed)} failed" if failed else ""))
+        bad = sum(1 for k in keys if k in recs and recs[k].get("failed"))
+        print(f"# {tag} ({a.out}): {sum(1 for k in keys if k in recs)} of {len(keys)} points done"
+              + (f", {bad} with broken marginals" if bad else "") + (f", {len(failed)} failed" if failed else ""))
         if a.status:
             for k in keys:
                 r = recs.get(k)
-                print(f"  n{field.n} mirror d{k[0]} i{k[1]}  " + (f"done     F = {r['fidelity']:.4g}" if r else
-                                                                ("failed" if k in failed else "pending")))
+                st = ("pending" if r is None and k not in failed else "failed" if r is None else
+                      f"broken   chips {sorted(int(c) for c in r.get('bad_qubits', {}))}" if r.get("failed") else
+                      f"done     F = {r['fidelity']:.4g}")
+                print(f"  {point_label(field, fam, k)}  {st}")
         if a.summarize:
-            summarize(field, recs, depths)
+            (summarize if fam == "mirror" else summarize_hamming)(field, recs, keys)
         return
     print(f"# cloverfield {tag}: {len(field.specs)} chips {desc['chips']} ({desc['arrangement'][0]}x"
-          f"{desc['arrangement'][1]}), {field.n} qubits, {len(field.links)} links"
+          f"{desc['arrangement'][1]}), {field.n} qubits, {len(field.links)} links" + (" (cut)" if field.cut else "")
           + (f" ({len(field.skipped)} facing pairs skipped: no common free colour" + (", or no ghost room under the caps" if field.rooms else "") + ")" if field.skipped else "")
-          + f", loom {a.loom}, backend {a.backend}, theta {a.theta}", flush=True)
+          + f", loom {a.loom}, backend {a.backend}, theta {a.theta}, family {fam}"
+          + (f", protocol {a.protocol}" if fam == "hamming" else ""), flush=True)
     todo = queue.Queue()
-    for k in sorted(keys, key=lambda k: (-k[0], k[1]) if a.order == "deep" else k):
+    order = (lambda k: (-k[0],) + tuple(k[1:])) if a.order == "deep" else (lambda k: k)
+    for k in sorted(keys, key=order):
         if k not in recs and k not in failed:
             todo.put(k)
     if todo.empty():
         print("# nothing to do")
-        summarize(field, recs, depths)
+        (summarize if fam == "mirror" else summarize_hamming)(field, recs, keys)
         return
     gpus = nq.parse_gpus(a.gpus) if a.gpus else []
     looms = a.parallel or (max(1, len(gpus) * max(1, a.chips_per_gpu) // len(field.specs)) if gpus and not a.cpu else 1)
@@ -960,6 +1239,11 @@ def cmd_run(a):
     def log(msg):
         with lock:
             print(msg, flush=True)
+
+    def write(rec):
+        with lock:
+            with open(a.out, "a") as fh:
+                fh.write(json.dumps(rec) + "\n")
 
     def worker(li):
         chips = None
@@ -980,22 +1264,39 @@ def cmd_run(a):
                                    + (f", patch widths {c.info['ghosts']['widths']}" if c.info['ghosts'].get('widths') else "")
                                    + ")" if c.info.get("ghosts", {}).get("count") else "") for c in chips))
                         loom = Loom(field, chips, a.loom)
-                        res = run_point(field, loom, k[0], k[1], a, log)
-                        rec = dict(cfg=tag, n=field.n, family="mirror", K=0, depth=k[0], partition=0, instance=k[1],
-                                   theta=a.theta, loom=a.loom, twirls=a.twirls if a.backend == "ace" else 0,
-                                   backend=a.backend, field=desc, round_trips=loom.round_trips,
-                                   chips_geometry=[c.info["geometry"] for c in chips],
-                                   chips_map=[c.info["ace_map"] for c in chips],
-                                   chips_ghosts=[c.info.get("ghosts") for c in chips], **res)
-                        with lock:
-                            with open(a.out, "a") as fh:
-                                fh.write(json.dumps(rec) + "\n")
-                        log(f"n {field.n} mirror d{k[0]:>3} inst {k[1]}  F {res['fidelity']:.5g} +/- {res['se']:.1e}"
-                            + (f"  ghost drift {res['ghost_drift']:.3g}" if "ghost_drift" in res else "")
-                            + f"  ({res['seconds']} s, loom {li})")
+                        base = dict(cfg=tag, n=field.n, family=fam, partition=0, theta=a.theta, loom=a.loom,
+                                    backend=a.backend, field=desc, chips_geometry=[c.info["geometry"] for c in chips],
+                                    chips_map=[c.info["ace_map"] for c in chips],
+                                    chips_ghosts=[c.info.get("ghosts") for c in chips])
+                        if fam == "mirror":
+                            res = run_point(field, loom, k[0], k[1], a, log)
+                            rec = dict(base, K=0, depth=k[0], instance=k[1],
+                                       twirls=a.twirls if a.backend == "ace" else 0, round_trips=loom.round_trips, **res)
+                        else:
+                            seams = [c.info.get("seam") or [] for c in chips]
+                            res = run_point_hamming(field, loom, k[0], k[1], k[2], a, seams, log)
+                            rec = dict(base, K=k[1], depth=k[0], instance=k[2], protocol=a.protocol,
+                                       chips_seam=seams, **res)
+                        write(rec)
+                        if res.get("failed"):
+                            log(f"{point_label(field, fam, k)}  BROKEN marginals on chip(s) "
+                                f"{sorted(int(c) for c in res['bad_qubits'])}: {json.dumps(res['bad_qubits'])[:200]}"
+                                f"  ({res['seconds']} s, loom {li}); recorded, --retry-failed reruns it")
+                            chips_restart = True
+                        else:
+                            chips_restart = False
+                            log(f"{point_label(field, fam, k)}  F {res['fidelity']:.5g}"
+                                + (f" +/- {res['se']:.1e}" if res.get("se") else "")
+                                + ("  chips " + " ".join(f"{s:.4g}" for s in res["chip_signal"]) if "chip_signal" in res else "")
+                                + (f"  ghost drift {res['ghost_drift']:.3g}" if "ghost_drift" in res else "")
+                                + f"  ({res['seconds']} s, loom {li})")
+                        if chips_restart:                # a broken state may linger in the backend: fresh chips
+                            for c in chips:
+                                c.close()
+                            chips = None
                         break
                     except Exception as err:
-                        log(f"# loom {li}: d{k[0]} i{k[1]} attempt {attempt} failed: {err}")
+                        log(f"# loom {li}: {point_label(field, fam, k)} attempt {attempt} failed: {err}")
                         if chips:
                             for c in chips:
                                 try:
@@ -1024,22 +1325,77 @@ def cmd_run(a):
         allf[tag] = sorted(set(map(tuple, allf.get(tag, []))) | set(fails))
         failed_path.write_text(json.dumps(allf))
         print(f"# {len(fails)} point(s) failed twice, listed in {failed_path} (--retry-failed reruns them)")
-    summarize(field, load_records(a.out, tag), depths)
+    (summarize if fam == "mirror" else summarize_hamming)(field, load_records(a.out, tag, fam), keys)
 
 
-def summarize(field, recs, depths):
+def summarize(field, recs, keys):
+    """Mirror survival per depth: the instances, their inverse-variance mean (instances whose se is 0,
+    exact backends, enter the plain mean only) and the plain mean."""
+    depths = sorted({k[0] for k in keys})
     print(f"\n== cloverfield, n = {field.n}, {len(field.specs)} chips, {len(field.links)} links ==")
     print("d     instances                          weighted          plain mean")
-    for d in sorted(depths):
-        rs = [recs[k] for k in sorted(recs) if k[0] == d]
+    for d in depths:
+        rs = [recs[k] for k in sorted(recs) if k[0] == d and recs[k].get("fidelity") is not None]
         if not rs:
             continue
         F = np.array([r["fidelity"] for r in rs])
-        se = np.array([max(r["se"], 1e-12) for r in rs])
-        w = 1 / se ** 2
-        wm, wse = float((w * F).sum() / w.sum()), float(1 / math.sqrt(w.sum()))
+        se = np.array([r.get("se") or 0.0 for r in rs])
+        if (se > 0).all():
+            w = 1 / se ** 2
+            wm, wse = float((w * F).sum() / w.sum()), float(1 / math.sqrt(w.sum()))
+            wcol = f"{wm:.5g}+/-{wse:.1e}"
+        else:
+            wcol = "(se = 0: plain)"
         inst = "  ".join(f"{r['fidelity']:.4g}" for r in rs)
-        print(f"{d:<5} {inst:<34} {wm:.5g}+/-{wse:.1e}   {F.mean():.5g}")
+        print(f"{d:<5} {inst:<34} {wcol:<17} {F.mean():.5g}")
+
+
+def summarize_hamming(field, recs, keys):
+    """Hamming signal 1 - 2h per depth and fold: plain mean over circuits +/- its standard error, the
+    regions (bulk / chip seam / link anchor), and Dan's zero-noise extrapolation (Richardson in
+    lambda^p on ln(signal), p = his depth power) where two or more folds are in."""
+    print(f"\n== cloverfield Hamming signal, n = {field.n}, {len(field.specs)} chips, {len(field.links)} links"
+          + (" (cut)" if field.cut else "") + " ==")
+    print(f"{'d':>3} {'λ':>3} {'circ':>4} {'broken':>6}  {'signal':>17}  {'bulk':>7} {'seam':>7} {'anchor':>7}  "
+          f"{'chip signals (means)':<30} {'drift':>7}")
+    by = {}
+    for d in sorted({k[0] for k in keys}):
+        for lam in sorted({k[1] for k in keys}):
+            rs = [recs[k] for k in sorted(recs) if k[0] == d and k[1] == lam]
+            ok = [r for r in rs if r.get("fidelity") is not None]
+            if not rs:
+                continue
+            nb = len(rs) - len(ok)
+            if not ok:
+                print(f"{d:>3} {lam:>3} {0:>4} {nb:>6}  {'—':>17}")
+                continue
+            F = np.array([r["fidelity"] for r in ok])
+            se = float(F.std(ddof=1) / math.sqrt(len(F))) if len(F) > 1 else 0.0
+            by[(d, lam)] = float(F.mean())
+            reg = []
+            for name in ("bulk", "seam", "anchor"):
+                v = [r[f"signal_{name}"] for r in ok if f"signal_{name}" in r]
+                reg.append(f"{np.mean(v):>7.4f}" if v else f"{'—':>7}")
+            cs = np.array([r["chip_signal"] for r in ok], dtype=float)
+            chips = " ".join(f"{x:.4f}" for x in np.nanmean(cs, axis=0)) if cs.size else ""
+            dr = [r["ghost_drift"] for r in ok if "ghost_drift" in r]
+            print(f"{d:>3} {lam:>3} {len(ok):>4} {nb:>6}  {F.mean():>8.4f} +/- {se:<6.2g}  {' '.join(reg)}  "
+                  f"{chips:<30} " + (f"{np.mean(dr):>7.3g}" if dr else f"{'—':>7}"))
+    p = nq.DAN_MODEL["depth_power"] if hasattr(nq, "DAN_MODEL") else 1.60569
+    zne = {}
+    for (d, lam), v in by.items():
+        zne.setdefault(d, {})[lam] = v
+    zne = {d: v for d, v in zne.items() if len(v) >= 2}
+    if zne:
+        print(f"\n# zero-noise extrapolation (Richardson in u = lambda^{p:g} on ln(signal); ideal 1)")
+        for d, v in sorted(zne.items()):
+            lams = sorted(v)
+            pts = "  ".join(f"λ{l} {v[l]:.4f}" for l in lams)
+            if all(v[l] > 0 for l in lams):
+                y0 = math.exp(nq.richardson_lambda_p(lams, [math.log(v[l]) for l in lams], p)[0])
+                print(f"  d {d:>3}: {pts}  ->  {y0:.4f}")
+            else:
+                print(f"  d {d:>3}: {pts}  ->  (signal <= 0)")
 
 
 # ================================================================== plan
@@ -1080,20 +1436,33 @@ def cmd_plan(a):
               f"  colour {col}")
     opts = engine_opts(a)
     total, splits = [], []
+    on_cpu = a.cpu and not a.ace_gpu
     for c, spec in enumerate(field.specs):
         widths, gb = chip_memory(spec, opts)
         ng = 0
-        if field.rooms is not None and not field.rooms[c].exact:
+        if field.rooms is not None and not field.rooms[c].exact and not field.cut:
             widths, gb, ng = field.rooms[c].widths(), field.rooms[c].gib(), len(field.rooms[c].sites)
         total.append(gb or 0)
-        sp = nq.die_split(widths, a.vram_gb or 8.0, a.gtt or 0.0) if widths else None
+        sp = nq.die_split(widths, a.vram_gb or 8.0, a.gtt or 0.0) if widths and not on_cpu else None
         if sp:
             splits.append(sp)
+        reg = ""
+        if field.rooms is not None and not field.rooms[c].exact:
+            rm = field.rooms[c]
+            seam = sum(1 for x in rm.site if len(rm.sids[x]) > 1)
+            anc = sum(1 for q in field.anchor_set if field.chip_of[q] == c)
+            reg = f"; {seam} seam qubits, {anc} link anchors"
         print(f"chip {c}: {spec['name']}, {field.chip_n[c]} qubits"
               + (f" + {ng} ghosts" if ng else "")
-              + (f", patch widths {widths} (incl. ancilla), peak about {gb:.1f} GiB fp32" if widths else "")
+              + (f", patch widths {widths} (incl. ancilla), peak about {gb:.1f} GiB fp32" if widths else "") + reg
               + (f"\n        on one die: {nq.describe_split(sp, a.vram_gb or 8.0, a.gtt or 0.0)}" if sp else ""))
-    if any(total):
+    if on_cpu:
+        print(f"one loom = {len(field.specs)} chip workers on the CPU: about {sum(total):.1f} GiB fp32 of host "
+              f"memory (sum of the chips' peaks); --parallel L looms need L times that")
+        if field.rooms is not None and not opts.get("ghost_max_width") and opts.get("gtt") is None:
+            print("note: ghost room was judged by the chip registers' own width caps (sized for one 8 GB die); "
+                  "on the CPU, --ghost-max-width W (--ghost-max-wide N) admits more links")
+    elif any(total):
         per = a.chips_per_gpu
         ok = all(sp["fits"] for sp in splits) and per == 1 if splits else max(total) * per <= a.die_gb
         gtt_host = sum(sp["gtt"] for sp in splits)
@@ -1131,7 +1500,9 @@ def draw_field(field, path):
 
 # ================================================================== linksearch
 def cmd_linksearch(a):
-    nq.THETA_DIST["mode"] = a.theta
+    """The same field at several link counts, short runs each. --family mirror: mean survival;
+    --family hamming: mean signal at fold 1 (and the anchor-region signal, where the links act)."""
+    set_protocol(a)
     rows = []
     for k in a.link_counts:
         a.links = k
@@ -1139,23 +1510,224 @@ def cmd_linksearch(a):
         chips = start_chips(field, a, 0)
         try:
             loom = Loom(field, chips, a.loom)
-            res = {}
+            res, anc = {}, {}
             for d in a.depths:
-                vals = [run_point(field, loom, d, i, a)["fidelity"] for i in range(a.instances)]
-                res[d] = float(np.mean(vals))
+                if a.family == "mirror":
+                    vals = [run_point(field, loom, d, i, a)["fidelity"] for i in range(a.instances)]
+                else:
+                    seams = [c.info.get("seam") or [] for c in chips]
+                    rs = [run_point_hamming(field, loom, d, 1, i, a, seams) for i in range(a.instances)]
+                    vals = [r["fidelity"] for r in rs if r.get("fidelity") is not None]
+                    av = [r["signal_anchor"] for r in rs if "signal_anchor" in r]
+                    anc[d] = float(np.mean(av)) if av else float("nan")
+                res[d] = float(np.mean(vals)) if vals else float("nan")
         finally:
             for c in chips:
                 c.close()
-        score = math.exp(sum(math.log(max(v, 1e-9)) for v in res.values()) / len(res))
-        rows.append((k, len(field.links), res, score))
+        good = [v for v in res.values() if math.isfinite(v)]
+        score = math.exp(sum(math.log(max(v, 1e-9)) for v in good) / len(good)) if good else float("nan")
+        rows.append((k, len(field.links), res, anc, score))
         print(f"links {k:>4} ({len(field.links)} placed): " + "  ".join(f"d{d} {v:.4g}" for d, v in res.items())
+              + ("  anchors " + "  ".join(f"d{d} {v:.4g}" for d, v in anc.items()) if anc else "")
               + f"  score {score:.4g}", flush=True)
-    print("\nlinks  placed  " + "  ".join(f"d{d:<8}" for d in a.depths) + "  score")
-    for k, nl, res, sc in rows:
-        print(f"{str(k):<6} {nl:>6}  " + "  ".join(f"{res[d]:<9.4g}" for d in a.depths) + f"  {sc:.4g}")
+    print(f"\n{a.family}: links  placed  " + "  ".join(f"d{d:<8}" for d in a.depths)
+          + ("  " + "  ".join(f"anc d{d:<4}" for d in a.depths) if a.family == "hamming" else "") + "  score")
+    for k, nl, res, anc, sc in rows:
+        print(f"{'':>{len(a.family) + 2}}{str(k):<6} {nl:>6}  " + "  ".join(f"{res[d]:<9.4g}" for d in a.depths)
+              + ("  " + "  ".join(f"{anc.get(d, float('nan')):<9.4g}" for d in a.depths) if a.family == "hamming" else "")
+              + f"  {sc:.4g}")
 
 
 # ================================================================== selftest
+def selftest_hamming(a, report):
+    """[6]-[10]: the Hamming family. [6] the loom's op stream for one chip without links equals
+    nighthawk_qrack.run_hamming's engine calls (CZ and nnqab protocols, folded); [7] the same point on
+    ACE through a worker process (skipped with --quick); [8] exact chips: the signal is 1 without links
+    and with cut links, and the loom's error alone with woven links; [9] --protocol nnqab draws
+    diagonal gates on every anchor coupler and Dan's gates elsewhere; [10] woven acz against exact
+    cases, and acz.acz = I across a link with ghosts."""
+    good_all = True
+
+    def rep(name, good, msg):
+        nonlocal good_all
+        good_all &= bool(good)
+        report(name, good, msg)
+
+    saved = (nq.THETA_DIST["mode"], nq.PROTOCOL["mode"])
+    nq.THETA_DIST["mode"] = "nnqab"
+    lay = nq.RegisterLayout(a.repo, "nighthawk2p45")
+
+    class RecEngine:
+        def __init__(self):
+            self.ops, self.n = [], lay.n
+
+        def reset(self):
+            self.ops.append(("reset",))
+
+        def g1(self, q, M):
+            self.ops.append(("g", q, np.asarray(M)))
+
+        def cz(self, a_, b_):
+            self.ops.append(("cz", a_, b_))
+
+        def g2(self, g, a_, b_):
+            self.ops.append(("g2", g, a_, b_))
+
+        def g2_inv(self, g, a_, b_):
+            self.ops.append(("g2i", g, a_, b_))
+
+        def prob1(self, q):
+            return 0.0
+
+    class RecChip:
+        def __init__(self, n):
+            self.ops, self._r, self.n = [], None, n
+
+        def put(self, msg):
+            for op in msg[1]:
+                if op[0] == "g":
+                    M = nq.gate(op[2])
+                    self.ops.append(("g", op[1], M.conj().T if op[3] else M))
+                else:
+                    self.ops.append(op)
+            self._r = ("m", [0.0] * len(msg[2]))
+
+        def get(self, want):
+            return self._r
+
+    def same(x, y):
+        if x[0] != y[0] or len(x) != len(y):
+            return False
+        if x[0] == "g":
+            return x[1] == y[1] and np.allclose(x[2], y[2], atol=1e-12)
+        return x == y
+
+    pa = argparse.Namespace(out=None, shots_dir=None, status=False)
+    fa = argparse.Namespace(repo=a.repo, chips="nighthawk2p45", arrangement=None, links="0", link_rows=None, link_cols=None)
+    f1 = build_field(fa)
+    res6 = []
+    for proto in ("nighthawk", "nnqab"):
+        nq.PROTOCOL["mode"] = proto
+        rec_e, rec_c = RecEngine(), RecChip(lay.n)
+        try:
+            nq.run_hamming(lay, rec_e, 4, 3, 0, pa)
+        except Exception as err:                    # Progress may want more of a; record and fail
+            res6.append((proto, False, f"run_hamming: {err}"))
+            continue
+        cyc = nq.fxeb_cycles(f1, 4, 0, f1.n)
+        gates = field_gates(f1, cyc, 0, proto)
+        Loom(f1, [rec_c], "ghost").run_hamming(cyc, gates, 3)
+        eq = len(rec_e.ops) == len(rec_c.ops) and all(same(x, y) for x, y in zip(rec_e.ops, rec_c.ops))
+        res6.append((proto, eq, f"{len(rec_c.ops)} vs {len(rec_e.ops)} ops"))
+    rep("[6] Hamming, one chip nighthawk2p45, no links: loom op stream == nighthawk_qrack.run_hamming's engine "
+        "calls (d4, lambda 3)", all(r[1] for r in res6), "; ".join(f"{p}: {m}{', identical' if e else ', DIFFER'}"
+                                                                    for p, e, m in res6))
+    # [7] ACE through a worker process vs nighthawk_qrack in-process
+    if not getattr(a, "quick", False):
+        msgs, good7 = [], True
+        for proto in ("nighthawk", "nnqab"):
+            nq.PROTOCOL["mode"] = proto
+            ra = argparse.Namespace(backend="ace", cpu=True, ace_gpu=False, twirls=0, gpus=None, chips_per_gpu=1,
+                                    gpu_isolation="auto", theta="nnqab", loom="ghost", repo=a.repo, protocol=proto)
+            chips = start_chips(f1, ra, 0)
+            try:
+                t0 = time.time()
+                r = run_point_hamming(f1, Loom(f1, chips, "ghost"), 4, 1, 0, ra, [c.info.get("seam") or [] for c in chips])
+                t1 = time.time() - t0
+                nseam = len(chips[0].info.get("seam") or [])
+            finally:
+                for c in chips:
+                    c.close()
+            na = chip_engine_args(f1.specs[0], dict(backend="ace", cpu=True, ace_gpu=False))
+            eng = nq.AceEngine(lay, lay.n, na)
+            ref = nq.run_hamming(lay, eng, 4, 1, 0, pa)["fidelity"]
+            del eng
+            ok7 = r.get("fidelity") is not None and abs(r["fidelity"] - ref) < 1e-3
+            good7 &= ok7
+            msgs.append(f"{proto}: {r.get('fidelity') or float('nan'):.6f} vs {ref:.6f} ({t1:.0f} s; {nseam} seam qubits, "
+                        f"bulk {r.get('signal_bulk', float('nan')):.4f} seam {r.get('signal_seam', float('nan')):.4f})")
+        rep("[7] Hamming on ACE nighthawk2p45, d4: worker process vs nighthawk_qrack in-process", good7, "; ".join(msgs))
+    # [8] exact chips: loom error alone in the Hamming signal
+    out = {}
+    for proto in ("nighthawk", "nnqab"):
+        nq.PROTOCOL["mode"] = proto
+        for nl, mode, cut in (("0", "ghost", False), ("all", "ghost", True), ("all", "mean", False), ("all", "ghost", False)):
+            ea = argparse.Namespace(backend="exact", cpu=True, ace_gpu=False, twirls=0, gpus=None, chips_per_gpu=1,
+                                    gpu_isolation="auto", theta="nnqab", loom=mode, repo=a.repo, protocol=proto)
+            fx = Field(a.repo, [parse_chip("rect:8-10,0-2", a.repo)] * 2, (1, 2), nl, cut_links=cut)
+            ch = start_chips(fx, ea, 0)
+            try:
+                out[proto, nl, mode, cut] = [run_point_hamming(fx, Loom(fx, ch, mode), d, 1, 0, ea, [[], []])
+                                             for d in (4, 8, 12)]
+            finally:
+                for c in ch:
+                    c.close()
+    fmt = lambda rs: " / ".join(f"{r['fidelity']:.4f}" for r in rs)
+    good8 = all(abs(r["fidelity"] - 1) < 1e-6 for p in ("nighthawk", "nnqab")
+                for key in (("0", "ghost", False), ("all", "ghost", True)) for r in out[(p,) + key])
+    good8 &= all(-1 - 1e-9 <= r["fidelity"] <= 1 + 1e-9 for rs in out.values() for r in rs)
+    rep("[8] exact chips rect:8-10,0-2 x 2, Hamming signal at d4 / d8 / d12 (1 without links and with --cut-links; "
+        "woven: the loom's error alone)", good8,
+        "; ".join(f"{p}: 0 links {fmt(out[p, '0', 'ghost', False])}, cut {fmt(out[p, 'all', 'ghost', True])}, "
+                  f"mean {fmt(out[p, 'all', 'mean', False])}, ghost {fmt(out[p, 'all', 'ghost', False])}"
+                  for p in ("nighthawk", "nnqab")))
+    # [9] the nnqab restriction
+    fb = build_field(argparse.Namespace(repo=a.repo, chips="nighthawk2p45*4", arrangement="2x2", links="all",
+                                        link_rows=None, link_cols=None))
+    tot = touched = changed = bad = 0
+    for inst in range(3):
+        cyc = nq.fxeb_cycles(fb, 12, inst, fb.n)
+        gs = field_gates(fb, cyc, inst, "nnqab")
+        seed = nq.instance_seed(inst, "full")
+        for c, ((_, es), row) in enumerate(zip(cyc, gs)):
+            for (u, v), g in zip(es, row):
+                tot += 1
+                dan = nq.nnqab_gate(seed, inst, c, u, v)
+                if u in fb.anchor_set or v in fb.anchor_set:
+                    touched += 1
+                    changed += g != dan
+                    bad += g not in DIAGONAL_G2 or (dan in DIAGONAL_G2 and g != dan)
+                else:
+                    bad += g != dan
+    rep(f"[9] --protocol nnqab on nighthawk2p45*4 (2x2, {len(fb.links)} links, every facing pair with a free colour), "
+        "d12 x 3 instances: anchor couplers cz/acz, Dan's draw elsewhere", bad == 0 and touched > 0,
+        f"{tot} gates, {touched} on anchor couplers, {changed} redrawn ({100 * changed / max(tot, 1):.1f} % of all)")
+    # [10] woven acz
+    fe = Field(a.repo, [parse_chip("rect:0-0,0-0", a.repo), parse_chip("rect:0-0,0-0", a.repo)], (1, 2), "all")
+    plus = (0.0, math.pi / 2, math.pi / 2)
+
+    def xval(mode, prep_other, side, twice=False):
+        plan = fe.ghost_plan() if mode == "ghost" else [[], []]
+        chs = [LocalChip(i, s_, a.repo, dict(backend="exact", cpu=True, ace_gpu=False,
+                                              ghost_anchors=[x for _, x, _ in plan[i]]), "nnqab")
+               for i, s_ in enumerate(fe.specs)]
+        lm = Loom(fe, chs, mode)
+        qs = [[("reset",)], [("reset",)]]
+        lm._emit1(qs, side, "g", plus, False)
+        other = 1 - side
+        if prep_other == "1":
+            lm._emit1(qs, other, "p", "x")
+        elif prep_other == "+":
+            lm._emit1(qs, other, "g", plus, False)
+        for _ in range(2 if twice else 1):
+            lm._layer_gates([(0, 1)], ["acz"], qs, None)
+        lm._flush(qs, [[], []])
+        s_ = chs[side].sim.eng.sim
+        s_.h(0)
+        return 1.0 - 2.0 * float(s_.prob(0))
+    # control (side 0) in |+>, target |0> / |1>: acz's phase reaches the control only when the target is 1
+    xs = {("ctrl", b): xval("mean", b, 0) for b in ("0", "1")}
+    xs.update({("tgt", b): xval("mean", b, 1) for b in ("0", "1")})
+    want = {("ctrl", "0"): 1, ("ctrl", "1"): -1, ("tgt", "0"): -1, ("tgt", "1"): 1}
+    xg, xm = xval("ghost", "+", 0, twice=True), xval("mean", "+", 0, twice=True)
+    rep("[10] woven acz on |+> against basis partners (exact: control +1 / -1 for target 0 / 1, target -1 / +1 "
+        "for control 0 / 1); acz.acz = I on |+>|+> with ghosts",
+        all(abs(xs[k] - v) < 1e-6 for k, v in want.items()) and abs(xg - 1) < 1e-6,
+        ", ".join(f"{k[0]} {k[1]}: {v:+.4f}" for k, v in xs.items()) + f"; acz.acz ghost {xg:+.4f}, mean-field {xm:+.4f}")
+    nq.THETA_DIST["mode"], nq.PROTOCOL["mode"] = saved
+    return good_all
+
+
 def cmd_selftest(a):
     ok = True
 
@@ -1313,6 +1885,7 @@ def cmd_selftest(a):
     report("[5] exact chips rect:8-10,0-2 x 2 (18 qubits), loom error alone, d8 / d12 / d16; ghost >= mean-field",
            good, f"0 links {fmt(out['0', 'ghost'])};  2 links mean {fmt(out['2', 'mean'])}, ghost "
                  f"{fmt(out['2', 'ghost'])};  all links mean {fmt(out['all', 'mean'])}, ghost {fmt(out['all', 'ghost'])}")
+    ok &= selftest_hamming(a, report)
     print("ALL OK" if ok else "SOME CHECKS FAILED")
     raise SystemExit(0 if ok else 1)
 
@@ -1358,6 +1931,23 @@ def add_field_args(p):
                         "host memory; QRACK_MAX_ALLOC_MB is raised to VRAM + GB. Ghost room is then judged by this "
                         "split instead of the register's width caps, so wider patches and more ghost links fit")
     p.add_argument("--vram-gb", dest="vram_gb", type=float, default=8.0, help="VRAM per chip worker's die (default 8)")
+    p.add_argument("--cut-links", dest="cut_links", action="store_true",
+                   help="place the links exactly as without this flag (same anchors, same gate restrictions under "
+                        "--protocol nnqab) but leave them out of the circuit: every chip runs alone. The matched "
+                        "baseline of a woven field: the difference is the links alone")
+
+
+def add_family_args(p):
+    p.add_argument("--family", choices=["mirror", "hamming"], default="mirror",
+                   help="mirror (default): twirled mirror circuits from the release's input strings, survival = "
+                        "product over chips; hamming: Dan Strano's observable, (U U^dagger)^lambda from |0...0>, "
+                        "signal 1 - 2h with h the mean P(1) over the field (exact given the chips' marginals)")
+    p.add_argument("--fold", type=int, nargs="+", default=None, metavar="LAMBDA",
+                   help="hamming: unitary folding scale factors (odd), e.g. 1 3 5 (default 1)")
+    p.add_argument("--protocol", choices=["nighthawk", "nnqab"], default="nighthawk",
+                   help="hamming: nighthawk (default): CZ on every coupler; nnqab: nn_qab.py's twelve gates, with "
+                        "links and couplers touching a link anchor drawn from cz / acz (the gates the loom can weave); "
+                        "sets --theta nnqab")
 
 
 def main():
@@ -1368,10 +1958,11 @@ def main():
         return nq.main()
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run", help="mirror circuits on the cloverfield")
+    r = sub.add_parser("run", help="mirror or Hamming circuits on the cloverfield")
     add_field_args(r)
+    add_family_args(r)
     r.add_argument("--depths", type=int, nargs="+", default=None, help="default 4 6 8 10 12")
-    r.add_argument("--instances", type=int, default=None, help="default 3, as released")
+    r.add_argument("--instances", type=int, default=None, help="default 3 (mirror, as released) or 10 (hamming)")
     r.add_argument("--parallel", type=int, default=None,
                    help="looms at once (default: devices x chips-per-gpu / chips, or 1 on CPU)")
     r.add_argument("--order", choices=["deep", "shallow"], default="shallow")
@@ -1383,14 +1974,16 @@ def main():
     add_field_args(p)
     p.add_argument("--die-gb", dest="die_gb", type=float, default=8.0)
     p.add_argument("--png", default=None, help="draw the field to this PNG")
-    ls = sub.add_parser("linksearch", help="survival against the number of links")
+    ls = sub.add_parser("linksearch", help="survival or Hamming signal against the number of links")
     add_field_args(ls)
+    add_family_args(ls)
     ls.add_argument("--link-counts", dest="link_counts", nargs="+", default=["0", "2", "4", "all"])
     ls.add_argument("--depths", type=int, nargs="+", default=[4, 8])
     ls.add_argument("--instances", type=int, default=1)
     sub.add_parser("layoutsearch", help="nighthawk_qrack's chip-level register + placement search (same options)")
-    t = sub.add_parser("selftest", help="field, IO equivalence, woven CZ, loom error")
+    t = sub.add_parser("selftest", help="field, IO equivalence, woven CZ, loom error, Hamming family")
     t.add_argument("--repo", default=None)
+    t.add_argument("--quick", action="store_true", help="skip the ACE checks of the Hamming family ([7])")
     a = ap.parse_args()
     if a.cmd in ("run", "linksearch", "selftest", "plan"):
         loom_env()
