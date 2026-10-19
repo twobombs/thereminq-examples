@@ -70,8 +70,11 @@ Subcommands
   run           mirror (default) or Hamming (--family hamming --fold) circuits on the field
                 (--depths, --instances, --twirls), loom +
                 chip workers; --gpus/--chips-per-gpu place the chip workers, --parallel
-                runs several looms at once; resumable JSONL records (nighthawk_graph.py
-                reads them as mirror records); --status, --summarize
+                runs several looms at once; --cpu-looms N adds CPU looms to a GPU run: one
+                queue, GPU looms from the expensive end (2 d lambda layers), CPU looms from
+                the cheap end, --gpu-min-layers / --cpu-max-layers bound each side, a point
+                that breaks on a GPU goes to the CPU once; resumable JSONL records
+                (nighthawk_graph.py reads them as mirror records); --status, --summarize
   linksearch    the same field at several link counts (--link-counts 0 2 4 all), short
                 mirror runs each: survival against number of links
   layoutsearch  nighthawk_qrack's register + placement search for one chip, unchanged
@@ -97,7 +100,6 @@ import json
 import math
 import os
 import pickle
-import queue
 import struct
 import subprocess
 import sys
@@ -1126,8 +1128,11 @@ def loom_env():
     os.execve(sys.executable, [sys.executable] + sys.argv, env)
 
 
-def worker_env_for(a, device):
-    if a.cpu or device is None:
+def worker_env_for(a, device, cpu=None):
+    """Environment of one chip worker: OpenCL hidden on the CPU (cpu=True, --cpu, or no device),
+    else pinned to its device (with --gtt's allocation ceiling)."""
+    cpu = a.cpu if cpu is None else cpu
+    if cpu or device is None:
         env = nq.base_env()
         os.makedirs("/tmp/no-icd", exist_ok=True)
         env["OCL_ICD_VENDORS"] = "/tmp/no-icd"
@@ -1139,19 +1144,26 @@ def worker_env_for(a, device):
     return env
 
 
-def start_chips(field, a, loom_index):
+def start_chips(field, a, loom_index, placement=None):
+    """One worker per chip. placement "gpu": loom loom_index's chips on --gpus (chips-per-gpu per
+    device, ACE on the device); "cpu": every chip on the CPU, OpenCL hidden; None: as the options say."""
     gpus = nq.parse_gpus(a.gpus) if a.gpus else []
+    if placement is None:
+        placement = "gpu" if gpus and not a.cpu else "cpu"
+    on_cpu = placement == "cpu"
     plan = field.ghost_plan() if a.loom == "ghost" else [[] for _ in field.specs]
     chips = []
     try:
         for c, spec in enumerate(field.specs):
             dev = None
-            if gpus and not a.cpu:
+            if gpus and not on_cpu:
                 slot = loom_index * len(field.specs) + c
                 dev = gpus[(slot // max(1, a.chips_per_gpu)) % len(gpus)]
             opts = dict(engine_opts(a), ghost_anchors=[anc for _, anc, _ in plan[c]],
                         ghost_sites=[site for _, _, site in plan[c]])
-            chips.append(ChipProc(c, spec, a.repo, opts, worker_env_for(a, dev), a.theta))
+            if on_cpu:
+                opts.update(cpu=True, ace_gpu=False)
+            chips.append(ChipProc(c, spec, a.repo, opts, worker_env_for(a, dev, cpu=on_cpu), a.theta))
     except Exception:
         for ch in chips:                         # a later chip failed to start: free the earlier ones
             try:
@@ -1162,7 +1174,75 @@ def start_chips(field, a, loom_index):
     return chips
 
 
+def point_cost(fam, k):
+    """Relative cost of a point: circuit layers per run, 2 d lambda (Hamming) or d (mirror: every
+    point has the same inputs x twirls)."""
+    return 2 * k[0] * k[1] if fam == "hamming" else k[0]
+
+
+class SplitQueue:
+    """The points of one run, cheapest first, shared by two kinds of loom: GPU looms take from the
+    expensive end (only points of cost >= gpu_min, if set), CPU looms from the cheap end (only cost <=
+    cpu_max, if set), so the two meet where their speeds balance. A point a GPU loom gives up on
+    (failed twice, or broken marginals) is handed to the CPU looms once, whatever its cost. A GPU loom
+    stops when nothing at its end qualifies; a CPU loom waits while a GPU loom may still hand a point
+    back, then stops. Points neither kind may take stay in .items (reported as left over)."""
+
+    def __init__(self, keys, cost, gpu_min=None, cpu_max=None, gpu_looms=0, cpu_looms=0, ends=None):
+        self.cost = cost
+        self.ends = ends or dict(gpu="dear", cpu="cheap")   # which end each kind takes from
+        self.items = sorted(keys, key=lambda k: (cost(k), k))
+        self.gpu_min, self.cpu_max = gpu_min, cpu_max
+        self.retry = []                          # handed back by GPU looms: CPU only
+        self.gpu_active, self.cpu_looms = gpu_looms, cpu_looms
+        self.cond = threading.Condition()
+
+    def counts(self):
+        """(GPU-only, either, CPU-only, neither) over the queued points, under the thresholds."""
+        g = e = c = n = 0
+        for k in self.items:
+            ok_g = self.gpu_active > 0 and (self.gpu_min is None or self.cost(k) >= self.gpu_min)
+            ok_c = self.cpu_looms > 0 and (self.cpu_max is None or self.cost(k) <= self.cpu_max)
+            g += ok_g and not ok_c
+            e += ok_g and ok_c
+            c += ok_c and not ok_g
+            n += not ok_g and not ok_c
+        return g, e, c, n
+
+    def take(self, kind):
+        with self.cond:
+            while True:
+                if kind == "gpu":
+                    for i in (range(len(self.items) - 1, -1, -1) if self.ends["gpu"] == "dear" else range(len(self.items))):
+                        if self.gpu_min is None or self.cost(self.items[i]) >= self.gpu_min:
+                            return self.items.pop(i)
+                    return None
+                if self.retry:
+                    return self.retry.pop(0)
+                for i in (range(len(self.items)) if self.ends["cpu"] == "cheap" else range(len(self.items) - 1, -1, -1)):
+                    if self.cpu_max is None or self.cost(self.items[i]) <= self.cpu_max:
+                        return self.items.pop(i)
+                if self.gpu_active <= 0:
+                    return None
+                self.cond.wait(timeout=30)
+
+    def hand_back(self, k):
+        """A GPU loom's point for the CPU looms; False when there are none (the caller records it)."""
+        if self.cpu_looms <= 0:
+            return False
+        with self.cond:
+            self.retry.append(k)
+            self.cond.notify_all()
+        return True
+
+    def gpu_done(self):
+        with self.cond:
+            self.gpu_active -= 1
+            self.cond.notify_all()
+
+
 def set_protocol(a):
+
     """--protocol nnqab: sin(theta)-uniform single-qubit gates, as nighthawk_qrack sets them."""
     if getattr(a, "protocol", "nighthawk") == "nnqab":
         if getattr(a, "family", "mirror") != "hamming":
@@ -1211,7 +1291,8 @@ def cmd_run(a):
             for k in keys:
                 r = recs.get(k)
                 st = ("pending" if r is None and k not in failed else "failed" if r is None else
-                      f"broken   chips {sorted(int(c) for c in r.get('bad_qubits', {}))}" if r.get("failed") else
+                      f"broken   chips {sorted(int(c) for c in r.get('bad_qubits', {}))}"
+                      + (" on a GPU, handed to the CPU looms (pending)" if r.get("handed_back") else "") if r.get("failed") else
                       f"done     F = {r['fidelity']:.4g}")
                 print(f"  {point_label(field, fam, k)}  {st}")
         if a.summarize:
@@ -1222,17 +1303,35 @@ def cmd_run(a):
           + (f" ({len(field.skipped)} facing pairs skipped: no common free colour" + (", or no ghost room under the caps" if field.rooms else "") + ")" if field.skipped else "")
           + f", loom {a.loom}, backend {a.backend}, theta {a.theta}, family {fam}"
           + (f", protocol {a.protocol}" if fam == "hamming" else ""), flush=True)
-    todo = queue.Queue()
-    order = (lambda k: (-k[0],) + tuple(k[1:])) if a.order == "deep" else (lambda k: k)
-    for k in sorted(keys, key=order):
-        if k not in recs and k not in failed:
-            todo.put(k)
-    if todo.empty():
+    gpus = nq.parse_gpus(a.gpus) if a.gpus else []
+    n_gpu = 0 if (a.cpu or not gpus) else (a.parallel or max(1, len(gpus) * max(1, a.chips_per_gpu) // len(field.specs)))
+    n_cpu = a.cpu_looms if a.cpu_looms is not None else (0 if n_gpu else (a.parallel or 1))
+    if n_gpu and not a.ace_gpu and a.backend == "ace":
+        raise SystemExit("--gpus without --ace-gpu runs ACE on the CPU inside device-pinned workers: add --ace-gpu "
+                         "(or --cpu for CPU looms only)")
+    if n_gpu + n_cpu == 0:
+        raise SystemExit("no looms: --cpu-looms 0 and no --gpus")
+    mixed = n_gpu > 0 and n_cpu > 0
+    # a single kind of loom follows --order; a split run sends GPU looms to the expensive end
+    ends = dict(gpu="dear" if (mixed or a.order == "deep") else "cheap",
+                cpu="cheap" if (mixed or a.order == "shallow") else "dear")
+    pending = [k for k in keys if k not in recs and k not in failed]
+    handed = [k for k in keys if k in recs and recs[k].get("failed") and recs[k].get("handed_back") and n_cpu]
+    sq = SplitQueue(pending, lambda k: point_cost(fam, k), a.gpu_min_layers if n_gpu else None,
+                    a.cpu_max_layers if n_cpu else None, n_gpu, n_cpu, ends)
+    sq.retry += handed
+    if not pending and not handed:
         print("# nothing to do")
         (summarize if fam == "mirror" else summarize_hamming)(field, recs, keys)
         return
-    gpus = nq.parse_gpus(a.gpus) if a.gpus else []
-    looms = a.parallel or (max(1, len(gpus) * max(1, a.chips_per_gpu) // len(field.specs)) if gpus and not a.cpu else 1)
+    g_, e_, c_, n_ = sq.counts()
+    print(f"# looms: {n_gpu} on GPUs {a.gpus or ''}".rstrip() + f", {n_cpu} on the CPU; {len(pending)} points"
+          + (f" + {len(handed)} handed back by GPU looms" if handed else "")
+          + (f" (cost 2 d λ: GPU only {g_}, either {e_}, CPU only {c_}" + (f", NEITHER {n_}" if n_ else "") + ")"
+             if mixed or n_ else ""), flush=True)
+    if n_:
+        print(f"# warning: {n_} points fit neither --gpu-min-layers {a.gpu_min_layers} nor --cpu-max-layers "
+              f"{a.cpu_max_layers}; they stay pending", flush=True)
     lock = threading.Lock()
     fails = dict()
 
@@ -1245,19 +1344,19 @@ def cmd_run(a):
             with open(a.out, "a") as fh:
                 fh.write(json.dumps(rec) + "\n")
 
-    def worker(li):
+    def worker(kind, li):
+        name = f"{kind[0]}{li}"
         chips = None
         try:
             while True:
-                try:
-                    k = todo.get_nowait()
-                except queue.Empty:
+                k = sq.take(kind)
+                if k is None:
                     return
                 for attempt in (1, 2):
                     try:
                         if chips is None:
-                            chips = start_chips(field, a, li)
-                            log(f"# loom {li}: chips " + ", ".join(
+                            chips = start_chips(field, a, li, placement=kind)
+                            log(f"# loom {name}: chips " + ", ".join(
                                 f"{c.spec['name']} pid {c.info['pid']} on {c.info['device'] or 'cpu'}"
                                 + (f" [GTT {c.info['gtt_gb']} GB, QRACK_MAX_ALLOC_MB={c.info['alloc_mb']}]" if c.info.get("gtt_gb") else "")
                                 + (f" ({c.info['ghosts']['count']} ghosts"
@@ -1265,7 +1364,9 @@ def cmd_run(a):
                                    + ")" if c.info.get("ghosts", {}).get("count") else "") for c in chips))
                         loom = Loom(field, chips, a.loom)
                         base = dict(cfg=tag, n=field.n, family=fam, partition=0, theta=a.theta, loom=a.loom,
-                                    backend=a.backend, field=desc, chips_geometry=[c.info["geometry"] for c in chips],
+                                    backend=a.backend, field=desc, placement=kind,
+                                    devices=[c.info["device"] for c in chips],
+                                    chips_geometry=[c.info["geometry"] for c in chips],
                                     chips_map=[c.info["ace_map"] for c in chips],
                                     chips_ghosts=[c.info.get("ghosts") for c in chips])
                         if fam == "mirror":
@@ -1277,26 +1378,27 @@ def cmd_run(a):
                             res = run_point_hamming(field, loom, k[0], k[1], k[2], a, seams, log)
                             rec = dict(base, K=k[1], depth=k[0], instance=k[2], protocol=a.protocol,
                                        chips_seam=seams, **res)
+                        handed_back = bool(res.get("failed")) and kind == "gpu" and sq.hand_back(k)
+                        if handed_back:
+                            rec["handed_back"] = True
                         write(rec)
                         if res.get("failed"):
                             log(f"{point_label(field, fam, k)}  BROKEN marginals on chip(s) "
                                 f"{sorted(int(c) for c in res['bad_qubits'])}: {json.dumps(res['bad_qubits'])[:200]}"
-                                f"  ({res['seconds']} s, loom {li}); recorded, --retry-failed reruns it")
-                            chips_restart = True
+                                f"  ({res['seconds']} s, loom {name}); "
+                                + ("handed to the CPU looms" if handed_back else "recorded, --retry-failed reruns it"))
+                            for c in chips:                # a broken state may linger in the backend: fresh chips
+                                c.close()
+                            chips = None
                         else:
-                            chips_restart = False
                             log(f"{point_label(field, fam, k)}  F {res['fidelity']:.5g}"
                                 + (f" +/- {res['se']:.1e}" if res.get("se") else "")
                                 + ("  chips " + " ".join(f"{s:.4g}" for s in res["chip_signal"]) if "chip_signal" in res else "")
                                 + (f"  ghost drift {res['ghost_drift']:.3g}" if "ghost_drift" in res else "")
-                                + f"  ({res['seconds']} s, loom {li})")
-                        if chips_restart:                # a broken state may linger in the backend: fresh chips
-                            for c in chips:
-                                c.close()
-                            chips = None
+                                + f"  ({res['seconds']} s, loom {name})")
                         break
                     except Exception as err:
-                        log(f"# loom {li}: {point_label(field, fam, k)} attempt {attempt} failed: {err}")
+                        log(f"# loom {name}: {point_label(field, fam, k)} attempt {attempt} failed: {err}")
                         if chips:
                             for c in chips:
                                 try:
@@ -1305,14 +1407,20 @@ def cmd_run(a):
                                     pass
                         chips = None
                         if attempt == 2:
-                            with lock:
-                                fails[k] = str(err)[:500]
+                            if kind == "gpu" and sq.hand_back(k):
+                                log(f"# loom {name}: {point_label(field, fam, k)} handed to the CPU looms")
+                            else:
+                                with lock:
+                                    fails[k] = str(err)[:500]
         finally:
             if chips:
                 for c in chips:
                     c.close()
+            if kind == "gpu":
+                sq.gpu_done()
 
-    th = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(looms)]
+    th = [threading.Thread(target=worker, args=("gpu", i), daemon=True) for i in range(n_gpu)]
+    th += [threading.Thread(target=worker, args=("cpu", i), daemon=True) for i in range(n_cpu)]
     for t in th:
         t.start()
     for t in th:
@@ -1325,7 +1433,16 @@ def cmd_run(a):
         allf[tag] = sorted(set(map(tuple, allf.get(tag, []))) | set(fails))
         failed_path.write_text(json.dumps(allf))
         print(f"# {len(fails)} point(s) failed twice, listed in {failed_path} (--retry-failed reruns them)")
-    (summarize if fam == "mirror" else summarize_hamming)(field, load_records(a.out, tag, fam), keys)
+    if sq.items:
+        print(f"# {len(sq.items)} point(s) left for neither kind of loom (costs {sorted({sq.cost(k) for k in sq.items})})")
+    final = load_records(a.out, tag, fam)
+    by = {}
+    for r in final.values():
+        if r.get("fidelity") is not None:
+            by.setdefault(r.get("placement", "?"), []).append(r.get("seconds") or 0)
+    if len(by) > 1 or mixed:
+        print("# placement: " + ", ".join(f"{p} {len(v)} points, {sum(v) / 3600:.2f} h" for p, v in sorted(by.items())))
+    (summarize if fam == "mirror" else summarize_hamming)(field, final, keys)
 
 
 def summarize(field, recs, keys):
@@ -1728,6 +1845,62 @@ def selftest_hamming(a, report):
     return good_all
 
 
+def selftest_split(report):
+    """[11] SplitQueue: every point taken once; GPU looms from the expensive end and CPU looms from the
+    cheap end; thresholds respected; a handed-back point reaches a CPU loom even above --cpu-max-layers;
+    CPU looms wait for a GPU loom that may still hand back, and every loom terminates."""
+    keys = [(d, l, i) for d in (4, 8, 12) for l in (1, 3, 5) for i in range(2)]
+    cost = lambda k: point_cost("hamming", k)
+    msgs, good = [], True
+    # (a) one GPU, one CPU, no thresholds, sequential: the GPU's first take is the dearest
+    sq = SplitQueue(keys, cost, None, None, 1, 1)
+    first_g, first_c = sq.take("gpu"), sq.take("cpu")
+    good &= cost(first_g) == max(map(cost, keys)) and cost(first_c) == min(map(cost, keys))
+    msgs.append(f"first takes: gpu {cost(first_g)} layers, cpu {cost(first_c)}")
+    # (b) threads with thresholds; one GPU point handed back; GPU looms slower to finish than CPU
+    sq = SplitQueue(keys, cost, 48, 24, 2, 2)
+    g, e, c, n = sq.counts()
+    taken = {"gpu": [], "cpu": []}
+    lk = threading.Lock()
+    back = [None]
+
+    def loom(kind):
+        try:
+            while True:
+                k = sq.take(kind)
+                if k is None:
+                    return
+                time.sleep(0.02 if kind == "gpu" else 0.001)
+                if kind == "gpu" and back[0] is None and cost(k) == 120:
+                    with lk:
+                        back[0] = k
+                    sq.hand_back(k)
+                    continue
+                with lk:
+                    taken[kind].append(k)
+        finally:
+            if kind == "gpu":
+                sq.gpu_done()
+    th = [threading.Thread(target=loom, args=(kd,)) for kd in ("gpu", "gpu", "cpu", "cpu")]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join(timeout=20)
+    alive = any(t.is_alive() for t in th)
+    all_taken = taken["gpu"] + taken["cpu"]
+    left = list(sq.items)
+    ok_b = (not alive and len(all_taken) + len(left) == len(keys) and len(set(all_taken)) == len(all_taken)
+            and all(cost(k) >= 48 for k in taken["gpu"]) and back[0] in taken["cpu"]
+            and all(cost(k) <= 24 or k == back[0] for k in taken["cpu"]) and all(24 < cost(k) < 48 for k in left))
+    good &= ok_b
+    msgs.append(f"thresholds 48 / 24: gpu-only {g}, either {e}, cpu-only {c}, neither {n}; gpu took {len(taken['gpu'])}, "
+                f"cpu {len(taken['cpu'])} (incl. the handed-back {cost(back[0]) if back[0] else '-'}-layer point), "
+                f"left {len(left)}" + (", A LOOM HUNG" if alive else ""))
+    report("[11] split queue: GPU looms from the expensive end, CPU from the cheap end, thresholds, hand-back, "
+           "termination", good, "; ".join(msgs))
+    return good
+
+
 def cmd_selftest(a):
     ok = True
 
@@ -1886,6 +2059,7 @@ def cmd_selftest(a):
            good, f"0 links {fmt(out['0', 'ghost'])};  2 links mean {fmt(out['2', 'mean'])}, ghost "
                  f"{fmt(out['2', 'ghost'])};  all links mean {fmt(out['all', 'mean'])}, ghost {fmt(out['all', 'ghost'])}")
     ok &= selftest_hamming(a, report)
+    ok &= selftest_split(report)
     print("ALL OK" if ok else "SOME CHECKS FAILED")
     raise SystemExit(0 if ok else 1)
 
@@ -1964,8 +2138,19 @@ def main():
     r.add_argument("--depths", type=int, nargs="+", default=None, help="default 4 6 8 10 12")
     r.add_argument("--instances", type=int, default=None, help="default 3 (mirror, as released) or 10 (hamming)")
     r.add_argument("--parallel", type=int, default=None,
-                   help="looms at once (default: devices x chips-per-gpu / chips, or 1 on CPU)")
-    r.add_argument("--order", choices=["deep", "shallow"], default="shallow")
+                   help="GPU looms (default: devices x chips-per-gpu / chips), or CPU looms with --cpu (default 1)")
+    r.add_argument("--cpu-looms", dest="cpu_looms", type=int, default=None,
+                   help="CPU looms alongside the GPU looms in the same run: GPU looms take points from the expensive "
+                        "end of one queue (cost 2 d lambda), CPU looms from the cheap end, until they meet; a point "
+                        "that breaks on a GPU goes to the CPU looms once")
+    r.add_argument("--gpu-min-layers", dest="gpu_min_layers", type=int, default=None, metavar="L",
+                   help="split run: GPU looms only take points of at least L layers (2 d lambda), e.g. 48 for "
+                        "d >= 8 at lambda 3; below that the GPU loses to the CPU (calibrate, README Sec. 3.5)")
+    r.add_argument("--cpu-max-layers", dest="cpu_max_layers", type=int, default=None, metavar="L",
+                   help="split run: CPU looms only take points of at most L layers (handed-back points excepted); "
+                        "the rest wait for the GPUs")
+    r.add_argument("--order", choices=["deep", "shallow"], default="shallow",
+                   help="runs with one kind of loom: expensive or cheap points first (a split run ignores it)")
     r.add_argument("--out", default="cloverfield.jsonl")
     r.add_argument("--status", action="store_true")
     r.add_argument("--summarize", action="store_true")
