@@ -416,6 +416,7 @@ Each row is one experiment as run. "Runs" is per point: instances × (inputs × 
 | ACE on GPU | tiled n = 27 points, CPU vs CMP 50HX | equal within shot noise (RESULTS §13) |
 | OpenCL fix | 16-qubit reproducer and ACE mirror points, patched build vs CPU | exact, and within 3 × 10⁻⁴ (RESULTS §12) |
 | loom | op-stream identity, worker vs in-process, CZ algebra, exact-chip mirrors | cloverfield selftest [1]–[5] (RESULTS §11) |
+| loom, Hamming family | op-stream identity with `run_hamming` (CZ and nnqab, folded); ACE worker vs in-process; exact chips at 0 links and cut links; nnqab restriction; acz algebra; split-queue scheduling | cloverfield selftest [6]–[11] |
 | layoutsearch | joint model vs exact engine on the release; saved-register round trip | selftest [10]; identical survival |
 | sub-registers at N = 61 | `release:61` and `nighthawk61r2` against the release | identical mirror circuits, angles and inputs |
 | boundary-CZ counter | three-patch register | reproduces RESULTS §6's column |
@@ -435,11 +436,31 @@ Each row is one experiment as run. "Runs" is per point: instances × (inputs × 
 | 5 | a CZ with only one end on a chip becomes a phase π · P(1) of the other end on that chip (`ghost`, `mean`), with P(1) → 1 − P(1) if the twirl put X or Y on the other end; `sample` applies Z with probability P(1) instead |
 | 6 | after the inverse half each chip returns the `prob` estimate of its part of the input; the field's survival is the product |
 
+| Step per Hamming point (`--family hamming`) | Operation |
+|---|---|
+| 1 | the field's forward circuit U of d cycles by `fxeb_cycles` on the combined register (as §6.4 for one chip); with `--protocol nnqab` each coupler's gate by `nnqab_gate` on global indices |
+| 2 | from \|0…0⟩, (U U†)^λ, no twirls: single-qubit gates to every copy; a two-qubit gate with both ends on a chip applied there (`g2` / `g2_inv`, as `run_hamming`); a diagonal gate with one end on a chip as the mean-field phase of the other end |
+| 3 | after the last layer one round trip returns every chip's P(q = 1) of its own qubits (ghosts excluded) |
+| 4 | h = Σ P(q = 1) / N over the field, signal 1 − 2h. h is linear in the marginals: the field estimator is exact given the chips' states and drops no cross-chip correlation, unlike the survival product. With 0 links it equals the mean of the chips' own signals |
+| 5 | the same mean over three regions: link anchors (endpoints of placed links), chip seam (own qubits on ACE seam sites, not anchors), bulk; and per chip (`chip_signal`) |
+| 6 | a chip whose marginals are not probabilities (NaN, outside [0, 1]) fails the point: the record keeps `fidelity: null`, `failed: "marginals"`, the chip and its first bad qubits; the chips are restarted |
+
 | Element | Rule |
 |---|---|
 | links | facing border sites of neighbouring chips, evenly spaced, each on a CZ colour free at both ends, so a cycle applies one colour and every qubit meets at most one CZ |
-| ghost room | a ghost needs a free ACE site coupled to its anchor; admitted only within the chip's width caps, or within the die split with `--gtt` |
+| ghost room | a ghost needs a free ACE site coupled to its anchor; admitted only within the chip's width caps, `--ghost-max-width/-wide`, or the die split with `--gtt` |
+| diagonal gates | only cz and acz (Z on the target when the control is 0) can be woven: mean-field phase on the held end, from f = n_a n_b (cz) or (1 − n_a) n_b (acz): π·P_b(1) and π·P_a(1) for cz; −π·P_b(1) on the control and π·(1 − P_a(1)) on the target for acz. `sample` applies Z with probability \|phase\| / π |
+| `--protocol nnqab` | nn_qab.py's twelve gates, except on links and couplers touching a link anchor: a non-diagonal draw there is replaced by cz or acz from hash key 5 (a diagonal draw is kept). Chip 0 of a field without links gets exactly the gates of a lone chip. A non-diagonal gate reaching a ghosted qubit raises |
+| `--cut-links` | links placed exactly as in the woven run (ghost room still judged), anchors and gate restrictions kept, link couplers left out of the circuit, no ghosts: the matched baseline, differing from the woven field only by the links |
+| split run | one queue sorted by cost 2 d λ (mirror: d); GPU looms (`--gpus`, one chip per die) take from the expensive end, `--cpu-looms` from the cheap end; `--gpu-min-layers` / `--cpu-max-layers` bound each side and points fitting neither are reported and stay pending. A GPU point that fails twice or returns non-probability marginals is handed to the CPU looms once (its broken record kept with `handed_back`; a resume re-queues it to the CPU). CPU looms wait while a GPU loom is active, so no hand-back is lost. Placement is recorded per point (`placement`, `devices`) and is not part of the tag: on exact chips a split run and a CPU-only run agree to 6 × 10⁻⁷ (fp32) |
 | isolation | one worker process per chip, pinned to one device; the loom has no simulator and no OpenCL; messages are length-prefixed pickles over stdin/stdout, and Qrack's own output goes to stderr |
+
+| Configuration tag (`field-<8 hex>`) | Content |
+|---|---|
+| always | field tag (chips, arrangement, links), backend, twirls (mirror), θ, loom, `--chip-ace` |
+| when set | ghost sites (with `--ghost-max-width` or `--gtt`), protocol (if not `nighthawk`), `cut_links`, family (if not `mirror`), `--chip-max-width/-wide` |
+
+Keys added only when set keep the tags of mirror records written before them. Mirror records written with explicit ghost caps or `--gtt` get a new tag: their ghost placement was not part of the old one.
 
 ---
 
