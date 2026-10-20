@@ -1,1 +1,1 @@
-early patched simulation of large circuits
+early patched simulation of larger circuits
