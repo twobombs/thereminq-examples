@@ -60,6 +60,11 @@ Subcommands
             then scored by a short mirror run (--test-depths, --test-instances,
             --test-twirls, geometric mean of the plain-mean survival); --save-best NAME
             writes the winner to nighthawk_registers.json for --register NAME.
+  danmodel  Dan Strano's ACE XEB calculator: predictions per register, or against measured records.
+  hamming   his mirror Hamming-weight ladder (run --families hamming): per register the signal
+            against his calculator at d and 2d, the seam's coupler load, a fitted depth power,
+            a measured / Dan grid sorted by coupler load, and his Richardson extrapolation over
+            the folds. Reads files only (no Qrack): safe beside running jobs.
 
 Backends
   exact   QrackSimulator. Patched circuits factorise, and QUnit keeps the patches
@@ -2250,6 +2255,132 @@ def cmd_danmodel(a):
         print("wrote", a.csv)
 
 
+# ================================================================== hamming: the E18 ladder against Dan's calculator
+def hamming_inputs(paths):
+    """Main --out files to read: the given ones, or dan_hamming_*.jsonl in the working directory.
+    Worker files (<stem>.w<pid>.jsonl) are not listed here: record_files() adds them per main file."""
+    import glob
+    worker = re.compile(r"\.w\d+\.jsonl$")
+    if paths:
+        return [p for p in paths if not worker.search(p)]
+    return sorted(p for p in glob.glob("dan_hamming_*.jsonl") if not worker.search(p))
+
+
+def cmd_hamming(a):
+    """Dan Strano's mirror Hamming-weight signal (run --families hamming) per register, against his
+    calculator at the depth d of U (and at the mirror's 2 d layers), with the coupler load of the seam,
+    a fitted depth power, a measured / Dan grid and his Richardson extrapolation over the folds."""
+    files = hamming_inputs(a.inputs)
+    if not files:
+        raise SystemExit("hamming: no input files (give --in, or run where dan_hamming_*.jsonl are)")
+    recs, geo, cfgs, nonfinite = {}, {}, defaultdict(set), 0
+    for path in files:
+        for f in record_files(path):
+            try:
+                lines = f.read_text().splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                if not line.startswith("{"):
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("family") != "hamming" or "fidelity" not in r or "ace_seam_used" not in r:
+                    continue
+                if a.protocol != "any" and r.get("protocol", "native") != a.protocol:
+                    continue
+                if not math.isfinite(float(r["fidelity"])):
+                    nonfinite += 1
+                    continue
+                n = r["n"]
+                cpl = r.get("ace_couplers") or {}
+                geo[n] = (r["ace_seam_used"], r.get("ace_sims_used", 2), cpl.get("replica", 0) + cpl.get("cross", 0))
+                cfgs[n].add(r["cfg"])
+                # one record per circuit; a later line (rerun, retry) replaces an earlier one
+                recs[(n, r["depth"], r.get("fold", r["K"]), r["instance"])] = float(r["fidelity"])
+    if nonfinite:
+        print(f"# {nonfinite} record(s) with a non-finite score skipped")
+    if not recs:
+        raise SystemExit("hamming: no hamming records" + (f" with --protocol {a.protocol}" if a.protocol != "any" else ""))
+    data = defaultdict(lambda: defaultdict(list))
+    for (n, d, lam, _), v in recs.items():
+        data[n][(d, lam)].append(v)
+    p0 = DAN_MODEL["depth_power"]
+    rows = []
+
+    def mean_se(v):
+        v = np.array(v, float)
+        return float(v.mean()), (float(v.std(ddof=1) / math.sqrt(len(v))) if len(v) > 1 else float("nan"))
+
+    print(f"# signal 1 - 2h at lambda = 1, plain mean over circuits; Dan's calculator at the depth d of U "
+          f"(and at the mirror's 2d layers); {len(files)} file(s), protocol {a.protocol}")
+    for n in sorted(data):
+        B, P, nc = geo[n]
+        note = f"; {len(cfgs[n])} configurations merged" if len(cfgs[n]) > 1 else ""
+        print(f"n {n}: seam {B}, patches {P}, couplers through the seam {nc} ({nc / B:.2f} per seam qubit){note}")
+        pts = []
+        for d in sorted(d for (d, lam) in data[n] if lam == 1):
+            m, se = mean_se(data[n][(d, 1)])
+            k = len(data[n][(d, 1)])
+            dn, d2 = dan_xeb(n - B, B, P, d), dan_xeb(n - B, B, P, 2 * d)
+            ratio = m / dn if dn else float("nan")
+            print(f"   d {d:>2}  {m:.3f} ± {se:.3f}  ({k:>2})  Dan(d) {dn:.3f}  ratio {ratio:.2f}  Dan(2d) {d2:.4f}")
+            rows.append(dict(n=n, seam=B, patches=P, seam_couplers=nc, couplers_per_seam=round(nc / B, 3), depth=d,
+                             fold=1, circuits=k, signal=m, se=se, dan=dn, ratio=ratio, dan_2d=d2))
+            if 0 < m < 1 and d >= a.fit_from:
+                pts.append((d, math.log(d / DAN_MODEL["d0"]), math.log(-math.log(m))))
+        if len(pts) >= 2:
+            _, X, Y = (np.array(c) for c in zip(*pts))
+            p, c = np.polyfit(X, Y, 1)
+            print(f"   fitted p {p:.2f}, signal(12) {math.exp(-math.exp(c)):.3f} over d = {pts[0][0]}-{pts[-1][0]}"
+                  f" ({len(pts)} depths)  (Dan: {p0}, {dan_xeb(n - B, B, P, 12):.3f})"
+                  + ("  [3 depths or fewer: indicative only]" if len(pts) <= 3 else ""))
+
+    # measured / Dan grid, registers sorted by coupler load
+    order = sorted(data, key=lambda n: (geo[n][2] / geo[n][0], n))
+    depths = sorted({d for n in data for (d, lam) in data[n] if lam == 1})
+    by = {(r["n"], r["depth"]): r for r in rows}
+    print(f"\n# measured / Dan, lambda = 1, registers by couplers per seam qubit (Dan's strips: {a.threshold:.1f}); "
+          f"(k) = only k circuits, fewer than {a.min_circuits}")
+    print(f"{'n':>9} " + " ".join(f"{n:>8}" for n in order))
+    print(f"{'cpl/seam':>9} " + " ".join(f"{geo[n][2] / geo[n][0]:>8.2f}" for n in order))
+    for d in depths:
+        cells = []
+        for n in order:
+            r = by.get((n, d))
+            if r is None:
+                cells.append(f"{'-':>8}")
+            else:
+                s = f"{r['ratio']:.2f}" + (f"({r['circuits']})" if r["circuits"] < a.min_circuits else "")
+                cells.append(f"{s:>8}")
+        print(f"{'d = ' + str(d):>9} " + " ".join(cells))
+
+    # folding: Dan's qem/richardson_nn_hamming_weight.py, ln(signal) to lambda = 0 in u = lambda^p
+    print(f"\n# folding: signal at lambda = 1 / 3 / 5 ... and Richardson (ln signal, u = lambda^{p0:g}) to lambda = 0")
+    for n in sorted(data):
+        for d in sorted({d for (d, _) in data[n]}):
+            lams = sorted(l for (dd, l) in data[n] if dd == d)
+            ms = [mean_se(data[n][(d, l)])[0] for l in lams]
+            ks = [len(data[n][(d, l)]) for l in lams]
+            mit = (math.exp(richardson_lambda_p(lams, [math.log(x) for x in ms], p0)[0])
+                   if len(lams) > 1 and min(ms) > 0 else float("nan"))
+            print(f"n {n:>3} d {d:>2}  lambda " + "/".join(map(str, lams)) + ":  " + " / ".join(f"{x:.3f}" for x in ms)
+                  + f"   mitigated {mit:.3f}   circuits " + " / ".join(map(str, ks)))
+            for r in rows:
+                if (r["n"], r["depth"]) == (n, d):
+                    r.update({f"signal_l{l}": x for l, x in zip(lams, ms)}, mitigated=mit)
+    if a.csv:
+        import csv
+        keys = sorted({k for r in rows for k in r})
+        with open(a.csv, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=keys)
+            w.writeheader()
+            w.writerows(rows)
+        print("wrote", a.csv)
+
+
 # ================================================================== run: clean-qubit emulation
 def ace_geometry(lay, lrc, lrr, torus):
     """Boundary qubits, bulk components and bulk-to-boundary ratio of the ACE register
@@ -3308,7 +3439,7 @@ def ensure_isolated(a):
     re-execs itself seeing one: QRACK_OCL_DEFAULT_DEVICE (default 0) for a single-process
     run, the first --gpus device for a launcher (which only builds CPU backends itself;
     its workers are isolated one by one from the original environment)."""
-    if getattr(a, "gpu_isolation", "auto") == "off" or getattr(a, "cmd", "") == "seamgap":
+    if getattr(a, "gpu_isolation", "auto") == "off" or getattr(a, "cmd", "") in ("seamgap", "hamming"):
         return
     if os.environ.get("NIGHTHAWK_ISOLATED") is not None or getattr(a, "worker", False):
         return
@@ -5301,6 +5432,19 @@ def main():
                     help="add ibm_phoenix's mirror survival at n = 61 (default on)")
     dm.add_argument("--csv", default=None, help="also write the rows as CSV")
 
+    hm = sub.add_parser("hamming", help="Dan's mirror Hamming-weight ladder (run --families hamming) against his "
+                                        "calculator: per register, a measured / Dan grid by coupler load, Richardson")
+    hm.add_argument("--in", dest="inputs", nargs="+", default=None, metavar="JSONL",
+                    help="run outputs (worker files included; default: dan_hamming_*.jsonl in the working directory)")
+    hm.add_argument("--protocol", default="nnqab", help="records of this protocol only (default nnqab; any = all)")
+    hm.add_argument("--fit-from", dest="fit_from", type=int, default=6,
+                    help="fit the depth power from this depth on (default 6)")
+    hm.add_argument("--min-circuits", dest="min_circuits", type=int, default=10,
+                    help="mark grid cells resting on fewer circuits (default 10)")
+    hm.add_argument("--threshold", type=float, default=3.0,
+                    help="coupler load named in the grid header (default 3.0, Dan's strips)")
+    hm.add_argument("--csv", default=None, help="also write the lambda = 1 rows as CSV")
+
     t = sub.add_parser("selftest", help="conventions and exactness checks")
     t.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
     t.add_argument("--n", type=int, default=14, help="register for the exact mirror checks")
@@ -5325,7 +5469,7 @@ help per command: python3 nighthawk_qrack.py <command> -h""")
         gtt_env(os.environ, float(getattr(a, "vram_gb", 8.0) or 8.0), float(a.gtt))   # inherited by re-exec and workers
     ensure_isolated(a)
     dict(seamgap=cmd_seamgap, verify=cmd_verify, hwxeb=cmd_hwxeb, run=cmd_run, selftest=cmd_selftest,
-         aceplan=cmd_aceplan, layoutsearch=cmd_layoutsearch, danmodel=cmd_danmodel)[a.cmd](a)
+         aceplan=cmd_aceplan, layoutsearch=cmd_layoutsearch, danmodel=cmd_danmodel, hamming=cmd_hamming)[a.cmd](a)
 
 
 if __name__ == "__main__":
