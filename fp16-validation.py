@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# for stacking large cloverfields we often leverage fp16 - this is a validation script if it is avaliable and functionaling according to specs
+#
 """
 FP16 validation harness for rusticl OpenCL targets.
 Tests: extension presence, arithmetic correctness, MAD throughput,
