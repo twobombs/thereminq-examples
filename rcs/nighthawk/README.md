@@ -28,9 +28,10 @@ BlueQubit ran 61-qubit random circuits on IBM's `ibm_phoenix` and estimated thei
 | `aceplan` | lists every ACE layout of a register |
 | `layoutsearch` | CP-SAT search for a register and its ACE placement, verified and tested |
 | `danmodel` | Dan Strano's ACE XEB calculator, alone or against measured points |
+| `hamming` | the Hamming ladder against his calculator: per register, a measured ÷ Dan grid by coupler load, Richardson over the folds |
 | `seamgap` | data-only analysis of the release |
 | `nighthawk_cloverfield.py` | chips in isolated workers, joined by a coordinator (the *loom*) |
-| `nighthawk_graph.py` | harvests every run, views 1–11, CSV export |
+| `nighthawk_graph.py` | harvests every run, views 1–13, CSV export |
 
 No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit statement is a proxy measurement or an extrapolation.
 
@@ -44,7 +45,7 @@ No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit st
 | Two patches on IBM's own register and circuits match the device at shallow depth | Haar θ, d = 4 / 6: 0.226 / 0.128 against 0.214 / 0.154 | 9 |
 | A register with a 3-qubit waist keeps the boundary nearly closed | 45-qubit version, d = 8 / 12 / 20: 0.90 / 0.88 / 0.12 against the device's 0.109 / 0.062 / 0.021; classically easier register | 9 |
 | In Dan's own protocol (`--protocol nnqab`) the Nighthawk ladder meets his calculator at 16 qubits and falls below it with size | XEB(12) 1.03× at 16 qubits, 0.40× at 28; depth power 0.89–1.70 vs his 1.606 | 10 |
-| Dan's mirror Hamming weight carries his protocol past the XEB ceiling | at U's depth d: within 0.86–1.33× of his calculator at d ≤ 6 at every size; at d = 12 0.37–0.63× at 28–40 qubits, 0.91× at 45 (4-qubit seam); tracks the forward XEB where both exist; folding exponent 0.04–0.48 against his 1.606 | 10 |
+| Dan's mirror Hamming weight carries his protocol past the XEB ceiling | at U's depth d: within 0.86–1.33× of his calculator at d ≤ 6 at every size; at d = 12 0.37–0.63× at 28–40 qubits, 0.91× at 45 (4-qubit seam); tracks the forward XEB where both exist; folding exponent 0.04–0.41 against his 1.606 | 10 |
 | Mirror survival is a different observable from his XEB | ACE's XEB equals a seam-cut sampler's XEB at 16–28 qubits; mirror survival falls with size | 14 |
 | 88 qubits fit one 8 GB GPU; disabled sites on the seams shrink the boundary | boundary 17 → 11 qubits; `nighthawk88e` 10–20× `nighthawk88d` at d = 4–6 | 8 |
 | A ghost link carries entanglement between chips | loom-only error, d = 8 / 12 / 16: ghost 1.000 / 0.989 / 0.656, mean-field 0.773 / 0.773 / 0.067 | 11 |
@@ -65,7 +66,7 @@ pip install numpy pyqrack matplotlib ortools qiskit
 |---|---|
 | Python ≥ 3.9 | everything (`argparse.BooleanOptionalAction`) |
 | numpy | every subcommand |
-| PyQrack | `hwxeb`, `run`, `selftest`, `aceplan`, `danmodel`; not `verify` or `seamgap`. ACE needs a build with `QrackAceBackend`; exact references above 32 qubits need Qrack built for > 32 qubits |
+| PyQrack | `hwxeb`, `run`, `selftest`, `aceplan`, `danmodel`; not `verify`, `seamgap` or `hamming`. ACE needs a build with `QrackAceBackend`; exact references above 32 qubits need Qrack built for > 32 qubits |
 | OR-Tools | the `exact` placement engine, `--register` presets, `layoutsearch` |
 | Qiskit | `--ace-transpile` |
 | matplotlib | `nighthawk_graph.py` (Tk for the viewer) |
@@ -253,6 +254,7 @@ Throughout, the figure compared with the device is a per-cycle decay b = −d ln
 | `--max-attempts`, `--retry-failed` | 2 | take-overs of a dead worker's point; clear failed marks |
 | `--max-rss-gb` | off | per-worker memory cap: the point is marked failed |
 | `--mem-budget-gb`, `--mem-ledger` | off, `/tmp/nighthawk_mem_ledger` | machine-wide budget shared by all runs (§5.1) |
+| `--mem-per-point-gb GB` | worst case | book this much per point in the ledger instead of both patches fully entangled; for shallow points, which stay well below it (57 qubits, d = 4–6: ~40 GiB against ~81); pair with `--max-rss-gb` |
 | `--order` | `deep` | `shallow`: cheapest points first |
 | `--gpu-isolation` | `auto` | every GPU worker sees one OpenCL device; required for clvk |
 | `--status`, `--summarize`, `--pack` | — | point list with progress and ETA; summary tables; rebuild release-format files |
@@ -270,6 +272,25 @@ Throughout, the figure compared with the device is a per-cycle decay b = −d ln
 | zero-noise | the same, on `hamming` runs with ≥ 2 folds | Dan's Richardson extrapolation: ln(signal) extrapolated to λ = 0 in u = λ^1.60569 |
 
 Both modes add `ibm_phoenix`'s mirror survival at n = 61 (`--no-device` to omit) and write CSV with `--csv`.
+
+### 3.3.1 `hamming`
+
+`hamming [--in dan_hamming_*.jsonl …]` reads `run --families hamming` outputs (worker files included; default every `dan_hamming_*.jsonl` in the working directory). Files only, no Qrack: safe beside running jobs.
+
+| Section | Content |
+|---|---|
+| per register | seam qubits, patches, couplers through the seam and per seam qubit (from the records' `ace_couplers`); per depth at λ = 1: plain mean ± circuit scatter, circuits, Dan at d and at 2d, ratio; fitted depth power and signal(12) from `--fit-from` (default d = 6), flagged when 3 depths or fewer |
+| grid | measured ÷ Dan per depth, registers ordered by couplers per seam qubit; `(k)` marks cells with fewer than `--min-circuits` (default 10) circuits |
+| folding | signal at every λ per depth with circuit counts, and Dan's Richardson extrapolation to λ = 0 in u = λ^1.60569 |
+
+| Option | Default | Effect |
+|---|---|---|
+| `--protocol` | `nnqab` | records of this protocol only; `any` for all |
+| `--fit-from` | 6 | first depth of the depth-power fit |
+| `--min-circuits` | 10 | cells below this get their circuit count |
+| `--csv FILE` | — | λ = 1 rows with coupler load, ratios, every λ's signal and the Richardson value |
+
+A circuit rerun (retry, second pass) replaces its earlier record; records of several configurations for one register are merged and the header says so.
 
 ### 3.4 `layoutsearch`
 
@@ -304,7 +325,7 @@ Validation of the tool: [RESULTS.md §13](RESULTS.md#13-tool-validation).
 
 ### 3.5 `nighthawk_cloverfield.py`
 
-The cloverfield puts two or more chips side by side, joined by inter-chip couplers, as IBM plans with l-couplers: one register, one circuit, one score (mirror survival, or the Hamming signal).
+The cloverfield puts two or more chips side by side, joined by inter-chip couplers, as IBM plans with l-couplers: one register, one circuit, one survival.
 
 | Part | Role |
 |---|---|
@@ -313,12 +334,8 @@ The cloverfield puts two or more chips side by side, joined by inter-chip couple
 | `--loom ghost` (default) | each chip holds a ghost of every partner its links touch; single-qubit gates and twirls go to every copy; the link CZ is exact on both chips; the partner's other CZs reach the ghost as a mean-field phase π·P(1). Records carry `ghost_drift` |
 | `--loom mean`, `--loom sample` | mean-field phases only (chips in a product state); Z kicks drawn from P(1) |
 | estimator | `prob` per chip; the field's survival is the product |
-| `--family hamming` | Dan's observable on the field: (U U†)^λ from \|0…0⟩ (`--fold`), signal 1 − 2h with h the mean P(1) over all field qubits, from the chips' marginals in one round trip; linear, so exact given the chips' states. Records add `chip_signal` and `signal_bulk` / `signal_seam` / `signal_anchor` |
-| `--protocol nnqab` | Dan's twelve gates (and θ), with cz / acz on links and on couplers touching a link anchor: the only gates the loom can weave |
-| `--cut-links` | the same links, anchors and gate draws, links left out of the circuit: the matched no-link baseline |
-| split run (`--cpu-looms N` with `--gpus`) | one queue, cheapest first by cost 2 d λ; GPU looms take from the expensive end, CPU looms from the cheap end, until they meet. `--gpu-min-layers L` keeps GPUs off points below L layers, `--cpu-max-layers L` keeps the CPU off points above L. A point that breaks on a GPU (twice an exception, or non-probability marginals) goes to the CPU looms once, whatever its cost. Records carry `placement` and `devices`; the configuration tag does not, so a split run and a CPU-only run share records |
 
-Options: `--chips` (`nighthawk88e*2`, `nighthawk2p45*4`, `release,nighthawk88d`, `rect:r0-r1,c0-c1`, any register), `--arrangement RxC`, `--links K|all`, `--link-rows`, `--link-cols`, `--cut-links`, `--loom`, `--ghost-max-width`, `--ghost-max-wide`, `--gtt`, `--vram-gb`, `--backend`, `--chip-ace`, `--cpu`, `--ace-gpu`, `--gpus`, `--chips-per-gpu`, `--theta`, `--twirls`; `run` and `linksearch` add `--family`, `--fold`, `--protocol`; `run` adds `--cpu-looms`, `--gpu-min-layers`, `--cpu-max-layers`. Subcommands: `plan` (links, widths, seam qubits and link anchors per chip, memory: dies, or host RAM with `--cpu`; `--png`), `run`, `linksearch` (score against link count; with `--family hamming` also the anchor-region signal), `layoutsearch` (passed to nighthawk_qrack), `selftest` (`--quick` skips [7]).
+Options: `--chips` (`nighthawk88e*2`, `release,nighthawk88d`, `rect:r0-r1,c0-c1`, any register), `--arrangement RxC`, `--links K|all`, `--link-rows`, `--link-cols`, `--loom`, `--ghost-max-width`, `--gtt`, `--vram-gb`, `--backend`, `--chip-ace`, `--cpu`, `--ace-gpu`, `--gpus`, `--chips-per-gpu`, `--theta`, `--twirls`. Subcommands: `plan` (links, widths, memory; `--png`), `run`, `linksearch` (survival against link count), `layoutsearch` (passed to nighthawk_qrack), `selftest`.
 
 | selftest | Check |
 |---|---|
@@ -328,12 +345,6 @@ Options: `--chips` (`nighthawk88e*2`, `nighthawk2p45*4`, `release,nighthawk88d`,
 | 3 | woven CZ on \|+⟩ against \|0⟩, \|1⟩, \|+⟩ |
 | 4 | CZ·CZ = I across a link |
 | 5 | loom error alone: two exact 9-qubit chips, 2 links, d = 8 / 12 / 16 |
-| 6 | Hamming, one chip, no links: loom op stream vs `run_hamming`, CZ and nnqab protocols, d = 4, λ = 3 |
-| 7 | the same on ACE (`nighthawk2p45`) through a worker process vs in-process |
-| 8 | exact chips: signal 1 with 0 links and with `--cut-links`; the loom's error alone with woven links (mean-field and ghost) |
-| 9 | `--protocol nnqab` on `nighthawk2p45*4`, 2 × 2: every anchor coupler cz / acz, Dan's draw elsewhere |
-| 10 | woven acz against exact basis cases; acz · acz = I across a ghost link |
-| 11 | split queue: GPU looms from the expensive end, CPU from the cheap end, thresholds, hand-back above `--cpu-max-layers`, termination |
 
 Results: [RESULTS.md §11](RESULTS.md#11-cloverfield-e13).
 
@@ -363,6 +374,8 @@ An example of the gap is in [RESULTS.md §4](RESULTS.md#4-the-nn_qab-ensemble-e6
 | 8, 9 | `fxeb` XEB against depth (per n) and against n (per depth) |
 | 10 | per-cycle decay b(N) per configuration, extrapolated to 61 |
 | 11 | XEB at one (n, d) against coupler classes, seam qubits, simulators, widest simulator, with rank correlations |
+| 12 | `hamming`: Dan's Hamming signal against depth per register, folds λ = 1 / 3 / 5, with his calculator |
+| 13 | `hamming`: measured ÷ calculator against register size per depth; effective folding exponent q against his 1.606 |
 
 Views 8–11 and `--table FILE` (CSV of every point) show one ensemble at a time (`--theta haar|nnqab|all`), since XEB values of different ensembles are not comparable.
 
@@ -543,7 +556,7 @@ python3 nighthawk_qrack.py run --backend ace --register nighthawk61r2 --families
   --depths 4 6 --fold 3 5 --instances 3 --order shallow \
   --cpu --gpus 0 --per-gpu 1 --swap-gb 238 --mem-budget-gb 530 --out dan_hamming_61.jsonl
 python3 nighthawk_qrack.py danmodel --in dan_hamming_*.jsonl --csv dan_hamming_vs_calculator.csv
-python3 dan_crosscheck/analyse_hamming.py dan_hamming_*.jsonl
+python3 nighthawk_qrack.py hamming --csv dan_hamming_ladder.csv
 
 # a register search (§3.4)
 python3 nighthawk_qrack.py layoutsearch --n 88 --geometries 114:4:5 102:4:5 --region convex \
@@ -555,26 +568,6 @@ python3 nighthawk_cloverfield.py run --chips nighthawk88e*2 --links 4 --theta nn
   --ace-gpu --gpus 0-5 --out field88e2.jsonl
 python3 nighthawk_cloverfield.py linksearch --chips nighthawk88e*2 --link-counts 0 2 4 all --theta nnqab \
   --depths 4 8 --twirls 4 --cpu
-
-# the 45-qubit chip as a virtual multi-chip Nighthawk, Hamming ladder (§3.5): 2 x 2 = 180 qubits, CPU
-python3 nighthawk_cloverfield.py plan --chips nighthawk2p45*4 --arrangement 2x2 --links all \
-  --ghost-max-width 28 --ghost-max-wide 2 --cpu --png field2x2.png
-python3 nighthawk_cloverfield.py linksearch --chips nighthawk2p45*4 --arrangement 2x2 --link-counts 0 4 8 all \
-  --ghost-max-width 28 --ghost-max-wide 2 --family hamming --theta nnqab --depths 4 8 --instances 3 --cpu
-# calibration: one chip, no links, both ends of the ladder, GPU against CPU (seconds, card power)
-python3 nighthawk_cloverfield.py run --chips nighthawk2p45 --links 0 --family hamming --theta nnqab \
-  --depths 6 12 --fold 1 5 --instances 1 --ace-gpu --gpus 0 --out cal_gpu.jsonl
-python3 nighthawk_cloverfield.py run --chips nighthawk2p45 --links 0 --family hamming --theta nnqab \
-  --depths 6 12 --fold 1 5 --instances 1 --cpu --out cal_cpu.jsonl
-# the ladder as one split run: 4 dies (one chip each) from the deep end, 4 CPU looms from the shallow end;
-# L = the cost 2 d λ above which the GPU won the calibration (48: d >= 8 at λ = 3, d >= 12 at λ = 2 ...)
-python3 nighthawk_cloverfield.py run --chips nighthawk2p45*4 --arrangement 2x2 --links all \
-  --ghost-max-width 28 --ghost-max-wide 2 --family hamming --theta nnqab --depths 4 6 8 10 12 --fold 1 3 5 \
-  --ace-gpu --gpus 0-3 --chips-per-gpu 1 --cpu-looms 4 --gpu-min-layers 48 --out field2p45x4.jsonl
-# the matched baseline (same links and anchors, links out of the circuit), then the mean-field control
-python3 nighthawk_cloverfield.py run ... --cut-links --out field2p45x4.jsonl
-python3 nighthawk_cloverfield.py run ... --loom mean --out field2p45x4.jsonl
-# Dan's gates instead of CZ: add --protocol nnqab to all three
 ```
 
 Progress of any run: the same command with `--status`. Deep points at 57–61 qubits are the slowest; time one d = 8 point before committing them.
