@@ -3310,33 +3310,99 @@ def shor9_run(sim, u, state, shots, hist=None):
     return raw_ok / shots, dec_ok / shots
 
 
-def shor9_bench(shots, gpu=False, exact=True, repeats=1, m=3):
+# --jobs: the pieces of a shor9 run are independent, so they run in a pool of processes, one core each
+# (Qrack threads only states far larger than a Shor unit, and the shot loop is Python):
+#   ACE      one task per (layout or rotation, logical state, fresh backend); a backend's shots stay in one
+#            task, because backends differ from one another by more than shot noise
+#   exact    the reference state is the same in every simulator, so its shots split into chunks over fresh
+#            simulators: the same distribution, sampled in parallel
+# Workers are started with 'spawn' (no fork of a process holding Qrack or OpenCL state) and inherit the
+# environment: QRACK_OCL_SYNC, the OpenCL isolation of a clvk die, OCL_ICD_VENDORS.
+
+def shor_pool(jobs, ntasks):
+    """(pool, workers): a spawn process pool of min(jobs, ntasks) workers (jobs 0 = every core), or (None, 1)."""
+    n = (os.cpu_count() or 1) if int(jobs) <= 0 else int(jobs)
+    n = max(1, min(n, int(ntasks)))
+    if n == 1:
+        return None, 1
+    import concurrent.futures as cf
+    import multiprocessing as mp
+    return cf.ProcessPoolExecutor(n, mp_context=mp.get_context("spawn")), n
+
+
+def shor_pool_map(pool, calls):
+    """[f(*args) for f, args in calls], in order: in the pool, or in this process without one."""
+    if pool is None:
+        return [f(*args) for f, args in calls]
+    futs = [pool.submit(f, *args) for f, args in calls]
+    return [f_.result() for f_ in futs]
+
+
+def shor_chunks(shots, k):
+    """shots split into at most k chunks of at least 32 (the exact reference's parallel sampling)."""
+    k = max(1, min(int(k), int(shots) // 32 or 1))
+    return [shots // k + (1 if i < shots % k else 0) for i in range(k)]
+
+
+def _shor9_ace_task(n, geo, gpu, u, s, shots):
+    from pyqrack import QrackAceBackend
+    h = collections.Counter()
+    r = shor9_run(QrackAceBackend(n, is_gpu=gpu, **geo), u, s, shots, h)
+    return r, h
+
+
+def _shor9_exact_task(n, gpu, u, s, shots):
+    from pyqrack import QrackSimulator
+    return shor9_run(QrackSimulator(n, is_gpu=gpu), u, s, shots), shots
+
+
+def shor9_bench(shots, gpu=False, exact=True, repeats=1, m=3, jobs=1):
     """{layout: {"unit", state: (raw, decoded), "runs", "hist"}} for both ACE layouts, each state on `repeats`
     fresh backends (mean over them), plus the exact reference (QrackSimulator, seam_leaders), where every
-    entry must be 1.0."""
-    from pyqrack import QrackAceBackend, QrackSimulator
+    entry must be 1.0. jobs > 1 (0 = every core): the backends, and chunks of the exact shots, in a process
+    pool. Returns (results, geo, workers)."""
+    from pyqrack import QrackAceBackend
     geo, n = shor_ace_geometry(m), m * m
     probe = QrackAceBackend(n, is_gpu=gpu, **geo)
     lays = shor9_layouts(probe, m)
     for u in lays.values():
         shor9_check_coupling(probe, shor9_encoder(u))
     del probe
+    R = max(1, int(repeats))
+    keys = [(name, s, r) for name in lays for s in SHOR9_STATES for r in range(R)]
+    pool, workers = shor_pool(jobs, len(keys) + (len(SHOR9_STATES) if exact else 0))
+    k_ex = max(1, -(-workers // len(SHOR9_STATES)))
+    ex_keys = [(s, c) for s in SHOR9_STATES for c in shor_chunks(shots, k_ex)] if exact else []
+    try:
+        out = shor_pool_map(pool, [(_shor9_ace_task, (n, geo, gpu, lays[name], s, shots)) for name, s, _ in keys]
+                            + [(_shor9_exact_task, (n, gpu, lays["seam_leaders"], s, c)) for s, c in ex_keys])
+    finally:
+        if pool is not None:
+            pool.shutdown()
+    got = dict(zip(keys, out[:len(keys)]))
     results = {}
     for name, u in lays.items():
         row = {"unit": u, "blocks": u["blocks"], "runs": {}, "hist": {}}
         for s in SHOR9_STATES:
             h = collections.Counter()
-            runs = [shor9_run(QrackAceBackend(n, is_gpu=gpu, **geo), u, s, shots, h)
-                    for _ in range(max(1, int(repeats)))]
+            runs = []
+            for r in range(R):
+                rr, hh = got[(name, s, r)]
+                runs.append(tuple(rr))
+                h.update(hh)
             row["runs"][s] = runs
             row["hist"][s] = h
             row[s] = (float(np.mean([r[0] for r in runs])), float(np.mean([r[1] for r in runs])))
         results[name] = row
     if exact:
         u = lays["seam_leaders"]
-        results["exact_reference"] = {"unit": u, "blocks": u["blocks"],
-                                      **{s: shor9_run(QrackSimulator(n, is_gpu=gpu), u, s, shots) for s in SHOR9_STATES}}
-    return results, geo
+        ref = {"unit": u, "blocks": u["blocks"]}
+        for s in SHOR9_STATES:
+            parts = [o for (s_, _), o in zip(ex_keys, out[len(keys):]) if s_ == s]
+            tot = sum(c for _, c in parts)
+            ref[s] = (sum(r[0] * c for r, c in parts) / tot, sum(r[1] * c for r, c in parts) / tot)
+        results["exact_reference"] = ref
+    return results, geo, workers
 
 
 def shor9_exact_dist(u, state):
@@ -3481,12 +3547,47 @@ def _local_unit(u):
     return qs, [[loc[q] for q in b] for b in u["blocks"]]
 
 
+def _shor9_one_run(sim, mapq, tiles, rot, shots):
+    """Every unit of the register in one circuit, logical states rotated by rot; each unit then sampled on
+    its own qubits: [(state, raw, decoded, histogram)] per unit."""
+    states = [SHOR9_STATES[(k + rot) % 4] for k in range(len(tiles))]
+    for (u, _, _), st_ in zip(tiles, states):
+        shor9_prepare(sim, u, st_, mapq)
+    out = []
+    for (u, _, _), st_ in zip(tiles, states):
+        # units are independent; shots_wide keeps bits above 31, which QrackSimulator's measure_shots drops
+        # (PyQrack 2.28.1)
+        qs, local = _local_unit(u)
+        sh = shots_wide(sim, [mapq[q] for q in qs], shots)
+        ok = [shor9_decode(x, local, st_) for x in sh]
+        out.append((st_, sum(r for r, _ in ok) / len(ok), sum(d for _, d in ok) / len(ok), collections.Counter(sh)))
+    return out
+
+
+_SHOR_LAYOUTS = {}
+
+
+def _shor9_reg_task(repo, reg, ra, tiles, rot, shots, exact, gpu):
+    """One run of the register (a fresh ACE engine, or the exact simulator), in a pool worker or here."""
+    lay = _SHOR_LAYOUTS.get((repo, reg))
+    if lay is None:
+        lay = _SHOR_LAYOUTS[(repo, reg)] = Layout(repo) if reg == "release" else RegisterLayout(repo, reg)
+    if exact:
+        from pyqrack import QrackSimulator
+        return _shor9_one_run(QrackSimulator(lay.n, is_gpu=gpu), list(range(lay.n)), tiles, rot, shots)
+    THETA_DIST["mode"] = ra.theta
+    eng = AceEngine(lay, lay.n, ra)
+    out = _shor9_one_run(eng.sim, eng.idx, tiles, rot, shots)
+    del eng
+    return out
+
+
 def cmd_shor9_register(a):
     """Units tiled over a whole register, every unit in one circuit on the register's own ACE placement;
     logical states rotate over the units in four runs, so every unit is read in all four."""
-    from pyqrack import QrackSimulator
     reg, m = a.register, int(a.size)
     lay = Layout(a.repo) if reg == "release" else RegisterLayout(a.repo, reg)
+    _SHOR_LAYOUTS[(a.repo, reg)] = lay
     n = lay.n
     tiles = shor9_tiles(lay, a.max_tiles, m)
     if not tiles:
@@ -3515,10 +3616,14 @@ def cmd_shor9_register(a):
                          regions=dict(regions), cx_classes=dict(cls), kind=kind))
     del probe
     ver = qrack_versions()
+    R = max(1, a.repeats)
+    keys = [(rot, r) for rot in range(4) for r in range(R)]
+    pool, workers = shor_pool(getattr(a, "jobs", 1), len(keys) + (0 if a.no_exact else 4))
     print(f"Shor-{m * m} units across {reg}: {len(tiles)} units on {m * m * len(tiles)} of {n} qubits, ACE "
           f"{row['lrc']}x{row['lrr']}{' torus' if row['torus'] else ''} preset placement, {a.shots} shots, "
           f"{a.repeats} fresh backend(s) per rotation, "
-          f"{'OpenCL' + (' (QRACK_OCL_SYNC=1)' if os.environ.get('QRACK_OCL_SYNC') == '1' else '') if a.gpu else 'CPU'}; {ver}")
+          f"{'OpenCL' + (' (QRACK_OCL_SYNC=1)' if os.environ.get('QRACK_OCL_SYNC') == '1' else '') if a.gpu else 'CPU'}"
+          f"{f', {workers} processes' if workers > 1 else ''}; {ver}")
     print("unit  rows   cols  leaders  regions                       encoder CX exact/replica/cross")
     for d in info:
         reg_s = ", ".join(f"{k} {v}" for k, v in sorted(d["regions"].items()))
@@ -3526,38 +3631,25 @@ def cmd_shor9_register(a):
         print(f"{d['unit']:>4}  {d['rows'][0]:>2}-{d['rows'][1]:<2} {d['cols'][0]:>2}-{d['cols'][1]:<2} "
               f"{d['leaders']:>6}   {reg_s:<29} {c.get('exact', 0)}/{c.get('replica', 0)}/{c.get('cross', 0)}")
 
-    def one_run(sim, mapq, rot):
-        states = [SHOR9_STATES[(k + rot) % 4] for k in range(len(tiles))]
-        for (u, _, _), st in zip(tiles, states):
-            shor9_prepare(sim, u, st, mapq)
-        out = []
-        for (u, _, _), st in zip(tiles, states):
-            # each unit sampled on its own qubits (units are independent); shots_wide keeps bits above 31,
-            # which QrackSimulator's measure_shots drops (PyQrack 2.28.1)
-            qs, local = _local_unit(u)
-            sh = shots_wide(sim, [mapq[q] for q in qs], a.shots)
-            ok = [shor9_decode(x, local, st) for x in sh]
-            out.append((st, sum(r for r, _ in ok) / len(ok), sum(d for _, d in ok) / len(ok),
-                        collections.Counter(sh)))
-        return out
-
     acc = [defaultdict(list) for _ in tiles]
     hists = [defaultdict(collections.Counter) for _ in tiles]
     t0 = time.time()
-    for rot in range(4):
-        for _ in range(max(1, a.repeats)):
-            eng = AceEngine(lay, n, ra)
-            for k, (st, raw, dec, h) in enumerate(one_run(eng.sim, eng.idx, rot)):
-                acc[k][st].append((raw, dec))
-                hists[k][st].update(h)
-            del eng
+    gpu = bool(a.gpu)
+    ex_keys = [] if a.no_exact else [(rot, c) for rot in range(4) for c in shor_chunks(a.shots, -(-workers // 4))]
+    try:
+        out = shor_pool_map(pool, [(_shor9_reg_task, (a.repo, reg, ra, tiles, rot, a.shots, False, gpu))
+                                   for rot, _ in keys]
+                            + [(_shor9_reg_task, (a.repo, reg, ra, tiles, rot, c, True, gpu)) for rot, c in ex_keys])
+    finally:
+        if pool is not None:
+            pool.shutdown()
+    for res in out[:len(keys)]:
+        for k, (st, raw, dec, h) in enumerate(res):
+            acc[k][st].append((raw, dec))
+            hists[k][st].update(h)
     exact_ok = None
     if not a.no_exact:
-        ex = [defaultdict(list) for _ in tiles]
-        for rot in range(4):
-            for k, (st, raw, dec, _) in enumerate(one_run(QrackSimulator(n, is_gpu=bool(a.gpu)), list(range(n)), rot)):
-                ex[k][st].append((raw, dec))
-        exact_ok = all(r == 1.0 and d == 1.0 for e in ex for v in e.values() for r, d in v)
+        exact_ok = all(raw == 1.0 and dec == 1.0 for res in out[len(keys):] for _, raw, dec, _ in res)
     print("\nunit  kind           |0_L>          |1_L>          |+_L>          |-_L>          logical Z  logical X")
     recs = []
     cmps = [{s: shor9_compare(hists[k][s], _local_unit(u)[1], s) for s in SHOR9_STATES}
@@ -3609,7 +3701,8 @@ def cmd_shor9(a):
         raise SystemExit("shor9: --size must be 3 or more (3 = Shor-9)")
     gpu = bool(a.gpu)
     t0 = time.time()
-    results, geo = shor9_bench(a.shots, gpu=gpu, exact=not a.no_exact, repeats=a.repeats, m=m)
+    results, geo, workers = shor9_bench(a.shots, gpu=gpu, exact=not a.no_exact, repeats=a.repeats, m=m,
+                                        jobs=getattr(a, "jobs", 1))
     gs = ", ".join(f"{k}={v}" for k, v in geo.items())
     if m % 2 == 0:
         print(f"# --size {m}: patch_blocks needs whole blocks inside each patch, and {m * (m - 1) // 2} bulk "
@@ -3617,7 +3710,8 @@ def cmd_shor9(a):
     ver = qrack_versions()
     print(f"Shor-{m * m} on ACE ({m}x{m}, {gs}), {a.shots} shots per logical state, "
           f"{'OpenCL' + (' (QRACK_OCL_SYNC=1)' if os.environ.get('QRACK_OCL_SYNC') == '1' else '') if gpu else 'CPU'}"
-          + (f", {a.repeats} fresh backends per state (means)" if a.repeats > 1 else "") + f"; {ver}")
+          + (f", {a.repeats} fresh backends per state (means)" if a.repeats > 1 else "")
+          + (f", {workers} processes" if workers > 1 else "") + f"; {ver}")
     print("success rate per logical state as raw / decoded  (1.0 perfect, 0.5 no logical information); "
           "'vs exact': total variation distance to the exact distribution (floor: exact samples of the same size), "
           "share of impossible outcomes, the most frequent of those (blocks, leader first; x = decoder fails, "
@@ -6456,6 +6550,11 @@ def main():
                     help="fresh ACE backends per logical state (default 1, as the original script); results "
                          "differ from backend to backend by more than shot noise, so use 5-10 for a mean")
     s9.add_argument("--no-exact", dest="no_exact", action="store_true", help="skip the exact QrackSimulator reference")
+    s9.add_argument("--jobs", type=int, default=1,
+                    help="worker processes, one core each (default 1; 0 = every core): one task per logical state "
+                         "and fresh backend (x layouts, or x rotations with --register), and the exact reference's "
+                         "shots in chunks; a backend's shots stay in one task. With --gpu all workers share the "
+                         "one OpenCL device (a clvk die: keep it to a few)")
     s9.add_argument("--out", default=None, help="append one JSON record per layout (per unit with --register)")
     s9.add_argument("--register", default=None,
                     help="tile Shor-9 units over this whole register (release, nighthawk2p45, nighthawk61r2, "

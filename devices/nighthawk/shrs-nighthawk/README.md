@@ -348,6 +348,7 @@ Every layout (and every unit with `--register`) is also compared outcome by outc
 | `--gpu` | off | ACE and the reference on OpenCL: the device `QRACK_OCL_DEFAULT_DEVICE` names among the ICDs the loader sees (a clvk V340 die, or PoCL's CPU device with `OCL_ICD_VENDORS` pointing at a directory holding `pocl.icd`) |
 | `--ocl-sync` | off | with `--gpu`: `QRACK_OCL_SYNC=1` (Qrack ≥ 10.13.2, §5.3). An OpenCL run whose exact reference is not 1.0 everywhere stops with an error and records nothing |
 | `--no-exact` | off | skip the exact `QrackSimulator` reference |
+| `--jobs` | 1 | worker processes, one core each; 0 = every core. One task per logical state × fresh backend (× layout, or × rotation with `--register`); a backend's shots stay in its task. The exact reference's shots split into chunks over fresh simulators (same state, same distribution). Workers inherit `QRACK_OCL_SYNC` and the clvk isolation; with `--gpu` they share one device |
 | `--out FILE` | — | append one JSON record per layout (per unit with `--register`), with the distribution comparison per logical state |
 | `--register NAME` | — | tile units over a whole register instead (below) |
 | `--max-tiles` | all | with `--register`: at most this many units |
@@ -623,7 +624,7 @@ python3 nighthawk_qrack.py danmodel --in dan_hamming_*.jsonl --csv dan_hamming_v
 python3 nighthawk_qrack.py hamming --csv dan_hamming_ladder.csv
 
 # Shor's 9-qubit code on a 3 x 3 two-patch ACE register (RESULTS §10.3): 10 fresh backends per state
-python3 nighthawk_qrack.py shor9 --shots 8192 --repeats 10 --out shor9.jsonl
+python3 nighthawk_qrack.py shor9 --shots 8192 --repeats 10 --jobs 0 --out shor9.jsonl      # every core
 for m in 4 5 6; do python3 nighthawk_qrack.py shor9 --size $m --shots 4096 --repeats 5 --out shor9.jsonl; done
 # the same on PoCL (OpenCL on the CPU; Qrack >= 10.13.2): a directory holding pocl.icd
 OCL_ICD_VENDORS=/path/to/pocl-icd-dir python3 nighthawk_qrack.py shor9 --gpu --ocl-sync --size 4 --shots 4096 --repeats 5 --out shor9_pocl.jsonl
