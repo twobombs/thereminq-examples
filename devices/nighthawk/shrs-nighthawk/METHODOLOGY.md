@@ -119,7 +119,7 @@ Registers other than the release follow the release's construction code:
 | Engine | Construction | Gates |
 |---|---|---|
 | exact | `QrackSimulator(n, is_gpu = not --cpu)` | `mtrx` for single-qubit gates, `mcz` for CZ |
-| ACE | `QrackAceBackend(size, long_range_columns = lrc, long_range_rows = lrr, is_torus, is_gpu, is_host_pointer, …)`; only non-default switches are passed (`is_boundary_repetition_code`, `is_error_detection`, `is_crossbars`) | logical qubit q acts on ACE site `site[q]` from the placement (§4); `u` for single-qubit gates, `cz`, Paulis by name |
+| ACE | `QrackAceBackend(size, long_range_columns = lrc, long_range_rows = lrr, is_torus, is_gpu, is_host_pointer, …)`; all three switches passed explicitly (`is_boundary_repetition_code` off, `is_error_detection` on, `use_crossbars` on unless a flag says otherwise; PyQrack 2.29 changed its own boundary-code default to on); only non-default ones enter the config tag | logical qubit q acts on ACE site `site[q]` from the placement (§4); `u` for single-qubit gates, `cz`, Paulis by name |
 | ACE reset | measure all sites (`m_all`), apply X where the outcome was 1: back to \|0…0⟩ without reallocating device buffers | — |
 | ACE rebuild | after a C++ exception the backend is deleted and constructed again with the same arguments | — |
 | exact reference (`fxeb`) | a separate `QrackSimulator(n)` running the same gates; all 2ⁿ probabilities copied into one NumPy buffer of Qrack's real type via `OutProbs` | — |
@@ -283,7 +283,8 @@ By Claude and Dan Strano: one logical qubit of Shor's [[m², 1, m]] code, the ou
 | whole register (`--register`) | units on disjoint m × m squares of the register's sites, leaders on the middle column or row, trees along rows and columns from the middle outwards (all encoder CXs nearest-neighbour couplers of the register); CP-SAT maximises their number; all in one circuit on the register's ACE preset; states rotated over units in 4 runs; each unit sampled on its own qubits; classified by the regions of its qubits and the ACE class (exact, replica, cross) of each encoder CX |
 | distribution | each unit's outcomes against the exact distribution, uniform over the outcomes the state can give (Z basis: 2^(m−1), every block all-equal with the right parity of block values; X basis: 2^(m(m−1)), every block's parity the logical sign), checked against a numpy state vector for m = 3, 4 (selftest [13]): TVD = ½ Σ \|q − p\|, its floor = mean TVD of 40 exact samples of the same size, the share of outcomes with p = 0, and the most frequent of those |
 | OpenCL | `--gpu` runs ACE and the reference on the OpenCL device `QRACK_OCL_DEFAULT_DEVICE` selects: a clvk die, or PoCL's CPU device (`OCL_ICD_VENDORS` pointing at `pocl.icd`); `--ocl-sync` sets `QRACK_OCL_SYNC=1` (Qrack ≥ 10.13.2). A wrong exact reference stops the run and nothing is recorded |
-| versions | every result carries pyqrack's and the Qrack library's version (`qrack` in the record): ACE's seam results differ between Qrack 10.13.1 and 10.13.2 |
+| versions | every result carries PyQrack's and the Qrack library's version (`qrack`) and `boundary_rep`. ACE is PyQrack's Python code: its results follow the PyQrack version and the boundary code, not the library |
+| boundary code | `--ace-boundary-rep`: `is_boundary_repetition_code=True` (default off, passed explicitly) |
 | sampling width | `QrackSimulator.measure_shots` and `m_all` return bits 0–31 only (PyQrack 2.28.1): above 32 qubits the exact reference draws each shot from a clone, qubit by qubit; registers are sampled per unit |
 
 ### 6.7 Patched and full

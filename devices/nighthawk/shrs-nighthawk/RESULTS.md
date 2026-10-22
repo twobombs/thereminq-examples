@@ -620,21 +620,38 @@ Shor-16 units tiled over whole registers (`--register --size 4`, 512 shots × 1 
 - **A bigger code does not buy back what the seam takes.** On the standalone register every inner block of `seam_leaders` crosses the seam, and its logical X falls with size (0.67, 0.61, 0.55, 0.53 from Shor-9 to Shor-36) while Z stays at 0.5: more qubits per block means more replica CXs per block, and the seam's loss is not the independent single-qubit error the larger distance corrects. With the outer layer crossing (`patch_blocks`, odd m) logical Z stays exact and X stays at no information at every size.
 - **Placed on the chip, Shor-16 tracks its replica CXs** as Shor-9 does: 1–2 replica CXs leave both bases at 1.000; 4 cost 0.04 in Z and 0.17–0.19 in X; the unit wholly inside one patch shows the sampler's whole-block flips again (X 0.951).
 
-Qrack version and OpenCL (PoCL 3.0, CPU device, in the container; decoded logical Z / X, 1024 shots; standalone register):
+PyQrack version, ACE's boundary code and OpenCL. `QrackAceBackend` is PyQrack's Python code on top of the Qrack library, and PyQrack 2.29 changed its default `is_boundary_repetition_code` from off to on, with a new implementation (the seam replica that received the real gate decides; ACE's seam error detection is skipped while it is on). Library and wrapper swapped with `PYQRACK_SHARED_LIB_PATH` (Shor-9, standalone register, CPU, 2048 shots, 6 backends per state; decoded logical Z / X):
 
-| Run | Qrack | Shor-9 `seam_leaders` | Shor-9 `patch_blocks` | Shor-16 `seam_leaders` | Shor-36 `seam_leaders` | Exact reference | Seconds (9 / 16 / 36) |
-|---|---|---|---|---|---|---|---|
-| CPU | 10.13.1 (pyqrack 2.28.1) | 0.499 / 0.669 (6 backends) | 1.000 / 0.486 | 0.496 / 0.614 | 0.493 / 0.528 | 1.000 | 14 / 6 / 531 |
-| CPU | 10.13.2 (pyqrack 2.29.4) | 0.510 / 0.875 (4 backends: X 0.500–1.000) | 1.000 / 0.511 | 0.505 / 0.529 | 0.487 / 0.512 | 1.000 | 7 / 5 / 139 |
-| PoCL, `--gpu --ocl-sync` | 10.13.2 | 0.489 / 1.000 (1 backend) | 1.000 / 0.561 | 0.517 / 0.536 | 0.482 / 0.493 | 1.000 | 8 / 12 / 94 |
-| PoCL, `--gpu` (asynchronous) | 10.13.2 | 0.513 / 1.000 | 1.000 / 0.550 | C++ exception | C++ exception | — | 7 / — / — |
-| PoCL, `--gpu` | 10.13.1 | 0.501 / 0.681 | 1.000 / 0.511 | exact reference wrong (\|−_L⟩ 0.53, then 0.00): stopped | — | — | 15 / — / — |
+| PyQrack | Qrack library | Boundary code | `seam_leaders` | `seam_leaders` X, backend to backend | `patch_blocks` |
+|---|---|---|---|---|---|
+| 2.28.1 | 10.13.2 | off (its default) | 0.495 / 0.678 | 0.622–0.711 | 1.000 / 0.507 |
+| 2.28.1 | 10.13.2 | on | 0.502 / 0.648 | 0.556–0.698 | 1.000 / 0.500 |
+| 2.29.4 | 10.13.2 | off | 0.496 / 0.663 | 0.634–0.708 | 1.000 / 0.515 |
+| 2.29.4 | 10.13.2 | on (its default) | 0.491 / 0.833 | 0.500–1.000 | 1.000 / 0.517 |
+| 2.29.4 | 10.13.1 | on (its default) | 0.503 / 0.833 | 0.500–1.000 | 1.000 / 0.506 |
 
-`nighthawk61r2` units under 10.13.2 (CPU, 1024 shots): the in-patch units still flip whole blocks in 5.2–6.7 % of their Z-basis shots (X 0.934–0.947); the seam units decode to 1.000 in both bases, unit 2 with 9.5–10.3 % single-bit impossible outcomes that the inner code removes (10.13.1: X 0.922).
+The EPYC (Qrack 10.13.2 library under PyQrack 2.28.1, boundary code off; CPU, 16 processes per job, 4096 shots × 10 backends per state; a range where the job ran more than once):
 
-- **PoCL runs `shor9` correctly with `--ocl-sync` on Qrack 10.13.2,** at every size, matching the CPU of the same version within ACE's backend-to-backend spread. Without the sync switch, or on 10.13.1, the asynchronous-dispatch defect of §12 returns: C++ exceptions, or an exact reference that is wrong. The run now stops on a wrong exact reference and records nothing.
-- **ACE's seam behaviour depends on the Qrack version.** Between 10.13.1 and 10.13.2 Shor-9 `seam_leaders` logical X moved from 0.67 to 0.875, with single backends now landing at 1.000 or at 0.5; seam units on the 61-qubit register improved. Every `shor9` result names its versions (header line and `qrack` in the record); the tables above this one are 10.13.1.
-- **The in-patch whole-block flips persist in 10.13.2,** so they are not tied to the version that changed the seam.
+| Code | Runs | `seam_leaders` Z | `seam_leaders` X | `patch_blocks` Z / X | Exact reference | Seconds per run |
+|---|---|---|---|---|---|---|
+| Shor-9 | 3 | 0.488–0.508 | 0.651–0.679 | 1.000 / 0.496–0.513 | 1.000 | 351–1122 |
+| Shor-16 | 3 | 0.501–0.514 | 0.590–0.601 | — (even m) | 1.000 | 312–830 |
+| Shor-25 | 1 | 0.503 | 0.542 | 1.000 / 0.496 | 1.000 | 695 |
+| Shor-36 | 1 | 0.493 | 0.527 | — (even m) | 1.000 | 4956 |
+
+OpenCL validity (PoCL 3.0, CPU device, in the container; 1024 shots; the 10.13.2 rows under PyQrack 2.29.4, so with its boundary code on):
+
+| Run | Qrack library | Shor-9 `seam_leaders` | Shor-16 `seam_leaders` | Shor-36 `seam_leaders` | Exact reference | Seconds (9 / 16 / 36) |
+|---|---|---|---|---|---|---|
+| CPU | 10.13.2 | 0.510 / 0.875 (4 backends: X 0.500–1.000) | 0.505 / 0.529 | 0.487 / 0.512 | 1.000 | 7 / 5 / 139 |
+| PoCL, `--gpu --ocl-sync` | 10.13.2 | 0.489 / 1.000 (1 backend) | 0.517 / 0.536 | 0.482 / 0.493 | 1.000 | 8 / 12 / 94 |
+| PoCL, `--gpu` (asynchronous) | 10.13.2 | 0.513 / 1.000 | C++ exception | C++ exception | — | 7 / — / — |
+| PoCL, `--gpu` | 10.13.1 | 0.501 / 0.681 | exact reference wrong (\|−_L⟩ 0.53, then 0.00): stopped | — | — | 15 / — / — |
+
+- **The earlier tables hold on the current library.** With the boundary code off, Qrack 10.13.2 gives Shor-9 to Shor-36 `seam_leaders` X of 0.65–0.68, 0.59–0.60, 0.54 and 0.53 on the EPYC against 0.67, 0.61, 0.55 and 0.53 above; the library version does not move ACE's results.
+- **PyQrack 2.29's boundary code is what lifts the seam.** It takes Shor-9 `seam_leaders` X from 0.66 to 0.83, each backend landing at 1.000 or 0.5, and the seam units of `nighthawk61r2` from 0.92 to 1.000; PyQrack 2.28.1's boundary code changes nothing. At Shor-36 it does not help (0.512 against 0.528). The script now passes all three ACE switches explicitly (`ace_backend`), off unless `--ace-boundary-rep`, so a run means the same on either PyQrack; records carry `boundary_rep` and both versions.
+- **The in-patch whole-block flips are in both PyQrack versions,** with the boundary code on or off: they come from ACE's sampling, not from the seam handling.
+- **PoCL runs `shor9` correctly with `--ocl-sync` on the 10.13.2 library,** at every size, within ACE's backend-to-backend spread of the CPU. Without the sync switch, or on 10.13.1, the asynchronous-dispatch defect of §12 returns: C++ exceptions, or an exact reference that is wrong. The run stops on a wrong exact reference and records nothing.
 
 - **The test spans the chip.** 4 units on 36 of `nighthawk61r2`'s 61 qubits, 7 units on 63 of `fav5p112`'s 112 (the 3 × 3 squares that fit between the holes), all in one circuit; Qrack keeps the unentangled units apart, so memory stays small (61 qubits: 0.05 GB peak).
 - **Seam load decides, unit by unit.** Units with one replica CX keep both logical bases; 3–4 replica CXs cost up to 0.1; the unit sitting on five seam qubits with seven replica CXs falls to Z 0.73 and X 0.44.
@@ -820,8 +837,9 @@ Our Nighthawk two-patch registers, 3 seam qubits each (release prefixes; `nn_qab
 | Hamming ladder n = 45–57 and `nighthawk61r2` (E18) | EPYC: README §7 recipe; 57 needs 64 GiB patches, 61 RAM + swap (≈ 385 GiB) |
 | VQE ladder n = 28–61 (E19) | EPYC: README §7 recipe; numpy circuit reference to 28–30 there (`--vqe-exact-max`, 4–16 GiB), Lanczos E₀ to 26–28 |
 | `QrackSimulator.measure_shots` beyond 31 qubits (PyQrack 2.28.1) | returns bits 0–31 only (a qubit above 31 reads 0; `QrackAceBackend` returns all); reproducer: `QrackSimulator(40)`, `x(35)`, `measure_shots(range(40), 3)` gives 0. `shor9` samples per unit; the exact engine now refuses to draw shots above 32 qubits instead of returning truncated ones. To report upstream |
-| ACE sampler, unit inside one patch (E20) | odd block parities (whole-block flips) ≈ 5–7 % with all-exact CXs, in Qrack 10.13.1 and 10.13.2; to report upstream with the `shor9 --register nighthawk61r2` units 0, 1 |
-| E20 on Qrack 10.13.2 | the earlier tables are 10.13.1; rerun on the EPYC's version with `--repeats 10` (seam_leaders lands at 1.000 or 0.5 per backend) |
+| ACE sampler, unit inside one patch (E20) | odd block parities (whole-block flips) ≈ 5–7 % with all-exact CXs, in PyQrack 2.28.1 and 2.29.4, boundary code on or off; to report upstream with the `shor9 --register nighthawk61r2` units 0, 1 |
+| E20 with PyQrack 2.29's boundary code | `shor9 --ace-boundary-rep` under PyQrack ≥ 2.29 on the EPYC, Shor-9 to Shor-36 and the registers, `--repeats 10` (each backend lands at 1.000 or 0.5) |
+| `run` under PyQrack ≥ 2.29 | earlier versions of the script passed only non-default ACE switches, so under 2.29 a `run` without `--ace-boundary-rep` would have had the boundary code on; every ladder point so far is PyQrack 2.28.1 (off) |
 | Hamming ladder 16–32 with 10 circuits per point | 6 measured in the container (36–45 have 10 on the EPYC) |
 | Hamming, 45 qubits: 9 failed points (worker deaths, C++ exceptions) and 4 NaN records | rerun with `--retry-failed` |
 | Hamming, C++ exceptions and worker deaths still open | 36: d = 10 λ = 5 i8 (2 workers died); 49: d = 8 λ = 5 i8, d = 10 λ = 1 i2, λ = 3 i1 and i3, λ = 5 i0; 57: d = 6 λ = 1 i1. Retryable with `--retry-failed`; NaN points may also pass on a retry |

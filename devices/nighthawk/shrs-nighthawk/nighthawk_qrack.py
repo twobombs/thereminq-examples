@@ -808,13 +808,32 @@ class ExactEngine:
 _TWO_PATCH = {}
 
 
+# the script's defaults, passed explicitly by ace_backend (PyQrack's own defaults differ between versions)
 ACE_OPTS = (("ace_boundary_rep", "is_boundary_repetition_code", False),
             ("ace_error_detection", "is_error_detection", True),
             ("ace_crossbars", "use_crossbars", True))
 
 
+_ACE_PARAMS = {}
+
+
+def ace_backend(*args, **kw):
+    """QrackAceBackend with every ACE_OPTS option passed explicitly (the script's default unless the caller
+    gives one), for each option this PyQrack build has. PyQrack changes these defaults between versions
+    (2.29 turned is_boundary_repetition_code on), so a run means the same thing on any version; config tags
+    keep naming only the options that differ from ACE_OPTS."""
+    from pyqrack import QrackAceBackend
+    if "p" not in _ACE_PARAMS:
+        import inspect
+        _ACE_PARAMS["p"] = set(inspect.signature(QrackAceBackend.__init__).parameters)
+    for _, k, d in ACE_OPTS:
+        if k in _ACE_PARAMS["p"]:
+            kw.setdefault(k, d)
+    return QrackAceBackend(*args, **kw)
+
+
 def ace_opts(a):
-    """QrackAceBackend keyword arguments that differ from Qrack's defaults (only those
+    """QrackAceBackend keyword arguments that differ from the script's defaults (ACE_OPTS) (only those
     are passed, so builds without an option work as long as it is not requested)."""
     return {kw: bool(getattr(a, attr, dflt)) for attr, kw, dflt in ACE_OPTS
             if a is not None and bool(getattr(a, attr, dflt)) != dflt}
@@ -840,7 +859,7 @@ def ace_register_geometry(size, lrc, lrr, torus, opts=None):
     register, read from its own _unpack() like nn_qab.py's bulk_to_boundary_ratio()."""
     from collections import Counter
     from pyqrack import QrackAceBackend
-    s = QrackAceBackend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False,
+    s = ace_backend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False,
                         **(opts or {}))
     sizes = Counter(sid for lq in range(s.num_qubits()) for sid, _ in s._unpack(lq))
     bnd = sum(1 for lq in range(s.num_qubits()) if len(s._unpack(lq)) > 1)
@@ -944,14 +963,14 @@ def ace_plan(size, toruses=(False, True)):
     if key in _ACE_PLAN:
         return _ACE_PLAN[key]
     from pyqrack import QrackAceBackend
-    probe = QrackAceBackend(size, is_gpu=False)
+    probe = ace_backend(size, is_gpu=False)
     C, R = probe.get_row_length(), probe.get_column_length()
     del probe
     cands = sorted(((t, lrc, lrr) for t in toruses for lrr in range(R + 1) for lrc in range(C + 1)),
                    key=lambda x: (x[1] + x[2], x[1], x[0]))
     rows, seen = [], set()
     for torus, lrc, lrr in cands:
-        s = QrackAceBackend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False)
+        s = ace_backend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False)
         unpack = [tuple(tuple(e) for e in s._unpack(q)) for q in range(s.num_qubits())]
         sig = (torus, tuple(unpack))
         if sig not in seen:
@@ -1322,7 +1341,7 @@ def ace_coupling_edges(row, size, torus, opts, exclude):
     edges = None
     try:
         from pyqrack import QrackAceBackend
-        b = QrackAceBackend(size, long_range_columns=row["lrc"], long_range_rows=row["lrr"], is_torus=torus,
+        b = ace_backend(size, long_range_columns=row["lrc"], long_range_rows=row["lrr"], is_torus=torus,
                             is_gpu=False, **(opts or {}))
         if hasattr(b, "get_logical_coupling_map"):
             edges = {tuple(sorted(map(int, e))) for e in b.get_logical_coupling_map() if e[0] != e[1]}
@@ -1595,7 +1614,7 @@ def layout_row(size, lrc, lrr, torus, opts=None):
     """ace_plan's entry for one layout (the identical layout with the smallest lrc+lrr
     if this one was folded into it), for the given non-default ACE options."""
     from pyqrack import QrackAceBackend
-    s = QrackAceBackend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False,
+    s = ace_backend(size, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False,
                         **(opts or {}))
     unpack = [tuple(tuple(e) for e in s._unpack(q)) for q in range(s.num_qubits())]
     widths = ace_sim_widths(s)
@@ -1665,7 +1684,7 @@ class AceEngine:
         self.coupler_classes = (self.stats["exact"], self.stats["replica"], self.stats["cross"])
         from pyqrack import QrackAceBackend
         # ACE on rusticl/Vega10 hung compute rings and forced GPU resets: CPU unless --ace-gpu
-        self._make_sim = lambda: QrackAceBackend(
+        self._make_sim = lambda: ace_backend(
             self.size, long_range_columns=self.lrc, long_range_rows=self.lrr, is_torus=torus,
             is_gpu=(not a.cpu) and getattr(a, "ace_gpu", False),
             is_host_pointer=getattr(a, "ace_host_pointer", False), **self.opts)
@@ -1747,7 +1766,7 @@ class AceEngine:
             raise RuntimeError(f"--ace-gpu shots: internal simulators up to {widest} qubits are too wide to copy "
                                f"to the CPU (limit {CPU_TWIN_MAX_QB}); use --mirror-estimator prob (mirror) "
                                f"or --ace-gpu-shots")
-        twin = QrackAceBackend(self.size, long_range_columns=self.lrc, long_range_rows=self.lrr,
+        twin = ace_backend(self.size, long_range_columns=self.lrc, long_range_rows=self.lrr,
                                is_torus=self.torus, is_gpu=False, **self.opts)
         if len(twin.sim) != len(self.sim.sim):
             raise RuntimeError(f"CPU copy has {len(twin.sim)} simulators, the GPU backend {len(self.sim.sim)}")
@@ -1755,7 +1774,7 @@ class AceEngine:
             if g.num_qubits() != c.num_qubits():
                 raise RuntimeError(f"CPU copy simulator width {c.num_qubits()} != GPU {g.num_qubits()}")
             c.in_ket(g.out_ket())
-        # ACE keeps classical state next to the simulators, which QrackAceBackend(to_clone=...)
+        # ACE keeps classical state next to the simulators, which ace_backend(to_clone=...)
         # copies and a fresh backend does not: the LHV proxy of every boundary qubit (used by
         # prob/m/force_m through _correct) and the logical -> (simulator, index) map
         for k, lhv in getattr(self.sim, "_lhv", {}).items():
@@ -2400,7 +2419,7 @@ def ace_geometry(lay, lrc, lrr, torus):
     as built, read from QrackAceBackend._unpack() the way nn_qab.py measures it."""
     from pyqrack import QrackAceBackend
     R, C = lay.grid
-    sim = QrackAceBackend(R * C, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False)
+    sim = ace_backend(R * C, long_range_columns=lrc, long_range_rows=lrr, is_torus=torus, is_gpu=False)
     bnd = {q for q in range(R * C) if len(sim._unpack(q)) > 1}
     del sim
     bulk, seen, comps = set(range(R * C)) - bnd, set(), []
@@ -3152,7 +3171,7 @@ def shor_ace_geometry(m):
     for lrc in range(1, m + 2):
         for lrr in range(1, m + 4):
             try:
-                s = QrackAceBackend(m * m, long_range_columns=lrc, long_range_rows=lrr, is_torus=False, is_gpu=False)
+                s = ace_backend(m * m, long_range_columns=lrc, long_range_rows=lrr, is_torus=False, is_gpu=False)
             except Exception:
                 continue
             seams, patches = _ace_split(s, m * m)
@@ -3344,10 +3363,9 @@ def shor_chunks(shots, k):
     return [shots // k + (1 if i < shots % k else 0) for i in range(k)]
 
 
-def _shor9_ace_task(n, geo, gpu, u, s, shots):
-    from pyqrack import QrackAceBackend
+def _shor9_ace_task(n, geo, gpu, u, s, shots, brep=False):
     h = collections.Counter()
-    r = shor9_run(QrackAceBackend(n, is_gpu=gpu, **geo), u, s, shots, h)
+    r = shor9_run(ace_backend(n, is_gpu=gpu, is_boundary_repetition_code=brep, **geo), u, s, shots, h)
     return r, h
 
 
@@ -3356,14 +3374,13 @@ def _shor9_exact_task(n, gpu, u, s, shots):
     return shor9_run(QrackSimulator(n, is_gpu=gpu), u, s, shots), shots
 
 
-def shor9_bench(shots, gpu=False, exact=True, repeats=1, m=3, jobs=1):
+def shor9_bench(shots, gpu=False, exact=True, repeats=1, m=3, jobs=1, brep=False):
     """{layout: {"unit", state: (raw, decoded), "runs", "hist"}} for both ACE layouts, each state on `repeats`
     fresh backends (mean over them), plus the exact reference (QrackSimulator, seam_leaders), where every
     entry must be 1.0. jobs > 1 (0 = every core): the backends, and chunks of the exact shots, in a process
-    pool. Returns (results, geo, workers)."""
-    from pyqrack import QrackAceBackend
+    pool. brep: ACE's is_boundary_repetition_code. Returns (results, geo, workers)."""
     geo, n = shor_ace_geometry(m), m * m
-    probe = QrackAceBackend(n, is_gpu=gpu, **geo)
+    probe = ace_backend(n, is_gpu=gpu, **geo)
     lays = shor9_layouts(probe, m)
     for u in lays.values():
         shor9_check_coupling(probe, shor9_encoder(u))
@@ -3374,7 +3391,7 @@ def shor9_bench(shots, gpu=False, exact=True, repeats=1, m=3, jobs=1):
     k_ex = max(1, -(-workers // len(SHOR9_STATES)))
     ex_keys = [(s, c) for s in SHOR9_STATES for c in shor_chunks(shots, k_ex)] if exact else []
     try:
-        out = shor_pool_map(pool, [(_shor9_ace_task, (n, geo, gpu, lays[name], s, shots)) for name, s, _ in keys]
+        out = shor_pool_map(pool, [(_shor9_ace_task, (n, geo, gpu, lays[name], s, shots, brep)) for name, s, _ in keys]
                             + [(_shor9_exact_task, (n, gpu, lays["seam_leaders"], s, c)) for s, c in ex_keys])
     finally:
         if pool is not None:
@@ -3593,7 +3610,8 @@ def cmd_shor9_register(a):
     if not tiles:
         raise SystemExit(f"shor9: no {m} x {m} square of {reg} is free of holes")
     ra = _RUN_PARSER["r"].parse_args(["--backend", "ace", "--register", reg] + (["--repo", a.repo] if a.repo else [])
-                                     + (["--ace-gpu"] if a.gpu else ["--cpu"]))
+                                     + (["--ace-gpu"] if a.gpu else ["--cpu"])
+                                     + (["--ace-boundary-rep"] if getattr(a, "ace_boundary_rep", False) else []))
     ra.cmd = "run"
     THETA_DIST["mode"] = ra.theta
     apply_register_preset(ra, lay)
@@ -3623,7 +3641,8 @@ def cmd_shor9_register(a):
           f"{row['lrc']}x{row['lrr']}{' torus' if row['torus'] else ''} preset placement, {a.shots} shots, "
           f"{a.repeats} fresh backend(s) per rotation, "
           f"{'OpenCL' + (' (QRACK_OCL_SYNC=1)' if os.environ.get('QRACK_OCL_SYNC') == '1' else '') if a.gpu else 'CPU'}"
-          f"{f', {workers} processes' if workers > 1 else ''}; {ver}")
+          f"{f', {workers} processes' if workers > 1 else ''}"
+          f"{', boundary repetition code' if getattr(a, 'ace_boundary_rep', False) else ''}; {ver}")
     print("unit  rows   cols  leaders  regions                       encoder CX exact/replica/cross")
     for d in info:
         reg_s = ", ".join(f"{k} {v}" for k, v in sorted(d["regions"].items()))
@@ -3661,6 +3680,7 @@ def cmd_shor9_register(a):
               + f"   {z:.3f}      {x:.3f}")
         recs.append(dict(test="shor9", size=m, code=f"shor{m * m}", register=reg, shots=a.shots, repeats=a.repeats,
                          qrack=ver, ocl_sync=os.environ.get("QRACK_OCL_SYNC") == "1",
+                         boundary_rep=bool(getattr(a, "ace_boundary_rep", False)),
                          device="gpu" if a.gpu else "cpu", logical_z=z, logical_x=x, **d,
                          distribution={s: cm[s] for s in SHOR9_STATES},
                          **{f"raw_{s}": m_[s][0] for s in SHOR9_STATES},
@@ -3702,7 +3722,7 @@ def cmd_shor9(a):
     gpu = bool(a.gpu)
     t0 = time.time()
     results, geo, workers = shor9_bench(a.shots, gpu=gpu, exact=not a.no_exact, repeats=a.repeats, m=m,
-                                        jobs=getattr(a, "jobs", 1))
+                                        jobs=getattr(a, "jobs", 1), brep=bool(getattr(a, "ace_boundary_rep", False)))
     gs = ", ".join(f"{k}={v}" for k, v in geo.items())
     if m % 2 == 0:
         print(f"# --size {m}: patch_blocks needs whole blocks inside each patch, and {m * (m - 1) // 2} bulk "
@@ -3711,7 +3731,8 @@ def cmd_shor9(a):
     print(f"Shor-{m * m} on ACE ({m}x{m}, {gs}), {a.shots} shots per logical state, "
           f"{'OpenCL' + (' (QRACK_OCL_SYNC=1)' if os.environ.get('QRACK_OCL_SYNC') == '1' else '') if gpu else 'CPU'}"
           + (f", {a.repeats} fresh backends per state (means)" if a.repeats > 1 else "")
-          + (f", {workers} processes" if workers > 1 else "") + f"; {ver}")
+          + (f", {workers} processes" if workers > 1 else "")
+          + (", boundary repetition code" if getattr(a, "ace_boundary_rep", False) else "") + f"; {ver}")
     print("success rate per logical state as raw / decoded  (1.0 perfect, 0.5 no logical information); "
           "'vs exact': total variation distance to the exact distribution (floor: exact samples of the same size), "
           "share of impossible outcomes, the most frequent of those (blocks, leader first; x = decoder fails, "
@@ -3734,7 +3755,7 @@ def cmd_shor9(a):
             shor9_print_dist("vs exact", cm)
         recs.append(dict(test="shor9", size=m, code=f"shor{m * m}", ace=geo, layout=name, blocks=row["blocks"],
                          qrack=ver, ocl_sync=os.environ.get("QRACK_OCL_SYNC") == "1",
-                         shots=a.shots, repeats=a.repeats, runs=row.get("runs"), **({"distribution": cm} if cm else {}),
+                         boundary_rep=bool(getattr(a, "ace_boundary_rep", False)), shots=a.shots, repeats=a.repeats, runs=row.get("runs"), **({"distribution": cm} if cm else {}),
                          device="gpu" if gpu else "cpu", logical_z=z, logical_x=x,
                          **{f"raw_{s}": row[s][0] for s in SHOR9_STATES},
                          **{f"decoded_{s}": row[s][1] for s in SHOR9_STATES}))
@@ -6112,7 +6133,7 @@ def cmd_selftest(a):
     # [13] shor9: both layouts read off ACE's own seam set use only couplings in its logical coupling map, and on
     # the exact simulator every logical state decodes (and reads raw) with success 1.0
     from pyqrack import QrackAceBackend
-    probe = QrackAceBackend(SHOR9_WIDTH, is_gpu=False, **SHOR9_ACE)
+    probe = ace_backend(SHOR9_WIDTH, is_gpu=False, **SHOR9_ACE)
     lays9 = shor9_layouts(probe)
     for blocks in lays9.values():
         shor9_check_coupling(probe, shor9_encoder(blocks))
@@ -6325,7 +6346,8 @@ def main():
     r.add_argument("--transpile-calls", dest="transpile_calls", type=int, default=0,
                    help=f"VF2Layout call_limit: bound on the isomorphism search (0 = {TRANSPILE_CALLS})")
     r.add_argument("--ace-boundary-rep", dest="ace_boundary_rep", action="store_true",
-                   help="ace: is_boundary_repetition_code=True (repetition code on seam qubits; Qrack default off)")
+                   help="ace: is_boundary_repetition_code=True (the seam's real-gated replica decides; default off, passed "
+                        "explicitly, since PyQrack 2.29 made it its own default)")
     r.add_argument("--no-ace-error-detection", dest="ace_error_detection", action="store_false",
                    help="ace: is_error_detection=False (Qrack default on: detect-and-post-select at the seams)")
     r.add_argument("--no-ace-crossbars", dest="ace_crossbars", action="store_false",
@@ -6550,6 +6572,9 @@ def main():
                     help="fresh ACE backends per logical state (default 1, as the original script); results "
                          "differ from backend to backend by more than shot noise, so use 5-10 for a mean")
     s9.add_argument("--no-exact", dest="no_exact", action="store_true", help="skip the exact QrackSimulator reference")
+    s9.add_argument("--ace-boundary-rep", dest="ace_boundary_rep", action="store_true",
+                    help="ACE's is_boundary_repetition_code=True (default off, passed explicitly: PyQrack 2.29 made "
+                         "it its own default; with it on, ACE skips its seam error detection)")
     s9.add_argument("--jobs", type=int, default=1,
                     help="worker processes, one core each (default 1; 0 = every core): one task per logical state "
                          "and fresh backend (x layouts, or x rotations with --register), and the exact reference's "

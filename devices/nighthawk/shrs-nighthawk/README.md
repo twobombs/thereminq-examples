@@ -251,7 +251,7 @@ Throughout, the figure compared with the device is a per-cycle decay b = −d ln
 | `--ace-transpile`, `--ace-width`, `--ace-exclude`, `--transpile-engine` | off, —, —, `exact` | §2.2 |
 | `--transpile-allow-cross`, `--transpile-max-width`, `--transpile-max-wide` | off | §2.2 |
 | `--transpile-seed`, `--transpile-trials`, `--transpile-calls` | 0, 2000, 2·10⁶ | VF2 seed and bounds |
-| `--ace-boundary-rep`, `--no-ace-error-detection`, `--no-ace-crossbars` | off, on, on | ACE switches; non-defaults enter the config tag |
+| `--ace-boundary-rep`, `--no-ace-error-detection`, `--no-ace-crossbars` | off, on, on | ACE switches, always passed explicitly (PyQrack 2.29 turned its own boundary-code default on); non-defaults enter the config tag |
 | `--variants SPEC …` | — | several ACE configurations scored against one exact reference (below) |
 | `--cpu`, `--ace-gpu`, `--ref-gpu`, `--ace-gpu-shots`, `--ace-host-pointer` | — | engine placement (§5.2) |
 | `--gtt GB`, `--vram-gb` | off, 8 | VRAM oversubscription (§5.4) |
@@ -348,6 +348,7 @@ Every layout (and every unit with `--register`) is also compared outcome by outc
 | `--gpu` | off | ACE and the reference on OpenCL: the device `QRACK_OCL_DEFAULT_DEVICE` names among the ICDs the loader sees (a clvk V340 die, or PoCL's CPU device with `OCL_ICD_VENDORS` pointing at a directory holding `pocl.icd`) |
 | `--ocl-sync` | off | with `--gpu`: `QRACK_OCL_SYNC=1` (Qrack ≥ 10.13.2, §5.3). An OpenCL run whose exact reference is not 1.0 everywhere stops with an error and records nothing |
 | `--no-exact` | off | skip the exact `QrackSimulator` reference |
+| `--ace-boundary-rep` | off | ACE's `is_boundary_repetition_code`, passed explicitly either way; PyQrack ≥ 2.29's version lifts the seam (RESULTS §10.3) |
 | `--jobs` | 1 | worker processes, one core each; 0 = every core. One task per logical state × fresh backend (× layout, or × rotation with `--register`); a backend's shots stay in its task. The exact reference's shots split into chunks over fresh simulators (same state, same distribution). Workers inherit `QRACK_OCL_SYNC` and the clvk isolation; with `--gpu` they share one device |
 | `--out FILE` | — | append one JSON record per layout (per unit with `--register`), with the distribution comparison per logical state |
 | `--register NAME` | — | tile units over a whole register instead (below) |
