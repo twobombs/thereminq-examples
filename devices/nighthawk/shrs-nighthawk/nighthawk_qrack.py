@@ -3674,7 +3674,8 @@ def shor9_run_args(reg, repo=None, gpu=False, brep=False):
 def shor9_register_map(lay, ra):
     """The register on the lattice as ACE places it: per logical qubit (row, column, region: p<patch> or
     seam) and per coupler its class (exact inside one simulator, replica through a seam qubit's copy,
-    cross between simulators that share no seam). Returns (map, sids, idx); map is what the shor9_map
+    cross between simulators that share no seam), and for a seam qubit the patches it joins. Returns (map,
+    sids, idx, row); map is what the shor9_map
     record stores and nighthawk_graph.py draws."""
     probe = AceEngine(lay, lay.n, ra)
     row = layout_row(probe.size, probe.lrc, probe.lrr, probe.torus, probe.opts)
@@ -3687,7 +3688,9 @@ def shor9_register_map(lay, ra):
         sa, sb = sids[idx[c]], sids[idx[t]]
         return "exact" if len(sa) == 1 and sa == sb else "replica" if sa & sb else "cross"
     C = 10
-    mp = dict(n=lay.n, columns=C, sites=[[q, p // C, p % C, region(q)] for q, p in enumerate(lay.l2p[:lay.n])],
+    # sites: [qubit, row, column, region, the ACE simulators holding it (two or more for a seam qubit)]
+    mp = dict(n=lay.n, columns=C, sites=[[q, p // C, p % C, region(q), sorted(int(x) for x in sids[idx[q]])]
+                                         for q, p in enumerate(lay.l2p[:lay.n])],
               couplers=[[a_, b_, cls(a_, b_)] for a_, b_ in logical_couplers(lay, lay.n)],
               ace=dict(lrc=row["lrc"], lrr=row["lrr"], torus=bool(row["torus"]), width=len(row["unpack"])))
     return mp, sids, idx, row

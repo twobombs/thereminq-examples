@@ -351,7 +351,7 @@ Every layout (and every unit with `--register`) is also compared outcome by outc
 | `--ace-boundary-rep` | off | ACE's `is_boundary_repetition_code`, passed explicitly either way; PyQrack ≥ 2.29's version lifts the seam (RESULTS §10.3) |
 | `--progress` | 30 | seconds between heartbeats: a start line (versions, settings), the plan (tasks, processes), a line per finished task (label, seconds, share done, running, ETA), and when nothing finishes for this long the longest-running task; 0 = off. Follow a log with `tail -f` |
 | `--jobs` | 1 | worker processes, one core each; 0 = every core. One task per logical state × fresh backend (× layout, or × rotation with `--register`); a backend's shots stay in its task. The exact reference's shots split into chunks over fresh simulators (same state, same distribution). Workers inherit `QRACK_OCL_SYNC` and the clvk isolation; with `--gpu` they share one device |
-| `--out FILE` | — | append one JSON record per layout (per unit with `--register`), with the distribution comparison per logical state; with `--register` also one `shor9_map` record (each qubit's lattice row, column and ACE region, each coupler's class) for `nighthawk_graph.py` view 17 |
+| `--out FILE` | — | append one JSON record per layout (per unit with `--register`), with the distribution comparison per logical state; with `--register` also one `shor9_map` record (each qubit's lattice row, column, ACE region and simulators, each coupler's class) for `nighthawk_graph.py` view 17 |
 | `--register NAME` | — | tile units over a whole register instead (below) |
 | `--max-tiles` | all | with `--register`: at most this many units |
 
@@ -446,7 +446,7 @@ An example of the gap is in [RESULTS.md §4](RESULTS.md#4-the-nn_qab-ensemble-e6
 | 14 | `shor9`: decoded logical Z and X against code size per layout and setup (PyQrack version, boundary code, OpenCL); backend-to-backend standard error, every fresh backend as a dot |
 | 15 | `shor9`: per logical state, impossible-outcome share and distance to the exact distribution against its shot-noise floor |
 | 16 | `shor9 --register`: each unit's decoded Z / X and Z-basis impossible share against its encoder CXs through the seam; units matched by their square, pooled over runs |
-| 17 | `shor9 --register` on the lattice, per register, code size and setup: qubits by ACE patch, seam qubits, couplers by class (exact / replica / cross), block leaders, each unit's square filled by min(Z, X) and labelled Z / X / impossible share. Map from the run's `shor9_map` record, else rebuilt (release + PyQrack), else the bare lattice |
+| 17 | `shor9 --register` on the lattice, per register, code size and setup: qubits by ACE patch, seam qubits and the seam lines (a band through neighbouring seam qubits, labelled with the two patches it joins), couplers by class (exact / replica / cross), block leaders, each unit's square filled by min(Z, X) and labelled Z / X / impossible share. Map from the run's `shor9_map` record, else rebuilt (release + PyQrack), else the bare lattice |
 
 Views 8–11 and `--table FILE` (CSV of every point) show one ensemble at a time (`--theta haar|nnqab|all`), since XEB values of different ensembles are not comparable. `--table FILE` also writes `FILE_shor9.csv` (one row per code, layout and setup, one per register unit, with the top wrong patterns) and prints the `shor9` summary. Views 14–16 read `shor9` records from the harvested `*.jsonl` or from `--shor FILE` and need no BlueQubit release; records without `boundary_rep` are taken as PyQrack's own default (on from 2.29).
 

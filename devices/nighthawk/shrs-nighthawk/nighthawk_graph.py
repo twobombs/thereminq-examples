@@ -39,7 +39,7 @@ Figures (one window each; --save writes PNGs too):
  16  shor9 --register: every unit's decoded Z / X and its Z-basis impossible share against
      the encoder CXs through the seam, by placement (one patch, touches seam)
  17  shor9 --register on the lattice: per register, code size and setup, the qubits by ACE
-     patch, seam qubits, couplers by class (exact / replica / cross), block leaders, and each
+     patch, seam qubits and seam lines (labelled with the patches they join), couplers by class (exact / replica / cross), block leaders, and each
      unit's square filled by its weaker logical basis and labelled Z / X / impossible share.
      The map is the run's shor9_map record; older runs' maps are rebuilt (release + PyQrack)
 
@@ -1450,6 +1450,52 @@ def shor_register_map(store, reg):
     return _SHOR_MAPS[reg]
 
 
+SEAM_COLOR = "#7b3294"
+
+
+def draw_seam_line(ax, sites):
+    """The seams as bands: seam qubits joined to their lattice neighbours (diagonals too, since a seam
+    steps across the square lattice) that join the same patches, each seam labelled with those patches
+    (ACE's crossbar simulator, which every seam qubit also lives in, left out).
+    Maps written before the joined patches were stored draw one band through every adjacent seam qubit."""
+    # a seam qubit is held by the patches it joins and by ACE's shared crossbar simulator, which holds no
+    # bulk qubit: only bulk-holding simulators (patches) name the seam
+    bulk = {int(st[3][1:]) for st in sites if st[3] != "seam" and st[3][1:].isdigit()}
+    seam = [(int(st[1]), int(st[2]), tuple(sorted(x for x in st[4] if x in bulk)) if len(st) > 4 else None)
+            for st in sites if st[3] == "seam"]
+    if not seam:
+        return
+    same = lambda a, b: a[2] is None or b[2] is None or a[2] == b[2]
+    parent = list(range(len(seam)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for i in range(len(seam)):
+        for j in range(i + 1, len(seam)):
+            a, b = seam[i], seam[j]
+            if max(abs(a[0] - b[0]), abs(a[1] - b[1])) == 1 and same(a, b):
+                ax.plot([a[1], b[1]], [a[0], b[0]], "-", color=SEAM_COLOR, lw=9, alpha=0.28, solid_capstyle="round",
+                        zorder=0.5)
+                parent[find(i)] = find(j)
+    for r, c, _ in seam:
+        ax.plot(c, r, "o", ms=14, color=SEAM_COLOR, alpha=0.28, mew=0, zorder=0.5)
+    comps = defaultdict(list)
+    for i, st in enumerate(seam):
+        comps[find(i)].append(st)
+    best = {}                                                       # one label per patch pair: its longest stretch
+    for members in comps.values():
+        joins = tuple(sorted({x for m_ in members if m_[2] for x in m_[2]}))
+        if joins and len(members) > len(best.get(joins, [])):
+            best[joins] = members
+    for joins, members in best.items():
+        r, c = max(members, key=lambda m_: (m_[0], -m_[1]))[:2]              # label at the seam's lower end
+        ax.text(c + 0.32, r + 0.38, "|".join(f"p{x}" for x in joins), fontsize=7, color=SEAM_COLOR, zorder=6,
+                fontweight="bold")
+
+
 def fig_shor_grid(plt, store):
     """The registers on the Nighthawk lattice with their Shor units: qubits by ACE patch, seam qubits, couplers
     by class, each unit's square filled by its weaker decoded logical basis and labelled with Z, X and the
@@ -1473,7 +1519,7 @@ def fig_shor_grid(plt, store):
         units = {k: u for k, u in un.items() if k[1] == reg and k[2] == m and k[0] == setup}
         mp = shor_register_map(store, reg)
         C = (mp or {}).get("columns", 10)
-        pos = {int(q): (int(r), int(c)) for q, r, c, _ in (mp or {}).get("sites", [])}
+        pos = {int(st[0]): (int(st[1]), int(st[2])) for st in (mp or {}).get("sites", [])}
         R = max([12] + [r + 1 for r, _ in pos.values()] + [int(u["rows"][1]) + 1 for u in units.values() if u["rows"]])
         gr, gc = np.meshgrid(np.arange(R), np.arange(C), indexing="ij")
         ax.plot(gc.ravel(), gr.ravel(), ".", color="#dddddd", ms=3, zorder=0)       # the lattice
@@ -1482,15 +1528,17 @@ def fig_shor_grid(plt, store):
                 (r1, c1), (r2, c2) = pos[int(a_)], pos[int(b_)]
                 col, lw = ccol.get(cl, ("k", 1.0))
                 ax.plot([c1, c2], [r1, r2], "-", color=col, lw=lw, zorder=1)
-            regs = sorted({rg for *_, rg in mp["sites"] if rg != "seam"}, key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
+            regs = sorted({st[3] for st in mp["sites"] if st[3] != "seam"},
+                          key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
             pcol = {rg: pal(i % 9) for i, rg in enumerate(regs)}
-            for q, r, c, rg in mp["sites"]:
+            draw_seam_line(ax, mp["sites"])
+            for q, r, c, rg, *_ in mp["sites"]:
                 if rg == "seam":
                     ax.plot(c, r, "D", ms=7, mfc="white", mec="k", mew=1.4, zorder=3)
                 else:
                     ax.plot(c, r, "o", ms=7.5, mfc=pcol[rg], mec="#777777", mew=0.6, zorder=3)
             for rg in regs:                                                         # patch names at their centre
-                pts = np.array([(r, c) for _, r, c, g in mp["sites"] if g == rg], dtype=float)
+                pts = np.array([(st[1], st[2]) for st in mp["sites"] if st[3] == rg], dtype=float)
                 ax.text(pts[:, 1].mean(), pts[:, 0].mean(), rg, fontsize=8, color="#555555", ha="center",
                         va="center", zorder=2, alpha=0.8)
         zs, xs = [], []
@@ -1529,6 +1577,7 @@ def fig_shor_grid(plt, store):
     hs = [Line2D([], [], color=ccol[k][0], lw=ccol[k][1], label=f"coupler {k}") for k in ("exact", "replica", "cross")]
     hs += [Line2D([], [], marker="o", ls="", mfc=pal(0), mec="#777777", ms=7, label="qubit (colour: ACE patch)"),
            Line2D([], [], marker="D", ls="", mfc="white", mec="k", ms=7, label="seam qubit"),
+           Line2D([], [], color=SEAM_COLOR, lw=8, alpha=0.3, solid_capstyle="round", label="seam line (patches joined)"),
            Line2D([], [], marker="o", ls="", mfc="none", mec="k", ms=11, label="block leader")]
     hs += [Line2D([], [], color=c, lw=2.2, label=f"unit {k}") for k, c in kcol.items()
            if any(u["kind"] == k for u in un.values())]
