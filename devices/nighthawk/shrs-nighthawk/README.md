@@ -32,7 +32,7 @@ BlueQubit ran 61-qubit random circuits on IBM's `ibm_phoenix` and estimated thei
 | `shor9` | one unit of Shor's code (9 qubits, or `--size m`: Shor-16, Shor-36, …) on a two-patch ACE register, or units tiled over a whole register: logical success, raw and decoded, for the four logical states, against the exact distribution |
 | `seamgap` | data-only analysis of the release |
 | `nighthawk_cloverfield.py` | chips in isolated workers, joined by a coordinator (the *loom*) |
-| `nighthawk_graph.py` | harvests every run, views 1–13, CSV export |
+| `nighthawk_graph.py` | harvests every run and `shor9` record, views 1–17, CSV export |
 
 No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit statement is a proxy measurement or an extrapolation.
 
@@ -349,8 +349,9 @@ Every layout (and every unit with `--register`) is also compared outcome by outc
 | `--ocl-sync` | off | with `--gpu`: `QRACK_OCL_SYNC=1` (Qrack ≥ 10.13.2, §5.3). An OpenCL run whose exact reference is not 1.0 everywhere stops with an error and records nothing |
 | `--no-exact` | off | skip the exact `QrackSimulator` reference |
 | `--ace-boundary-rep` | off | ACE's `is_boundary_repetition_code`, passed explicitly either way; PyQrack ≥ 2.29's version lifts the seam (RESULTS §10.3) |
+| `--progress` | 30 | seconds between heartbeats: a start line (versions, settings), the plan (tasks, processes), a line per finished task (label, seconds, share done, running, ETA), and when nothing finishes for this long the longest-running task; 0 = off. Follow a log with `tail -f` |
 | `--jobs` | 1 | worker processes, one core each; 0 = every core. One task per logical state × fresh backend (× layout, or × rotation with `--register`); a backend's shots stay in its task. The exact reference's shots split into chunks over fresh simulators (same state, same distribution). Workers inherit `QRACK_OCL_SYNC` and the clvk isolation; with `--gpu` they share one device |
-| `--out FILE` | — | append one JSON record per layout (per unit with `--register`), with the distribution comparison per logical state |
+| `--out FILE` | — | append one JSON record per layout (per unit with `--register`), with the distribution comparison per logical state; with `--register` also one `shor9_map` record (each qubit's lattice row, column and ACE region, each coupler's class) for `nighthawk_graph.py` view 17 |
 | `--register NAME` | — | tile units over a whole register instead (below) |
 | `--max-tiles` | all | with `--register`: at most this many units |
 
@@ -442,8 +443,12 @@ An example of the gap is in [RESULTS.md §4](RESULTS.md#4-the-nn_qab-ensemble-e6
 | 11 | XEB at one (n, d) against coupler classes, seam qubits, simulators, widest simulator, with rank correlations |
 | 12 | `hamming`: Dan's Hamming signal against depth per register, folds λ = 1 / 3 / 5, with his calculator |
 | 13 | `hamming`: measured ÷ calculator against register size per depth; effective folding exponent q against his 1.606 |
+| 14 | `shor9`: decoded logical Z and X against code size per layout and setup (PyQrack version, boundary code, OpenCL); backend-to-backend standard error, every fresh backend as a dot |
+| 15 | `shor9`: per logical state, impossible-outcome share and distance to the exact distribution against its shot-noise floor |
+| 16 | `shor9 --register`: each unit's decoded Z / X and Z-basis impossible share against its encoder CXs through the seam; units matched by their square, pooled over runs |
+| 17 | `shor9 --register` on the lattice, per register, code size and setup: qubits by ACE patch, seam qubits, couplers by class (exact / replica / cross), block leaders, each unit's square filled by min(Z, X) and labelled Z / X / impossible share. Map from the run's `shor9_map` record, else rebuilt (release + PyQrack), else the bare lattice |
 
-Views 8–11 and `--table FILE` (CSV of every point) show one ensemble at a time (`--theta haar|nnqab|all`), since XEB values of different ensembles are not comparable.
+Views 8–11 and `--table FILE` (CSV of every point) show one ensemble at a time (`--theta haar|nnqab|all`), since XEB values of different ensembles are not comparable. `--table FILE` also writes `FILE_shor9.csv` (one row per code, layout and setup, one per register unit, with the top wrong patterns) and prints the `shor9` summary. Views 14–16 read `shor9` records from the harvested `*.jsonl` or from `--shor FILE` and need no BlueQubit release; records without `boundary_rep` are taken as PyQrack's own default (on from 2.29).
 
 ---
 

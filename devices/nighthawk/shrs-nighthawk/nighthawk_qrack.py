@@ -621,13 +621,15 @@ def apply_register_preset(a, lay):
 def preset_placement(lay, n, a, row, size):
     """The stored placement of the register's ACE preset, when this run uses exactly that preset.
     Switching seam error detection off keeps it: the sites and patches are unchanged, each patch
-    only loses its ancilla (one qubit narrower, half the memory)."""
+    only loses its ancilla (one qubit narrower, half the memory). So does the boundary repetition
+    code: the same sites and patches, with one more ancilla per patch in PyQrack 2.28 (twice the
+    memory) and none from 2.29."""
     if is_release(lay):
         return None
     ace = REGISTERS[layout_id(lay)].get("ace")
     if not ace or n != lay.n or size != ace["width"] or (row["lrc"], row["lrr"]) != (ace["lrc"], ace["lrr"]):
         return None
-    opts = {k: v for k, v in ace_opts(a).items() if k != "is_error_detection"}
+    opts = {k: v for k, v in ace_opts(a).items() if k not in ("is_error_detection", "is_boundary_repetition_code")}
     if bool(getattr(a, "ace_torus", False)) != ace["torus"] or parse_exclude(getattr(a, "ace_exclude", None)) \
             or opts or transpile_caps(a) != (ace["max_width"], ace["max_wide"]) \
             or (getattr(a, "transpile_engine", "exact") or "exact") != "exact":
@@ -3349,12 +3351,60 @@ def shor_pool(jobs, ntasks):
     return cf.ProcessPoolExecutor(n, mp_context=mp.get_context("spawn")), n
 
 
-def shor_pool_map(pool, calls):
-    """[f(*args) for f, args in calls], in order: in the pool, or in this process without one."""
+def _shor_timed(f, args):
+    t = time.time()
+    return f(*args), time.time() - t
+
+
+def shor_pool_map(pool, calls, labels=None, every=30.0, what="shor9"):
+    """[f(*args) for f, args in calls], in order: in the pool, or in this process without one. every > 0:
+    a line per finished task (its label, seconds, share done, running tasks, elapsed and ETA) and, when
+    nothing finishes for `every` seconds, a heartbeat naming the longest-running task."""
+    n = len(calls)
+    labels = labels or [f"task {i + 1}" for i in range(n)]
+    t0 = time.time()
+
+    def clock(done):
+        el = time.time() - t0
+        return f"{el / 60:.1f} min elapsed" + (f", ~{el * (n - done) / done / 60:.1f} min left" if 0 < done < n else "")
+    out = [None] * n
     if pool is None:
-        return [f(*args) for f, args in calls]
-    futs = [pool.submit(f, *args) for f, args in calls]
-    return [f_.result() for f_ in futs]
+        for i, (f, args) in enumerate(calls):
+            if every:
+                print(f"# {what} {i + 1}/{n} start: {labels[i]}", flush=True)
+            t = time.time()
+            out[i] = f(*args)
+            if every:
+                print(f"# {what} {i + 1}/{n} done ({100 * (i + 1) // n} %): {labels[i]} in {time.time() - t:.1f} s; "
+                      f"{clock(i + 1)}", flush=True)
+        return out
+    import concurrent.futures as cf
+    futs = {pool.submit(_shor_timed, f, args): i for i, (f, args) in enumerate(calls)}
+    pending, seen, done_n, last = set(futs), {}, 0, time.time()
+    cap = getattr(pool, "_max_workers", None) or n           # the executor marks a queued call or two running too
+    nrun = lambda: min(cap, sum(1 for x in pending if x.running()))
+    while pending:
+        fin, pending = cf.wait(pending, timeout=5, return_when=cf.FIRST_COMPLETED)
+        now = time.time()
+        for f_ in pending:
+            if f_ not in seen and f_.running():
+                seen[f_] = now
+        for f_ in sorted(fin, key=lambda x: futs[x]):
+            i = futs[f_]
+            out[i], dt = f_.result()
+            done_n += 1
+            last = now
+            if every:
+                print(f"# {what} {done_n}/{n} done ({100 * done_n // n} %): {labels[i]} in {dt:.1f} s; "
+                      f"{nrun()} running; {clock(done_n)}", flush=True)
+        if every and not fin and now - last >= every:
+            run = [x for x in pending if x.running()]
+            old = min(run, key=lambda x: seen.get(x, now)) if run else None
+            print(f"# {what} {done_n}/{n} done; {nrun()} running"
+                  + (f", longest {(now - seen.get(old, now)) / 60:.1f} min: {labels[futs[old]]}" if old else "")
+                  + f"; {clock(done_n)}", flush=True)
+            last = now
+    return out
 
 
 def shor_chunks(shots, k):
@@ -3374,7 +3424,7 @@ def _shor9_exact_task(n, gpu, u, s, shots):
     return shor9_run(QrackSimulator(n, is_gpu=gpu), u, s, shots), shots
 
 
-def shor9_bench(shots, gpu=False, exact=True, repeats=1, m=3, jobs=1, brep=False):
+def shor9_bench(shots, gpu=False, exact=True, repeats=1, m=3, jobs=1, brep=False, every=30.0):
     """{layout: {"unit", state: (raw, decoded), "runs", "hist"}} for both ACE layouts, each state on `repeats`
     fresh backends (mean over them), plus the exact reference (QrackSimulator, seam_leaders), where every
     entry must be 1.0. jobs > 1 (0 = every core): the backends, and chunks of the exact shots, in a process
@@ -3390,9 +3440,17 @@ def shor9_bench(shots, gpu=False, exact=True, repeats=1, m=3, jobs=1, brep=False
     pool, workers = shor_pool(jobs, len(keys) + (len(SHOR9_STATES) if exact else 0))
     k_ex = max(1, -(-workers // len(SHOR9_STATES)))
     ex_keys = [(s, c) for s in SHOR9_STATES for c in shor_chunks(shots, k_ex)] if exact else []
+    nch = len(ex_keys) // len(SHOR9_STATES) if ex_keys else 0
+    labels = ([f"{name} |{s}_L> backend {r + 1}/{R}" for name, s, r in keys]
+              + [f"exact |{s}_L> chunk {k % nch + 1}/{nch} ({c} shots)" for k, (s, c) in enumerate(ex_keys)])
+    if every:
+        print(f"# shor9 plan: Shor-{n}, {len(lays)} layout(s) x {len(SHOR9_STATES)} states x {R} backend(s) = {len(keys)} "
+              f"ACE tasks of {shots} shots" + (f", exact reference in {len(ex_keys)} chunks" if ex_keys else "")
+              + f"; {workers} process(es)", flush=True)
     try:
         out = shor_pool_map(pool, [(_shor9_ace_task, (n, geo, gpu, lays[name], s, shots, brep)) for name, s, _ in keys]
-                            + [(_shor9_exact_task, (n, gpu, lays["seam_leaders"], s, c)) for s, c in ex_keys])
+                            + [(_shor9_exact_task, (n, gpu, lays["seam_leaders"], s, c)) for s, c in ex_keys],
+                            labels, every)
     finally:
         if pool is not None:
             pool.shutdown()
@@ -3588,6 +3646,8 @@ def _shor9_reg_task(repo, reg, ra, tiles, rot, shots, exact, gpu):
     """One run of the register (a fresh ACE engine, or the exact simulator), in a pool worker or here."""
     lay = _SHOR_LAYOUTS.get((repo, reg))
     if lay is None:
+        if reg != "release" and reg not in REGISTERS:
+            load_register_files()               # a spawned worker: saved registers ($NIGHTHAWK_REGISTERS, ...)
         lay = _SHOR_LAYOUTS[(repo, reg)] = Layout(repo) if reg == "release" else RegisterLayout(repo, reg)
     if exact:
         from pyqrack import QrackSimulator
@@ -3599,6 +3659,40 @@ def _shor9_reg_task(repo, reg, ra, tiles, rot, shots, exact, gpu):
     return out
 
 
+def shor9_run_args(reg, repo=None, gpu=False, brep=False):
+    """The `run` settings shor9 --register uses on a register: its ACE preset placement."""
+    if "r" not in _RUN_PARSER:
+        make_parser()
+    ra = _RUN_PARSER["r"].parse_args(["--backend", "ace", "--register", reg] + (["--repo", repo] if repo else [])
+                                     + (["--ace-gpu"] if gpu else ["--cpu"])
+                                     + (["--ace-boundary-rep"] if brep else []))
+    ra.cmd = "run"
+    THETA_DIST["mode"] = ra.theta
+    return ra
+
+
+def shor9_register_map(lay, ra):
+    """The register on the lattice as ACE places it: per logical qubit (row, column, region: p<patch> or
+    seam) and per coupler its class (exact inside one simulator, replica through a seam qubit's copy,
+    cross between simulators that share no seam). Returns (map, sids, idx); map is what the shor9_map
+    record stores and nighthawk_graph.py draws."""
+    probe = AceEngine(lay, lay.n, ra)
+    row = layout_row(probe.size, probe.lrc, probe.lrr, probe.torus, probe.opts)
+    sids = [frozenset(s_ for s_, _ in u) for u in row["unpack"]]
+    idx = list(probe.idx)
+    del probe
+    region = lambda q: "seam" if len(sids[idx[q]]) > 1 else f"p{next(iter(sids[idx[q]]))}"
+
+    def cls(c, t):
+        sa, sb = sids[idx[c]], sids[idx[t]]
+        return "exact" if len(sa) == 1 and sa == sb else "replica" if sa & sb else "cross"
+    C = 10
+    mp = dict(n=lay.n, columns=C, sites=[[q, p // C, p % C, region(q)] for q, p in enumerate(lay.l2p[:lay.n])],
+              couplers=[[a_, b_, cls(a_, b_)] for a_, b_ in logical_couplers(lay, lay.n)],
+              ace=dict(lrc=row["lrc"], lrr=row["lrr"], torus=bool(row["torus"]), width=len(row["unpack"])))
+    return mp, sids, idx, row
+
+
 def cmd_shor9_register(a):
     """Units tiled over a whole register, every unit in one circuit on the register's own ACE placement;
     logical states rotate over the units in four runs, so every unit is read in all four."""
@@ -3606,19 +3700,18 @@ def cmd_shor9_register(a):
     lay = Layout(a.repo) if reg == "release" else RegisterLayout(a.repo, reg)
     _SHOR_LAYOUTS[(a.repo, reg)] = lay
     n = lay.n
+    every = float(a.progress or 0)
+    if every:
+        print(f"# shor9 start {time.strftime('%Y-%m-%d %H:%M:%S')}: Shor-{m * m} units on {reg} ({n} qubits), {a.shots} "
+              f"shots, {a.repeats} backend(s) per rotation, {'OpenCL' if a.gpu else 'CPU'}, --jobs {a.jobs}"
+              f"{', boundary repetition code' if a.ace_boundary_rep else ''}; {qrack_versions()}", flush=True)
+        print(f"# shor9 placing {m} x {m} units (CP-SAT, up to 30 s)", flush=True)
     tiles = shor9_tiles(lay, a.max_tiles, m)
     if not tiles:
         raise SystemExit(f"shor9: no {m} x {m} square of {reg} is free of holes")
-    ra = _RUN_PARSER["r"].parse_args(["--backend", "ace", "--register", reg] + (["--repo", a.repo] if a.repo else [])
-                                     + (["--ace-gpu"] if a.gpu else ["--cpu"])
-                                     + (["--ace-boundary-rep"] if getattr(a, "ace_boundary_rep", False) else []))
-    ra.cmd = "run"
-    THETA_DIST["mode"] = ra.theta
+    ra = shor9_run_args(reg, a.repo, bool(a.gpu), bool(getattr(a, "ace_boundary_rep", False)))
     apply_register_preset(ra, lay)
-    probe = AceEngine(lay, n, ra)
-    row = layout_row(probe.size, probe.lrc, probe.lrr, probe.torus, probe.opts)
-    sids = [frozenset(s for s, _ in u) for u in row["unpack"]]
-    idx = list(probe.idx)
+    lmap, sids, idx, row = shor9_register_map(lay, ra)
     patch_of = lambda q: ("seam" if len(sids[idx[q]]) > 1 else f"p{next(iter(sids[idx[q]]))}")
     info = []
     for k, (u, (r0, c0), ori) in enumerate(tiles):
@@ -3632,7 +3725,6 @@ def cmd_shor9_register(a):
         kind = "touches seam" if "seam" in regions else "one patch" if len(regions) == 1 else "two patches"
         info.append(dict(unit=k, rows=[r0, r0 + m - 1], cols=[c0, c0 + m - 1], leaders=ori, blocks=u["blocks"],
                          regions=dict(regions), cx_classes=dict(cls), kind=kind))
-    del probe
     ver = qrack_versions()
     R = max(1, a.repeats)
     keys = [(rot, r) for rot in range(4) for r in range(R)]
@@ -3655,10 +3747,18 @@ def cmd_shor9_register(a):
     t0 = time.time()
     gpu = bool(a.gpu)
     ex_keys = [] if a.no_exact else [(rot, c) for rot in range(4) for c in shor_chunks(a.shots, -(-workers // 4))]
+    nch = len(ex_keys) // 4 if ex_keys else 0
+    labels = ([f"ACE rotation {rot + 1}/4 backend {r + 1}/{R}" for rot, r in keys]
+              + [f"exact rotation {rot + 1}/4 chunk {k % nch + 1}/{nch} ({c} shots)" for k, (rot, c) in enumerate(ex_keys)])
+    if every:
+        print(f"# shor9 plan: {len(tiles)} units, 4 rotations x {R} backend(s) = {len(keys)} ACE tasks of {a.shots} shots"
+              + (f", exact reference ({n} qubits) in {len(ex_keys)} chunks" if ex_keys else "") + f"; {workers} process(es)",
+              flush=True)
     try:
         out = shor_pool_map(pool, [(_shor9_reg_task, (a.repo, reg, ra, tiles, rot, a.shots, False, gpu))
                                    for rot, _ in keys]
-                            + [(_shor9_reg_task, (a.repo, reg, ra, tiles, rot, c, True, gpu)) for rot, c in ex_keys])
+                            + [(_shor9_reg_task, (a.repo, reg, ra, tiles, rot, c, True, gpu)) for rot, c in ex_keys],
+                            labels, every)
     finally:
         if pool is not None:
             pool.shutdown()
@@ -3703,10 +3803,14 @@ def cmd_shor9_register(a):
     print(f"  seconds: {time.time() - t0:.1f}  (shot noise alone +/- {0.5 / math.sqrt(2 * a.shots * max(1, a.repeats)):.3f} "
           f"per logical basis)")
     if a.out and exact_ok is not False:
+        when = time.strftime("%Y-%m-%dT%H:%M:%S")
         with open(a.out, "a") as fh:
+            # the register as placed (sites, regions, coupler classes), once per run: nighthawk_graph.py view 17
+            fh.write(json.dumps(dict(test="shor9_map", register=reg, size=m, qrack=ver,
+                                     boundary_rep=bool(getattr(a, "ace_boundary_rep", False)), when=when, **lmap)) + "\n")
             for r in recs:
-                fh.write(json.dumps(dict(r, when=time.strftime("%Y-%m-%dT%H:%M:%S"))) + "\n")
-        print(f"  appended {len(recs)} records to {a.out}")
+                fh.write(json.dumps(dict(r, when=when)) + "\n")
+        print(f"  appended {len(recs)} records and the register map to {a.out}")
     if exact_ok is False:
         shor9_bad_reference(bool(a.gpu))
 
@@ -3721,8 +3825,13 @@ def cmd_shor9(a):
         raise SystemExit("shor9: --size must be 3 or more (3 = Shor-9)")
     gpu = bool(a.gpu)
     t0 = time.time()
+    if a.progress:
+        print(f"# shor9 start {time.strftime('%Y-%m-%d %H:%M:%S')}: Shor-{m * m}, {a.shots} shots, {a.repeats} backend(s) "
+              f"per state, {'OpenCL' if gpu else 'CPU'}, --jobs {a.jobs}"
+              f"{', boundary repetition code' if a.ace_boundary_rep else ''}; {qrack_versions()}", flush=True)
     results, geo, workers = shor9_bench(a.shots, gpu=gpu, exact=not a.no_exact, repeats=a.repeats, m=m,
-                                        jobs=getattr(a, "jobs", 1), brep=bool(getattr(a, "ace_boundary_rep", False)))
+                                        jobs=getattr(a, "jobs", 1), brep=bool(getattr(a, "ace_boundary_rep", False)),
+                                        every=float(getattr(a, "progress", 30.0) or 0))
     gs = ", ".join(f"{k}={v}" for k, v in geo.items())
     if m % 2 == 0:
         print(f"# --size {m}: patch_blocks needs whole blocks inside each patch, and {m * (m - 1) // 2} bulk "
@@ -6240,8 +6349,9 @@ def cmd_seamgap(a):
 
 
 # ================================================================== CLI
-def main():
-    load_register_files()
+def make_parser():
+    """The command-line parser (also fills _RUN_PARSER, which shor9 and nighthawk_graph.py use to build a
+    run's ACE settings for a register)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -6575,6 +6685,9 @@ def main():
     s9.add_argument("--ace-boundary-rep", dest="ace_boundary_rep", action="store_true",
                     help="ACE's is_boundary_repetition_code=True (default off, passed explicitly: PyQrack 2.29 made "
                          "it its own default; with it on, ACE skips its seam error detection)")
+    s9.add_argument("--progress", type=float, default=30.0, metavar="SECONDS",
+                    help="progress lines (start, plan, every finished task with its time and an ETA) and a heartbeat "
+                         "naming the longest-running task when nothing finishes for this many seconds (default 30; 0 = off)")
     s9.add_argument("--jobs", type=int, default=1,
                     help="worker processes, one core each (default 1; 0 = every core): one task per logical state "
                          "and fresh backend (x layouts, or x rotations with --register), and the exact reference's "
@@ -6593,7 +6706,12 @@ def main():
     t.add_argument("--n", type=int, default=14, help="register for the exact mirror checks")
     t.add_argument("--lrc", type=int, default=4)
     t.add_argument("--lrr", type=int, default=4)
+    return ap
 
+
+def main():
+    load_register_files()
+    ap = make_parser()
     if len(sys.argv) == 1:
         ap.print_help()
         print("""
