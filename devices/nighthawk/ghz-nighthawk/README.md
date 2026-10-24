@@ -1,4 +1,4 @@
-updated with GHZ measurements: after completion all variants will be merged
+[updated](https://github.com/twobombs/thereminq-examples/tree/main/devices/nighthawk/ghz-nighthawk#36-nighthawk_ghzpy) with GHZ measurements: after completion all variants will be merged
 
 <img width="1860" height="750" alt="ghz61_unmitigated" src="https://github.com/user-attachments/assets/f3f8aadc-6713-40a0-ac07-c56ebab48aa5" />
 <img width="1860" height="750" alt="ghz61_dd" src="https://github.com/user-attachments/assets/bec9d860-1666-49f1-b447-b20f8b49097c" />
