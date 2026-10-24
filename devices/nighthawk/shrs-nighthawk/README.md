@@ -32,7 +32,7 @@ BlueQubit ran 61-qubit random circuits on IBM's `ibm_phoenix` and estimated thei
 | `shor9` | one unit of Shor's code (9 qubits, or `--size m`: Shor-16, Shor-36, …) on a two-patch ACE register, or units tiled over a whole register: logical success, raw and decoded, for the four logical states, against the exact distribution |
 | `seamgap` | data-only analysis of the release |
 | `nighthawk_cloverfield.py` | chips in isolated workers, joined by a coordinator (the *loom*) |
-| `nighthawk_graph.py` | harvests every run and `shor9` record, views 1–17, CSV export |
+| `nighthawk_graph.py` | harvests every run and `shor9` record, views 1–17, CSV export, `shor9` registers in 3D (`--grid3d`) |
 
 No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit statement is a proxy measurement or an extrapolation.
 
@@ -70,7 +70,7 @@ pip install numpy pyqrack matplotlib ortools qiskit
 | PyQrack | `hwxeb`, `run`, `selftest`, `aceplan`, `danmodel`, `shor9`; not `verify`, `seamgap` or `hamming`. ACE needs a build with `QrackAceBackend`; exact references above 32 qubits need Qrack built for > 32 qubits |
 | OR-Tools | the `exact` placement engine, `--register` presets, `layoutsearch` |
 | Qiskit | `--ace-transpile` |
-| matplotlib | `nighthawk_graph.py` (Tk for the viewer) |
+| matplotlib | `nighthawk_graph.py` (Tk for the viewer); `--grid3d` pages need a browser with WebGL, and three.js 0.160 from jsDelivr or a local npm `three` package (`--three DIR --serve`) |
 | GPU | OpenCL (`QRACK_OCL_DEFAULT_DEVICE`) or `--cpu`; use the Qrack build of §5.3 |
 
 Every PyQrack script in the repository carries:
@@ -116,6 +116,8 @@ done; wait
 python3 nighthawk_qrack.py run --backend ace --families fxeb --sizes 27-34 --depths 12 16 20 \
   --variants 4/4:t3 4/4:t2 --gpus 0 --per-gpu 4 --mem-budget-gb 280 --out big_var.jsonl
 python3 nighthawk_graph.py --table harvest.csv                      # everything, side by side
+python3 nighthawk_graph.py --grid3d nighthawk_3d --open             # shor9 registers in 3D (three.js from jsDelivr)
+python3 nighthawk_graph.py --grid3d nighthawk_3d --three node_modules/three --serve   # offline
 ```
 
 ---
@@ -449,6 +451,23 @@ An example of the gap is in [RESULTS.md §4](RESULTS.md#4-the-nn_qab-ensemble-e6
 | 17 | `shor9 --register` on the lattice, per register, code size and setup: qubits by ACE patch, seam qubits and the seam lines (a band through neighbouring seam qubits, labelled with the two patches it joins), couplers by class (exact / replica / cross), block leaders, each unit's square filled by min(Z, X) and labelled Z / X / impossible share. Map from the run's `shor9_map` record, else rebuilt (release + PyQrack), else the bare lattice |
 
 Views 8–11 and `--table FILE` (CSV of every point) show one ensemble at a time (`--theta haar|nnqab|all`), since XEB values of different ensembles are not comparable. `--table FILE` also writes `FILE_shor9.csv` (one row per code, layout and setup, one per register unit, with the top wrong patterns) and prints the `shor9` summary. Views 14–16 read `shor9` records from the harvested `*.jsonl` or from `--shor FILE` and need no BlueQubit release; records without `boundary_rep` are taken as PyQrack's own default (on from 2.29).
+
+`--grid3d DIR` (or the viewer's *Open shor9 registers in 3D*) writes view 17 as a rotatable page per register and code size, with `index.html`:
+
+| Element | Shows |
+|---|---|
+| lattice | the 12 × 10 Nighthawk grid, broken qubits 17, 55, 62, sites outside the register |
+| qubits, couplers | colour by ACE patch; seam qubits split in the two patches they join; couplers exact (patch colour), replica (black), cross (red); seam lines |
+| unit columns | one per unit, height (decoded success − 0.5) / 0.5 of logical X, Z or the weaker one; colour red 0.5 → green 1.0; grey outline at 1.0 |
+| setups | one button per setup in the records (PyQrack version, boundary code, OpenCL); units matched by their square |
+| *Pull the patches apart* | each patch on its own layer (its simulator); seam qubits stay in the crossbar and reappear as copies in every patch they join, joined by pillars |
+
+| Option | Effect |
+|---|---|
+| `--grid3d [DIR]` | write the pages (default `./nighthawk_3d`) and exit |
+| `--open` | open them in the default browser |
+| `--three DIR_OR_URL` | three.js from a local npm `three` package (copied next to the pages) or another URL; default jsDelivr |
+| `--serve [PORT]` | serve the pages on 127.0.0.1 (default 8017) and open them; needed with a local `--three` (module scripts do not load from `file://`) |
 
 ---
 
