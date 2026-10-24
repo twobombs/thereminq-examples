@@ -3,8 +3,8 @@
 ## Exact Refocusing of Diagonal Crosstalk for Shor Order Finding on a $10 \times 12$ Square-Lattice Processor: Analysis and Simulation
 
 **Date:** Oct 24, 2026  
-**Author:** Generated
-**Concept:** Aryan Blaauw
+**Author:** Generated  
+**Concept:** Aryan Blaauw  
 
 ---
 
