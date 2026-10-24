@@ -1,4 +1,5 @@
-# HOWTO: `rcs/nighthawk/nighthawk_qrack.py`
+updated with GHZ measurements: after completion all variants will be merged
+
 
 **A clean-qubit PyQrack companion to arXiv:2609.28657 (random-circuit sampling on IBM Nighthawk r2), with an exact-reference study of seam-partitioned approximate simulation**
 
