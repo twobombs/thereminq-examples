@@ -1,6 +1,6 @@
 # Results: `rcs/nighthawk`
 
-Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E24 in its §9); usage is in the [README](README.md). State as of 24 October 2026.
+Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E25 in its §9); usage is in the [README](README.md). State as of 24 October 2026.
 
 ## Index
 
@@ -23,6 +23,7 @@ Every measured number of the experiments, grouped by experiment. The procedure b
 | [10.5](#105-layer-2-across-the-seams-walsh-echo-compensation-e22) | E22: the formal proof's Layer 2 (Walsh echo, compensation) on the same tiles | off the seam ACE = exact in every mode, the echo restores 1.000; on the seam every mode costs (61: 0.773 → 0.671 dd, 0.426 → 0.240 on 2-seam-CX units) |
 | [10.6](#106-seam-error-extraction-and-zne-e23) | E23: seam error extracted from passes 1–2, ZNE over seam scales λ = 1, 5, 9, a fresh Layer 2 check | the first crossing keeps 0.39 of the coherence on 28 and 61 qubits; no amplifier scales the loss, so ZNE returns pass 2 (−0.02 … +0.01), less than a rerun moves it (0.04–0.06) |
 | [10.7](#107-seam-error-correction-syndrome-replica-repetition-code-the-third-measurement-e24) | E24: seam syndrome from passes 1–2, the replica repetition code with its schedule, the corrected third measurement | every unit one simulator holds is corrected to the exact reference (28: 0.720 → 1.001; 61: 0.683 → 0.999, 0.481 → 1.002), +0.28–0.34 against a rerun's 0.09; units across two simulators keep no coherence (≤ 0.06), F ≤ ½ |
+| [10.8](#108-pyqracks-ace-source-the-authority-rule-the-crossbar-the-gadget-e25) | E25: PyQrack's lineage authority, a co-located variant, the crossbar, the error-detection gadget | the lineage rule strands a seam partner's authority on the crossbar ([48, 40, 56] 0.463 in the preparation's order); the co-located step corrects every replica unit in any order (1.000–1.003); seam-to-seam GHZ 0.99–1.01 through the crossbar; the gadget does not make the one-sided loss |
 | [11](#11-cloverfield-e13) | E13: cloverfield | ghost link 1.000 / 0.989 / 0.656 vs mean-field 0.773 / 0.773 / 0.067 |
 | [12](#12-qracks-opencl-engine-and-vram-oversubscription-e14-e15) | E14, E15: OpenCL and GTT | three defects, fixed; GTT ceiling lifted |
 | [13](#13-tool-validation) | tool validation | GPU = CPU; layoutsearch matches the exact engine |
@@ -818,6 +819,43 @@ One GHZ over `nighthawk2p16` (MQC, dense patches): P0 + P1 bfs / seam tree 0.583
 - **Against §10.6.** ZNE moved F by −0.02 … +0.01 because the seam's loss is set at the first crossing; the code removes it outright on the replica class. What remains of the seam's GHZ loss after Layer S is exactly the cut class, the coherence ACE does not carry between simulators.
 - **Layer 2 on a corrected seam.** Under the code the Walsh echo is back to Theorem 1 on the seam units: V (pass 2's dd circuit) = exact on every replica unit, where pass 2 without the code had fallen to 0.48–0.72.
 
+### 10.8 PyQrack's ACE source: the authority rule, the crossbar, the gadget (E25)
+
+PyQrack's main branch (unitaryfoundation/pyqrack, last change to `qrack_ace_backend.py` on 21 October 2026) is byte-identical to the 2.29.5 used here. Its newest change replaced the fresh-copy authority of the boundary code with lineage tracking (`_update_lineage`): a replica stays the decoder's authority while every coupling it took part in was a real gate with a clean replica of the partner, and when two boundary qubits meet, their crossbar pair becomes the sole authority. `nighthawk_ghz.py --code-authority colocated` adds one step after it: a boundary qubit whose authority moves to a simulator takes the authority of every boundary qubit it has coupled with to that qubit's replica in the same simulator. `stack --code-schedule off` keeps the preparation's CX order. 256 shots × K = 4 per setting, Layer V on realisations 1000–1003; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Layer V, mean F_GHZ of the replica units under the code (E24: lineage with the schedule):
+
+| Register, replica units | Lineage + schedule (E24) | Lineage, preparation order | Co-located, preparation order | Co-located + schedule | Exact |
+|---|---|---|---|---|---|
+| `nighthawk2p28`, 1 seam CX (9) | 1.001 | 1.000 | 1.000 | 1.002 | 1.000–1.003 |
+| `nighthawk61r2`, 1 seam CX (15) | 0.999 | 1.001 | 1.001 | 1.002 | 0.998–1.002 |
+| `nighthawk61r2`, 2 seam CXs, two seam qubits (2) | 1.002 | **0.732** | 1.001 | 0.999 | 0.990–1.002 |
+| of these, [48, 40, 56] (48→40 seam to seam first) | 1.000 | **0.463** | 1.003 | 0.994 | 0.990–1.001 |
+| `nighthawk61r2`, code units: V − pass 2, mean | +0.340 | +0.320 | +0.338 | +0.346 | — |
+
+The cut units run without the code in every configuration: V 0.15–0.22, coherence 0.03–0.05, the control as in §10.7.
+
+| In-process probe, `nighthawk61r2`, preparation order, F_GHZ (no drift / echo) | No code | Code, lineage | Code, co-located |
+|---|---|---|---|
+| [48, 40, 56] | 0.648 / 0.157 | 0.780 / 0.584 | 0.998 / 1.003 |
+| [18, 10, 26] | 0.658 / 0.570 | 0.999 / 1.002 | 1.001 / 0.997 |
+| seam pair [18, 26] | 0.935 / 0.822 | 1.007 / 0.999 | 1.002 / 0.996 |
+| seam pair [40, 48] | 0.927 / 0.770 | 1.001 / 0.993 | 0.997 / 1.004 |
+| all 17 replica units, echo, 2 realisations: mean (lowest) | — | 0.970 (0.469, [48, 40, 56]) | 0.999 (0.989) |
+| all 7 cut units, echo: mean | — | 0.160 | 0.147 |
+
+| Z populations of a seam unit, no code, 6 backends × 256 shots | Error detection | P000 | P111 | Seam qubit flipped (010 / 101) |
+|---|---|---|---|---|
+| `nighthawk61r2` [19, 18, 20] | on | 0.514 | 0.157 | 0.06 / 0.27 |
+| | off | 0.232 | 0.377 | 0.27 / 0.12 |
+| `nighthawk61r2` [58, 57, 59] | on | 0.367 | 0.244 | 0.11 / 0.28 |
+| | off | 0.247 | 0.434 | 0.21 / 0.11 |
+| `nighthawk61r2` [11, 10, 12], cut | on / off | 0.354 / 0.363 | 0.327 / 0.310 | patches decorrelate (§10.7) |
+
+- **The lineage rule strands a partner on the crossbar.** A CX between two seam qubits runs in every simulator, and the crossbar pair becomes the sole authority of both. When one of them then couples into a patch, its authority moves there; its partner's stays on the crossbar, whose copy is correlated with a stale copy of the first. [48, 40, 56] in the preparation's order: 0.463 through the stack, 0.58 in the probe, against 1.00 for every other replica unit.
+- **The co-located step removes it, and with it the need for the schedule.** Moving the partner's authority to its copy in the same simulator, which shares the whole history, corrects [48, 40, 56] in the preparation's order (1.003) and every replica class of both registers (means 1.000–1.001); with the schedule as well it changes nothing (means 0.999–1.002). It costs nothing on the other classes. The schedule of §10.7 works around the same stranding from the circuit side; the co-located step fixes it in the decoder, for any order.
+- **The crossbar carries a seam-to-seam GHZ.** Pairs of seam qubits reach 0.99–1.01 under the code with the echo: the crossbar simulator holds a replica of every boundary qubit, so seam-to-seam circuits stay coherent across the whole boundary, as the source says. Bulk qubits have no crossbar replica, so the cut class (§10.7) stays.
+- **The error-detection gadget does not make the one-sided loss.** With it on or off, the seam qubit leaves its unit in about a third of shots, and which branch loses changes from backend to backend (P000 0.51 against P111 0.16 with it on, 0.23 against 0.38 off): a per-backend reconcile choice, not the gadget's forced ancilla measurement.
+- **Two readings of the source, not run.** `measure_shots_consensus` forces every qubit to its majority marginal across clones, which erases a GHZ's correlations (every marginal is ½): an XEB tool. `QrackAceBackend` turns `is_boundary_repetition_code` on by default since 2.29; `nighthawk_qrack.py` passes it off for comparability, so the uncorrected passes here are that choice, not ACE's default.
+
 ---
 
 ## 11. Cloverfield (E13)
@@ -997,7 +1035,7 @@ Our Nighthawk two-patch registers, 3 seam qubits each (release prefixes; `nn_qab
 | `fxeb` ladder, n = 32 | EPYC (48 GiB reference) |
 | a noise knob ACE's seam loss follows (E23): ACE's own thresholds (`_epsilon`, `_rot_epsilon`) | not tried: the gate-level amplifiers (CX, ZZ-echo and global folding) do not scale it; the boundary repetition code is not a noise level but a correction (§10.7) |
 | Layer 2 at the paper's K = 32 (E22); Layer 1b and the OTOC on ACE | not run here: K = 4; 1b and OTOC only in the numpy reference |
-| ACE's authority record after a seam-to-seam CX (E24) | a CX matched in every simulator clears it, so a seam qubit that meets another seam qubit before its host partner leaves the boundary code no replica to trust; `nighthawk_ghz.py` schedules around it. To report upstream with `nighthawk61r2` [48, 40, 56] |
+| ACE's lineage authority after a seam-to-seam CX (E24, E25) | the crossbar pair becomes the sole authority and a partner stays there when the other qubit couples into a patch; `nighthawk_ghz.py` schedules around it (`--code-schedule`) or moves the partner along (`--code-authority colocated`). To report upstream: the co-located step in `_update_lineage`, with `nighthawk61r2` [48, 40, 56] (0.463 → 1.003) |
 | GHZ across two ACE simulators (E24) | no coherence by construction (replicas and classical shadows only): a chip-wide GHZ on a register of two or more patches is not correctable on ACE |
 | GHZ chip-wide on `nighthawk61r2` (E21) | stabilizer patches leave the tableau in ACE's sampler on PyQrack 2.29.5 / Qrack 10.13.2: test on the EPYC build |
 | Hamming ladder n = 45–57 and `nighthawk61r2` (E18) | EPYC: README §7 recipe; 57 needs 64 GiB patches, 61 RAM + swap (≈ 385 GiB) |

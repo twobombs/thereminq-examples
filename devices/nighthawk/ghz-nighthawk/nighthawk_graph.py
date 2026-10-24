@@ -1223,6 +1223,10 @@ def shor_setup(r):
     sht = f"py {pv}" if r.get("qrack") else "py ?"
     if shor_brep(r):
         lng, sht = lng + ", boundary code", sht + " brep"
+        if r.get("code_authority") == "colocated":                   # nighthawk_ghz.py --code-authority
+            lng, sht = lng + " (co-located)", sht + " coloc"
+        if r.get("stack_pass") == "V" and r.get("code_schedule") is False:   # stack --code-schedule off
+            lng, sht = lng + ", preparation order", sht + " prep"
     if r.get("device") == "gpu":
         lng += ", OpenCL" + (" (sync)" if r.get("ocl_sync") else "")
         sht += " ocl"
@@ -1707,7 +1711,7 @@ def read_ghz(paths, test="ghz"):
                 continue
             key = (r.get("when"), r.get("register"), r.get("mode"), r.get("tiling"), r.get("unit"), r.get("tree"),
                    ghz_mode(r), r.get("layers"), r.get("qrack"), tuple(r.get("qubits") or ()), r.get("stack_pass"),
-                   r.get("boundary_rep"))
+                   r.get("boundary_rep"), r.get("code_authority"), r.get("code_schedule"))
             if key in seen:
                 continue
             seen.add(key)

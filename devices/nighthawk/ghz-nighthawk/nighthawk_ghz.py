@@ -54,8 +54,10 @@ Shor payload)
               is_boundary_repetition_code, zero ancillae, the replica that received the real gate is the decoder's
               ground truth and the stale replicas are flipped or rotated to it; and the code's schedule: from every
               qubit its CXs into the host simulator first, its CXs into seam qubits after (a CX between two seam
-              qubits is matched in every simulator and clears the decoder's authority record; the same state, CXs
-              from one control commute). Cut units get no code.
+              qubits is matched in every simulator and moves the decoder's authority to the crossbar, where it
+              stays for the partner when the other qubit couples on; the same state, CXs from one control commute).
+              --code-schedule off keeps the preparation's order; --code-authority colocated (any run with the
+              code) moves a seam partner's authority along instead, and needs no schedule. Cut units get no code.
               --zne-k adds zero-noise extrapolation for comparison: the seam units rerun pass 2 with every seam
               crossing scaled by lambda (AmpGates: K identities ZZ(phi) ZZ(-phi) after each, lambda = 1 + 4K),
               P0 + P1, Re c, Im c (or <X..X>) extrapolated to lambda = 0, linearly and exponentially.
@@ -84,7 +86,8 @@ Commands
   plot      the map of a records file (--in).
   selftest  Lemma 3, Lemma 4 and the witness against numpy; the readout gates, Theorem 1, Corollaries 2.1
             and 4.1, the outside-coupling identity, fold and the ZNE amplification on the exact simulator;
-            the ZNE models on synthetic decays; Layer S's seam classes, plan and the code's schedule.
+            the ZNE models on synthetic decays; Layer S's seam classes, plan, the code's schedule and the
+            co-located authority rule.
 
 Per-unit hook (--layers): pre / after_cx / post inside a unit's preparation. fold:F[:all] adds F CX pairs
 after every seam CX (every CX); zzfold:K[:all[:phi]] K identities ZZ(phi) ZZ(-phi); gfold:K undoes and redoes
@@ -237,6 +240,62 @@ def register(repo, reg, brep=False):
     if key not in _REGS:
         _REGS[key] = Register(repo, reg, brep)
     return _REGS[key]
+
+
+# ================================================================== ACE's boundary code: the authority rule
+
+AUTHORITY_RULES = ("lineage", "colocated")
+_LINEAGE = {}
+
+
+def _colocate(self, lq1, hq1, lq2, hq2):
+    """The co-located rule's step after PyQrack's lineage update (self: a QrackAceBackend). Every boundary qubit
+    whose authority now sits in some simulators pulls the authority of each boundary partner it has met to that
+    partner's replicas in those simulators, where it has one. Why: a CX between two seam qubits runs in every
+    simulator and the lineage rule then makes the crossbar pair the sole authority; when one of the two later
+    couples into a patch, its authority moves there, but its partner's stays on the crossbar, whose copy is
+    correlated with a stale copy of the first (nighthawk61r2 [48, 40, 56]: F 0.58 under the code and the echo,
+    1.00 with this step). The partner's copy in the new simulator shares the whole history."""
+    P = self.__dict__.setdefault("_seam_partners", collections.defaultdict(set))
+    if len(hq1) > 1 and len(hq2) > 1:
+        P[lq1].add(lq2)
+        P[lq2].add(lq1)
+    for lq, hq in ((lq1, hq1), (lq2, hq2)):
+        if len(hq) < 2 or lq not in self._authority:
+            continue
+        sims = {hq[i][0] for i in self._authority[lq]}
+        for p in sorted(P.get(lq, ())):
+            hp = self._unpack(p)
+            new = {j for j, b in enumerate(hp) if b[0] in sims}
+            if new and new != set(self._authority.get(p, range(len(hp)))):
+                self._authority[p] = new
+
+
+def set_authority_rule(rule):
+    """Install the authority rule of ACE's boundary repetition code in this process, before a backend is built:
+    lineage (PyQrack's own lineage tracking, 2.29.5) or colocated (lineage, then _colocate). The rule is read
+    from the class at every coupling, so it holds for every backend this process builds afterwards."""
+    from pyqrack import qrack_ace_backend as qab
+    cls = qab.QrackAceBackend
+    if "orig" not in _LINEAGE:
+        if not hasattr(cls, "_update_lineage"):
+            if rule == "lineage":
+                return
+            raise SystemExit("ghz: this PyQrack's QrackAceBackend has no lineage authority (_update_lineage, "
+                             "PyQrack 2.29.5); --code-authority colocated needs it")
+        _LINEAGE["orig"] = cls._update_lineage
+    orig = _LINEAGE["orig"]
+    if rule == "lineage":
+        cls._update_lineage = orig
+        return
+    if rule != "colocated":
+        raise ValueError(rule)
+
+    def colocated(self, lq1, hq1, lq2, hq2):
+        orig(self, lq1, hq1, lq2, hq2)
+        if self.is_boundary_repetition_code and not self._in_gadget_capture and lq1 is not None and lq2 is not None:
+            _colocate(self, lq1, hq1, lq2, hq2)
+    cls._update_lineage = colocated
 
 
 # ================================================================== Layer 2 model: Definition 2 (eta = 0)
@@ -717,6 +776,7 @@ def _task(spec):
         sim = QrackSimulator(R.n, is_gpu=spec["gpu"], is_stabilizer_hybrid=spec["stab"])
         mapq = list(range(R.n))
     else:
+        set_authority_rule(spec.get("authority", "lineage"))
         sim = R.backend(spec["gpu"], spec["stab"])
         mapq = R.idx
     amp = spec.get("amp")
@@ -908,7 +968,7 @@ def run_tasks(a, R, groups, settings, label, l2, amp=None, with_exact=True, rep_
     ex_reps = reps if l2["mode"] != "none" else 1
     no_exact = a.no_exact or not with_exact
     base = dict(repo=a.repo, reg=R.name, brep=bool(a.ace_boundary_rep if brep is None else brep), layers=a.layers,
-                gpu=bool(a.gpu), stab=a.stab, layer2=l2, amp=amp)
+                gpu=bool(a.gpu), stab=a.stab, layer2=l2, amp=amp, authority=getattr(a, "code_authority", "lineage"))
     calls, labels, keys = [], [], []
     for name, units in groups:
         for s in settings:
@@ -958,12 +1018,15 @@ def header(a, R, what, l2):
             f"sigma_qs {l2['sigma_qs']}, seed {l2['seed']}, eta 0")
     return (f"{what} on {R.describe()}; {a.shots} shots x {a.repeats} realisation(s) per setting, {lay2}, "
             f"layers {a.layers or 'none'}, {stab}, {dev}"
-            + (", boundary repetition code" if a.ace_boundary_rep else "") + f"; {nq.qrack_versions()}")
+            + (", boundary repetition code" if a.ace_boundary_rep else "")
+            + (f", code authority {a.code_authority}" if getattr(a, "code_authority", "lineage") != "lineage" else "")
+            + f"; {nq.qrack_versions()}")
 
 
 def base_record(a, R, l2):
     return dict(register=R.name, n=R.n, shots=a.shots, repeats=a.repeats, layers=layers_name(parse_layers(a.layers)),
                 layer2=l2, estimator=a.estimator, stabilizer=bool(a.stab), boundary_rep=bool(a.ace_boundary_rep),
+                code_authority=getattr(a, "code_authority", "lineage"),
                 device="gpu" if a.gpu else "cpu", ocl_sync=os.environ.get("QRACK_OCL_SYNC") == "1",
                 qrack=nq.qrack_versions(), ace=dict(lrc=R.lrc, lrr=R.lrr, torus=bool(R.torus), width=R.size,
                                                    widths=R.widths))
@@ -1480,7 +1543,8 @@ def cmd_stack(a):
     what = f"GHZ stack, {k}-qubit chains" if a.mode == "tiles" else f"GHZ stack over all {R.n} qubits"
     print(header(a, R, what, l2))
     print(f"passes: 1 = Layer 1a (no drift); 2 = Layer 2 {l2['mode']}; S = the seam's syndrome from 1 and 2, then the "
-          f"replica repetition code where it corrects" + (f", and ZNE ({a.zne_amp}, lambda {lams})" if lams else "")
+          f"replica repetition code where it corrects (authority {a.code_authority}, schedule {a.code_schedule})"
+          + (f", and ZNE ({a.zne_amp}, lambda {lams})" if lams else "")
           + "; V = the third measurement: pass 2's circuit under the correction")
     print(f"{len(groups)} circuit groups, {sum(len(u) for _, u in groups)} units; readout settings: {' '.join(settings)}")
     d1, x1, bad, t1 = run_tasks(a, R, groups, settings, "pass 1", l2_0)
@@ -1525,7 +1589,7 @@ def cmd_stack(a):
     for plan_, brep in (("code", True), ("control", False)):
         for rs in by_g[plan_].values():
             for r in rs:
-                r["uV"] = code_schedule(R, r["u"]) if plan_ == "code" else r["u"]
+                r["uV"] = code_schedule(R, r["u"]) if plan_ == "code" and a.code_schedule == "on" else r["u"]
         vg = [(f"{g}/{plan_}", [r["uV"] for r in rs]) for g, rs in by_g[plan_].items()]
         if not vg:
             continue
@@ -1548,14 +1612,16 @@ def cmd_stack(a):
             recs.append(dict(base_record(a, R, l2p), test="ghz", stack_pass=p, **where, **r["u"], **info, **e, **x))
         if "eV" in r:
             recs.append(dict(base_record(a, R, l2), test="ghz", stack_pass="V", **where, **r["uV"], **info, **r["eV"],
-                             **r["x2"], boundary_rep=r["plan"] == "code"))
+                             **r["x2"], boundary_rep=r["plan"] == "code",
+                             code_schedule=(r["plan"] == "code" and a.code_schedule == "on")))
         st = dict(base_record(a, R, l2), test="ghz_stack", **where, **r["u"], **info,
                   seam_crossings=dict(prep=r["prep"], drift=r["drift"]), syndrome=r["syn"],
                   pass1={q: r["e1"][q] for q in KEEP if q in r["e1"]}, exact1=r["x1"],
                   pass2={q: r["e2"][q] for q in KEEP if q in r["e2"]}, exact2=r["x2"])
         if "eV" in r:
             st["passV"] = dict({q: r["eV"][q] for q in KEEP if q in r["eV"]}, boundary_rep=r["plan"] == "code",
-                               edges=r["uV"]["edges"])
+                               code_authority=a.code_authority,
+                               code_schedule=(r["plan"] == "code" and a.code_schedule == "on"), edges=r["uV"]["edges"])
         if "zne" in r:
             z = r["zne"]
             st.update(layerS=dict(amp=a.zne_amp, phi=float(a.zne_phi), K=ks, lambdas=lams, observables=r["obs"],
@@ -2034,6 +2100,24 @@ def cmd_selftest(a):
     us = code_schedule(_RegStub, dict(qubits=[1, 4, 2], root=1, edges=[[1, 4], [1, 2]], classes=["replica"] * 2))
     check("the code's schedule: into the host simulator first, seam to seam after", us["edges"] == [[1, 2], [1, 4]],
           str(us["edges"]))
+
+    print("[12] the co-located authority rule (stub backend): two seam qubits meet, the crossbar holds both "
+          "authorities; one couples into patch 1, its partner's authority follows")
+
+    class _AceStub:
+        def __init__(self):
+            self.hq = {0: [(0, 5), (1, 5), (2, 0)], 1: [(0, 6), (1, 6), (2, 1)], 7: [(1, 9)]}
+            self._authority = {0: {2}, 1: {2}}           # after the seam-to-seam CX: the crossbar pair
+
+        def _unpack(self, lq):
+            return self.hq[lq]
+    st = _AceStub()
+    _colocate(st, 0, st.hq[0], 1, st.hq[1])               # records the partners, moves nothing
+    unmoved = st._authority == {0: {2}, 1: {2}}
+    st._authority[0] = {1}                                # lineage: qubit 0's CX into patch 1 moves it there
+    _colocate(st, 0, st.hq[0], 7, st.hq[7])
+    check("partner 1 follows qubit 0 into patch 1; nothing moves before", unmoved and st._authority[1] == {1},
+          str(st._authority))
     print("selftest " + ("passed" if ok else "FAILED"))
     if not ok:
         raise SystemExit(1)
@@ -2078,6 +2162,10 @@ def make_parser():
     common.add_argument("--force", action="store_true", help="chip: run dense patches above 30 qubits anyway")
     common.add_argument("--ace-boundary-rep", dest="ace_boundary_rep", action="store_true",
                         help="ACE's is_boundary_repetition_code (off unless given, as in nighthawk_qrack.py)")
+    common.add_argument("--code-authority", dest="code_authority", choices=AUTHORITY_RULES, default="lineage",
+                        help="the boundary code's authority rule, wherever the code runs (--ace-boundary-rep; stack's "
+                             "Layer V): lineage = PyQrack 2.29.5's own; colocated = lineage, and a seam qubit whose "
+                             "authority moves to a simulator takes its seam partners' authority with it")
     common.add_argument("--gpu", action="store_true", help="ACE and the reference on OpenCL (QRACK_OCL_DEFAULT_DEVICE)")
     common.add_argument("--ocl-sync", dest="ocl_sync", action="store_true", help="with --gpu: QRACK_OCL_SYNC=1")
     common.add_argument("--jobs", type=int, default=1, help="worker processes, one circuit each (0 = every core)")
@@ -2109,6 +2197,10 @@ def make_parser():
                    help="ZNE for comparison with the code: comma list of K (identities per seam crossing), e.g. 1,2 "
                         "(lambda 1, 5, 9); default none")
     s.add_argument("--zne-phi", dest="zne_phi", type=float, default=0.3, help="ZNE, zz: the ZZ angle phi")
+    s.add_argument("--code-schedule", dest="code_schedule", choices=["on", "off"], default="on",
+                   help="Layer S: reorder each code unit's CXs, into the host simulator before into seam qubits (on), "
+                        "or keep the preparation's order (off; with --code-authority colocated the code needs no "
+                        "schedule)")
 
     p = sub.add_parser("plot", help="the map of a records file")
     p.add_argument("--in", dest="inp", required=True, help="JSONL written by chip / tiles --out")

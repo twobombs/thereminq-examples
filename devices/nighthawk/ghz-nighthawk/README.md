@@ -466,6 +466,7 @@ Not in the paper: the Clifford witness F ≥ P0 + P1 + P(even X parity) − 1 (t
 | `--stabilizer` | `auto` | tableau patches only for `chip` with Clifford readout and no Layer 2 |
 | `--exact-shots`, `--no-exact` | 128 | the reference's shots per setting and realisation |
 | `--force`, `--ace-boundary-rep`, `--gpu`, `--ocl-sync`, `--jobs`, `--progress`, `--out` | | as `shor9`; `--force`: dense chip above 30 qubits |
+| `--code-authority` | `lineage` | the boundary code's authority rule wherever the code runs (`--ace-boundary-rep`, `stack`'s Layer V): `lineage` = PyQrack 2.29.5's own; `colocated` = lineage, and a seam qubit whose authority moves to a simulator takes its seam partners' authority with it (below) |
 
 | Record field | Meaning |
 |---|---|
@@ -482,7 +483,7 @@ Not in the paper: the Clifford witness F ≥ P0 + P1 + P(even X parity) − 1 (t
 | pass 1 | Layer 1a: the units' GHZ states, no drift | every group, ACE + exact |
 | pass 2 | Layer 2 in `--layer2` (`dd` when none is given) on the same units | every group, ACE + exact |
 | Layer S, extraction | per unit and pass the seam syndrome against the exact reference: the share of P0 + P1 and of the coherence (\|c\|, or ⟨X…X⟩) ACE keeps, the fidelity lost (and in standard errors), the qubit whose Z value leaves the unit's majority most often and whether it is a seam qubit, which branch loses (P1 − P0); per unit its seam class (below); the seam-crossing fits (log(kept) = a + b·n: e^a what the first crossing leaves, e^b what each further one keeps); per seam coupler its Z break rate | none |
-| Layer S, correction | every replica unit that lost F (> 0.02 and 3σ below the exact reference, pass 1 or 2) gets the replica repetition code with authority decoding (ACE's `is_boundary_repetition_code`: zero ancillae, the replica that received the real gate is the decoder's ground truth, stale replicas are flipped or rotated to it) and the code's schedule (from every qubit its CXs into the host simulator first, into seam qubits after: a CX between two seam qubits is matched in every simulator and clears the authority record). Cut units: no code | — |
+| Layer S, correction | every replica unit that lost F (> 0.02 and 3σ below the exact reference, pass 1 or 2) gets the replica repetition code with authority decoding (ACE's `is_boundary_repetition_code`: zero ancillae, the replica that received the real gate is the decoder's ground truth, stale replicas are flipped or rotated to it) and the code's schedule (from every qubit its CXs into the host simulator first, into seam qubits after), or `--code-schedule off` with `--code-authority colocated` (below). Cut units: no code | — |
 | Layer V | the third GHZ measurement: the replica units under the correction, the cut units without it (the control: what a rerun moves), pass 2's Layer 2 and fresh ε draws, printed unit by unit beside pass 1, pass 2 and the exact reference | the units planned code or control, ACE |
 | ZNE (`--zne-k`) | for comparison: the seam units rerun pass 2 with every seam crossing scaled by λ (`AmpGates`: K × ZZ(φ) ZZ(−φ) after each, λ = 1 + 4K; `--zne-amp cx`: K × CX CX, λ = 1 + 2K); P0 + P1, Re c, Im c (or ⟨X…X⟩) extrapolated to λ = 0, linearly and exponentially | seam units × each K, ACE |
 
@@ -494,9 +495,16 @@ Not in the paper: the Clifford witness F ≥ P0 + P1 + P(even X parity) − 1 (t
 
 A chip-wide GHZ over a register of two or more patches is always cut.
 
+| The code's authority (`--code-authority`) | After a CX between two seam qubits | Needs the schedule |
+|---|---|---|
+| `lineage` (PyQrack 2.29.5) | the CX runs in every simulator and the crossbar pair becomes the sole authority of both; when one of them then couples into a patch its authority moves there, its partner's stays on the crossbar, whose copy is correlated with a stale copy | yes: CXs into the host simulator first |
+| `colocated` | as `lineage`, then the partner's authority moves with it, to its copy in the same simulator, which shares the whole history | no |
+
+
 | Option | Default | Effect |
 |---|---|---|
 | `--mode` | `tiles` | `tiles` (with `--unit`, `--orient`, `--offsets`) or `chip` (with `--trees`, `--root`) |
+| `--code-schedule` | `on` | the code's schedule for the code units, or `off`: the preparation's order |
 | `--zne-k` | none | ZNE identities per crossing, e.g. `1,2`: λ = 1, 5, 9 with `zz` |
 | `--zne-amp`, `--zne-phi` | `zz`, 0.3 | ZNE amplification `zz` or `cx`; the ZZ angle (about one window's J·T) |
 
@@ -504,8 +512,8 @@ A chip-wide GHZ over a register of two or more patches is always cut.
 
 | Record (`stack --out`) | Holds |
 |---|---|
-| `ghz` with `stack_pass` 1, 2, V | the three measurements as ordinary records, with `seam_class`, `seam_plan`; V: `boundary_rep` true where the code ran, the scheduled `edges`, the exact fields of pass 2. `nighthawk_graph.py` reads 1, 2 and the corrected V (setup ", boundary code"), not the control |
-| `ghz_stack`, per unit | `seam_class`, `seam_plan`, `syndrome` (pass 1, pass 2), `seam_crossings` (prep, drift), `pass1`, `pass2`, `passV` (with `boundary_rep`, `edges`), `exact1`, `exact2`; with `--zne-k`: `layerS` (λ, the observables at each λ, `F_at`, both fits), `F_zne_linear`, `F_zne_exp` |
+| `ghz` with `stack_pass` 1, 2, V | the three measurements as ordinary records, with `seam_class`, `seam_plan`; V: `boundary_rep` true where the code ran, `code_authority`, `code_schedule`, the `edges` as run, the exact fields of pass 2. `nighthawk_graph.py` reads 1, 2 and the corrected V (setup ", boundary code"), not the control |
+| `ghz_stack`, per unit | `seam_class`, `seam_plan`, `syndrome` (pass 1, pass 2), `seam_crossings` (prep, drift), `pass1`, `pass2`, `passV` (with `boundary_rep`, `code_authority`, `code_schedule`, `edges`), `exact1`, `exact2`; with `--zne-k`: `layerS` (λ, the observables at each λ, `F_at`, both fits), `F_zne_linear`, `F_zne_exp` |
 | `ghz_seam_model` | Layer S's extraction and plan: `plan` (per class: units, plans, P0 + P1 and coherence kept, P1 − P0, breaks on a seam qubit, per pass), `fit` (`pop`, `coh`), `couplers` (a, b, class, break rate pass 1, pass 2) |
 
 A code corrects ACE's seam where ZNE cannot: the loss is set at the first crossing, so no amplifier scales it (RESULTS §10.6), while the replica code removes it from every replica unit and leaves the cut units, which no code reaches, where a rerun leaves them (§10.7).
