@@ -33,6 +33,36 @@ Paper objects as implemented here (section numbers of the paper)
 Not in the paper: the Clifford witness F >= P0 + P1 + P(even X parity) - 1, used for chip-wide states too
 wide for MQC, and the seam maps.
 
+Seam layers (stack; not in the paper, which has no seams; named S and V to stay clear of its Layer 3, the
+Shor payload)
+  pass 1      Layer 1a: the units' GHZ states, no drift
+  pass 2      Layer 2: the same units through L idle windows in the chosen mode (default dd)
+  Layer S     seam error correction, in two steps.
+              Extraction, no new circuits: per unit and pass the seam syndrome against the exact reference (the
+              share of P0 + P1 and of the coherence ACE keeps, the qubit whose Z value leaves the unit's majority
+              most often and whether it is a seam qubit, which branch loses: P1 - P0), and per unit its seam class:
+                replica  one ACE simulator holds the whole unit (its seam qubits through their replica there): a
+                         seam error is a disagreement between a seam qubit's replicas, a bit flip of the seam qubit
+                         against its unit. Correctable: the replicas are a repetition code
+                cut      no simulator holds the whole unit: its GHZ needs coherence between two simulators, and ACE
+                         carries only classical correlations between them (a replica or the classical shadow), so
+                         c = 0 there and F_GHZ <= (P0 + P1) / 2 <= 1/2 whatever a decoder does. Not correctable
+              Also the seam-crossing fits of the passes (what the first crossing keeps, what each further one
+              keeps) and per seam coupler its Z break rate.
+              Correction: every replica unit whose fidelity fell below the exact reference (by 0.02 and 3 sigma
+              in pass 1 or 2) gets the replica repetition code with authority decoding: ACE's
+              is_boundary_repetition_code, zero ancillae, the replica that received the real gate is the decoder's
+              ground truth and the stale replicas are flipped or rotated to it; and the code's schedule: from every
+              qubit its CXs into the host simulator first, its CXs into seam qubits after (a CX between two seam
+              qubits is matched in every simulator and clears the decoder's authority record; the same state, CXs
+              from one control commute). Cut units get no code.
+              --zne-k adds zero-noise extrapolation for comparison: the seam units rerun pass 2 with every seam
+              crossing scaled by lambda (AmpGates: K identities ZZ(phi) ZZ(-phi) after each, lambda = 1 + 4K),
+              P0 + P1, Re c, Im c (or <X..X>) extrapolated to lambda = 0, linearly and exponentially.
+  Layer V     the third GHZ measurement: the seam units through pass 2's circuit again (new eps draws, new ACE
+              backends), the replica units under the code, the cut units without (the control: a rerun measures
+              how far pass 2 moves by itself), compared unit by unit with pass 1, pass 2 and the exact reference.
+
 Drift on ACE. e^{-i phi Z_i Z_j} is applied as CX_ij e^{-i phi Z_j} CX_ij, so a coupling across a seam goes
 through ACE's seam machinery, as the circuit's own CXs do. A coupling from a GHZ unit to a qubit outside every
 unit is applied as e^{-i phi z_j Z_i} on the unit qubit, with z_j = +-1 that qubit's Z eigenvalue, tracked
@@ -49,16 +79,24 @@ Commands
             patches are dense: small registers only.
   tiles     disjoint k-qubit GHZ chains (--unit k) along lattice rows and columns, every orientation and
             offset; per unit Layer 1a numbers, per qubit the mean over its units, by seam distance.
+  stack     pass 1, pass 2, Layer S (seam error correction), Layer V on tiles (--mode tiles) or one state (--mode
+            chip).
   plot      the map of a records file (--in).
   selftest  Lemma 3, Lemma 4 and the witness against numpy; the readout gates, Theorem 1, Corollaries 2.1
-            and 4.1, and the outside-coupling identity on the exact simulator.
+            and 4.1, the outside-coupling identity, fold and the ZNE amplification on the exact simulator;
+            the ZNE models on synthetic decays; Layer S's seam classes, plan and the code's schedule.
 
 Per-unit hook (--layers): pre / after_cx / post inside a unit's preparation. fold:F[:all] adds F CX pairs
-after every seam CX (every CX): ACE's seam error scaled 2F + 1 times.
+after every seam CX (every CX); zzfold:K[:all[:phi]] K identities ZZ(phi) ZZ(-phi); gfold:K undoes and redoes
+the whole preparation K times. All logical identities; on ACE they add seam crossings (README 3.6: ACE's
+seam loss barely follows them).
 
 Records (--out, JSONL): one ghz_map per run, one ghz per state (chip: per tree; tiles: per unit) with the
 reference implementation's Layer 1a names (P0, P1, C_parity, Phi_coh, F_GHZ, lambda_per_block,
-sum_dw_estimate) for ACE and, prefixed exact_, for the exact reference.
+sum_dw_estimate) for ACE and, prefixed exact_, for the exact reference. stack adds stack_pass (1, 2, V) to its
+ghz records (V: boundary_rep true where the code ran, seam_plan), one ghz_stack per unit (seam_class, seam_plan,
+syndrome per pass, pass1, pass2, passV, exact1, exact2, seam_crossings; with --zne-k layerS: the observables at
+every lambda and both fits, F_zne_linear, F_zne_exp) and one ghz_seam_model (Layer S's extraction and plan).
 
 Examples
   python3 nighthawk_ghz.py selftest
@@ -67,6 +105,9 @@ Examples
           --jobs 8 --out ghz61_dd.jsonl
   python3 nighthawk_ghz.py chip  --register nighthawk2p57 --shots 4096 --repeats 5 --jobs 8 --out ghz57.jsonl
   python3 nighthawk_ghz.py chip  --register nighthawk2p16 --layer2 unmitigated --out ghz16.jsonl
+  python3 nighthawk_ghz.py stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --jobs 8 --out stack61.jsonl
+  python3 nighthawk_ghz.py stack --register nighthawk2p16 --mode chip --out stack16.jsonl
+  python3 nighthawk_ghz.py stack --register nighthawk2p28 --unit 3 --zne-k 1,2 --out stack28.jsonl
   python3 nighthawk_ghz.py plot  --in ghz61.jsonl --register nighthawk61r2 --png ghz61.png
 
 Environment: no CUDA. CPU by default; --gpu runs ACE and the reference on the OpenCL device
@@ -462,6 +503,43 @@ class Gates:
         self.sim.mcx([self.q[c]], self.q[t])
 
 
+class AmpGates(Gates):
+    """Layer S noise amplification: every CX through a seam (coupler class replica or cross), in the
+    preparation and in the drift alike, is followed by K logical identities, so every seam crossing of the
+    circuit is multiplied by the same scale lambda = 1 + per * K and nothing else changes.
+      zz  ZZ(phi) ZZ(-phi), each as CX Rz CX, the second with control and target swapped (per = 4): a rotation
+          between every two crossings, as the drift's own couplings cross
+      cx  CX CX (per = 2): plain local folding
+    Exact on the reference simulator (selftest [9])."""
+    PER = dict(zz=4, cx=2)
+
+    def __init__(self, sim, mapq, R, kind="zz", K=1, phi=0.3):
+        super().__init__(sim, mapq)
+        if kind not in self.PER:
+            raise ValueError(kind)
+        self.R, self.kind, self.K, self.phi = R, kind, int(K), float(phi)
+
+    @classmethod
+    def scale(cls, kind, K):
+        return 1 + cls.PER[kind] * int(K)
+
+    def cx(self, c, t):
+        Gates.cx(self, c, t)
+        if self.K <= 0 or self.R.cls(c, t) == "exact":
+            return
+        for _ in range(self.K):
+            if self.kind == "zz":
+                Gates.cx(self, c, t)
+                self.zrot(t, self.phi)
+                Gates.cx(self, c, t)
+                Gates.cx(self, t, c)
+                self.zrot(c, -self.phi)
+                Gates.cx(self, t, c)
+            else:
+                Gates.cx(self, c, t)
+                Gates.cx(self, c, t)
+
+
 class Layer:
     """Base per-unit layer: nothing. A layer acts on one unit at three points of its preparation."""
     name = "none"
@@ -490,9 +568,48 @@ class Fold(Layer):
                 g.cx(p, c)
 
 
+class ZZFold(Layer):
+    """zzfold:K[:all[:phi]]: after every seam CX (or every CX) K identities ZZ(phi) ZZ(-phi), each ZZ as the
+    drift applies one (CX Rz CX), the second with control and target swapped so no two equal CXs meet.
+    Four extra crossings of that coupler per identity, each with a rotation between, as Layer 2's windows
+    cross it."""
+
+    def __init__(self, K=1, scope="seam", phi=0.3):
+        self.K, self.scope, self.phi = int(K), scope, float(phi)
+        self.name = f"zzfold:{self.K}" + (":all" if scope == "all" else "") + (f":{phi:g}" if self.phi != 0.3 else "")
+
+    def after_cx(self, g, unit, p, c, cls):
+        if self.scope == "all" or cls != "exact":
+            for _ in range(self.K):
+                g.cx(p, c)
+                g.zrot(c, self.phi)
+                g.cx(p, c)
+                g.cx(c, p)
+                g.zrot(p, -self.phi)
+                g.cx(c, p)
+
+
+class GlobalFold(Layer):
+    """gfold:K: after the preparation U, K times U^-1 U (the whole tree undone and redone): every CX of the
+    unit, seam or not, 2K + 1 times, with the state each CX meets in the circuit itself."""
+
+    def __init__(self, K=1):
+        self.K = int(K)
+        self.name = f"gfold:{self.K}"
+
+    def post(self, g, unit):
+        for _ in range(self.K):
+            for p, c in reversed(unit["edges"]):        # U^-1 ends with H on the root and U starts with it:
+                g.cx(p, c)                              # the pair cancels exactly and is left out
+            for p, c in unit["edges"]:
+                g.cx(p, c)
+
+
 LAYERS = {
     "none": lambda *args: Layer(),
     "fold": lambda F="1", scope="seam": Fold(int(F), scope),
+    "zzfold": lambda K="1", scope="seam", phi="0.3": ZZFold(int(K), scope, float(phi)),
+    "gfold": lambda K="1": GlobalFold(int(K)),
 }
 
 
@@ -598,10 +715,12 @@ def _task(spec):
     if spec["exact"]:
         from pyqrack import QrackSimulator
         sim = QrackSimulator(R.n, is_gpu=spec["gpu"], is_stabilizer_hybrid=spec["stab"])
-        g = Gates(sim, list(range(R.n)))
+        mapq = list(range(R.n))
     else:
         sim = R.backend(spec["gpu"], spec["stab"])
-        g = Gates(sim, R.idx)
+        mapq = R.idx
+    amp = spec.get("amp")
+    g = AmpGates(sim, mapq, R, amp["kind"], amp["K"], amp["phi"]) if amp and amp.get("K", 0) > 0 else Gates(sim, mapq)
     for u in spec["units"]:
         prepare(g, u, layers)
     l2 = spec.get("layer2") or {}
@@ -684,7 +803,7 @@ def estimate(data, k, blocks=1, t_idle=None):
         var = np.array([par[f"q{m}"][1] ** 2 for m in range(M)])
         c = complex(np.mean(sig * np.exp(-1j * k * phis)))
         se_c = math.sqrt(var.sum()) / M                                          # per real component, about
-        out.update(c_re=c.real, c_im=c.imag, C_parity=2 * abs(c), Phi_coh=math.atan2(c.imag, c.real),
+        out.update(c_re=c.real, c_im=c.imag, c_se=se_c, C_parity=2 * abs(c), Phi_coh=math.atan2(c.imag, c.real),
                    F_GHZ=0.5 * (out["P0"] + out["P1"] + 2 * abs(c)),
                    F0=0.5 * (out["P0"] + out["P1"]) + c.real)                    # fidelity to GHZ_0
         out["F_GHZ_se"] = 0.5 * math.hypot(out["pop_se"], 2 * se_c)
@@ -692,7 +811,7 @@ def estimate(data, k, blocks=1, t_idle=None):
             out["sum_dw_estimate"] = -out["Phi_coh"] / (2 * max(1, int(blocks)) * t_idle)   # Corollary 4.1
     x = par.get("q0") or par.get("xr0")
     if x is not None and "pop" in out:                                          # Clifford witness (not in the paper)
-        out["x_parity"] = x[0]
+        out["x_parity"], out["x_se"] = x[0], x[1]
         out["F_witness"] = out["pop"] + (1.0 + x[0]) / 2.0 - 1.0
         out["F_witness_se"] = math.hypot(out["pop_se"], x[1] / 2.0)
     if all(f"xr{a}" in par for a in range(4)):
@@ -779,32 +898,37 @@ def identity_idle(l2):
     return m in ("none", "dd") or (m == "compensated" and l2.get("sigma_qs", 0) == 0)
 
 
-def run_tasks(a, R, groups, settings, label, l2):
+def run_tasks(a, R, groups, settings, label, l2, amp=None, with_exact=True, rep_offset=0, brep=None):
     """Every (group of units, setting, realisation) on ACE and on the exact simulator. groups: [(name,
-    [units])]. Returns ({name: [ {setting: bits} per realisation ]} for ACE and for exact, bad, seconds)."""
+    [units])]. amp: Layer S amplification (AmpGates) or None. with_exact False: ACE only. rep_offset: first
+    realisation index (fresh eps draws for Layer V). brep: ACE's boundary repetition code for these circuits
+    (None: --ace-boundary-rep). Returns ({name: [ {setting: bits} per realisation ]} for ACE and for exact, bad,
+    seconds)."""
     reps = max(1, int(a.repeats))
     ex_reps = reps if l2["mode"] != "none" else 1
-    base = dict(repo=a.repo, reg=R.name, brep=bool(a.ace_boundary_rep), layers=a.layers, gpu=bool(a.gpu),
-                stab=a.stab, layer2=l2)
+    no_exact = a.no_exact or not with_exact
+    base = dict(repo=a.repo, reg=R.name, brep=bool(a.ace_boundary_rep if brep is None else brep), layers=a.layers,
+                gpu=bool(a.gpu), stab=a.stab, layer2=l2, amp=amp)
     calls, labels, keys = [], [], []
     for name, units in groups:
         for s in settings:
             for r in range(reps):
-                calls.append((_task, (dict(base, units=units, setting=s, shots=a.shots, exact=False, realisation=r),)))
+                calls.append((_task, (dict(base, units=units, setting=s, shots=a.shots, exact=False,
+                                           realisation=r + rep_offset),)))
                 labels.append(f"ACE {label} {name} {s} realisation {r + 1}/{reps}")
                 keys.append((name, s, r, False))
-            if not a.no_exact:
+            if not no_exact:
                 for r in range(ex_reps):
                     calls.append((_task, (dict(base, units=units, setting=s, shots=a.exact_shots, exact=True,
-                                               realisation=r),)))
+                                               realisation=r + rep_offset),)))
                     labels.append(f"exact {label} {name} {s} realisation {r + 1}/{ex_reps}")
                     keys.append((name, s, r, True))
     pool, workers = nq.shor_pool(a.jobs, len(calls))
     every = float(a.progress or 0)
     if every:
         print(f"# ghz plan: {len(calls)} circuits ({len(groups)} groups x {len(settings)} settings x {reps} "
-              f"ACE realisations" + (f" + exact x {ex_reps}" if not a.no_exact else "") + f"), {workers} process(es)",
-              flush=True)
+              f"ACE realisations" + (f" + exact x {ex_reps}" if not no_exact else "") + f"), {workers} process(es)"
+              + (f" [{label}]" if label else ""), flush=True)
     t0 = time.time()
     try:
         res = nq.shor_pool_map(pool, calls, labels, every, what="ghz")
@@ -823,7 +947,7 @@ def run_tasks(a, R, groups, settings, label, l2):
             exact[name][r][s] = bits
         else:
             data[name][r][s] = bits
-    return data, (None if a.no_exact else exact), (None if a.no_exact else bad), time.time() - t0
+    return data, (None if no_exact else exact), (None if no_exact else bad), time.time() - t0
 
 
 def header(a, R, what, l2):
@@ -975,23 +1099,30 @@ def cmd_chip(a):
 
 # ================================================================== tiles
 
-def cmd_tiles(a):
-    R = register(a.repo, a.register, a.ace_boundary_rep)
-    l2 = layer2_spec(a)
-    k = int(a.unit)
+def tile_groups(a, R, k, apart):
+    """[(name, [units])]: k-qubit chains in every orientation and offset of --orient / --offsets, one group per
+    tiling or, apart, split so no coupler joins two units of a group (Layer 2 needs that)."""
     if k < 2:
         raise SystemExit("ghz: --unit must be 2 or more")
     offs = None if a.offsets in (None, "all") else [int(x) for x in a.offsets.split(",")]
     tl = tilings(R, k, tuple(x.strip() for x in a.orient.split(",")), offs)
     if not tl:
         raise SystemExit(f"ghz: no chain of {k} coupled qubits along a lattice line of {R.name}")
-    settings = settings_for(k, a.estimator, a.mqc_max)
-    a.stab = resolve_stabilizer(a, "tiles", settings, l2["mode"])
     groups = []
     for ori, f, units in tl:
-        parts = spread(R, units) if l2["mode"] != "none" else [units]
+        parts = spread(R, units) if apart else [units]
         for j, part in enumerate(parts):
             groups.append((f"{ori}{f}" + (f".{j}" if len(parts) > 1 else ""), part))
+    return groups
+
+
+def cmd_tiles(a):
+    R = register(a.repo, a.register, a.ace_boundary_rep)
+    l2 = layer2_spec(a)
+    k = int(a.unit)
+    groups = tile_groups(a, R, k, l2["mode"] != "none")
+    settings = settings_for(k, a.estimator, a.mqc_max)
+    a.stab = resolve_stabilizer(a, "tiles", settings, l2["mode"])
     nunits = sum(len(u) for _, u in groups)
     print(header(a, R, f"{k}-qubit GHZ chains tiled", l2))
     print(f"{len(groups)} circuit groups ({', '.join(f'{g} {len(u)}' for g, u in groups)} units), {nunits} units; "
@@ -1041,6 +1172,465 @@ def cmd_tiles(a):
     print(f"seconds: {secs:.1f}  (shot noise alone on {key}: about +/- "
           f"{np.mean([r.get(key + '_se', 0) for r in recs]):.3f} per unit)")
     write_records(a, R, recs, bad)
+
+
+# ================================================================== stack: Layer S (seam error correction), Layer V
+
+SEGMENTS = dict(none=0, unmitigated=1, compensated=2, dd=4)      # drift segments per idle window (idle_block)
+KEEP = ("P0", "P1", "pop", "C_parity", "Phi_coh", "F_GHZ", "F_GHZ_se", "F0", "F_witness", "F_witness_se", "x_parity",
+        "lambda_per_block")
+
+
+def seam_crossings(R, u, l2):
+    """Seam crossings of one unit's circuit: the preparation's CXs through a seam, and the drift's, two CXs per
+    coupling inside the unit through a seam, per segment of every window (outside couplings are rotations)."""
+    prep = sum(1 for c in u["classes"] if c != "exact")
+    qs = set(u["qubits"])
+    inside = sum(1 for a_, b_ in R.couplers if a_ in qs and b_ in qs and R.cls(a_, b_) != "exact")
+    return prep, 2 * inside * SEGMENTS[l2["mode"]] * max(0, int(l2.get("blocks") or 0))
+
+
+def lin_obs(e):
+    """The observables linear in rho that the fidelity is built from, with standard errors: P0 + P1 and
+    c = rho_{0..0,1..1} (Lemma 4), or P0 + P1 and the X parity (witness)."""
+    o = dict(pop=e["pop"], pop_se=e["pop_se"])
+    if "c_re" in e:
+        o.update(c_re=e["c_re"], c_im=e["c_im"], c_se=e["c_se"])
+    else:
+        o.update(x=e["x_parity"], x_se=e["x_se"])
+    return o
+
+
+def fidelity_from(o):
+    """F_GHZ = (P0 + P1 + 2|c|) / 2 (Lemma 4), or the witness P0 + P1 + (1 + <X..X>) / 2 - 1."""
+    if "c_re" in o:
+        return 0.5 * (o["pop"] + 2 * abs(complex(o["c_re"], o["c_im"])))
+    return o["pop"] + (1 + o["x"]) / 2 - 1
+
+
+def wls(x, y, se):
+    """Weighted least-squares line y = p0 + p1 x: (p0, se of p0, p1). One point: (y, se, 0)."""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    w = 1.0 / np.maximum(np.asarray(se, float), 1e-6) ** 2
+    if len(x) == 1:
+        return float(y[0]), float(1 / math.sqrt(w[0])), 0.0
+    A = np.vstack([np.ones_like(x), x]).T
+    cov = np.linalg.inv(A.T @ (A * w[:, None]))
+    p = cov @ (A.T @ (w * y))
+    return float(p[0]), float(math.sqrt(max(cov[0, 0], 0.0))), float(p[1])
+
+
+def zne_extrapolate(lams, obs, k):
+    """Zero-noise extrapolation of one unit's observables measured at seam scales lams (lambda = 1: the circuit
+    itself, lambda = 0: no seam error).
+      linear  a weighted line through each linear observable (P0 + P1, Re c, Im c or <X..X>), read at 0
+      exp     A e^{-r lambda} through the population excess (P0 + P1 - 2/d) / (1 - 2/d) (Lemma 3's survival) and
+              through |c| (or <X..X>), read at 0; None where a value is not positive
+    Returns {model: dict(obs at 0, F, F_se, slopes, physical) or None}."""
+    d = 2.0 ** k
+    mqc = "c_re" in obs[0]
+    out = {}
+    pop0, pop_se, pop_sl = wls(lams, [o["pop"] for o in obs], [o["pop_se"] for o in obs])
+    if mqc:
+        re0, re_se, _ = wls(lams, [o["c_re"] for o in obs], [o["c_se"] for o in obs])
+        im0, im_se, _ = wls(lams, [o["c_im"] for o in obs], [o["c_se"] for o in obs])
+        o0 = dict(pop=pop0, c_re=re0, c_im=im0)
+        cse = max(re_se, im_se)
+        F_se = 0.5 * math.hypot(pop_se, 2 * cse)
+        phys = pop0 <= 1 + 2 * pop_se and abs(complex(re0, im0)) <= pop0 / 2 + 2 * cse
+    else:
+        x0, x_se, _ = wls(lams, [o["x"] for o in obs], [o["x_se"] for o in obs])
+        o0 = dict(pop=pop0, x=x0)
+        F_se = math.hypot(pop_se, x_se / 2)
+        phys = pop0 <= 1 + 2 * pop_se and x0 <= 1 + 2 * x_se
+    out["linear"] = dict(obs=o0, F=fidelity_from(o0), F_se=F_se, pop_slope=pop_sl, physical=bool(phys))
+    exc = np.array([(o["pop"] - 2 / d) / (1 - 2 / d) for o in obs])
+    exc_se = np.array([o["pop_se"] / (1 - 2 / d) for o in obs])
+    coh = np.array([abs(complex(o["c_re"], o["c_im"])) if mqc else o["x"] for o in obs])
+    coh_se = np.array([o["c_se"] if mqc else o["x_se"] for o in obs])
+    if exc.min() > 0 and coh.min() > 0:
+        le0, le_se, le_sl = wls(lams, np.log(exc), exc_se / exc)
+        lc0, lc_se, lc_sl = wls(lams, np.log(coh), coh_se / coh)
+        e0, c0 = math.exp(le0), math.exp(lc0)
+        p0 = 2 / d + (1 - 2 / d) * e0
+        oe = dict(pop=p0, c_re=c0, c_im=0.0) if mqc else dict(pop=p0, x=c0)
+        F_se = (0.5 * math.hypot((1 - 2 / d) * e0 * le_se, 2 * c0 * lc_se) if mqc
+                else math.hypot((1 - 2 / d) * e0 * le_se, c0 * lc_se / 2))
+        phys = p0 <= 1 and (c0 <= p0 / 2 if mqc else c0 <= 1)
+        out["exp"] = dict(obs=oe, F=fidelity_from(oe), F_se=F_se, pop_rate=-le_sl, coh_rate=-lc_sl,
+                          physical=bool(phys))
+    else:
+        out["exp"] = None
+    return out
+
+
+def seam_model(R, rows):
+    """Layer S, extraction: the seam's error information in passes 1 and 2, no new circuits. Per unit with seam
+    crossings and per pass, the share of P0 + P1 and of the coherence (|c|, or <X..X>) that ACE keeps against
+    the exact reference, against the circuit's seam crossings n: log(kept) = a + b n by least squares. e^a is
+    what the first crossing leaves (scaling the crossings cannot remove it), e^b what each further crossing
+    keeps (the part ZNE can remove). Per seam coupler: the share of shots whose two ends differ in Z, per pass."""
+    pts = dict(pop=[], coh=[])
+    for r in rows:
+        if r["prep"] + r["drift"] == 0:
+            continue
+        for e, x, n in ((r["e1"], r["x1"], r["prep"]), (r["e2"], r["x2"], r["prep"] + r["drift"])):
+            if not x:
+                continue
+            xp = x["exact_P0"] + x["exact_P1"]
+            if xp > 0.5:
+                pts["pop"].append((n, e["pop"] / xp))
+            if x.get("exact_C_parity", 0) > 0.5 and "C_parity" in e:
+                pts["coh"].append((n, e["C_parity"] / x["exact_C_parity"]))
+            elif x.get("exact_x_parity", 0) > 0.5 and "x_parity" in e:
+                pts["coh"].append((n, e["x_parity"] / x["exact_x_parity"]))
+    fit = {}
+    for key, p in pts.items():
+        ns = np.array([q[0] for q in p], float)
+        if len(set(ns.tolist())) < 2:
+            fit[key] = None
+            continue
+        b, a_ = np.polyfit(ns, np.log(np.clip([q[1] for q in p], 1e-3, None)), 1)
+        fit[key] = dict(first=float(math.exp(a_)), per_crossing=float(math.exp(b)), points=len(p),
+                        crossings=[int(ns.min()), int(ns.max())])
+    brk = collections.defaultdict(lambda: ([], []))
+    for r in rows:
+        for i, e in enumerate((r["e1"], r["e2"])):
+            for a_, b_, cl, v in e.get("coupler_break", []):
+                if cl != "exact":
+                    brk[(min(a_, b_), max(a_, b_))][i].append(v)
+    couplers = [[a_, b_, R.cls(a_, b_), (round(float(np.mean(v1)), 4) if v1 else None),
+                 (round(float(np.mean(v2)), 4) if v2 else None)] for (a_, b_), (v1, v2) in sorted(brk.items())]
+    return dict(fit=fit, couplers=couplers)
+
+
+def print_seam_model(model, lams):
+    print("\nLayer S, extraction (passes 1 and 2 against the exact reference, units with seam crossings n):")
+    for key, name in (("pop", "P0 + P1"), ("coh", "coherence")):
+        f = model["fit"].get(key)
+        if f is None:
+            print(f"  {name:<9}  not identifiable (one crossing count, or no exact reference)")
+            continue
+        print(f"  {name:<9}  kept after the first crossing {f['first']:.3f}, per further crossing {f['per_crossing']:.4f}"
+              f"  ({f['points']} unit-passes, n {f['crossings'][0]}..{f['crossings'][1]})")
+    f = model["fit"].get("coh")
+    if f is not None and lams:
+        print(f"  ZNE ceiling under this model: lambda -> 0 restores the per-crossing part only; the first-crossing "
+              f"share {f['first']:.3f} stays" + ("  [per-crossing loss < 1 %: little for ZNE to extrapolate]"
+                                                 if f["per_crossing"] > 0.99 else ""))
+    br = sorted((c for c in model["couplers"] if c[3] is not None), key=lambda c: -(c[3] or 0))
+    if br:
+        print("  seam couplers, Z break rate pass 1 / pass 2 (highest first): "
+              + ", ".join(f"{a_}-{b_} {v1:.2f}/" + ("  - " if v2 is None else f"{v2:.2f}")
+                          for a_, b_, _, v1, v2 in br[:8]))
+    if lams:
+        print(f"  ZNE (--zne-k) runs the units with seam crossings again with every crossing scaled by lambda {lams[1:]}")
+
+
+SEAM_CLASSES = ("bulk", "replica", "cut")
+
+
+def unit_hosts(R, u):
+    """The ACE simulators that hold every qubit of a unit (a seam qubit is held by the simulator of each replica)."""
+    return sorted(set.intersection(*(set(R.sids[q]) for q in u["qubits"])))
+
+
+def seam_class(R, u):
+    """bulk: one simulator holds the unit and none of its qubits is a seam qubit. replica: one simulator holds the
+    unit, its seam qubits through their replica there; their seam error is a disagreement between replicas, which
+    the replica repetition code corrects. cut: no simulator holds the whole unit; its GHZ needs coherence between
+    two simulators, and ACE has none to give (c = 0, F_GHZ <= 1/2)."""
+    if not unit_hosts(R, u):
+        return "cut"
+    return "replica" if any(q in R.seam for q in u["qubits"]) else "bulk"
+
+
+def code_schedule(R, u):
+    """The unit's tree in the order the replica repetition code needs: from every prepared qubit, its CXs into qubits
+    of one simulator first, its CXs into seam qubits after. A CX between two seam qubits is matched in every simulator,
+    which clears ACE's authority record, so a seam qubit that meets another seam qubit before its partner in the host
+    simulator leaves the decoder no replica to trust (measured: nighthawk61r2 [48, 40, 56] at F 0.23-0.45 under the
+    code in the preparation's order, 1.000 in this one). The same state: CXs from one control commute, and every
+    child still follows its parent."""
+    parent = {c: p for p, c in u["edges"]}
+    kids = collections.defaultdict(list)
+    for p, c in u["edges"]:
+        kids[p].append(c)
+    order, ready = [u["root"]], list(kids[u["root"]])
+    while ready:
+        ready.sort(key=lambda c: (len(R.sids[c]) > 1, order.index(parent[c])))
+        c = ready.pop(0)
+        order.append(c)
+        ready += kids[c]
+    return unit_from_tree(R, u["root"], parent, order)
+
+
+def syndrome(R, e, x, key):
+    """One pass's seam syndrome of a unit, read from its records: the shares of P0 + P1 and of the coherence ACE keeps
+    against the exact reference, the fidelity it loses (and in standard errors), which branch loses population
+    (P1 - P0 > 0: the 0..0 branch), and the qubit whose Z value leaves the unit's majority most often."""
+    out = dict(branch=round(e["P1"] - e["P0"], 4))
+    if x:
+        xp = x.get("exact_P0", 0.0) + x.get("exact_P1", 0.0)
+        if xp > 0.5:
+            out["pop_kept"] = round(e["pop"] / xp, 4)
+        if "C_parity" in e and x.get("exact_C_parity", 0.0) > 0.5:
+            out["coh_kept"] = round(e["C_parity"] / x["exact_C_parity"], 4)
+        elif "x_parity" in e and x.get("exact_x_parity", 0.0) > 0.5:
+            out["coh_kept"] = round(e["x_parity"] / x["exact_x_parity"], 4)
+        xF = x.get("exact_" + key)
+        if xF is not None and e.get(key) is not None:
+            out["loss"] = round(xF - e[key], 4)
+            out["loss_sigma"] = round((xF - e[key]) / max(e.get(key + "_se", 0.0), 1e-3), 2)
+    sb = e.get("site_break") or {}
+    if sb:
+        q, v = max(((int(q), v) for q, v in sb.items()), key=lambda t: (t[1], -t[0]))
+        out.update(break_site=q, break_rate=round(v, 4), break_on_seam=q in R.seam)
+    return out
+
+
+def seam_plan(R, rows, key, min_loss=0.02, min_sigma=3.0):
+    """Layer S's extraction and plan, per row (unit): seam class, the syndrome of passes 1 and 2, and the plan: code
+    (a replica unit that lost fidelity in pass 1 or 2: rerun under the replica repetition code), clean (a replica
+    unit with no measurable loss: nothing to correct), control (a cut unit: rerun without a code), None (bulk).
+    Returns a summary per class."""
+    for r in rows:
+        r["cls"] = seam_class(R, r["u"])
+        r["syn"] = [syndrome(R, r["e1"], r["x1"], key), syndrome(R, r["e2"], r["x2"], key)]
+        lost = any(s.get("loss", 0.0) > min_loss and s.get("loss_sigma", 0.0) > min_sigma for s in r["syn"])
+        r["plan"] = (("code" if lost else "clean") if r["cls"] == "replica" else
+                     "control" if r["cls"] == "cut" else None)
+    summary = {}
+    for cl in SEAM_CLASSES:
+        rs = [r for r in rows if r["cls"] == cl]
+        if not rs:
+            continue
+        s = dict(units=len(rs), plans=dict(collections.Counter(str(r["plan"]) for r in rs)))
+        for i in (0, 1):
+            for f in ("pop_kept", "coh_kept", "branch"):
+                v = [r["syn"][i][f] for r in rs if f in r["syn"][i]]
+                if v:
+                    s[f"{f}{i + 1}"] = round(float(np.mean(v)), 4)
+            v = [r["syn"][i]["break_on_seam"] for r in rs if r["syn"][i].get("break_rate", 0) > 0.02]
+            if v:
+                s[f"break_on_seam{i + 1}"] = [int(sum(v)), len(v)]
+        summary[cl] = s
+    return summary
+
+
+def print_seam_plan(summary, min_loss=0.02):
+    print("\nLayer S, syndrome by seam class (against the exact reference; pass 1 / pass 2):")
+    print(f"  {'class':<9}{'units':>6}  {'P0+P1 kept':>13}  {'coherence kept':>15}  {'P1 - P0':>14}  "
+          f"{'breaks on a seam qubit':>23}  plan")
+    for cl in SEAM_CLASSES:
+        s = summary.get(cl)
+        if not s:
+            continue
+
+        def pair(f, nd=3):
+            return f"{fmt(s.get(f + '1'), nd)} / {fmt(s.get(f + '2'), nd)}"
+
+        def brk(i):
+            v = s.get(f"break_on_seam{i}")
+            return f"{v[0]}/{v[1]}" if v else "-"
+        plans = ", ".join(f"{k} {v}" for k, v in sorted(s["plans"].items()) if k != "None") or "-"
+        print(f"  {cl:<9}{s['units']:>6}  {pair('pop_kept'):>13}  {pair('coh_kept'):>15}  {pair('branch'):>14}  "
+              f"{brk(1) + ' / ' + brk(2):>23}  {plans}")
+    print(f"  (breaks: units whose most-breaking qubit, at > 0.02, is a seam qubit. replica: one simulator holds the "
+          f"unit; code = it lost > {min_loss} and 3 sigma of F, rerun under the replica repetition code. cut: no "
+          f"simulator holds it, ACE keeps no coherence between simulators, F_GHZ <= 1/2: rerun without a code)")
+
+
+def cmd_stack(a):
+    """Pass 1 Layer 1a, pass 2 Layer 2, Layer S (the seam's syndrome from passes 1 and 2, then the replica repetition
+    code on the units it can correct; ZNE for comparison with --zne-k), Layer V (the third GHZ measurement: pass 2's
+    circuit under the correction, the uncorrectable units as a control), compared unit by unit."""
+    if a.ace_boundary_rep:
+        raise SystemExit("ghz stack: passes 1 and 2 measure the seam uncorrected and Layer S applies the boundary "
+                         "repetition code itself: drop --ace-boundary-rep")
+    R = register(a.repo, a.register, False)
+    Rc = register(a.repo, a.register, True)
+    if Rc.idx != R.idx or Rc.size != R.size or Rc.sids != R.sids:
+        raise SystemExit(f"ghz stack: ACE places {R.name} differently with the boundary repetition code, so Layer V "
+                         f"would not rerun the same circuits")
+    if parse_layers(a.layers):
+        raise SystemExit("ghz stack: --layers must be none: the passes compare the plain preparation")
+    if parse_layer2(a.layer2) == "none":
+        a.layer2 = "dd"
+    l2, l2_0 = layer2_spec(a), dict(mode="none", blocks=0)
+    ks = sorted({int(x) for x in str(a.zne_k or "").split(",") if x.strip()})
+    if ks and ks[0] < 1:
+        raise SystemExit("ghz stack: --zne-k needs K >= 1")
+    lams = [1] + [AmpGates.scale(a.zne_amp, K) for K in ks] if ks else []
+    if a.mode == "tiles":
+        k = int(a.unit)
+        groups = tile_groups(a, R, k, True)
+    else:
+        names = [t.strip() for t in a.trees.split(",") if t.strip()]
+        for t in names:
+            if t not in TREES:
+                raise SystemExit(f"ghz: unknown tree {t!r}; known: {', '.join(TREES)}")
+        groups = [(t, [TREES[t](R, a.root)]) for t in names]
+        k = R.n
+    settings = settings_for(k, a.estimator, a.mqc_max)
+    a.stab = resolve_stabilizer(a, a.mode, settings, l2["mode"])
+    if a.mode == "chip" and not a.stab and R.n > 30 and not a.force:
+        raise SystemExit(f"ghz stack: {R.n} qubits with dense patches do not fit; use a register of <= 30 qubits")
+    L, T = max(1, l2["blocks"]), l2["t_idle"]
+    what = f"GHZ stack, {k}-qubit chains" if a.mode == "tiles" else f"GHZ stack over all {R.n} qubits"
+    print(header(a, R, what, l2))
+    print(f"passes: 1 = Layer 1a (no drift); 2 = Layer 2 {l2['mode']}; S = the seam's syndrome from 1 and 2, then the "
+          f"replica repetition code where it corrects" + (f", and ZNE ({a.zne_amp}, lambda {lams})" if lams else "")
+          + "; V = the third measurement: pass 2's circuit under the correction")
+    print(f"{len(groups)} circuit groups, {sum(len(u) for _, u in groups)} units; readout settings: {' '.join(settings)}")
+    d1, x1, bad, t1 = run_tasks(a, R, groups, settings, "pass 1", l2_0)
+    stop_on_bad(a, bad)
+    d2, x2, bad, t2 = run_tasks(a, R, groups, settings, "pass 2", l2)
+    stop_on_bad(a, bad)
+    rows = []
+    for g, units in groups:
+        for j, u in enumerate(units):
+            prep, drift = seam_crossings(R, u, l2)
+            rows.append(dict(g=g, j=j, u=u, prep=prep, drift=drift,
+                             e1=score_unit(R, u, d1[g], k, 1, None),
+                             x1=exact_fields(R, u, x1[g] if x1 else None, k, l2_0),
+                             e2=score_unit(R, u, d2[g], k, L, T),
+                             x2=exact_fields(R, u, x2[g] if x2 else None, k, l2)))
+    key = headline(rows[0]["e1"])[0]
+    model = seam_model(R, rows)
+    print_seam_model(model, lams)
+    plan = seam_plan(R, rows, key)
+    print_seam_plan(plan)
+    if a.no_exact:
+        print("  (--no-exact: no loss can be measured, so no unit is planned for the code)")
+    tS = tV = 0.0
+    sg = [(g, units) for g, units in groups if any(r["prep"] + r["drift"] for r in rows if r["g"] == g)]
+    if lams and sg:
+        dS = {}
+        for K in ks:
+            amp = dict(kind=a.zne_amp, K=K, phi=float(a.zne_phi))
+            dS[K], _, _, t_ = run_tasks(a, R, sg, settings, f"ZNE lambda {AmpGates.scale(a.zne_amp, K)}", l2,
+                                        amp=amp, with_exact=False)
+            tS += t_
+        names = {g for g, _ in sg}
+        for r in rows:
+            if r["g"] in names and r["prep"] + r["drift"]:
+                r["eS"] = {K: score_unit(R, r["u"], dS[K][r["g"]], k, L, T, maps=False) for K in ks}
+                r["obs"] = [lin_obs(r["e2"])] + [lin_obs(r["eS"][K]) for K in ks]
+                r["zne"] = zne_extrapolate(lams, r["obs"], k)
+    by_g = collections.defaultdict(lambda: collections.defaultdict(list))
+    for r in rows:
+        if r["plan"] in ("code", "control"):
+            by_g[r["plan"]][r["g"]].append(r)
+    for plan_, brep in (("code", True), ("control", False)):
+        for rs in by_g[plan_].values():
+            for r in rs:
+                r["uV"] = code_schedule(R, r["u"]) if plan_ == "code" else r["u"]
+        vg = [(f"{g}/{plan_}", [r["uV"] for r in rs]) for g, rs in by_g[plan_].items()]
+        if not vg:
+            continue
+        dV, _, _, t_ = run_tasks(a, R, vg, settings, f"Layer V, {plan_}", l2, with_exact=False, rep_offset=1000,
+                                 brep=brep)
+        tV += t_
+        for g, rs in by_g[plan_].items():
+            for r in rs:
+                r["eV"] = score_unit(R, r["uV"], dV[f"{g}/{plan_}"], k, L, T)
+    report_stack(R, rows, key, lams)
+    print(f"seconds: pass 1 {t1:.1f}, pass 2 {t2:.1f}" + (f", ZNE {tS:.1f}" if lams else "") + f", Layer V {tV:.1f}")
+    recs = []
+    for r in rows:
+        info = (unit_info(R, r["u"]) if a.mode == "tiles"
+                else dict(cx_classes=dict(collections.Counter(r["u"]["classes"]))))
+        info = dict(info, seam_class=r["cls"], seam_plan=r["plan"])
+        where = (dict(mode="tiles", unit_size=k, tiling=r["g"], unit=r["j"]) if a.mode == "tiles"
+                 else dict(mode="chip", tree=r["g"]))
+        for p, l2p, e, x in ((1, l2_0, r["e1"], r["x1"]), (2, l2, r["e2"], r["x2"])):
+            recs.append(dict(base_record(a, R, l2p), test="ghz", stack_pass=p, **where, **r["u"], **info, **e, **x))
+        if "eV" in r:
+            recs.append(dict(base_record(a, R, l2), test="ghz", stack_pass="V", **where, **r["uV"], **info, **r["eV"],
+                             **r["x2"], boundary_rep=r["plan"] == "code"))
+        st = dict(base_record(a, R, l2), test="ghz_stack", **where, **r["u"], **info,
+                  seam_crossings=dict(prep=r["prep"], drift=r["drift"]), syndrome=r["syn"],
+                  pass1={q: r["e1"][q] for q in KEEP if q in r["e1"]}, exact1=r["x1"],
+                  pass2={q: r["e2"][q] for q in KEEP if q in r["e2"]}, exact2=r["x2"])
+        if "eV" in r:
+            st["passV"] = dict({q: r["eV"][q] for q in KEEP if q in r["eV"]}, boundary_rep=r["plan"] == "code",
+                               edges=r["uV"]["edges"])
+        if "zne" in r:
+            z = r["zne"]
+            st.update(layerS=dict(amp=a.zne_amp, phi=float(a.zne_phi), K=ks, lambdas=lams, observables=r["obs"],
+                                  F_at=[fidelity_from(o) for o in r["obs"]], linear=z["linear"], exp=z["exp"]),
+                      F_zne_linear=z["linear"]["F"], F_zne_exp=(z["exp"]["F"] if z["exp"] else None))
+        recs.append(st)
+    recs.append(dict(base_record(a, R, l2), test="ghz_seam_model", mode=a.mode, plan=plan, lambdas=lams,
+                     amp=(a.zne_amp if lams else None), phi=(float(a.zne_phi) if lams else None), **model))
+    write_records(a, R, recs, None)
+
+
+def report_stack(R, rows, key, lams):
+    """Layer V: the three GHZ measurements (pass 1, pass 2, V) side by side, by seam class, plan and seam CXs in the
+    preparation; the units Layer V reran one by one; what the code changed against what a rerun changes."""
+    xk = "exact_" + key
+
+    def mean(rs, f):
+        v = [f(r) for r in rs]
+        v = [x for x in v if x is not None]
+        return float(np.mean(v)) if v else None
+    by = collections.defaultdict(list)
+    for r in rows:
+        by[(SEAM_CLASSES.index(r["cls"]), r["prep"], str(r["plan"]))].append(r)
+    zcol = bool(lams)
+    print(f"\nLayer V: {key} by class, mean over units (pass 1 Layer 1a | pass 2 Layer 2 | V: pass 2's circuit again, "
+          f"under the code (code) or without (control) | exact, pass 2" + (" | ZNE linear" if zcol else "") + ")")
+    print(f"  {'seam class, seam CXs':<24}{'plan':<9}{'units':>6}{'pass 1':>9}{'pass 2':>9}{'V':>9}{'exact':>9}"
+          + (f"{'ZNE lin':>9}" if zcol else ""))
+    for c in sorted(by):
+        rs = by[c]
+        cl, prep, plan_ = SEAM_CLASSES[c[0]], c[1], c[2]
+        v = [r for r in rs if "eV" in r]
+        cols = [mean(rs, lambda r: r["e1"].get(key)), mean(rs, lambda r: r["e2"].get(key)),
+                mean(v, lambda r: r["eV"].get(key)) if v else None, mean(rs, lambda r: r["x2"].get(xk))]
+        if zcol:
+            z = [r for r in rs if "zne" in r]
+            cols.append(mean(z, lambda r: r["zne"]["linear"]["F"]) if z else None)
+        print(f"  {cl + ', ' + str(prep):<24}{('-' if plan_ == 'None' else plan_):<9}{len(rs):>6}"
+              + "".join(f"{fmt(x):>9}" for x in cols))
+    v = [r for r in rows if "eV" in r]
+    if not v:
+        print("  no unit to correct or to control: every unit is in the bulk, or no loss was measured")
+        return
+    print(f"\nunits Layer V reran ({key}; seam crossings prep + drift; syndrome of pass 2: the qubit that breaks most, "
+          f"* = a seam qubit, and P1 - P0):")
+    for r in sorted(v, key=lambda r: (r["plan"], r["prep"], r["e2"].get(key, 0))):
+        s = r["syn"][1]
+        site = (f"q{s['break_site']}{'*' if s.get('break_on_seam') else ' '} {s['break_rate']:.2f}"
+                if "break_site" in s else "  -  ")
+        print(f"  {r['plan']:<8}{r['g']:>9} #{r['j']:<3} {str(r['u']['qubits']):<14} n {r['prep']}+{r['drift']:<3} "
+              f"p1 {fmt(r['e1'].get(key))}  p2 {fmt(r['e2'].get(key))}  V {fmt(r['eV'].get(key))}  "
+              f"exact {fmt(r['x2'].get(xk))}   breaks {site}  P1-P0 {s['branch']:+.2f}"
+              + (f"  ZNE lin {r['zne']['linear']['F']:.3f}" if "zne" in r else ""))
+    code = [r for r in v if r["plan"] == "code"]
+    ctrl = [r for r in v if r["plan"] == "control"]
+    if ctrl:
+        spread = [abs(r["eV"][key] - r["e2"][key]) for r in ctrl]
+        coh = [r["eV"].get("C_parity", r["eV"].get("x_parity")) for r in ctrl]
+        print(f"  control (cut units, no code): |V - pass 2| mean {np.mean(spread):.3f}, max {max(spread):.3f} (what a "
+              f"rerun moves); V {key} at most {max(r['eV'][key] for r in ctrl):.3f}, coherence mean "
+              f"{np.mean([c for c in coh if c is not None]):.3f} (no coherence between simulators: F <= 1/2)")
+    if code:
+        gain = [r["eV"][key] - r["e2"][key] for r in code]
+        gap = [r["x2"][xk] - r["eV"][key] for r in code if r["x2"].get(xk) is not None]
+        print(f"  code (replica units): V - pass 2 mean {np.mean(gain):+.3f}, range {min(gain):+.3f} .. {max(gain):+.3f}"
+              + (f"; exact - V mean {np.mean(gap):+.3f}" if gap else "")
+              + (f"; V - pass 1 mean {np.mean([r['eV'][key] - r['e1'][key] for r in code]):+.3f}"))
+        if ctrl:
+            print(f"  the code moves F by {np.mean(gain):+.3f} on average, a rerun by "
+                  f"{np.mean([abs(r['eV'][key] - r['e2'][key]) for r in ctrl]):.3f}")
+    z = [r for r in rows if "zne" in r]
+    if z:
+        g = [r["zne"]["linear"]["F"] - r["e2"][key] for r in z]
+        print(f"  ZNE (linear) minus pass 2 on the seam units: mean {np.mean(g):+.3f}, range {min(g):+.3f} .. "
+              f"{max(g):+.3f}")
 
 
 # ================================================================== plot
@@ -1386,6 +1976,64 @@ def cmd_selftest(a):
     prepare(g, u, parse_layers("fold:2:all"))
     p = [sim.prob_perm([0, 1, 2, 3], [bool((x >> i) & 1) for i in range(4)]) for x in range(16)]
     check("fold:2:all keeps the GHZ populations", abs(p[0] - 0.5) < 1e-6 and abs(p[15] - 0.5) < 1e-6)
+
+    print("[9] Layer S amplification (AmpGates) is the identity on the exact simulator (random 3-qubit state)")
+
+    class _SeamStub:                                     # coupler 0-1 through a seam, the rest inside a patch
+        @staticmethod
+        def cls(a_, b_):
+            return "replica" if {a_, b_} == {0, 1} else "exact"
+    for kind in ("zz", "cx"):
+        kets = []
+        for K in (0, 2):
+            sim = QrackSimulator(3, is_gpu=False)
+            g = AmpGates(sim, [0, 1, 2], _SeamStub, kind, K, 0.3) if K else Gates(sim, [0, 1, 2])
+            r_ = np.random.default_rng(7)
+            for q in range(3):
+                g.u(q, *r_.uniform(0, math.pi, 3))
+            g.cx(0, 1)
+            g.cx(1, 2)
+            g.cx(1, 0)
+            kets.append(_ket(sim, 3))
+        fid = abs(np.vdot(kets[0], kets[1])) ** 2
+        check(f"{kind}, K = 2 (lambda {AmpGates.scale(kind, 2)})", abs(fid - 1) < 1e-6, f"overlap {fid:.9f}")
+
+    print("[10] ZNE: each model returns its own zero-noise value (k = 3, lambda 1, 5, 9)")
+    lams = [1, 5, 9]
+    obs = [dict(pop=0.25 + 0.75 * 0.9 * math.exp(-0.05 * x), pop_se=0.01, c_re=0.45 * math.exp(-0.08 * x), c_im=0.0,
+                c_se=0.01) for x in lams]
+    z = zne_extrapolate(lams, obs, 3)
+    want = 0.5 * (0.25 + 0.75 * 0.9 + 2 * 0.45)
+    check("exponential decay, exp model", z["exp"] is not None and abs(z["exp"]["F"] - want) < 1e-9,
+          f"{z['exp']['F']:.6f} / {want:.6f}")
+    obs = [dict(pop=0.95 - 0.02 * x, pop_se=0.01, c_re=0.45 - 0.01 * x, c_im=0.0, c_se=0.01) for x in lams]
+    z = zne_extrapolate(lams, obs, 3)
+    check("linear decay, linear model", abs(z["linear"]["F"] - 0.5 * (0.95 + 0.9)) < 1e-9, f"{z['linear']['F']:.6f}")
+
+    print("[11] Layer S: seam classes and the correction plan (two patches 0, 1, crossbar 2, seam qubits 1, 4)")
+
+    class _RegStub:
+        sids = [{0}, {0, 1, 2}, {1}, {0}, {0, 1, 2}]
+        seam = {1, 4}
+
+        @classmethod
+        def cls(cls, a_, b_):
+            sa, sb = cls.sids[a_], cls.sids[b_]
+            return "exact" if len(sa) == 1 and sa == sb else "replica" if sa & sb else "cross"
+    cl = {tuple(qs): seam_class(_RegStub, dict(qubits=list(qs), classes=[])) for qs in ((0, 3), (0, 1, 3), (1, 2), (0, 1, 2))}
+    check("bulk / replica / replica / cut", list(cl.values()) == ["bulk", "replica", "replica", "cut"], str(cl))
+
+    def _row(qs, F, xF, se=0.01):
+        e = dict(P0=0.5 * F, P1=0.5 * F, pop=F, F_GHZ=F, F_GHZ_se=se, site_break={str(qs[0]): 0.1})
+        x = dict(exact_P0=0.5, exact_P1=0.5, exact_F_GHZ=xF)
+        return dict(u=dict(qubits=list(qs), classes=[]), e1=e, x1=x, e2=e, x2=x)
+    rows = [_row((0, 1, 3), 0.75, 1.0), _row((0, 1, 3), 0.995, 1.0), _row((0, 1, 2), 0.4, 1.0), _row((0, 3), 1.0, 1.0)]
+    seam_plan(_RegStub, rows, "F_GHZ")
+    check("code / clean / control / none", [r["plan"] for r in rows] == ["code", "clean", "control", None],
+          str([r["plan"] for r in rows]))
+    us = code_schedule(_RegStub, dict(qubits=[1, 4, 2], root=1, edges=[[1, 4], [1, 2]], classes=["replica"] * 2))
+    check("the code's schedule: into the host simulator first, seam to seam after", us["edges"] == [[1, 2], [1, 4]],
+          str(us["edges"]))
     print("selftest " + ("passed" if ok else "FAILED"))
     if not ok:
         raise SystemExit(1)
@@ -1419,7 +2067,8 @@ def make_parser():
     common.add_argument("--sigma-qs", dest="sigma_qs", type=float, default=0.015,
                         help="Layer 2: quasi-static detuning spread (rad per time unit)")
     common.add_argument("--seed", type=int, default=42, help="Layer 2: seed of the J_ij draw and the eps realisations")
-    common.add_argument("--layers", default="none", help="per-unit hook: none, fold:F, fold:F:all, joined by '+'")
+    common.add_argument("--layers", default="none",
+                        help="per-unit hook: none, fold:F[:all], zzfold:K[:all[:phi]], gfold:K, joined by '+'")
     common.add_argument("--exact-shots", dest="exact_shots", type=int, default=128,
                         help="shots of the exact reference per setting and realisation")
     common.add_argument("--no-exact", dest="no_exact", action="store_true", help="skip the exact reference")
@@ -1444,6 +2093,23 @@ def make_parser():
     t.add_argument("--orient", default="rows,cols", help="rows, cols or both")
     t.add_argument("--offsets", default="all", help="chain offsets along a line: all, or a comma list")
 
+    s = sub.add_parser("stack", parents=[common],
+                       help="pass 1 Layer 1a, pass 2 Layer 2, Layer S (seam syndrome + repetition code), Layer V "
+                            "(the corrected measurement)")
+    s.add_argument("--mode", choices=["tiles", "chip"], default="tiles", help="GHZ chains tiled, or one over the register")
+    s.add_argument("--unit", type=int, default=3, help="tiles: qubits per GHZ chain")
+    s.add_argument("--orient", default="rows,cols", help="tiles: rows, cols or both")
+    s.add_argument("--offsets", default="all", help="tiles: chain offsets along a line: all, or a comma list")
+    s.add_argument("--trees", default="bfs,seam", help="chip: comma list of bfs, seam")
+    s.add_argument("--root", type=int, default=None, help="chip: root qubit (default: the tree's centre)")
+    s.add_argument("--zne-amp", dest="zne_amp", choices=sorted(AmpGates.PER), default="zz",
+                   help="ZNE (with --zne-k): amplification of every seam crossing: zz (ZZ(phi) ZZ(-phi) after each, "
+                        "lambda = 1 + 4K) or cx (CX CX, lambda = 1 + 2K)")
+    s.add_argument("--zne-k", dest="zne_k", default="",
+                   help="ZNE for comparison with the code: comma list of K (identities per seam crossing), e.g. 1,2 "
+                        "(lambda 1, 5, 9); default none")
+    s.add_argument("--zne-phi", dest="zne_phi", type=float, default=0.3, help="ZNE, zz: the ZZ angle phi")
+
     p = sub.add_parser("plot", help="the map of a records file")
     p.add_argument("--in", dest="inp", required=True, help="JSONL written by chip / tiles --out")
     p.add_argument("--register", default=None, help="which register (default: the last map in the file)")
@@ -1459,9 +2125,9 @@ def main():
     a = make_parser().parse_args()
     if getattr(a, "ocl_sync", False):
         os.environ["QRACK_OCL_SYNC"] = "1"
-    if a.cmd in ("chip", "tiles"):
+    if a.cmd in ("chip", "tiles", "stack"):
         nq.ensure_isolated(a)
-    dict(chip=cmd_chip, tiles=cmd_tiles, plot=cmd_plot, selftest=cmd_selftest)[a.cmd](a)
+    dict(chip=cmd_chip, tiles=cmd_tiles, stack=cmd_stack, plot=cmd_plot, selftest=cmd_selftest)[a.cmd](a)
 
 
 if __name__ == "__main__":

@@ -1688,7 +1688,9 @@ GHZ_MODE_COLOR = {"none": "#7f7f7f", "unmitigated": "C3", "compensated": "C1", "
 
 
 def read_ghz(paths, test="ghz"):
-    """Every ghz (or ghz_map) record in these files, once each (the same file may be harvested and given)."""
+    """Every ghz (or ghz_map) record in these files, once each (the same file may be harvested and given). Layer V's
+    control records of nighthawk_ghz.py stack (pass 2's circuit rerun without the code) are left out: they repeat
+    pass 2. Its corrected records (boundary_rep true) stay, under their own setup (", boundary code")."""
     out, seen = [], set()
     for p in paths:
         p = Path(p)
@@ -1701,8 +1703,11 @@ def read_ghz(paths, test="ghz"):
                 continue
             if not isinstance(r, dict) or r.get("test") != test:
                 continue
+            if r.get("stack_pass") == "V" and not r.get("boundary_rep"):
+                continue
             key = (r.get("when"), r.get("register"), r.get("mode"), r.get("tiling"), r.get("unit"), r.get("tree"),
-                   ghz_mode(r), r.get("layers"), r.get("qrack"), tuple(r.get("qubits") or ()))
+                   ghz_mode(r), r.get("layers"), r.get("qrack"), tuple(r.get("qubits") or ()), r.get("stack_pass"),
+                   r.get("boundary_rep"))
             if key in seen:
                 continue
             seen.add(key)

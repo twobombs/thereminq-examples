@@ -1,8 +1,4 @@
-[updated](https://github.com/twobombs/thereminq-examples/tree/main/devices/nighthawk/ghz-nighthawk#36-nighthawk_ghzpy) with GHZ measurements: after completion all variants will be merged
-
-<img width="1860" height="750" alt="ghz61_unmitigated" src="https://github.com/user-attachments/assets/f3f8aadc-6713-40a0-ac07-c56ebab48aa5" />
-<img width="1860" height="750" alt="ghz61_dd" src="https://github.com/user-attachments/assets/bec9d860-1666-49f1-b447-b20f8b49097c" />
-
+# HOWTO: `rcs/nighthawk/nighthawk_qrack.py`
 
 **A clean-qubit PyQrack companion to arXiv:2609.28657 (random-circuit sampling on IBM Nighthawk r2), with an exact-reference study of seam-partitioned approximate simulation**
 
@@ -36,7 +32,7 @@ BlueQubit ran 61-qubit random circuits on IBM's `ibm_phoenix` and estimated thei
 | `shor9` | one unit of Shor's code (9 qubits, or `--size m`: Shor-16, Shor-36, …) on a two-patch ACE register, or units tiled over a whole register: logical success, raw and decoded, for the four logical states, against the exact distribution |
 | `seamgap` | data-only analysis of the release |
 | `nighthawk_cloverfield.py` | chips in isolated workers, joined by a coordinator (the *loom*) |
-| `nighthawk_ghz.py` | the formal proof's Layer 1a (GHZ populations + MQC) and Layer 2 (Walsh echo, compensation) on a register under ACE: F_GHZ per state, seam maps, refocusing across the seams |
+| `nighthawk_ghz.py` | the formal proof's Layer 1a (GHZ populations + MQC) and Layer 2 (Walsh echo, compensation) on a register under ACE: F_GHZ per state, seam maps, refocusing across the seams; `stack`: seam layers S (syndrome + repetition code) and V (the corrected measurement) |
 | `nighthawk_graph.py` | harvests every run, `shor9` and `ghz` record, views 1–21, CSV export, `shor9` registers in 3D (`--grid3d`); views 18–21: GHZ tiles on the lattice, by placement × Layer 2 mode, ACE vs exact, chip-wide break maps; GHZ registers in 3D too |
 
 No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit statement is a proxy measurement or an extrapolation.
@@ -54,6 +50,7 @@ No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit st
 | Dan's mirror Hamming weight carries his protocol past the XEB ceiling | at U's depth d: within 0.86–1.33× of his calculator at d ≤ 6 at every size; at d = 12 0.37–0.63× at 28–40 qubits, 0.91× at 45 (4-qubit seam); tracks the forward XEB where both exist; folding exponent 0.04–0.41 against his 1.606 | 10 |
 | Mirror survival is a different observable from his XEB | ACE's XEB equals a seam-cut sampler's XEB at 16–28 qubits; mirror survival falls with size | 14 |
 | 88 qubits fit one 8 GB GPU; disabled sites on the seams shrink the boundary | boundary 17 → 11 qubits; `nighthawk88e` 10–20× `nighthawk88d` at d = 4–6 | 8 |
+| ACE's seam loss is set at the first crossing, so ZNE cannot undo it | coherence kept after the first crossing 0.391 (28 qubits), 0.390 (61); ×17 crossings move F by ≤ 0.08; ZNE − pass 2 −0.02 … +0.01 against a rerun's 0.04–0.06 | 10.6 |
 | A ghost link carries entanglement between chips | loom-only error, d = 8 / 12 / 16: ghost 1.000 / 0.989 / 0.656, mean-field 0.773 / 0.773 / 0.067 | 11 |
 | Qrack's OpenCL engine had three host-memory defects | fixed without serialising dispatch; GPU reproduces CPU | 12 |
 
@@ -424,7 +421,7 @@ Results: [RESULTS.md §11](RESULTS.md#11-cloverfield-e13).
 
 ### 3.6 `nighthawk_ghz.py`
 
-Layers 1a and 2 of *Exact Refocusing of Diagonal Crosstalk for Shor Order Finding on a 10 × 12 Square-Lattice Processor: A Formal Proof* (numpy reference `shrs_nighthawk_stealth.py`, the 2 × 4 plaquette Π), run on a Nighthawk register's ACE preset placement, so the paper's exact statements meet ACE's seams. Standalone; imports `nighthawk_qrack.py` for registers, placement, coupler classes and the worker pool. Gates are exact; the departures from the paper's model are ACE's seam approximation and its sampler. An exact `QrackSimulator` reference runs beside every ACE run, with the same quasi-static draws.
+Layers 1a and 2 of *Exact Refocusing of Diagonal Crosstalk for Shor Order Finding on a 10 × 12 Square-Lattice Processor: Analysis and Simulation* (numpy reference `shrs_nighthawk_stealth.py`, the 2 × 4 plaquette Π), run on a Nighthawk register's ACE preset placement, so the paper's exact statements meet ACE's seams. Standalone; imports `nighthawk_qrack.py` for registers, placement, coupler classes and the worker pool. Gates are exact; the departures from the paper's model are ACE's seam approximation and its sampler. An exact `QrackSimulator` reference runs beside every ACE run, with the same quasi-static draws.
 
 | Paper | Here |
 |---|---|
@@ -455,8 +452,9 @@ Not in the paper: the Clifford witness F ≥ P0 + P1 + P(even X parity) − 1 (t
 |---|---|---|
 | `chip` | one GHZ over all n qubits: H on a root, CX along a spanning tree (`--trees bfs`: breadth-first from the centre; `seam`: Kruskal, fewest seam CXs = seam qubits + 1) | witness (`z`, `xr0`–`xr3`, Clifford) above `--mqc-max`, MQC below |
 | `tiles` | disjoint k-qubit chains (`--unit k`) along lattice rows and columns, every orientation and offset | MQC: `z`, `q0`–`q(2k+1)`, 2k + 3 settings |
+| `stack` | pass 1 (Layer 1a), pass 2 (Layer 2), Layer S (seam syndrome + repetition code), Layer V (the corrected measurement) on `tiles` or one `chip` state (`--mode`): below | as `tiles` / `chip` |
 | `plot` | per-site loss map, tree and coupler classes, fidelity by seam distance (`--in`, `--layer2`, `--png`) | — |
-| `selftest` | [1] Lemma 4 and the witness against numpy, [2] Lemma 4 on random ρ, [3] Lemma 3, [4] readout gates on Qrack, [5] Theorem 1, [6] Cor. 2.1 and 4.1, [7] outside-coupling identity, [8] fold = I | — |
+| `selftest` | [1] Lemma 4 and the witness against numpy, [2] Lemma 4 on random ρ, [3] Lemma 3, [4] readout gates on Qrack, [5] Theorem 1, [6] Cor. 2.1 and 4.1, [7] outside-coupling identity, [8] fold = I, [9] ZNE amplification = I, [10] ZNE models on synthetic decays, [11] Layer S's seam classes, plan and the code's schedule | — |
 
 | Option | Default | Effect |
 |---|---|---|
@@ -464,7 +462,7 @@ Not in the paper: the Clifford witness F ≥ P0 + P1 + P(even X parity) − 1 (t
 | `--shots`, `--repeats` | 4096, 3 | per setting and realisation; a realisation is a fresh ACE backend and ε draw (the paper's K) |
 | `--estimator`, `--mqc-max` | `auto`, 12 | MQC up to 12 qubits, witness above; `both`; `mqc`; `witness` |
 | `--layer2`, `--blocks`, `--t-idle`, `--j-zz`, `--sigma-qs`, `--seed` | none, 3, 4.4, 0.065, 0.015, 42 | Layer 2 mode and the §8 model |
-| `--layers` | none | per-unit hook: `fold:F[:all]` adds F CX pairs after every seam CX (every CX) |
+| `--layers` | none | per-unit hook, logical identities that add seam crossings: `fold:F[:all]` F CX pairs after every seam CX (every CX); `zzfold:K[:all[:φ]]` K × ZZ(φ) ZZ(−φ); `gfold:K` the preparation undone and redone K times |
 | `--stabilizer` | `auto` | tableau patches only for `chip` with Clifford readout and no Layer 2 |
 | `--exact-shots`, `--no-exact` | 128 | the reference's shots per setting and realisation |
 | `--force`, `--ace-boundary-rep`, `--gpu`, `--ocl-sync`, `--jobs`, `--progress`, `--out` | | as `shor9`; `--force`: dense chip above 30 qubits |
@@ -476,6 +474,41 @@ Not in the paper: the Clifford witness F ≥ P0 + P1 + P(even X parity) − 1 (t
 | `exact_*` | the same from the exact reference |
 | `edge_break`, `coupler_break`, `site_break` | Z-basis maps: per tree CX, per coupler, per qubit (against the unit's majority) |
 | `layer2` | mode, blocks, T, J scale, σ, seed, η = 0 |
+
+**Seam layers (`stack`).** Two layers after Layer 2, named S and V to stay clear of the paper's Layer 3 (the Shor payload). The paper has no seams; Layer S reads ACE's seam error from the first two passes and corrects what a code can correct, Layer V measures the GHZ states a third time.
+
+| Step | Does | New circuits |
+|---|---|---|
+| pass 1 | Layer 1a: the units' GHZ states, no drift | every group, ACE + exact |
+| pass 2 | Layer 2 in `--layer2` (`dd` when none is given) on the same units | every group, ACE + exact |
+| Layer S, extraction | per unit and pass the seam syndrome against the exact reference: the share of P0 + P1 and of the coherence (\|c\|, or ⟨X…X⟩) ACE keeps, the fidelity lost (and in standard errors), the qubit whose Z value leaves the unit's majority most often and whether it is a seam qubit, which branch loses (P1 − P0); per unit its seam class (below); the seam-crossing fits (log(kept) = a + b·n: e^a what the first crossing leaves, e^b what each further one keeps); per seam coupler its Z break rate | none |
+| Layer S, correction | every replica unit that lost F (> 0.02 and 3σ below the exact reference, pass 1 or 2) gets the replica repetition code with authority decoding (ACE's `is_boundary_repetition_code`: zero ancillae, the replica that received the real gate is the decoder's ground truth, stale replicas are flipped or rotated to it) and the code's schedule (from every qubit its CXs into the host simulator first, into seam qubits after: a CX between two seam qubits is matched in every simulator and clears the authority record). Cut units: no code | — |
+| Layer V | the third GHZ measurement: the replica units under the correction, the cut units without it (the control: what a rerun moves), pass 2's Layer 2 and fresh ε draws, printed unit by unit beside pass 1, pass 2 and the exact reference | the units planned code or control, ACE |
+| ZNE (`--zne-k`) | for comparison: the seam units rerun pass 2 with every seam crossing scaled by λ (`AmpGates`: K × ZZ(φ) ZZ(−φ) after each, λ = 1 + 4K; `--zne-amp cx`: K × CX CX, λ = 1 + 2K); P0 + P1, Re c, Im c (or ⟨X…X⟩) extrapolated to λ = 0, linearly and exponentially | seam units × each K, ACE |
+
+| Seam class | Unit | Seam error | Layer S |
+|---|---|---|---|
+| bulk | one simulator holds it, no seam qubit | none | — |
+| replica | one simulator holds it; its seam qubits enter through their replica there | a seam qubit's replicas disagree: a bit flip of the seam qubit against its unit, often one-sided (one branch loses) | code |
+| cut | no simulator holds it | the GHZ needs coherence between two simulators; ACE joins them only through replicas and classical shadows, so c = 0 there and F_GHZ ≤ (P0 + P1)/2 ≤ ½ for any decoder | control |
+
+A chip-wide GHZ over a register of two or more patches is always cut.
+
+| Option | Default | Effect |
+|---|---|---|
+| `--mode` | `tiles` | `tiles` (with `--unit`, `--orient`, `--offsets`) or `chip` (with `--trees`, `--root`) |
+| `--zne-k` | none | ZNE identities per crossing, e.g. `1,2`: λ = 1, 5, 9 with `zz` |
+| `--zne-amp`, `--zne-phi` | `zz`, 0.3 | ZNE amplification `zz` or `cx`; the ZZ angle (about one window's J·T) |
+
+`--ace-boundary-rep` is refused: passes 1 and 2 measure the seam uncorrected, and Layer S switches the code on itself.
+
+| Record (`stack --out`) | Holds |
+|---|---|
+| `ghz` with `stack_pass` 1, 2, V | the three measurements as ordinary records, with `seam_class`, `seam_plan`; V: `boundary_rep` true where the code ran, the scheduled `edges`, the exact fields of pass 2. `nighthawk_graph.py` reads 1, 2 and the corrected V (setup ", boundary code"), not the control |
+| `ghz_stack`, per unit | `seam_class`, `seam_plan`, `syndrome` (pass 1, pass 2), `seam_crossings` (prep, drift), `pass1`, `pass2`, `passV` (with `boundary_rep`, `edges`), `exact1`, `exact2`; with `--zne-k`: `layerS` (λ, the observables at each λ, `F_at`, both fits), `F_zne_linear`, `F_zne_exp` |
+| `ghz_seam_model` | Layer S's extraction and plan: `plan` (per class: units, plans, P0 + P1 and coherence kept, P1 − P0, breaks on a seam qubit, per pass), `fit` (`pop`, `coh`), `couplers` (a, b, class, break rate pass 1, pass 2) |
+
+A code corrects ACE's seam where ZNE cannot: the loss is set at the first crossing, so no amplifier scales it (RESULTS §10.6), while the replica code removes it from every replica unit and leaves the cut units, which no code reaches, where a rerun leaves them (§10.7).
 
 **Stabilizer patches.** ACE's default dense patches hold a chip-wide GHZ as 2^width amplitudes per patch. Preparation and Clifford readout keep a stabilizer-hybrid patch a tableau, but ACE's seam corrections are not Clifford: on PyPI's PyQrack 2.29.5 / Qrack 10.13.2 the tableau holds on the two-patch ladder up to `nighthawk2p57` (internal simulators 41/41/9, < 1 s per 8 shots), while `nighthawk61r2` (43/43/8) leaves it in sampling (Z: a zero-probability forced replica measurement; X: no shot in 15 min). Not yet traced. MQC (not Clifford) and Layer 2 (Z rotations by arbitrary angles) run dense; `tiles` stay small because QUnit keeps every chain separate.
 
@@ -645,7 +678,7 @@ The release holds every sampled 61-qubit bitstring of the full and patched circu
 
 ## 6. Results
 
-Every measured number is in [RESULTS.md](RESULTS.md), grouped by experiment (E1–E20 of [METHODOLOGY.md](METHODOLOGY.md) §9), with the points not yet measured in its §15.
+Every measured number is in [RESULTS.md](RESULTS.md), grouped by experiment (E1–E23 of [METHODOLOGY.md](METHODOLOGY.md) §9), with the points not yet measured in its §15.
 
 ---
 
@@ -749,6 +782,11 @@ done
 python3 nighthawk_ghz.py chip  --register nighthawk2p57 --shots 4096 --repeats 5 --jobs 16 --out ghz.jsonl
 python3 nighthawk_ghz.py chip  --register nighthawk2p16 --layer2 dd --mqc-max 16 --repeats 32 --out ghz_l2.jsonl
 python3 nighthawk_ghz.py plot  --in ghz_l2.jsonl --register nighthawk61r2 --layer2 dd --png ghz61_dd.png
+# the seam layers (§3.6): passes 1 and 2, Layer S (syndrome + repetition code), Layer V (the corrected measurement)
+python3 nighthawk_ghz.py stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --jobs 16 --out stack61.jsonl
+python3 nighthawk_ghz.py stack --register nighthawk2p16 --mode chip --mqc-max 16 --repeats 8 --jobs 16 --out stack16.jsonl
+# the same with ZNE beside the code (lambda 1, 5, 9)
+python3 nighthawk_ghz.py stack --register nighthawk2p28 --unit 3 --zne-k 1,2 --out stack28.jsonl
 
 # the cloverfield (§3.5)
 python3 nighthawk_cloverfield.py plan --chips nighthawk88e*2 --links 4 --png field.png
@@ -772,6 +810,7 @@ Progress of any run: the same command with `--status`. Deep points at 57–61 qu
 - **GPU builds.** GPU results depend on the Qrack build (§5.3): check one point against the CPU on every new device or driver.
 - **Comparability.** Registers with disabled sites or waists change the circuit graph, so their fidelities are not comparable one-to-one with the release's.
 - **GHZ on stabilizer patches.** `nighthawk_ghz.py chip` on `nighthawk61r2` does not sample on stabilizer-hybrid patches with PyQrack 2.29.5 / Qrack 10.13.2 (§3.6); its `tiles` run dense and are unaffected.
+- **GHZ across simulators.** ACE joins its simulators through replicas and classical shadows, so a GHZ state no single simulator holds (a chip-wide state on two or more patches, a chain through a seam qubit into both patches) keeps no coherence and F_GHZ ≤ ½: `stack`'s Layer S corrects the replica class only (RESULTS §10.7).
 - **Open failure.** A CPU-side C++ exception at d = 16 (61-qubit i0, 45-qubit `nn_qab`) is not yet traced.
 - **Preprint.** arXiv:2609.28657 is a preprint (v1), not peer reviewed at the time of writing.
 
