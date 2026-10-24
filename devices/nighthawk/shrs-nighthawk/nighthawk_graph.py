@@ -43,6 +43,12 @@ Figures (one window each; --save writes PNGs too):
      unit's square filled by its weaker logical basis and labelled Z / X / impossible share.
      The map is the run's shor9_map record; older runs' maps are rebuilt (release + PyQrack)
 
+3D (--grid3d DIR, or the viewer's "Open shor9 registers in 3D" button): view 17 as a rotatable page per
+register and code size, written to DIR with an index; each unit a column whose height is the logical
+information it kept, setups side by side, and a switch that pulls the patches apart into ACE's
+simulators. three.js comes from jsDelivr; --three DIR uses a local npm `three` package and --serve
+serves the pages on 127.0.0.1 (module scripts do not load from file://).
+
 shor9 records (`nighthawk_qrack.py shor9 --out`) are found in the harvested *.jsonl or given
 with --shor; views 14-16 need no BlueQubit release. --table FILE also writes
 FILE_shor9.csv (one row per code, layout and setup, and one per register unit, with the top
@@ -70,6 +76,8 @@ Usage
   python3 nighthawk_graph.py --out clean_ace.jsonl --hwxeb hwxeb.json      # viewer, chosen files
   python3 nighthawk_graph.py --save plots                                  # PNGs only
   python3 nighthawk_graph.py --table harvest.csv                           # CSV + comparison table
+  python3 nighthawk_graph.py --grid3d nighthawk_3d --open                  # shor9 registers in 3D
+  python3 nighthawk_graph.py --grid3d nighthawk_3d --three node_modules/three --serve   # the same, offline
 Without a display (no DISPLAY / WAYLAND_DISPLAY) it writes PNGs to ./nighthawk_plots.
 """
 
@@ -1649,6 +1657,715 @@ def print_shor_summary(store):
                   f"{u['exact_cx']}/{u['replica']}/{u['cross']}  [{setup}]")
 
 
+# ================================================================== shor9 in 3D (--grid3d, viewer button)
+# A self-contained page per register and code size: the register on the Nighthawk lattice (ACE patches, seam
+# lines, couplers by class, block leaders) with every Shor unit as a column whose height is the logical
+# information it kept, (decoded success - 0.5) / 0.5; setups side by side; a switch that pulls the patches
+# apart into ACE's simulators (the seam qubits stay in the crossbar and reappear as copies in each patch
+# they join). three.js 0.160.0 from jsDelivr, or a local copy (--three DIR: an npm `three` package) served
+# from a local web server (--serve). The page text is ASCII here: entities in HTML, u-escapes in JS.
+THREE_CDN = "https://cdn.jsdelivr.net/npm/three@0.160.0/"
+SHOR3D_HEAD = r"""<title>__TITLE__</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: poster header and figure row on top, the 3D stage as the page's one large surface, controls and units beside it (below it on phones). */
+:root {
+  --bg: #fcfcfb; --panel: #f3f2ef; --stage: #f0efeb; --ink: #0b0b0b; --ink2: #52514e; --muted: #8a8984; --grid: #d9d8d3; --line: #e4e3df;
+  --p0: #2a78d6; --p1: #eb6834; --pc0: #2a78d6; --pc1: #eb6834; --pc2: #8a5cc7; --pc3: #d39a12; --pc4: #2f9e8f; --pc5: #c2477d; --cross: #c0392b; --seam: #1baf7a; --focus: #2a78d6;
+  --display: "Inter", "Helvetica Neue", Arial, sans-serif; --body: "Inter", "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --r: 10px;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121315; --panel: #1b1c1f; --stage: #0d0e10; --ink: #ecebe7; --ink2: #b8b6b0; --muted: #807e78; --grid: #34353a; --line: #2a2b2f;
+  --p0: #5b9cf0; --p1: #f2875a; --pc0: #5b9cf0; --pc1: #f2875a; --pc2: #a982e0; --pc3: #e3b23a; --pc4: #4fbcad; --pc5: #e06b9f; --cross: #ef6b5c; --seam: #2fd093; --focus: #7fb2f5; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121315; --panel: #1b1c1f; --stage: #0d0e10; --ink: #ecebe7; --ink2: #b8b6b0; --muted: #807e78; --grid: #34353a; --line: #2a2b2f;
+  --p0: #5b9cf0; --p1: #f2875a; --pc0: #5b9cf0; --pc1: #f2875a; --pc2: #a982e0; --pc3: #e3b23a; --pc4: #4fbcad; --pc5: #e06b9f; --cross: #ef6b5c; --seam: #2fd093; --focus: #7fb2f5; color-scheme: dark }
+html, body { height: auto; }
+body { background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 14px; line-height: 1.45;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 22px 28px; }
+.wrap { max-width: 1440px; margin: 0 auto; display: grid; gap: 18px; }
+header { display: grid; gap: 6px; }
+.eyebrow { font-size: 12px; color: var(--muted); letter-spacing: .02em; }
+h1 { margin: 0; font-family: var(--display); font-weight: 800; font-size: clamp(30px, 4.2vw, 46px); letter-spacing: -.02em; line-height: 1.05; text-wrap: balance; }
+h1 span { font-weight: 500; color: var(--ink2); font-size: .5em; letter-spacing: 0; margin-left: .5em; }
+.sub { margin: 0; color: var(--ink2); max-width: 75ch; }
+.figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 8px; }
+.fig { background: var(--panel); border-radius: 8px; padding: 10px 12px; display: grid; gap: 2px; min-width: 0; }
+.fig b { font-size: 21px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.fig > span { font-size: 11.5px; color: var(--ink2); }
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 18px; align-items: start; }
+@media (max-width: 980px) { .main { grid-template-columns: minmax(0, 1fr); } }
+.stage { position: relative; background: var(--stage); border-radius: var(--r); overflow: hidden; height: clamp(380px, 72vh, 820px); min-width: 0; touch-action: none; }
+.stage canvas { display: block; }
+.labels { position: absolute; inset: 0; pointer-events: none; }
+.qlab { font: 600 9.5px/1 var(--mono); color: #fff; text-shadow: 0 0 2px rgba(0,0,0,.65); pointer-events: none; }
+.ulab { font: 600 12px/1.25 var(--body); color: var(--ink); background: var(--bg); border: 1.5px solid var(--ink2); border-radius: 6px; padding: 4px 7px;
+  white-space: nowrap; pointer-events: auto; cursor: pointer; font-variant-numeric: tabular-nums; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+.ulab.sel { outline: 2px solid var(--focus); outline-offset: 2px; }
+.ulab em { font-style: normal; color: var(--ink2); font-weight: 500; }
+.llab { font: 600 11px/1.2 var(--body); color: var(--ink2); letter-spacing: .03em; text-transform: uppercase; pointer-events: none; white-space: nowrap; }
+.hint { position: absolute; right: 12px; top: 10px; font-size: 11.5px; color: var(--muted); pointer-events: none; text-align: right; }
+.legend { position: absolute; left: 12px; bottom: 10px; display: flex; flex-wrap: wrap; gap: 6px 14px; max-width: calc(100% - 24px); font-size: 11.5px; color: var(--ink2); pointer-events: none; }
+.legend i { display: inline-block; width: 11px; height: 11px; border-radius: 50%; vertical-align: -1px; margin-right: 5px; }
+.legend i.bar { border-radius: 2px; height: 4px; width: 16px; vertical-align: 2px; }
+.legend i.ring { background: transparent; border: 2px dashed var(--ink2); }
+.nogl { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--ink2); }
+aside { display: grid; gap: 14px; min-width: 0; }
+.ctl { display: grid; gap: 6px; }
+.ctl > .lbl { font-size: 11.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.seg { display: flex; background: var(--panel); border-radius: 8px; padding: 3px; gap: 3px; }
+.seg button { flex: 1 1 0; min-width: 0; border: 0; background: transparent; color: var(--ink2); font: 500 12.5px/1.25 var(--body); padding: 7px 8px; border-radius: 6px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--bg); color: var(--ink); font-weight: 650; box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.sw { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink); cursor: pointer; }
+.sw input { width: 34px; height: 20px; appearance: none; background: var(--grid); border-radius: 999px; position: relative; cursor: pointer; flex: none; margin: 0; transition: background .15s; }
+.sw input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--bg); transition: transform .15s; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.sw input:checked { background: var(--seam); }
+.sw input:checked::after { transform: translateX(14px); }
+.btn { border: 1px solid var(--grid); background: var(--bg); color: var(--ink); border-radius: 8px; padding: 7px 12px; font: 500 12.5px var(--body); cursor: pointer; justify-self: start; }
+button:focus-visible, input:focus-visible, .ucard:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.units { display: grid; gap: 8px; }
+.ucard { text-align: left; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 9px; padding: 10px 12px; display: grid; gap: 6px; cursor: pointer; font: inherit; }
+.ucard[aria-pressed="true"] { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
+.urow { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.uid { font-weight: 800; font-size: 15px; }
+.chip { font-size: 11px; padding: 2px 7px; border-radius: 999px; background: var(--panel); color: var(--ink2); }
+.chip.seam { color: var(--seam); }
+.sq { font: 400 11.5px var(--mono); color: var(--muted); margin-left: auto; }
+.meters { display: grid; grid-template-columns: 14px 1fr 46px; gap: 3px 8px; align-items: center; font-size: 12px; font-variant-numeric: tabular-nums; }
+.meters b { font-weight: 600; color: var(--ink2); font-size: 11px; }
+.meter { height: 6px; background: var(--panel); border-radius: 3px; position: relative; overflow: hidden; }
+.meter span { position: absolute; inset: 0 auto 0 0; border-radius: 3px; }
+.meter::after { content: ""; position: absolute; left: 50%; top: -1px; bottom: -1px; width: 1px; background: var(--muted); opacity: .6; }
+.umeta { font-size: 11.5px; color: var(--ink2); display: flex; gap: 10px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.note { font-size: 12px; color: var(--ink2); margin: 0; max-width: 60ch; }
+footer { font-size: 11.5px; color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .sw input, .sw input::after { transition: none; } }
+</style>
+"""
+SHOR3D_BODY = r"""<div class="wrap">
+  <header>
+    <div class="eyebrow" id="t-eyebrow"></div>
+    <h1 id="t-h1"></h1>
+    <p class="sub" id="t-sub"></p>
+  </header>
+
+  <section class="figs" aria-label="Register figures" id="figs"></section>
+
+  <section class="main">
+    <div class="stage" id="stage" aria-label="3D view of the register">
+      <div class="labels" id="labels"></div>
+      <div class="hint">Drag to rotate &#xb7; scroll or pinch to zoom &#xb7; right-drag to pan</div>
+      <div class="legend" aria-hidden="true" id="legend"></div>
+    </div>
+
+    <aside>
+      <div class="ctl">
+        <span class="lbl" id="l-setup">Setup</span>
+        <div class="seg" role="group" aria-labelledby="l-setup" id="seg-setup"></div>
+      </div>
+      <div class="ctl">
+        <span class="lbl" id="l-theme">Theme</span>
+        <div class="seg" role="group" aria-labelledby="l-theme" id="seg-theme">
+          <button type="button" id="th-auto" data-t="auto" aria-pressed="true">Auto</button>
+          <button type="button" id="th-light" data-t="light" aria-pressed="false">Light</button>
+          <button type="button" id="th-dark" data-t="dark" aria-pressed="false">Dark</button>
+        </div>
+      </div>
+      <div class="ctl">
+        <span class="lbl" id="l-height">Column height</span>
+        <div class="seg" role="group" aria-labelledby="l-height" id="seg-height">
+          <button type="button" id="h-x" data-h="x" aria-pressed="true">Logical X</button>
+          <button type="button" id="h-z" data-h="z" aria-pressed="false">Logical Z</button>
+          <button type="button" id="h-min" data-h="min" aria-pressed="false">Weaker</button>
+        </div>
+      </div>
+      <div class="ctl">
+        <label class="sw" for="sw-split"><input type="checkbox" id="sw-split"> Pull the patches apart</label>
+        <label class="sw" for="sw-num"><input type="checkbox" id="sw-num" checked> Qubit numbers</label>
+        <label class="sw" for="sw-turn"><input type="checkbox" id="sw-turn"> Turn slowly</label>
+        <button type="button" class="btn" id="b-reset">Reset view</button>
+      </div>
+      <p class="note" id="split-note">Pulled apart, each patch drops to its own layer: that is the dense simulator ACE keeps for it. The seam qubits stay on the device plane in the crossbar and reappear as copies in every patch layer they join, linked by green pillars. Couplers drawn in the text colour (black, or white in dark mode) run through such a copy.</p>
+      <div class="ctl">
+        <span class="lbl">Units</span>
+        <div class="units" id="units"></div>
+      </div>
+    </aside>
+  </section>
+
+  <footer id="t-foot"></footer>
+</div>
+"""
+SHOR3D_JS = r"""import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
+
+const D = JSON.parse(document.getElementById("d").textContent);
+const stage = document.getElementById("stage");
+const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const M = D.m;            // code size: m x m units
+const H = 3.0;            // column height at decoded success 1.0
+const LAYER = 2.6;        // drop between layers when pulled apart
+const R = 0.26;           // qubit radius
+const COLS = D.columns;
+
+// ------------------------------------------------------------------ data
+const sites = D.sites.map(([q, r, c, region, sims]) => ({ q, r, c, region, sims: sims || [] }));
+const ROWS = Math.max(12, ...sites.map(s => s.r + 1));
+const bulkIds = [...new Set(sites.filter(s => s.region !== "seam").map(s => +s.region.slice(1)))].sort((a, b) => a - b);
+const hasSims = sites.some(s => s.sims.length);
+const pidx = sim => bulkIds.indexOf(sim);                    // patch number 0, 1, ... in display order
+const layerOf = sim => (bulkIds.includes(sim) ? pidx(sim) + 1 : 0);   // 0: device plane / crossbar
+const ptok = sim => `--pc${pidx(sim) % 6}`;
+const joins = s => s.sims.filter(v => bulkIds.includes(v));
+const byQ = new Map(sites.map(s => [s.q, s]));
+const home = q => { const s = byQ.get(q); return s.region === "seam" ? null : +s.region.slice(1); };
+const px = c => c - (COLS - 1) / 2, pz = r => r - (ROWS - 1) / 2;
+const state = { setup: 0, h: "x", split: 0, splitTarget: 0, sel: null, nums: true };
+const KEY = `nh3d-${D.register}`;
+try { const s = JSON.parse(localStorage.getItem(KEY) || "{}"); Object.assign(state, { h: s.h || "x", nums: s.nums ?? true }); } catch (e) {}
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify({ h: state.h, nums: state.nums })); } catch (e) {} };
+
+// ------------------------------------------------------------------ text
+const S0 = D.setups[0];
+const nUnits = D.places.length, nSeam = sites.filter(s => s.region === "seam").length;
+const cnt = { exact: 0, replica: 0, cross: 0 };
+for (const [, , k] of D.couplers) cnt[k] = (cnt[k] || 0) + 1;
+const bulkCounts = bulkIds.map(p => sites.filter(s => s.region === `p${p}`).length);
+const words = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+const w = k => (k < words.length ? words[k] : String(k));
+document.getElementById("t-eyebrow").textContent = `rcs/nighthawk \u00b7 nighthawk_qrack.py shor9 --register ${D.register}`
+  + (M !== 3 ? ` --size ${M}` : "") + ` \u00b7 stored ACE placement, lrc ${D.ace.lrc} \u00b7 lrr ${D.ace.lrr} \u00b7 nighthawk_graph.py view 17 in three dimensions`;
+document.getElementById("t-h1").innerHTML = `${D.register}<span>Shor-${M * M} units on the Nighthawk lattice</span>`;
+document.getElementById("t-sub").textContent = `${w(nUnits).replace(/^./, c => c.toUpperCase())} unit${nUnits === 1 ? "" : "s"} of Shor's `
+  + `[[${M * M}, 1, ${M}]] code tiled over a ${D.n}-qubit register cut into ${w(bulkIds.length)} ACE patches. Each unit rises from its `
+  + `${M} \u00d7 ${M} square: the column's height is the logical information it kept, so a flat square has none left (0.5) and a `
+  + `full-height column decodes perfectly (1.0).`;
+document.getElementById("figs").innerHTML = [
+  [D.n, "qubits"], [bulkIds.length, `ACE patches (${bulkCounts.join(" + ")} bulk)`], [nSeam, "seam qubits"],
+  [`${cnt.exact} / ${cnt.replica} / ${cnt.cross}`, "exact / replica / cross couplers"],
+  [`${nUnits} \u00b7 ${nUnits * M * M}`, "units \u00b7 qubits used"], ['<span id="f-mean">\u2013</span>', "mean decoded Z / X"],
+  ["1.000", "exact reference, every unit"],
+].map(([v, k]) => `<div class="fig"><b>${v}</b><span>${k}</span></div>`).join("");
+document.getElementById("t-foot").textContent = `Source: twobombs/thereminq-examples rcs/nighthawk, nighthawk_qrack.py shor9 --register ${D.register}`
+  + ` (unit records and the shor9_map record of the placement); ` + D.setups.map(s => `${s.label}: ${s.backends} fresh backend${s.backends === 1 ? "" : "s"} \u00d7 ${s.shots} shots per rotation`).join("; ")
+  + `; logical states rotated over 4 runs. Height = (decoded success \u2212 0.5) / 0.5. imp: share of |+_L\u27e9, |\u2212_L\u27e9 outcomes the exact state never gives; `
+  + `the inner code corrects the single-bit ones. Written by nighthawk_graph.py --grid3d.`;
+document.getElementById("legend").innerHTML = bulkIds.map(p => `<span><i style="background:var(${ptok(p)})"></i>patch ${pidx(p)}</span>`).join("")
+  + `<span><i style="background:linear-gradient(90deg,var(--pc1) 50%,var(--pc0) 50%);box-shadow:0 0 0 2px var(--ink)"></i>seam qubit</span>`
+  + `<span><i class="bar" style="background:var(--seam);opacity:.55;height:7px"></i>seam line</span>`
+  + `<span><i class="bar" style="background:var(--ink)"></i>replica coupler</span>`
+  + (cnt.cross ? `<span><i class="bar" style="background:var(--cross)"></i>cross coupler</span>` : "")
+  + `<span><i class="bar" style="background:var(--pc0);opacity:.55"></i>exact coupler</span><span><i class="ring"></i>block leader</span>`;
+if (!hasSims) {
+  const sw = document.getElementById("sw-split"); sw.disabled = true;
+  document.getElementById("split-note").textContent = "This register map does not say which simulators hold each seam qubit (written before nighthawk_qrack.py stored it); rerun shor9 --register once to pull the patches apart.";
+}
+
+// ------------------------------------------------------------------ renderer
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+} catch (e) {
+  stage.insertAdjacentHTML("beforeend", '<div class="nogl">This view needs WebGL, which this browser or device does not offer. nighthawk_graph.py view 17 shows the same register flat.</div>');
+  throw e;
+}
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+stage.prepend(renderer.domElement);
+const labels = new CSS2DRenderer({ element: document.getElementById("labels") });
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 400);
+const span = Math.max(ROWS, COLS);
+const HOME = { pos: new THREE.Vector3(-0.29 * span, 1.04 * span, 1.21 * span), target: new THREE.Vector3(0.6, 0.3, 0.6) };
+camera.position.copy(HOME.pos);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.copy(HOME.target);
+controls.enableDamping = !reduce;
+controls.maxPolarAngle = Math.PI * 0.92;
+controls.minDistance = 5; controls.maxDistance = 4 * span + LAYER * bulkIds.length * 2;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8984, 1.9));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(-6, 14, 9); scene.add(sun);
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const themed = [];   // [material, token]
+const mat = (token, opts = {}, kind = "std") => {
+  const m = kind === "line" ? new THREE.LineBasicMaterial(opts) : kind === "basic" ? new THREE.MeshBasicMaterial(opts)
+    : new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.0, ...opts });
+  themed.push([m, token]); return m;
+};
+
+// ------------------------------------------------------------------ geometry helpers
+const UP = new THREE.Vector3(0, 1, 0);
+const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 10, 1);
+function placeCyl(mesh, a, b, r) {
+  const d = new THREE.Vector3().subVectors(b, a), len = d.length();
+  mesh.position.copy(a).addScaledVector(d, 0.5);
+  mesh.scale.set(r, Math.max(len, 1e-4), r);
+  if (len > 1e-6) mesh.quaternion.setFromUnitVectors(UP, d.normalize());
+}
+const sphGeo = new THREE.SphereGeometry(R, 28, 18);
+const halfA = new THREE.SphereGeometry(R + 0.03, 28, 18, 0, Math.PI);
+const halfB = new THREE.SphereGeometry(R + 0.03, 28, 18, Math.PI, Math.PI);
+const ringGeo = new THREE.TorusGeometry(R + 0.07, 0.035, 8, 40);
+const leaderGeo = new THREE.TorusGeometry(R + 0.17, 0.022, 6, 40);
+const ease = t => t * t * (3 - 2 * t);
+
+// ------------------------------------------------------------------ the lattice (device plane)
+{
+  const pts = [];
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    if (c + 1 < COLS) pts.push(px(c), 0, pz(r), px(c + 1), 0, pz(r));
+    if (r + 1 < ROWS) pts.push(px(c), 0, pz(r), px(c), 0, pz(r + 1));
+  }
+  const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+  scene.add(new THREE.LineSegments(g, mat("--grid", {}, "line")));
+  const taken = new Set(sites.map(s => s.r * 10 + s.c));
+  const dotGeo = new THREE.SphereGeometry(0.06, 10, 8), dotMat = mat("--muted", { transparent: true, opacity: 0.55 }, "basic");
+  const xMat = mat("--muted", {}, "basic"), xGeo = new THREE.BoxGeometry(0.42, 0.04, 0.06);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const p = r * 10 + c;
+    if (taken.has(p)) continue;
+    if ([17, 55, 62].includes(p)) {
+      for (const a of [Math.PI / 4, -Math.PI / 4]) { const m = new THREE.Mesh(xGeo, xMat); m.position.set(px(c), 0.02, pz(r)); m.rotation.y = a; scene.add(m); }
+    } else { const d = new THREE.Mesh(dotGeo, dotMat); d.position.set(px(c), 0, pz(r)); scene.add(d); }
+  }
+}
+
+// ------------------------------------------------------------------ qubits (and seam copies)
+const nodes = [];
+const qlabels = [];
+const qLayer = q => { const h = home(q); return h == null ? 0 : layerOf(h); };
+for (const s of sites) {
+  const x = px(s.c), z = pz(s.r);
+  const el = document.createElement("div"); el.className = "qlab"; el.textContent = s.q; qlabels.push(el);
+  if (s.region !== "seam") {
+    const p = +s.region.slice(1);
+    const m = new THREE.Mesh(sphGeo, mat(ptok(p)));
+    m.position.set(x, 0, z); scene.add(m); m.add(new CSS2DObject(el));
+    nodes.push({ obj: m, layer: layerOf(p) });
+    continue;
+  }
+  const j = joins(s);
+  const g = new THREE.Group(); g.position.set(x, 0, z);
+  g.add(new THREE.Mesh(halfA, mat(j.length ? ptok(j[j.length - 1]) : "--pc1")), new THREE.Mesh(halfB, mat(j.length ? ptok(j[0]) : "--pc0")));
+  const ring = new THREE.Mesh(ringGeo, mat("--ink")); ring.rotation.x = Math.PI / 2; g.add(ring);
+  g.add(new CSS2DObject(el)); scene.add(g);
+  nodes.push({ obj: g, layer: 0 });
+  for (const sim of j) {                                       // its copy in each patch it joins
+    const cg = new THREE.Group();
+    const cm = mat(ptok(sim), { transparent: true, opacity: 0 });
+    cg.add(new THREE.Mesh(sphGeo, cm));
+    const rm = mat("--seam", { transparent: true, opacity: 0 }); const rr = new THREE.Mesh(ringGeo, rm); rr.rotation.x = Math.PI / 2; cg.add(rr);
+    cg.position.set(x, 0, z); scene.add(cg);
+    nodes.push({ obj: cg, layer: layerOf(sim), copy: [cm, rm] });
+  }
+  if (j.length) {
+    const pm = mat("--seam", { transparent: true, opacity: 0, depthWrite: false });
+    const pillar = new THREE.Mesh(cylGeo, pm); scene.add(pillar);
+    nodes.push({ pillar, pm, x, z, depth: LAYER * Math.max(...j.map(layerOf)) });
+  }
+}
+
+// ------------------------------------------------------------------ couplers (each end in its own layer)
+const edges = [];
+for (const [a, b, cls] of D.couplers) {
+  const la = home(a) != null ? qLayer(a) : home(b) != null ? qLayer(b) : 0;
+  const lb = home(b) != null ? qLayer(b) : home(a) != null ? qLayer(a) : 0;
+  const bulk = home(a) != null ? home(a) : home(b);
+  const token = cls === "replica" ? "--ink" : cls === "cross" ? "--cross" : (bulk != null ? ptok(bulk) : "--ink");
+  const m = new THREE.Mesh(cylGeo, mat(token, cls === "exact" ? { transparent: true, opacity: 0.55 } : {}));
+  scene.add(m);
+  edges.push({ m, a, b, la, lb, r: cls === "exact" ? 0.04 : 0.055 });
+}
+const qPos = (q, layer, t) => { const s = byQ.get(q); return new THREE.Vector3(px(s.c), -LAYER * layer * t, pz(s.r)); };
+
+// ------------------------------------------------------------------ seam lines (device plane)
+{
+  const seam = sites.filter(s => s.region === "seam");
+  const lm = mat("--seam", { transparent: true, opacity: 0.32, depthWrite: false });
+  const blobGeo = new THREE.SphereGeometry(0.46, 20, 12);
+  for (let i = 0; i < seam.length; i++) {
+    const blob = new THREE.Mesh(blobGeo, lm); blob.scale.y = 0.25;
+    blob.position.set(px(seam[i].c), -0.02, pz(seam[i].r)); scene.add(blob);
+    for (let k = i + 1; k < seam.length; k++) {
+      const A = seam[i], B = seam[k];
+      if (Math.max(Math.abs(A.r - B.r), Math.abs(A.c - B.c)) === 1 && joins(A).join() === joins(B).join()) {
+        const t = new THREE.Mesh(cylGeo, lm);
+        placeCyl(t, new THREE.Vector3(px(A.c), -0.02, pz(A.r)), new THREE.Vector3(px(B.c), -0.02, pz(B.r)), 0.2);
+        scene.add(t);
+      }
+    }
+  }
+}
+
+// ------------------------------------------------------------------ layer planes (pulled apart)
+const planes = [];
+if (hasSims) {
+  const rs = sites.map(s => s.r), cs = sites.map(s => s.c);
+  const wd = Math.max(...cs) - Math.min(...cs) + 1.4, dp = Math.max(...rs) - Math.min(...rs) + 1.4;
+  const cx = (px(Math.max(...cs)) + px(Math.min(...cs))) / 2, cz = (pz(Math.max(...rs)) + pz(Math.min(...rs))) / 2;
+  const layers = [["crossbar: the seam qubits", "--seam"], ...bulkIds.map(p => [`patch ${pidx(p)} simulator`, ptok(p)])];
+  layers.forEach(([nm, tok], i) => {
+    const pm = mat(tok, { transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide });
+    const pl = new THREE.Mesh(new THREE.PlaneGeometry(wd, dp), pm); pl.rotation.x = -Math.PI / 2; pl.position.set(cx, -LAYER * i - 0.03, cz);
+    scene.add(pl);
+    const el = document.createElement("div"); el.className = "llab"; el.textContent = nm; el.style.opacity = 0;
+    const lab = new CSS2DObject(el); lab.position.set(cx - wd / 2 + 0.15, -LAYER * i, cz + dp / 2 + 0.15); lab.center.set(0, 0); scene.add(lab);
+    planes.push({ pm, el, i });
+  });
+}
+
+// ------------------------------------------------------------------ units (columns)
+const STOPS = [[0, "#c8352e"], [0.25, "#ee8a3c"], [0.5, "#f1cf55"], [0.75, "#86c06a"], [1, "#1f9a5a"]];
+function vcol(v) {
+  const t = Math.min(1, Math.max(0, (v - 0.5) / 0.5));
+  for (let i = 1; i < STOPS.length; i++) if (t <= STOPS[i][0]) {
+    const [t0, c0] = STOPS[i - 1], [t1, c1] = STOPS[i];
+    return new THREE.Color(c0).lerp(new THREE.Color(c1), (t - t0) / (t1 - t0));
+  }
+  return new THREE.Color(STOPS[STOPS.length - 1][1]);
+}
+const units = [];
+const boxGeo = new THREE.BoxGeometry(1, 1, 1), boxEdges = new THREE.EdgesGeometry(boxGeo);
+const leaderMat = mat("--ink", { transparent: true, opacity: 0.85 });
+for (const u of D.places) {
+  const r0 = u.rows[0], c0 = u.cols[0];
+  const cx = px(c0 + (M - 1) / 2), cz = pz(r0 + (M - 1) / 2), side = M - 0.14;
+  const fill = new THREE.MeshStandardMaterial({ transparent: true, opacity: 0.34, depthWrite: false, roughness: 0.7 });
+  const box = new THREE.Mesh(boxGeo, fill); box.renderOrder = 2;
+  const em = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.95 });
+  const edge = new THREE.LineSegments(boxEdges, em);
+  const gm = mat("--muted", { transparent: true, opacity: 0.35 }, "line");
+  const ghost = new THREE.LineSegments(boxEdges, gm);
+  ghost.scale.set(side, H, side); ghost.position.set(cx, H / 2, cz);
+  const baseMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide });
+  const base = new THREE.Mesh(new THREE.PlaneGeometry(side, side), baseMat); base.rotation.x = -Math.PI / 2; base.position.set(cx, 0.015, cz);
+  scene.add(box, edge, ghost, base);
+  box.userData.unit = u.id;
+  const el = document.createElement("div"); el.className = "ulab";
+  el.addEventListener("click", () => select(state.sel === u.id ? null : u.id));
+  const lab = new CSS2DObject(el); scene.add(lab);
+  for (const b of u.blocks) {
+    const lg = new THREE.Mesh(leaderGeo, leaderMat);
+    lg.rotation.x = Math.PI / 2; const s = byQ.get(b[0]); lg.position.set(px(s.c), 0, pz(s.r)); scene.add(lg);
+    nodes.push({ obj: lg, layer: qLayer(b[0]) });
+  }
+  units.push({ id: u.id, cx, cz, side, box, edge, fill, em, ghost, gm, base, baseMat, el, lab, h: 0, hTarget: 0 });
+}
+
+// ------------------------------------------------------------------ values and UI
+const metric = u => (state.h === "x" ? u.x : state.h === "z" ? u.z : Math.min(u.x, u.z));
+const fmt = v => v.toFixed(3);
+const unitData = id => D.setups[state.setup].units.find(u => u.id === id);
+function applyValues(instant) {
+  for (const U of units) {
+    const u = unitData(U.id);
+    if (!u) { U.hTarget = 0.03; if (instant) U.h = U.hTarget; U.el.textContent = `${U.id} not measured in this setup`; continue; }
+    const v = metric(u);
+    U.hTarget = Math.max(0.03, H * (v - 0.5) / 0.5);
+    if (instant) U.h = U.hTarget;
+    const col = vcol(v);
+    U.fill.color.copy(col); U.em.color.copy(col).multiplyScalar(0.72); U.baseMat.color.copy(col);
+    U.el.innerHTML = `${U.id} <em>Z</em> ${fmt(u.z)} <em>\u00b7 X</em> ${fmt(u.x)}`;
+    U.el.style.borderColor = "#" + col.clone().multiplyScalar(0.8).getHexString();
+  }
+  const s = D.setups[state.setup];
+  const mz = s.units.reduce((a, u) => a + u.z, 0) / s.units.length, mx = s.units.reduce((a, u) => a + u.x, 0) / s.units.length;
+  document.getElementById("f-mean").textContent = `${fmt(mz)} / ${fmt(mx)}`;
+  renderCards();
+}
+function setupName(s) {
+  const py = (s.label.match(/pyqrack ([\d.]+)/) || [])[1] || "?";
+  return `PyQrack ${py}` + (s.label.includes("boundary code") ? " + boundary code" : "") + (s.label.includes("OpenCL") ? " \u00b7 OpenCL" : "");
+}
+const segSetup = document.getElementById("seg-setup");
+D.setups.forEach((s, i) => {
+  const b = document.createElement("button"); b.type = "button"; b.id = `setup-${i}`; b.textContent = setupName(s);
+  b.setAttribute("aria-pressed", i === state.setup); b.title = `${s.label} \u00b7 ${s.backends} fresh backends \u00d7 ${s.shots} shots per rotation`;
+  b.addEventListener("click", () => { state.setup = i; [...segSetup.children].forEach((x, k) => x.setAttribute("aria-pressed", k === i)); applyValues(reduce); });
+  segSetup.appendChild(b);
+});
+document.querySelectorAll("#seg-height button").forEach(b => {
+  b.setAttribute("aria-pressed", b.dataset.h === state.h);
+  b.addEventListener("click", () => {
+    state.h = b.dataset.h; save();
+    document.querySelectorAll("#seg-height button").forEach(x => x.setAttribute("aria-pressed", x === b));
+    applyValues(reduce);
+  });
+});
+const swSplit = document.getElementById("sw-split"), swNum = document.getElementById("sw-num");
+swSplit.addEventListener("change", () => { state.splitTarget = swSplit.checked ? 1 : 0; if (reduce) state.split = state.splitTarget; });
+swNum.checked = state.nums;
+const applyNums = () => qlabels.forEach(el => (el.style.visibility = state.nums ? "visible" : "hidden"));
+swNum.addEventListener("change", () => { state.nums = swNum.checked; save(); applyNums(); });
+applyNums();
+let lastT = 0;
+document.getElementById("b-reset").addEventListener("click", () => {
+  const dy = -LAYER * 0.45 * bulkIds.length * lastT, z = 1 + 0.09 * bulkIds.length * lastT;
+  controls.target.copy(HOME.target).y += dy;
+  camera.position.copy(HOME.pos).sub(HOME.target).multiplyScalar(z).add(controls.target); controls.update();
+});
+
+function renderCards() {
+  const box = document.getElementById("units");
+  box.innerHTML = "";
+  for (const u of D.setups[state.setup].units) {
+    const c = document.createElement("button"); c.type = "button"; c.className = "ucard"; c.id = `card-${u.id}`;
+    c.setAttribute("aria-pressed", state.sel === u.id);
+    const bar = v => `<div class="meter"><span style="width:${(v * 100).toFixed(1)}%;background:#${vcol(v).getHexString()}"></span></div>`;
+    const regs = Object.entries(u.regions).map(([k, v]) => `${k} ${v}`).join(", ");
+    c.innerHTML = `<div class="urow"><span class="uid">${u.id}</span><span class="chip ${u.kind === "one patch" ? "" : "seam"}">${u.kind}</span>`
+      + `<span class="sq">r${u.rows[0]}\u2013${u.rows[1]} c${u.cols[0]}\u2013${u.cols[1]}</span></div>`
+      + `<div class="meters"><b>Z</b>${bar(u.z)}<span>${fmt(u.z)}</span><b>X</b>${bar(u.x)}<span>${fmt(u.x)}</span></div>`
+      + `<div class="umeta"><span>${regs}</span><span>CX ${u.cx[0]}/${u.cx[1]}/${u.cx[2]}</span>`
+      + `<span>imp ${u.imp == null ? "\u2013" : (100 * u.imp).toFixed(1) + " %"}</span></div>`;
+    c.addEventListener("click", () => select(state.sel === u.id ? null : u.id));
+    box.appendChild(c);
+  }
+}
+function select(id) {
+  state.sel = id;
+  document.querySelectorAll(".ucard").forEach(c => c.setAttribute("aria-pressed", c.id === `card-${id}`));
+  for (const U of units) { const on = U.id === id; U.el.classList.toggle("sel", on); U.fill.emissive.set(on ? 0x333333 : 0x000000); }
+}
+const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
+renderer.domElement.addEventListener("click", e => {
+  const r = renderer.domElement.getBoundingClientRect();
+  ptr.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(ptr, camera);
+  const hit = ray.intersectObjects(units.map(U => U.box), false)[0];
+  if (hit) select(hit.object.userData.unit);
+});
+
+// ------------------------------------------------------------------ theme
+function applyTheme() {
+  for (const [m, token] of themed) m.color.set(css(token) || "#888");
+  scene.background = new THREE.Color(css("--stage") || "#f0efeb");
+}
+new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+// Theme switch: Auto keeps whatever the page started with (the system setting, or a host's own choice)
+const hostTheme = document.documentElement.getAttribute("data-theme");
+function setTheme(t, keep) {
+  if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+  else if (hostTheme) document.documentElement.setAttribute("data-theme", hostTheme);
+  else document.documentElement.removeAttribute("data-theme");
+  document.querySelectorAll("#seg-theme button").forEach(b => b.setAttribute("aria-pressed", b.dataset.t === t));
+  if (keep) { try { localStorage.setItem("nh3d-theme", t); } catch (e) {} }
+}
+document.querySelectorAll("#seg-theme button").forEach(b => b.addEventListener("click", () => setTheme(b.dataset.t, true)));
+let savedTheme = "auto";
+try { savedTheme = localStorage.getItem("nh3d-theme") || "auto"; } catch (e) {}
+setTheme(savedTheme, false);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+
+// ------------------------------------------------------------------ frame
+function layout() {
+  const t = ease(state.split);
+  const follow = LAYER * 0.45 * bulkIds.length * (t - lastT);   // keep the stack in view, keep the user's own pan
+  controls.target.y -= follow; camera.position.y -= follow;
+  const zoom = f => 1 + 0.09 * bulkIds.length * f;               // and step back as the stack grows
+  if (t !== lastT) camera.position.sub(controls.target).multiplyScalar(zoom(t) / zoom(lastT)).add(controls.target);
+  lastT = t;
+  for (const n of nodes) {
+    if (n.pillar) {
+      n.pm.opacity = 0.55 * t; n.pillar.visible = t > 0.01;
+      placeCyl(n.pillar, new THREE.Vector3(n.x, 0, n.z), new THREE.Vector3(n.x, -n.depth * t, n.z), 0.05);
+      continue;
+    }
+    n.obj.position.y = -LAYER * n.layer * t;
+    if (n.copy) { n.copy[0].opacity = t; n.copy[1].opacity = t; n.obj.visible = t > 0.01; }
+  }
+  for (const e of edges) placeCyl(e.m, qPos(e.a, e.la, t), qPos(e.b, e.lb, t), e.r);
+  for (const p of planes) { p.pm.opacity = (p.i === 0 ? 0.10 : 0.08) * t; p.el.style.opacity = t; }
+  for (const U of units) {
+    U.box.scale.set(U.side, U.h, U.side); U.box.position.set(U.cx, U.h / 2 + 0.02, U.cz);
+    U.edge.scale.copy(U.box.scale); U.edge.position.copy(U.box.position);
+    U.fill.opacity = 0.34 * (1 - 0.8 * t); U.em.opacity = 0.95 * (1 - 0.65 * t); U.gm.opacity = 0.35 * (1 - 0.7 * t);
+    U.lab.position.set(U.cx, Math.max(U.h, 0.4) + 0.45, U.cz);
+  }
+}
+function resize() {
+  const wd = stage.clientWidth, ht = stage.clientHeight;
+  renderer.setSize(wd, ht, false); renderer.domElement.style.width = wd + "px"; renderer.domElement.style.height = ht + "px";
+  labels.setSize(wd, ht); camera.aspect = wd / ht; camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(stage);
+let prev = performance.now();
+function frame(now) {
+  const dt = Math.min(0.1, Math.max(0, (now - prev) / 1000)); prev = now;
+  const step = dt / (0.6 + 0.15 * bulkIds.length);
+  if (Math.abs(state.split - state.splitTarget) > step) state.split += Math.sign(state.splitTarget - state.split) * step;
+  else state.split = state.splitTarget;
+  const k = 1 - Math.exp(-dt / 0.12);
+  for (const U of units) if (Math.abs(U.h - U.hTarget) > 1e-3) U.h += (U.hTarget - U.h) * k; else U.h = U.hTarget;
+  layout();
+  controls.update();
+  renderer.render(scene, camera); labels.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+// turning: the switch, and a hook for scripted captures (camera at a fixed angle about the target)
+const swTurn = document.getElementById("sw-turn");
+controls.autoRotateSpeed = -0.8;
+swTurn.addEventListener("change", () => { controls.autoRotate = swTurn.checked; });
+const sph = new THREE.Spherical();
+let theta0 = null;
+window.nh3d = {
+  camera, controls,
+  orbit(deg) {
+    sph.setFromVector3(camera.position.clone().sub(controls.target));
+    if (theta0 === null) theta0 = sph.theta;
+    sph.theta = theta0 + (deg * Math.PI) / 180;
+    camera.position.copy(controls.target).add(new THREE.Vector3().setFromSpherical(sph));
+    controls.update();
+  },
+  frame: () => new Promise(res => requestAnimationFrame(() => requestAnimationFrame(res))),
+};
+applyTheme(); resize(); applyValues(true); select(null);
+requestAnimationFrame(frame);
+window.__ready = true;
+"""
+
+
+def _setup_rank(setup):
+    return ("boundary code" in setup, "OpenCL" in setup, setup)
+
+
+def shor3d_payload(store, reg, m):
+    """Everything the 3D page of one register and code size shows: the placement (sites with their ACE
+    simulators, couplers by class), the union of unit squares measured on it, and per setup each unit's
+    decoded Z / X, Z-basis impossible share, encoder CX classes; None without a register map."""
+    mp = shor_register_map(store, reg)
+    if not mp:
+        return None
+    un = {k: u for k, u in shor_units(store.shor).items() if k[1] == reg and k[2] == m}
+    if not un:
+        return None
+    places = {}
+    for (_, _, _, place), u in un.items():
+        places.setdefault(place, dict(rows=u["rows"], cols=u["cols"], blocks=u["blocks"]))
+    order = sorted(places, key=lambda p: (places[p]["rows"][0], places[p]["cols"][0]))
+    ids = {p: f"U{i + 1}" for i, p in enumerate(order)}
+    setups = []
+    for su in sorted({k[0] for k in un}, key=_setup_rank):
+        rs = [r for r in store.shor if r.get("register") == reg and int(r.get("size", 3)) == m and shor_setup(r)[0] == su]
+        units = []
+        for (s_, _, _, place), u in sorted(un.items(), key=lambda kv: ids[kv[0][3]]):
+            if s_ != su:
+                continue
+            imp = [u["dist"][x]["impossible"] for x in ("+", "-") if u["dist"].get(x)]
+            units.append(dict(id=ids[place], rows=u["rows"], cols=u["cols"], z=round(float(u["z"]), 4),
+                              x=round(float(u["x"]), 4), kind=u["kind"], regions=u["regions"],
+                              cx=[u["exact_cx"], u["replica"], u["cross"]],
+                              imp=round(float(np.mean(imp)), 4) if imp else None))
+        setups.append(dict(label=su, backends=max([int(r.get("repeats", 1)) for r in rs] or [1]),
+                           shots=rs[0].get("shots") if rs else None, units=units))
+    sites = [list(st[:4]) + [list(st[4]) if len(st) > 4 else []] for st in mp["sites"]]
+    return dict(register=reg, m=int(m), n=int(mp.get("n", len(sites))), columns=int(mp.get("columns", 10)),
+                ace=mp.get("ace") or dict(lrc="?", lrr="?"), sites=sites, couplers=mp["couplers"],
+                places=[dict(id=ids[p], **places[p]) for p in order], setups=setups)
+
+
+def shor3d_html(payload, three_base=THREE_CDN, document=True):
+    data = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).replace("</", "<\\/")
+    title = f"{payload['register']} Shor-{payload['m'] ** 2} in 3D"
+    imports = json.dumps({"imports": {"three": three_base + "build/three.module.js",
+                                      "three/addons/": three_base + "examples/jsm/"}})
+    if not document:                                   # a fragment for a host that adds its own document
+        return (SHOR3D_HEAD.replace("__TITLE__", title) + SHOR3D_BODY
+                + '<script type="application/json" id="d">' + data + "</script>\n"
+                + '<script type="importmap">' + imports + "</script>\n"
+                + '<script type="module">\n' + SHOR3D_JS + "</script>\n")
+    return ('<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
+            "<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}"
+            "body{margin:0}[hidden]{display:none!important}</style>\n"
+            + SHOR3D_HEAD.replace("__TITLE__", title) + "</head><body>\n" + SHOR3D_BODY
+            + '<script type="application/json" id="d">' + data + "</script>\n"
+            + '<script type="importmap">' + imports + "</script>\n"
+            + '<script type="module">\n' + SHOR3D_JS + "</script>\n</body></html>\n")
+
+
+def _copy_three(src, outdir):
+    """Copy the three files the page imports out of an npm `three` package (offline use, with --serve)."""
+    src = Path(src)
+    need = ["build/three.module.js", "examples/jsm/controls/OrbitControls.js", "examples/jsm/renderers/CSS2DRenderer.js"]
+    missing = [p for p in need if not (src / p).exists()]
+    if missing:
+        raise SystemExit(f"--three {src}: not an npm three package (missing {', '.join(missing)}); "
+                         "get one with: npm pack three@0.160.0 && tar xzf three-0.160.0.tgz")
+    import shutil
+    for p in need:
+        (Path(outdir) / "three" / p).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src / p, Path(outdir) / "three" / p)
+    return "./three/"                                   # import maps need ./ (a bare name is ignored)
+
+
+def write_shor3d(store, outdir, three=None):
+    """One page per register and code size with shor9 --register records, plus index.html; returns the
+    list of written pages (the index first when there are several)."""
+    Path(outdir).mkdir(parents=True, exist_ok=True)
+    base = THREE_CDN
+    if three:
+        base = three if str(three).startswith(("http://", "https://")) else _copy_three(three, outdir)
+        if not base.endswith("/"):
+            base += "/"
+    pages = []
+    for reg, m in sorted({(k[1], k[2]) for k in shor_units(store.shor)}):
+        pl = shor3d_payload(store, reg, m)
+        if pl is None:
+            print(f"# 3D: no register map of {reg}; skipped")
+            continue
+        p = Path(outdir) / f"{reg}_shor{m * m}_3d.html"
+        p.write_text(shor3d_html(pl, base))
+        pages.append(p)
+        print("wrote", p)
+    if len(pages) > 1:
+        idx = Path(outdir) / "index.html"
+        rows = "".join(f'<li><a href="{p.name}">{p.stem.replace("_3d", "").replace("_", " ")}</a></li>' for p in pages)
+        idx.write_text("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>shor9 in 3D</title>"
+                       "<style>body{font:15px/1.5 Inter,Helvetica,Arial,sans-serif;margin:32px;background:#fcfcfb;color:#0b0b0b}"
+                       "a{color:#2a78d6}@media(prefers-color-scheme:dark){body{background:#121315;color:#ecebe7}a{color:#7fb2f5}}</style>"
+                       f"</head><body><h1>shor9 in 3D</h1><ul>{rows}</ul></body></html>\n")
+        pages.insert(0, idx)
+    return pages
+
+
+def serve_dir(folder, port=0):
+    """Serve a folder on 127.0.0.1 from a daemon thread (module scripts do not load from file://);
+    returns the base URL."""
+    import functools
+    import http.server
+    import threading
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a, **k):
+            pass
+    h = functools.partial(Quiet, directory=str(folder))
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", int(port)), h)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{srv.server_address[1]}/"
+
+
+def open_shor3d(store, folder=None, three=None, serve=False, port=0):
+    """Write the 3D pages and open the index (or the one page) in the default browser."""
+    import tempfile
+    import webbrowser
+    folder = folder or tempfile.mkdtemp(prefix="nighthawk_3d_")
+    pages = write_shor3d(store, folder, three)
+    if not pages:
+        return None
+    if serve or (three and not str(three).startswith(("http://", "https://"))):
+        url = serve_dir(folder, port) + pages[0].name
+    else:
+        url = pages[0].resolve().as_uri()
+    webbrowser.open(url)
+    return url
+
+
 class FigFactory:
     """The slice of pyplot the builders use, returning standalone Figures: they embed in
     the Tk viewer or save as PNG without pyplot ever opening a window."""
@@ -1928,6 +2645,16 @@ def run_viewer(store):
 
     ttk.Button(btns, text="Export table (CSV)...", command=export_table).pack(fill=tk.X, pady=(4, 0))
 
+    def open_3d():
+        try:
+            url = open_shor3d(store, None, store.a.three)
+        except (SystemExit, Exception) as err:          # keep the viewer alive
+            status.set(f"3D: {err}")
+            return
+        status.set(f"3D view: {url}" if url else "3D: no shor9 --register records with a register map")
+
+    ttk.Button(btns, text="Open shor9 registers in 3D", command=open_3d).pack(fill=tk.X, pady=(4, 0))
+
     lb.bind("<<ListboxSelect>>", draw)
     for cb in (cb_cfg, cb_n, cb_d):
         cb.bind("<<ComboboxSelected>>", draw)
@@ -1946,6 +2673,16 @@ def main():
     ap.add_argument("--out", action="append", default=[],
                     help="run record file(s) given to nighthawk_qrack.py run --out (repeatable)")
     ap.add_argument("--hwxeb", action="append", default=[], help="hwxeb --out JSON file(s)")
+    ap.add_argument("--grid3d", nargs="?", const="nighthawk_3d", default=None, metavar="DIR",
+                    help="write a rotatable 3D page per register and code size of the shor9 --register records "
+                         "(view 17 in three dimensions) to DIR (default ./nighthawk_3d), with index.html; then exit")
+    ap.add_argument("--three", default=None, metavar="DIR_OR_URL",
+                    help="--grid3d / viewer: three.js 0.160 from here instead of jsDelivr: an npm `three` package "
+                         "directory (copied next to the pages; offline, needs --serve) or a URL ending in /")
+    ap.add_argument("--serve", nargs="?", type=int, const=8017, default=None, metavar="PORT",
+                    help="--grid3d: serve the pages on http://127.0.0.1:PORT (default 8017) and open them in the "
+                         "browser; Ctrl-C stops")
+    ap.add_argument("--open", action="store_true", help="--grid3d: open the pages in the default browser")
     ap.add_argument("--shor", action="append", default=[],
                     help="shor9 --out file(s) (views 14-16); harvested *.jsonl are searched for shor9 records too")
     ap.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
@@ -1980,6 +2717,28 @@ def main():
         ap.print_help()
         return
     a.figs_set = set(nh.parse_sizes(a.figs)) if a.figs else set()
+    if a.grid3d:
+        import matplotlib
+        matplotlib.use("Agg")
+        store = Store(a)
+        print(store.summary())
+        pages = write_shor3d(store, a.grid3d, a.three)
+        if not pages:
+            print("no shor9 --register records with a register map: nothing to draw in 3D")
+            return
+        import webbrowser
+        if a.serve is not None or (a.three and not a.three.startswith(("http://", "https://"))):
+            url = serve_dir(a.grid3d, a.serve or 8017) + pages[0].name
+            print(f"serving {a.grid3d} at {url} (Ctrl-C stops)")
+            webbrowser.open(url)
+            try:
+                while True:
+                    __import__("time").sleep(3600)
+            except KeyboardInterrupt:
+                return
+        if a.open:
+            webbrowser.open(pages[0].resolve().as_uri())
+        return
     if a.table:
         import matplotlib
         matplotlib.use("Agg")
