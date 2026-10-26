@@ -32,7 +32,7 @@ BlueQubit ran 61-qubit random circuits on IBM's `ibm_phoenix` and estimated thei
 | `shor9` | one unit of Shor's code (9 qubits, or `--size m`: Shor-16, Shor-36, …) on a two-patch ACE register, or units tiled over a whole register: logical success, raw and decoded, for the four logical states, against the exact distribution |
 | `seamgap` | data-only analysis of the release |
 | `nighthawk_cloverfield.py` | chips in isolated workers, joined by a coordinator (the *loom*) |
-| `nighthawk_ghz.py` | the formal proof's Layer 1a (GHZ populations + MQC) and Layer 2 (Walsh echo, compensation) on a register under ACE: F_GHZ per state, seam maps, refocusing across the seams; `stack`: seam layers S (syndrome + repetition code) and V (the corrected measurement) |
+| `nighthawk_ghz.py` | the formal proof's Layer 1a (GHZ populations + MQC) and Layer 2 (Walsh echo, compensation) on a register under ACE: F_GHZ per state, seam maps, refocusing across the seams; `stack`: seam layers S (syndrome + repetition code) and V (the corrected measurement), in either order; `sweep`: F_GHZ against the number of Walsh-echo windows; `probe`: the drift's inside ZZ put through ACE several ways; `stackmap`: a stack run as three heatmaps on the chip layout |
 | `nighthawk_graph.py` | harvests every run, `shor9` and `ghz` record, views 1–21, CSV export, `shor9` registers in 3D (`--grid3d`); views 18–21: GHZ tiles on the lattice, by placement × Layer 2 mode, ACE vs exact, chip-wide break maps; GHZ registers in 3D too |
 
 No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit statement is a proxy measurement or an extrapolation.
@@ -52,6 +52,7 @@ No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit st
 | 88 qubits fit one 8 GB GPU; disabled sites on the seams shrink the boundary | boundary 17 → 11 qubits; `nighthawk88e` 10–20× `nighthawk88d` at d = 4–6 | 8 |
 | ACE's seam loss is set at the first crossing, so ZNE cannot undo it | coherence kept after the first crossing 0.391 (28 qubits), 0.390 (61); ×17 crossings move F by ≤ 0.08; ZNE − pass 2 −0.02 … +0.01 against a rerun's 0.04–0.06 | 10.6 |
 | A ghost link carries entanglement between chips | loom-only error, d = 8 / 12 / 16: ghost 1.000 / 0.989 / 0.656, mean-field 0.773 / 0.773 / 0.067 | 11 |
+| The Walsh echo's seam loss on ACE is a one-time step, and comes from the drift's ZZ inside a unit, which the GHZ stabiliser removes | replica units 0.78 → 0.72 by L = 2, then flat to L = 8; dropping the inside ZZ (a global phase on the GHZ) keeps the echo pass at the no-drift level: replica 0.764, cut 0.355 against 0.683, 0.228 | 10.10, 10.11 |
 | Qrack's OpenCL engine had three host-memory defects | fixed without serialising dispatch; GPU reproduces CPU | 12 |
 
 ---
@@ -444,7 +445,7 @@ Not in the paper: the Clifford witness F ≥ P0 + P1 + P(even X parity) − 1 (t
 
 | Drift on ACE | Rule |
 |---|---|
-| coupling inside a GHZ unit | CX · e^{−iφZ_j} · CX: across a seam it goes through ACE's seam machinery, as the circuit's CXs do |
+| coupling inside a GHZ unit | CX · e^{−iφZ_j} · CX: across a seam it goes through ACE's seam machinery, as the circuit's CXs do. `--inside-zz stabilizer`: not applied. Z_iZ_j stabilises the unit's GHZ and every Walsh-flipped image of it, so the gate is a global phase there (Cor. 2.1; selftest [13]); the exact reference runs the same circuit. GHZ units only |
 | coupling to a qubit outside every unit | e^{−iφ z_j Z_i} on the unit qubit, z_j = ±1 that qubit's Z eigenvalue tracked through the X pulses: the same unitary (selftest [7]) without merging units |
 | coupling between two units | none: under `--layer2` the tiles of a line are spread into groups with no coupler between units (a ZZ between two GHZ units entangles them, and the register would no longer factorise) |
 
@@ -454,7 +455,10 @@ Not in the paper: the Clifford witness F ≥ P0 + P1 + P(even X parity) − 1 (t
 | `tiles` | disjoint k-qubit chains (`--unit k`) along lattice rows and columns, every orientation and offset | MQC: `z`, `q0`–`q(2k+1)`, 2k + 3 settings |
 | `stack` | pass 1 (Layer 1a), pass 2 (Layer 2), Layer S (seam syndrome + repetition code), Layer V (the corrected measurement) on `tiles` or one `chip` state (`--mode`): below | as `tiles` / `chip` |
 | `plot` | per-site loss map, tree and coupler classes, fidelity by seam distance (`--in`, `--layer2`, `--png`) | — |
-| `selftest` | [1] Lemma 4 and the witness against numpy, [2] Lemma 4 on random ρ, [3] Lemma 3, [4] readout gates on Qrack, [5] Theorem 1, [6] Cor. 2.1 and 4.1, [7] outside-coupling identity, [8] fold = I, [9] ZNE amplification = I, [10] ZNE models on synthetic decays, [11] Layer S's seam classes, plan and the code's schedule | — |
+| `selftest` | [1] Lemma 4 and the witness against numpy, [2] Lemma 4 on random ρ, [3] Lemma 3, [4] readout gates on Qrack, [5] Theorem 1, [6] Cor. 2.1 and 4.1, [7] outside-coupling identity, [8] fold = I, [9] ZNE amplification = I, [10] ZNE models on synthetic decays, [11] Layer S's seam classes, plan and the code's schedule, [12] the co-located authority step, [13] `--inside-zz stabilizer` = a global phase on a GHZ unit (dd, unmitigated, compensated), not the identity on a product state, and `probe`'s CX-target choices = the same unitary, [14] `probe`'s chain re-rooting | — |
+| `sweep` | `tiles` once per window count (`--windows 0,1,2,3,4,5,6,8`; 0 = no Layer 2, dd otherwise, overriding `--layer2`, `--blocks`), again under the boundary code at `--code-at`; then the means per (setup, L, seam class): units, F_GHZ, P0 + P1, C, \|P1 − P0\|. `--summarise FILE…`: the means of records already written, no runs; `--summary FILE`: the means as JSON. Records: `tiles`' `ghz`, to `--out` (default `ghz_sweep_<register>.jsonl`) | as `tiles` |
+| `probe` | the `--seam-class` units (default `cut`) of every spread tiling through Layer 2 (dd unless `--layer2`), per `--variants`: `none` (no Layer 2), `gate` (inside ZZ as CX · Rz · CX), `tseam` / `tbulk` (the CX's target on the seam / bulk qubit), `stab` (dropped), and `chain-none`, `chain-gate`, `chain-stab` with the GHZ prepared from one end of the chain; `--exact-variants` (default `gate,stab,chain-stab`) also on the exact simulator. Prints means and per-unit ranges; records `ghz_probe` (not read by `nighthawk_graph.py`) | as `tiles` |
+| `stackmap` | the latest `stack` run in `--in` as three heatmaps on the chip layout (pass 1, 2, V, or 1, C, E): per site the lowest F_GHZ of the chains through it, seam qubits ringed, class means under each panel (`--png`) | — |
 
 | Option | Default | Effect |
 |---|---|---|
@@ -462,6 +466,7 @@ Not in the paper: the Clifford witness F ≥ P0 + P1 + P(even X parity) − 1 (t
 | `--shots`, `--repeats` | 4096, 3 | per setting and realisation; a realisation is a fresh ACE backend and ε draw (the paper's K) |
 | `--estimator`, `--mqc-max` | `auto`, 12 | MQC up to 12 qubits, witness above; `both`; `mqc`; `witness` |
 | `--layer2`, `--blocks`, `--t-idle`, `--j-zz`, `--sigma-qs`, `--seed` | none, 3, 4.4, 0.065, 0.015, 42 | Layer 2 mode and the §8 model |
+| `--inside-zz` | `gate` | Layer 2: the drift's ZZ between two qubits of one unit as CX · Rz · CX (`gate`), or dropped (`stabilizer`: a global phase on the GHZ, no seam crossings in the drift). Records carry `layer2.inside_zz`; `nighthawk_graph.py` shows the setup as ", inside ZZ by stabiliser" |
 | `--layers` | none | per-unit hook, logical identities that add seam crossings: `fold:F[:all]` F CX pairs after every seam CX (every CX); `zzfold:K[:all[:φ]]` K × ZZ(φ) ZZ(−φ); `gfold:K` the preparation undone and redone K times |
 | `--stabilizer` | `auto` | tableau patches only for `chip` with Clifford readout and no Layer 2 |
 | `--exact-shots`, `--no-exact` | 128 | the reference's shots per setting and realisation |
@@ -505,6 +510,7 @@ A chip-wide GHZ over a register of two or more patches is always cut.
 |---|---|---|
 | `--mode` | `tiles` | `tiles` (with `--unit`, `--orient`, `--offsets`) or `chip` (with `--trees`, `--root`) |
 | `--code-schedule` | `on` | the code's schedule for the code units, or `off`: the preparation's order |
+| `--order` | `echo-code` | `echo-code`: pass 2 (Layer 2), then Layer S from passes 1 and 2, then Layer V. `code-echo`: Layer S from pass 1 alone, pass C (pass 1's circuit, the replica units under the code, the cut units without), then pass E (Layer 2 on every unit, the code kept where it ran). The drift arrives with its echo in both orders, so pass E runs Layer V's circuit; `--zne-k` needs `echo-code` |
 | `--zne-k` | none | ZNE identities per crossing, e.g. `1,2`: λ = 1, 5, 9 with `zz` |
 | `--zne-amp`, `--zne-phi` | `zz`, 0.3 | ZNE amplification `zz` or `cx`; the ZZ angle (about one window's J·T) |
 
@@ -512,15 +518,15 @@ A chip-wide GHZ over a register of two or more patches is always cut.
 
 | Record (`stack --out`) | Holds |
 |---|---|
-| `ghz` with `stack_pass` 1, 2, V | the three measurements as ordinary records, with `seam_class`, `seam_plan`; V: `boundary_rep` true where the code ran, `code_authority`, `code_schedule`, the `edges` as run, the exact fields of pass 2. `nighthawk_graph.py` reads 1, 2 and the corrected V (setup ", boundary code"), not the control |
-| `ghz_stack`, per unit | `seam_class`, `seam_plan`, `syndrome` (pass 1, pass 2), `seam_crossings` (prep, drift), `pass1`, `pass2`, `passV` (with `boundary_rep`, `code_authority`, `code_schedule`, `edges`), `exact1`, `exact2`; with `--zne-k`: `layerS` (λ, the observables at each λ, `F_at`, both fits), `F_zne_linear`, `F_zne_exp` |
+| `ghz` with `stack_pass` 1, 2, V (`--order code-echo`: 1, C, E) and `stack_order` | the three measurements as ordinary records, with `seam_class`, `seam_plan`; V, C, E: `boundary_rep` true where the code ran, `code_authority`, `code_schedule`, the `edges` as run; V the exact fields of pass 2, C those of pass 1, E its own. `nighthawk_graph.py` reads 1, 2, E and the corrected V and C (setup ", boundary code"), not the V and C controls, which repeat pass 2 and pass 1 |
+| `ghz_stack`, per unit | `stack_order`, `seam_class`, `seam_plan`, `syndrome` (pass 1, pass 2; code-echo: pass 1), `seam_crossings` (prep, drift), `pass1`, `pass2`, `passV` (with `boundary_rep`, `code_authority`, `code_schedule`, `edges`), `exact1`, `exact2`; code-echo: `pass1`, `passC` (seam units), `passE`, `exact1`, `exactE`; with `--zne-k`: `layerS` (λ, the observables at each λ, `F_at`, both fits), `F_zne_linear`, `F_zne_exp` |
 | `ghz_seam_model` | Layer S's extraction and plan: `plan` (per class: units, plans, P0 + P1 and coherence kept, P1 − P0, breaks on a seam qubit, per pass), `fit` (`pop`, `coh`), `couplers` (a, b, class, break rate pass 1, pass 2) |
 
 A code corrects ACE's seam where ZNE cannot: the loss is set at the first crossing, so no amplifier scales it (RESULTS §10.6), while the replica code removes it from every replica unit and leaves the cut units, which no code reaches, where a rerun leaves them (§10.7).
 
 **Stabilizer patches.** ACE's default dense patches hold a chip-wide GHZ as 2^width amplitudes per patch. Preparation and Clifford readout keep a stabilizer-hybrid patch a tableau, but ACE's seam corrections are not Clifford: on PyPI's PyQrack 2.29.5 / Qrack 10.13.2 the tableau holds on the two-patch ladder up to `nighthawk2p57` (internal simulators 41/41/9, < 1 s per 8 shots), while `nighthawk61r2` (43/43/8) leaves it in sampling (Z: a zero-probability forced replica measurement; X: no shot in 15 min). Not yet traced. MQC (not Clifford) and Layer 2 (Z rotations by arbitrary angles) run dense; `tiles` stay small because QUnit keeps every chain separate.
 
-**Views.** `nighthawk_graph.py --ghz FILE` (or harvest): 18 tiles on the lattice per register and Layer 2 mode, 19 fidelity by placement with one bar per mode and the exact reference, 20 ACE against exact per unit, 21 chip-wide break maps per tree; `--table FILE` writes `FILE_ghz.csv` and prints the summary. `--grid3d DIR` (or the viewer's 3D button) also writes `<register>_ghz_3d.html` per register: every site a column of height (v − 0.5)/0.5, v the mean F_GHZ of the chains through it or a chip-wide state's agreement with its majority; one switch per Layer 2 mode and chip-wide tree, ACE or the exact reference, the chains through a clicked site, the patches pulled apart into ACE's simulators as on the shor9 pages.
+**Views.** `nighthawk_ghz.py stackmap --in FILE`: one stack run, three heatmaps. `nighthawk_graph.py --ghz FILE` (or harvest): 18 tiles on the lattice per register and Layer 2 mode, 19 fidelity by placement with one bar per mode and the exact reference, 20 ACE against exact per unit, 21 chip-wide break maps per tree; `--table FILE` writes `FILE_ghz.csv` and prints the summary. `--grid3d DIR` (or the viewer's 3D button) also writes `<register>_ghz_3d.html` per register: every site a column of height (v − 0.5)/0.5, v the mean F_GHZ of the chains through it or a chip-wide state's agreement with its majority; one switch per Layer 2 mode and chip-wide tree, ACE or the exact reference, the chains through a clicked site, the patches pulled apart into ACE's simulators as on the shor9 pages.
 
 **Estimator bias.** C = 2\|ĉ\| is biased upward at finite shots, so F_GHZ of a perfect unit scatters around and above 1 (± 0.013 at 256 × 2 shots per setting); `F0` and the witness are linear and are not.
 
@@ -795,6 +801,17 @@ python3 nighthawk_ghz.py stack --register nighthawk61r2 --unit 3 --shots 256 --r
 python3 nighthawk_ghz.py stack --register nighthawk2p16 --mode chip --mqc-max 16 --repeats 8 --jobs 16 --out stack16.jsonl
 # the same with ZNE beside the code (lambda 1, 5, 9)
 python3 nighthawk_ghz.py stack --register nighthawk2p28 --unit 3 --zne-k 1,2 --out stack28.jsonl
+# the code before the echo (E26), the inside ZZ by the GHZ stabiliser (E28), each run as three heatmaps
+python3 nighthawk_ghz.py stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --order code-echo --jobs 16 \
+  --out stack61_ce.jsonl
+python3 nighthawk_ghz.py stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --inside-zz stabilizer \
+  --jobs 16 --out stack61_zz.jsonl
+python3 nighthawk_ghz.py stackmap --in stack61_ce.jsonl --png stack61_ce.png
+python3 nighthawk_ghz.py stackmap --in stack61_zz.jsonl --png stack61_zz.png
+# the Walsh echo window by window (E27), the cut units under Layer 2 (E28)
+python3 nighthawk_ghz.py sweep --register nighthawk2p28 --shots 256 --repeats 4 --no-exact --code-at 8 --jobs 16 \
+  --out sweep28.jsonl --summary sweep28.json
+python3 nighthawk_ghz.py probe --register nighthawk61r2 --shots 256 --repeats 4 --jobs 16 --out probe61.jsonl
 
 # the cloverfield (§3.5)
 python3 nighthawk_cloverfield.py plan --chips nighthawk88e*2 --links 4 --png field.png

@@ -64,6 +64,12 @@ Shor payload)
   Layer V     the third GHZ measurement: the seam units through pass 2's circuit again (new eps draws, new ACE
               backends), the replica units under the code, the cut units without (the control: a rerun measures
               how far pass 2 moves by itself), compared unit by unit with pass 1, pass 2 and the exact reference.
+  --order     echo-code (default): the order above. code-echo flips Layers 2 and S: pass 1, then Layer S from
+              pass 1's syndrome alone, pass C (the third letter of code: pass 1's circuit, no drift, the replica
+              units under the code, the cut units without), then pass E (the drift and the Walsh echo on every
+              unit, the code still on where it ran). The drift arrives with its echo in both orders, so pass E
+              runs the same circuit as echo-code's Layer V; what changes is the middle measurement and the
+              syndrome the plan is read from.
 
 Drift on ACE. e^{-i phi Z_i Z_j} is applied as CX_ij e^{-i phi Z_j} CX_ij, so a coupling across a seam goes
 through ACE's seam machinery, as the circuit's own CXs do. A coupling from a GHZ unit to a qubit outside every
@@ -71,6 +77,11 @@ unit is applied as e^{-i phi z_j Z_i} on the unit qubit, with z_j = +-1 that qub
 through the Walsh pulses: the same unitary, exactly, without merging units. Couplings among outside qubits are
 global phases. Units of one circuit never share a coupler under --layer2 (tiles are spread into groups),
 because a ZZ between two GHZ units entangles them and the register would no longer factorise.
+--inside-zz stabilizer drops the couplings inside a unit instead: Z_i Z_j stabilises the unit's GHZ state and
+every Walsh-flipped image of it, so e^{-i phi Z_i Z_j} is a global phase there (Corollary 2.1; selftest [13]),
+while on ACE it is two CXs through the seam wherever the coupling crosses one. dw, eps and the couplings to
+outside qubits stay. Valid for GHZ units only, which is all this script prepares; the exact reference runs the
+same circuit.
 
 Commands
   chip      one GHZ state over every qubit of the register: H on a root, then CX along a spanning tree
@@ -83,11 +94,18 @@ Commands
             offset; per unit Layer 1a numbers, per qubit the mean over its units, by seam distance.
   stack     pass 1, pass 2, Layer S (seam error correction), Layer V on tiles (--mode tiles) or one state (--mode
             chip).
+  sweep     tiles once per Walsh-echo window count (--windows 0,1,2,3,4,5,6,8: 0 = no Layer 2, dd
+            otherwise), again under the boundary code at --code-at; F_GHZ, P0 + P1, C and |P1 - P0| per
+            (setup, L, seam class). --summarise FILE... reads records instead of running.
+  probe     the --seam-class units (default cut) through Layer 2 with the drift's ZZ inside a unit put
+            through ACE several ways (--variants: none, gate, tseam, tbulk, stab, and chain-* with the GHZ
+            prepared from one end), against the exact reference (--exact-variants); ghz_probe records.
+  stackmap  a stack run's three measurements (pass 1, 2, V or 1, C, E) as heatmaps on the chip layout (--in).
   plot      the map of a records file (--in).
   selftest  Lemma 3, Lemma 4 and the witness against numpy; the readout gates, Theorem 1, Corollaries 2.1
             and 4.1, the outside-coupling identity, fold and the ZNE amplification on the exact simulator;
-            the ZNE models on synthetic decays; Layer S's seam classes, plan, the code's schedule and the
-            co-located authority rule.
+            the ZNE models on synthetic decays; Layer S's seam classes, plan, the code's schedule, the
+            co-located authority rule, --inside-zz stabilizer and the probe's target and chain rules.
 
 Per-unit hook (--layers): pre / after_cx / post inside a unit's preparation. fold:F[:all] adds F CX pairs
 after every seam CX (every CX); zzfold:K[:all[:phi]] K identities ZZ(phi) ZZ(-phi); gfold:K undoes and redoes
@@ -96,10 +114,13 @@ seam loss barely follows them).
 
 Records (--out, JSONL): one ghz_map per run, one ghz per state (chip: per tree; tiles: per unit) with the
 reference implementation's Layer 1a names (P0, P1, C_parity, Phi_coh, F_GHZ, lambda_per_block,
-sum_dw_estimate) for ACE and, prefixed exact_, for the exact reference. stack adds stack_pass (1, 2, V) to its
-ghz records (V: boundary_rep true where the code ran, seam_plan), one ghz_stack per unit (seam_class, seam_plan,
-syndrome per pass, pass1, pass2, passV, exact1, exact2, seam_crossings; with --zne-k layerS: the observables at
+sum_dw_estimate) for ACE and, prefixed exact_, for the exact reference. stack adds stack_pass (1, 2, V; with
+--order code-echo 1, C, E) and stack_order to its ghz records (V, C, E: boundary_rep true where the code ran,
+seam_plan), one ghz_stack per unit (seam_class, seam_plan, syndrome per pass, pass1, pass2, passV, exact1,
+exact2, seam_crossings; code-echo: pass1, passC, passE, exact1, exactE; with --zne-k layerS: the observables at
 every lambda and both fits, F_zne_linear, F_zne_exp) and one ghz_seam_model (Layer S's extraction and plan).
+probe writes one ghz_probe record per unit, variant and reference (variant, exact, seam_class and the Layer 1a
+names); sweep writes tiles' ghz records.
 
 Examples
   python3 nighthawk_ghz.py selftest
@@ -111,6 +132,12 @@ Examples
   python3 nighthawk_ghz.py stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --jobs 8 --out stack61.jsonl
   python3 nighthawk_ghz.py stack --register nighthawk2p16 --mode chip --out stack16.jsonl
   python3 nighthawk_ghz.py stack --register nighthawk2p28 --unit 3 --zne-k 1,2 --out stack28.jsonl
+  python3 nighthawk_ghz.py stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --order code-echo \\
+          --out stack61_ce.jsonl
+  python3 nighthawk_ghz.py stackmap --in stack61_ce.jsonl --png stack61_ce.png
+  python3 nighthawk_ghz.py sweep --register nighthawk2p28 --shots 256 --repeats 4 --no-exact --code-at 8 \\
+          --out sweep28.jsonl --summary sweep28.json
+  python3 nighthawk_ghz.py probe --register nighthawk61r2 --shots 256 --repeats 4 --out probe61.jsonl
   python3 nighthawk_ghz.py plot  --in ghz61.jsonl --register nighthawk61r2 --png ghz61.png
 
 Environment: no CUDA. CPU by default; --gpu runs ACE and the reference on the OpenCL device
@@ -324,8 +351,8 @@ class Probe:
     """What the drift acts on in one circuit: the units' qubits, couplings inside a unit (gates), couplings
     from a unit qubit to a qubit outside every unit (z-signed local rotations), none between two units."""
 
-    def __init__(self, drift, units):
-        self.drift = drift
+    def __init__(self, drift, units, inside_zz="gate", seam=()):
+        self.drift, self.inside_zz, self.seam = drift, inside_zz, set(seam)
         owner = {}
         for k, u in enumerate(units):
             for q in u["qubits"]:
@@ -349,7 +376,12 @@ def drift_segment(g, probe, dt, eps, z, sign=1.0, with_eps=True):
     """e^{-i sign dt H} on the probe: H = H_D with (dw + eps) or, with_eps False, with dw only (H_hat).
     z: the Z eigenvalue (+1 / -1) of every outside qubit, as the Walsh pulses leave it."""
     d = probe.drift
-    for a, b, J in probe.inside:
+    rule = probe.inside_zz
+    for a, b, J in (probe.inside if rule != "stabilizer" else ()):     # stabilizer: a global phase on the GHZ
+        if rule == "target-seam" and a in probe.seam and b not in probe.seam:
+            a, b = b, a                                  # the probe's variants: the CX's target on the seam qubit
+        elif rule == "target-bulk" and b in probe.seam and a not in probe.seam:
+            a, b = b, a                                  # ... or on the bulk qubit (Z_a Z_b is symmetric)
         g.cx(a, b)
         g.zrot(b, sign * J * dt)
         g.cx(a, b)
@@ -786,7 +818,7 @@ def _task(spec):
     l2 = spec.get("layer2") or {}
     if l2.get("mode", "none") != "none":
         drift = Drift(R.couplers, R.n, R.sub, l2["j_zz"], l2["sigma_qs"], l2["t_idle"], l2["seed"])
-        probe = Probe(drift, spec["units"])
+        probe = Probe(drift, spec["units"], l2.get("inside_zz", "gate"), R.seam)
         eps = drift.eps(spec["realisation"])
         for _ in range(int(l2["blocks"])):
             idle_block(g, probe, l2["mode"], eps)
@@ -947,8 +979,11 @@ def layer2_spec(a):
     mode = parse_layer2(a.layer2)
     if mode == "none":
         return dict(mode="none", blocks=0)
-    return dict(mode=mode, blocks=int(a.blocks), j_zz=float(a.j_zz), sigma_qs=float(a.sigma_qs),
-                t_idle=float(a.t_idle), seed=int(a.seed), eta=0.0)
+    l2 = dict(mode=mode, blocks=int(a.blocks), j_zz=float(a.j_zz), sigma_qs=float(a.sigma_qs),
+              t_idle=float(a.t_idle), seed=int(a.seed), eta=0.0)
+    if getattr(a, "inside_zz", "gate") == "stabilizer":
+        l2["inside_zz"] = "stabilizer"            # absent: the gates (every record before this option)
+    return l2
 
 
 def identity_idle(l2):
@@ -1015,7 +1050,8 @@ def header(a, R, what, l2):
     dev = ("OpenCL" + (" (QRACK_OCL_SYNC=1)" if os.environ.get("QRACK_OCL_SYNC") == "1" else "")) if a.gpu else "CPU"
     lay2 = ("Layer 2 none" if l2["mode"] == "none" else
             f"Layer 2 {l2['mode']}: {l2['blocks']} blocks, T {l2['t_idle']}, J {l2['j_zz']} x U(0.75, 1.25), "
-            f"sigma_qs {l2['sigma_qs']}, seed {l2['seed']}, eta 0")
+            f"sigma_qs {l2['sigma_qs']}, seed {l2['seed']}, eta 0"
+            + (", ZZ inside a unit dropped (stabilizer)" if l2.get("inside_zz") == "stabilizer" else ""))
     return (f"{what} on {R.describe()}; {a.shots} shots x {a.repeats} realisation(s) per setting, {lay2}, "
             f"layers {a.layers or 'none'}, {stab}, {dev}"
             + (", boundary repetition code" if a.ace_boundary_rep else "")
@@ -1250,6 +1286,8 @@ def seam_crossings(R, u, l2):
     prep = sum(1 for c in u["classes"] if c != "exact")
     qs = set(u["qubits"])
     inside = sum(1 for a_, b_ in R.couplers if a_ in qs and b_ in qs and R.cls(a_, b_) != "exact")
+    if l2.get("inside_zz") == "stabilizer":
+        inside = 0                                   # the drift's couplings inside the unit are not applied
     return prep, 2 * inside * SEGMENTS[l2["mode"]] * max(0, int(l2.get("blocks") or 0))
 
 
@@ -1332,13 +1370,14 @@ def seam_model(R, rows):
     crossings and per pass, the share of P0 + P1 and of the coherence (|c|, or <X..X>) that ACE keeps against
     the exact reference, against the circuit's seam crossings n: log(kept) = a + b n by least squares. e^a is
     what the first crossing leaves (scaling the crossings cannot remove it), e^b what each further crossing
-    keeps (the part ZNE can remove). Per seam coupler: the share of shots whose two ends differ in Z, per pass."""
+    keeps (the part ZNE can remove); at least three distinct crossing counts (pass 1 alone has 1 and 2, one per seam
+    class, so --order code-echo reports no fit). Per seam coupler: the share of shots whose two ends differ in Z, per pass."""
     pts = dict(pop=[], coh=[])
     for r in rows:
         if r["prep"] + r["drift"] == 0:
             continue
-        for e, x, n in ((r["e1"], r["x1"], r["prep"]), (r["e2"], r["x2"], r["prep"] + r["drift"])):
-            if not x:
+        for e, x, n in ((r["e1"], r["x1"], r["prep"]), (r.get("e2"), r.get("x2"), r["prep"] + r["drift"])):
+            if not x or e is None:
                 continue
             xp = x["exact_P0"] + x["exact_P1"]
             if xp > 0.5:
@@ -1350,7 +1389,7 @@ def seam_model(R, rows):
     fit = {}
     for key, p in pts.items():
         ns = np.array([q[0] for q in p], float)
-        if len(set(ns.tolist())) < 2:
+        if len(set(ns.tolist())) < 3:        # two counts: a line through two class means, not a decay
             fit[key] = None
             continue
         b, a_ = np.polyfit(ns, np.log(np.clip([q[1] for q in p], 1e-3, None)), 1)
@@ -1358,8 +1397,8 @@ def seam_model(R, rows):
                         crossings=[int(ns.min()), int(ns.max())])
     brk = collections.defaultdict(lambda: ([], []))
     for r in rows:
-        for i, e in enumerate((r["e1"], r["e2"])):
-            for a_, b_, cl, v in e.get("coupler_break", []):
+        for i, e in enumerate((r["e1"], r.get("e2"))):
+            for a_, b_, cl, v in (e or {}).get("coupler_break", []):
                 if cl != "exact":
                     brk[(min(a_, b_), max(a_, b_))][i].append(v)
     couplers = [[a_, b_, R.cls(a_, b_), (round(float(np.mean(v1)), 4) if v1 else None),
@@ -1368,11 +1407,11 @@ def seam_model(R, rows):
 
 
 def print_seam_model(model, lams):
-    print("\nLayer S, extraction (passes 1 and 2 against the exact reference, units with seam crossings n):")
+    print("\nLayer S, extraction (the passes so far against the exact reference, units with seam crossings n):")
     for key, name in (("pop", "P0 + P1"), ("coh", "coherence")):
         f = model["fit"].get(key)
         if f is None:
-            print(f"  {name:<9}  not identifiable (one crossing count, or no exact reference)")
+            print(f"  {name:<9}  not identifiable (fewer than three crossing counts, or no exact reference)")
             continue
         print(f"  {name:<9}  kept after the first crossing {f['first']:.3f}, per further crossing {f['per_crossing']:.4f}"
               f"  ({f['points']} unit-passes, n {f['crossings'][0]}..{f['crossings'][1]})")
@@ -1459,7 +1498,7 @@ def seam_plan(R, rows, key, min_loss=0.02, min_sigma=3.0):
     Returns a summary per class."""
     for r in rows:
         r["cls"] = seam_class(R, r["u"])
-        r["syn"] = [syndrome(R, r["e1"], r["x1"], key), syndrome(R, r["e2"], r["x2"], key)]
+        r["syn"] = [syndrome(R, r["e1"], r["x1"], key)] + ([syndrome(R, r["e2"], r["x2"], key)] if r.get("e2") else [])
         lost = any(s.get("loss", 0.0) > min_loss and s.get("loss_sigma", 0.0) > min_sigma for s in r["syn"])
         r["plan"] = (("code" if lost else "clean") if r["cls"] == "replica" else
                      "control" if r["cls"] == "cut" else None)
@@ -1469,7 +1508,7 @@ def seam_plan(R, rows, key, min_loss=0.02, min_sigma=3.0):
         if not rs:
             continue
         s = dict(units=len(rs), plans=dict(collections.Counter(str(r["plan"]) for r in rs)))
-        for i in (0, 1):
+        for i in range(len(rs[0]["syn"])):
             for f in ("pop_kept", "coh_kept", "branch"):
                 v = [r["syn"][i][f] for r in rs if f in r["syn"][i]]
                 if v:
@@ -1481,8 +1520,8 @@ def seam_plan(R, rows, key, min_loss=0.02, min_sigma=3.0):
     return summary
 
 
-def print_seam_plan(summary, min_loss=0.02):
-    print("\nLayer S, syndrome by seam class (against the exact reference; pass 1 / pass 2):")
+def print_seam_plan(summary, min_loss=0.02, passes="pass 1 / pass 2"):
+    print(f"\nLayer S, syndrome by seam class (against the exact reference; {passes}):")
     print(f"  {'class':<9}{'units':>6}  {'P0+P1 kept':>13}  {'coherence kept':>15}  {'P1 - P0':>14}  "
           f"{'breaks on a seam qubit':>23}  plan")
     for cl in SEAM_CLASSES:
@@ -1542,13 +1581,22 @@ def cmd_stack(a):
     L, T = max(1, l2["blocks"]), l2["t_idle"]
     what = f"GHZ stack, {k}-qubit chains" if a.mode == "tiles" else f"GHZ stack over all {R.n} qubits"
     print(header(a, R, what, l2))
-    print(f"passes: 1 = Layer 1a (no drift); 2 = Layer 2 {l2['mode']}; S = the seam's syndrome from 1 and 2, then the "
-          f"replica repetition code where it corrects (authority {a.code_authority}, schedule {a.code_schedule})"
-          + (f", and ZNE ({a.zne_amp}, lambda {lams})" if lams else "")
-          + "; V = the third measurement: pass 2's circuit under the correction")
+    if a.order == "code-echo":
+        if lams:
+            raise SystemExit("ghz stack: --zne-k extrapolates pass 2's circuit; with --order code-echo there is none")
+        print(f"passes (order code-echo): 1 = Layer 1a (no drift); S = the seam's syndrome from pass 1, then the replica "
+              f"repetition code where it corrects (authority {a.code_authority}, schedule {a.code_schedule}); C = pass "
+              f"1's circuit under the correction; E = Layer 2 {l2['mode']} on every unit, the code kept where it ran")
+    else:
+        print(f"passes: 1 = Layer 1a (no drift); 2 = Layer 2 {l2['mode']}; S = the seam's syndrome from 1 and 2, then "
+              f"the replica repetition code where it corrects (authority {a.code_authority}, schedule "
+              f"{a.code_schedule})" + (f", and ZNE ({a.zne_amp}, lambda {lams})" if lams else "")
+              + "; V = the third measurement: pass 2's circuit under the correction")
     print(f"{len(groups)} circuit groups, {sum(len(u) for _, u in groups)} units; readout settings: {' '.join(settings)}")
     d1, x1, bad, t1 = run_tasks(a, R, groups, settings, "pass 1", l2_0)
     stop_on_bad(a, bad)
+    if a.order == "code-echo":
+        return stack_code_echo(a, R, groups, settings, k, l2, l2_0, d1, x1, t1)
     d2, x2, bad, t2 = run_tasks(a, R, groups, settings, "pass 2", l2)
     stop_on_bad(a, bad)
     rows = []
@@ -1609,12 +1657,14 @@ def cmd_stack(a):
         where = (dict(mode="tiles", unit_size=k, tiling=r["g"], unit=r["j"]) if a.mode == "tiles"
                  else dict(mode="chip", tree=r["g"]))
         for p, l2p, e, x in ((1, l2_0, r["e1"], r["x1"]), (2, l2, r["e2"], r["x2"])):
-            recs.append(dict(base_record(a, R, l2p), test="ghz", stack_pass=p, **where, **r["u"], **info, **e, **x))
+            recs.append(dict(base_record(a, R, l2p), test="ghz", stack_pass=p, stack_order="echo-code", **where,
+                             **r["u"], **info, **e, **x))
         if "eV" in r:
-            recs.append(dict(base_record(a, R, l2), test="ghz", stack_pass="V", **where, **r["uV"], **info, **r["eV"],
+            recs.append(dict(base_record(a, R, l2), test="ghz", stack_pass="V", stack_order="echo-code", **where,
+                             **r["uV"], **info, **r["eV"],
                              **r["x2"], boundary_rep=r["plan"] == "code",
                              code_schedule=(r["plan"] == "code" and a.code_schedule == "on")))
-        st = dict(base_record(a, R, l2), test="ghz_stack", **where, **r["u"], **info,
+        st = dict(base_record(a, R, l2), test="ghz_stack", stack_order="echo-code", **where, **r["u"], **info,
                   seam_crossings=dict(prep=r["prep"], drift=r["drift"]), syndrome=r["syn"],
                   pass1={q: r["e1"][q] for q in KEEP if q in r["e1"]}, exact1=r["x1"],
                   pass2={q: r["e2"][q] for q in KEEP if q in r["e2"]}, exact2=r["x2"])
@@ -1631,6 +1681,129 @@ def cmd_stack(a):
     recs.append(dict(base_record(a, R, l2), test="ghz_seam_model", mode=a.mode, plan=plan, lambdas=lams,
                      amp=(a.zne_amp if lams else None), phi=(float(a.zne_phi) if lams else None), **model))
     write_records(a, R, recs, None)
+
+
+def stack_code_echo(a, R, groups, settings, k, l2, l2_0, d1, x1, t1):
+    """--order code-echo: Layer S from pass 1's syndrome, pass C (pass 1's circuit under the correction: replica
+    units with the code, cut units without, as the control), pass E (Layer 2 on every unit, the code kept on the
+    replica units it ran on). Bulk and clean units keep pass 1's value in C; every unit runs in E, with the exact
+    reference of Layer 2."""
+    L, T = max(1, l2["blocks"]), l2["t_idle"]
+    rows = []
+    for g, units in groups:
+        for j, u in enumerate(units):
+            prep, drift = seam_crossings(R, u, l2)
+            rows.append(dict(g=g, j=j, u=u, prep=prep, drift=drift, e1=score_unit(R, u, d1[g], k, 1, None),
+                             x1=exact_fields(R, u, x1[g] if x1 else None, k, l2_0)))
+    key = headline(rows[0]["e1"])[0]
+    model = seam_model(R, rows)
+    print_seam_model(model, [])
+    plan = seam_plan(R, rows, key)
+    print_seam_plan(plan, passes="pass 1")
+    if a.no_exact:
+        print("  (--no-exact: no loss can be measured, so no unit is planned for the code)")
+    for r in rows:
+        r["uV"] = code_schedule(R, r["u"]) if r["plan"] == "code" and a.code_schedule == "on" else r["u"]
+    by_g = collections.defaultdict(lambda: collections.defaultdict(list))
+    for r in rows:
+        by_g[r["plan"] if r["plan"] == "code" else "rest"][r["g"]].append(r)
+    tC = tE = 0.0
+    for plan_, brep in (("code", True), ("control", False)):
+        rs_g = collections.defaultdict(list)
+        for r in rows:
+            if r["plan"] == plan_:
+                rs_g[r["g"]].append(r)
+        if not rs_g:
+            continue
+        dC, _, _, t_ = run_tasks(a, R, [(f"{g}/{plan_}", [r["uV"] for r in rs]) for g, rs in rs_g.items()], settings,
+                                 f"pass C, {plan_}", l2_0, with_exact=False, rep_offset=1000, brep=brep)
+        tC += t_
+        for g, rs in rs_g.items():
+            for r in rs:
+                r["eC"] = score_unit(R, r["uV"], dC[f"{g}/{plan_}"], k, 1, None)
+    for part, brep in (("code", True), ("rest", False)):
+        vg = [(f"{g}/{part}", [r["uV"] for r in rs]) for g, rs in by_g[part].items()]
+        if not vg:
+            continue
+        dE, xE, bad, t_ = run_tasks(a, R, vg, settings, f"pass E, {part}", l2, brep=brep)
+        stop_on_bad(a, bad)
+        tE += t_
+        for g, rs in by_g[part].items():
+            for j, r in enumerate(rs):
+                r["eE"] = score_unit(R, r["uV"], dE[f"{g}/{part}"], k, L, T)
+                r["xE"] = exact_fields(R, r["uV"], xE[f"{g}/{part}"] if xE else None, k, l2)
+    report_code_echo(rows, key)
+    print(f"seconds: pass 1 {t1:.1f}, pass C {tC:.1f}, pass E {tE:.1f}")
+    recs = []
+    for r in rows:
+        info = (unit_info(R, r["u"]) if a.mode == "tiles"
+                else dict(cx_classes=dict(collections.Counter(r["u"]["classes"]))))
+        info = dict(info, seam_class=r["cls"], seam_plan=r["plan"])
+        where = (dict(mode="tiles", unit_size=k, tiling=r["g"], unit=r["j"]) if a.mode == "tiles"
+                 else dict(mode="chip", tree=r["g"]))
+        coded = r["plan"] == "code"
+        cs = coded and a.code_schedule == "on"
+        recs.append(dict(base_record(a, R, l2_0), test="ghz", stack_pass=1, stack_order="code-echo", **where,
+                         **r["u"], **info, **r["e1"], **r["x1"]))
+        if "eC" in r:
+            recs.append(dict(base_record(a, R, l2_0), test="ghz", stack_pass="C", stack_order="code-echo", **where,
+                             **r["uV"], **info, **r["eC"], **r["x1"], boundary_rep=coded, code_schedule=cs))
+        recs.append(dict(base_record(a, R, l2), test="ghz", stack_pass="E", stack_order="code-echo", **where,
+                         **r["uV"], **info, **r["eE"], **r["xE"], boundary_rep=coded, code_schedule=cs))
+        st = dict(base_record(a, R, l2), test="ghz_stack", stack_order="code-echo", **where, **r["u"], **info,
+                  seam_crossings=dict(prep=r["prep"], drift=r["drift"]), syndrome=r["syn"],
+                  pass1={q: r["e1"][q] for q in KEEP if q in r["e1"]}, exact1=r["x1"],
+                  passE=dict({q: r["eE"][q] for q in KEEP if q in r["eE"]}, boundary_rep=coded,
+                             code_authority=a.code_authority, code_schedule=cs, edges=r["uV"]["edges"]),
+                  exactE=r["xE"])
+        if "eC" in r:
+            st["passC"] = dict({q: r["eC"][q] for q in KEEP if q in r["eC"]}, boundary_rep=coded,
+                               code_authority=a.code_authority, code_schedule=cs, edges=r["uV"]["edges"])
+        recs.append(st)
+    recs.append(dict(base_record(a, R, l2), test="ghz_seam_model", stack_order="code-echo", mode=a.mode, plan=plan,
+                     lambdas=[], amp=None, phi=None, **model))
+    write_records(a, R, recs, None)
+
+
+def report_code_echo(rows, key):
+    """--order code-echo: the three GHZ measurements (pass 1, C, E) by seam class and plan; the units C reran."""
+    xk = "exact_" + key
+
+    def mean(rs, f):
+        v = [f(r) for r in rs]
+        v = [x for x in v if x is not None]
+        return float(np.mean(v)) if v else None
+    by = collections.defaultdict(list)
+    for r in rows:
+        by[(SEAM_CLASSES.index(r["cls"]), r["prep"], str(r["plan"]))].append(r)
+    print(f"\nOrder code-echo: {key} by class, mean over units (pass 1 Layer 1a | C: pass 1's circuit under the code "
+          f"(code) or without (control); bulk and clean units keep pass 1 | E: Layer 2 on every unit, the code kept | "
+          f"exact, E)")
+    print(f"  {'seam class, seam CXs':<24}{'plan':<9}{'units':>6}{'pass 1':>9}{'C':>9}{'E':>9}{'exact':>9}")
+    for c in sorted(by):
+        rs = by[c]
+        cl, prep, plan_ = SEAM_CLASSES[c[0]], c[1], c[2]
+        cols = [mean(rs, lambda r: r["e1"].get(key)),
+                mean(rs, lambda r: (r["eC"] if "eC" in r else r["e1"]).get(key)),
+                mean(rs, lambda r: r["eE"].get(key)), mean(rs, lambda r: r["xE"].get(xk))]
+        print(f"  {cl + ', ' + str(prep):<24}{('-' if plan_ == 'None' else plan_):<9}{len(rs):>6}"
+              + "".join(f"{fmt(x):>9}" for x in cols))
+    code = [r for r in rows if r["plan"] == "code"]
+    ctrl = [r for r in rows if r["plan"] == "control"]
+    if code:
+        g1 = [r["eC"][key] - r["e1"][key] for r in code]
+        g2 = [r["eE"][key] - r["eC"][key] for r in code]
+        print(f"  code (replica units): C - pass 1 mean {np.mean(g1):+.3f}, range {min(g1):+.3f} .. {max(g1):+.3f}; "
+              f"E - C mean {np.mean(g2):+.3f}; exact - E mean "
+              f"{np.mean([r['xE'][xk] - r['eE'][key] for r in code if r['xE'].get(xk) is not None]):+.3f}")
+    if ctrl:
+        sp = [abs(r["eC"][key] - r["e1"][key]) for r in ctrl]
+        print(f"  control (cut units, no code): |C - pass 1| mean {np.mean(sp):.3f} (what a rerun moves); E {key} "
+              f"mean {np.mean([r['eE'][key] for r in ctrl]):.3f}, at most {max(r['eE'][key] for r in ctrl):.3f}")
+    bulk = [r for r in rows if r["cls"] == "bulk"]
+    if bulk:
+        print(f"  bulk: pass 1 {mean(bulk, lambda r: r['e1'].get(key)):.3f}, E "
+              f"{mean(bulk, lambda r: r['eE'].get(key)):.3f} (the echo on its own)")
 
 
 def report_stack(R, rows, key, lams):
@@ -1697,6 +1870,260 @@ def report_stack(R, rows, key, lams):
         g = [r["zne"]["linear"]["F"] - r["e2"][key] for r in z]
         print(f"  ZNE (linear) minus pass 2 on the seam units: mean {np.mean(g):+.3f}, range {min(g):+.3f} .. "
               f"{max(g):+.3f}")
+
+
+# ================================================================== sweep, probe, stackmap
+
+def chain_from_end(u):
+    """The same GHZ as a chain from one end of a chain unit: H on the end, CX along the chain (the probe's chain
+    variants; nighthawk_ghz.py's tiles root a chain in its middle)."""
+    adj = collections.defaultdict(set)
+    for p_, c_ in u["edges"]:
+        adj[p_].add(c_)
+        adj[c_].add(p_)
+    end = min(q for q in u["qubits"] if len(adj[q]) == 1)
+    order, prev = [end], None
+    while len(order) < len(u["qubits"]):
+        nxt = [q for q in adj[order[-1]] if q != prev][0]
+        prev = order[-1]
+        order.append(nxt)
+    edges = [[x, y] for x, y in zip(order, order[1:])]
+    return dict(u, root=end, edges=edges)
+
+
+def cmd_sweep(a):
+    """tiles once per Walsh-echo window count L (0: no Layer 2), optionally again under the boundary code, then
+    the means per (setup, L, seam class); or (--summarise) the means of records already written."""
+    import copy
+    if not a.summarise:
+        if not a.out:
+            a.out = f"ghz_sweep_{a.register}.jsonl"
+        for L, code in ([(int(x), False) for x in a.windows.split(",") if x.strip()]
+                        + [(int(x), True) for x in str(a.code_at or "").split(",") if x.strip()]):
+            b = copy.copy(a)
+            b.layer2, b.blocks, b.ace_boundary_rep = ("none" if L == 0 else "dd"), max(L, 1), code
+            print(f"\n# sweep: L = {L}" + (", boundary code" if code else ""), flush=True)
+            cmd_tiles(b)
+    sweep_summary(a.summarise or [a.out], a.register, a.repo, a.summary)
+
+
+def sweep_summary(paths, reg, repo, out=None):
+    R = register(repo, reg, False)
+    acc = collections.defaultdict(list)
+    for path in paths:
+        for r in read_records(path):
+            if r.get("test") != "ghz" or r.get("register") != reg or r.get("mode") != "tiles" or "stack_pass" in r:
+                continue
+            l2 = r.get("layer2") or {}
+            L = int(l2.get("blocks", 0)) if l2.get("mode") == "dd" else 0
+            setup = ("code" if r.get("boundary_rep") else "no code") + (
+                ", zz stab" if l2.get("inside_zz") == "stabilizer" else "")
+            acc[(setup, L, seam_class(R, dict(qubits=r["qubits"])))].append(r)
+    if not acc:
+        raise SystemExit(f"ghz sweep: no tiles records of {reg} in {', '.join(paths)}")
+    rows = []
+    for (setup, L, cl), rs in sorted(acc.items(), key=lambda t: (t[0][0], t[0][1], SEAM_CLASSES.index(t[0][2]))):
+        def m(f):
+            return round(float(np.mean([f(r) for r in rs])), 4)
+        rows.append(dict(setup=setup, windows=L, seam_class=cl, units=len(rs), F_GHZ=m(lambda r: r["F_GHZ"]),
+                         pop=m(lambda r: r["pop"]), C_parity=m(lambda r: r.get("C_parity", float("nan"))),
+                         abs_branch=m(lambda r: abs(r["P1"] - r["P0"]))))
+    print(f"\nsweep, {reg}: mean over units per window count L (4 Walsh segments per window; C = 2|c|)")
+    print(f"  {'setup':<18}{'L':>3}  {'class':<9}{'units':>6}{'F_GHZ':>8}{'P0+P1':>8}{'C':>8}{'|P1-P0|':>9}")
+    for r in rows:
+        print(f"  {r['setup']:<18}{r['windows']:>3}  {r['seam_class']:<9}{r['units']:>6}{r['F_GHZ']:>8.3f}"
+              f"{r['pop']:>8.3f}{r['C_parity']:>8.3f}{r['abs_branch']:>9.3f}")
+    if out:
+        with open(out, "w") as fh:
+            json.dump(dict(register=reg, records=list(paths), rows=rows), fh, indent=1)
+        print(f"  summary: {out}")
+    return rows
+
+
+PROBE_VARIANTS = dict(none=("tree", None), gate=("tree", "gate"), tseam=("tree", "target-seam"),
+                      tbulk=("tree", "target-bulk"), stab=("tree", "stabilizer"), **{
+                          "chain-none": ("chain", None), "chain-gate": ("chain", "gate"),
+                          "chain-stab": ("chain", "stabilizer")})
+
+
+def cmd_probe(a):
+    """One seam class's k-qubit chains through Layer 2 with the drift's ZZ inside a unit put through ACE in
+    several ways (PROBE_VARIANTS: preparation tree or chain from one end; inside ZZ none (no Layer 2), as gates,
+    with the CX's target on the seam or the bulk qubit, or dropped by the GHZ stabiliser), against the exact
+    reference for --exact-variants."""
+    if parse_layer2(a.layer2) == "none":
+        a.layer2 = "dd"
+    R = register(a.repo, a.register, False)
+    k = int(a.unit)
+    groups = [(g, [u for u in units if seam_class(R, u) == a.seam_class]) for g, units in tile_groups(a, R, k, True)]
+    groups = [(g, us) for g, us in groups if us]
+    if not groups:
+        raise SystemExit(f"ghz probe: no {k}-qubit chain of class {a.seam_class} on {R.name}")
+    variants = [v.strip() for v in a.variants.split(",") if v.strip()]
+    exact_v = {v.strip() for v in a.exact_variants.split(",") if v.strip()}
+    for v in variants + sorted(exact_v):
+        if v not in PROBE_VARIANTS:
+            raise SystemExit(f"ghz probe: unknown variant {v!r}; known: {', '.join(PROBE_VARIANTS)}")
+    settings = settings_for(k, a.estimator, a.mqc_max)
+    a.stab = False
+    l2 = layer2_spec(a)
+    l2.pop("inside_zz", None)
+    print(header(a, R, f"probe: {k}-qubit {a.seam_class} chains", l2))
+    print(f"{sum(len(u) for _, u in groups)} units in {len(groups)} circuit groups; variants {', '.join(variants)}"
+          f" (exact reference: {', '.join(v for v in variants if v in exact_v) or 'none'})")
+    rows, means = [], []
+    for v in variants:
+        prep, rule = PROBE_VARIANTS[v]
+        vg = [(g, [chain_from_end(u) if prep == "chain" else u for u in us]) for g, us in groups]
+        lv = dict(mode="none", blocks=0) if rule is None else dict(l2, inside_zz=rule)
+        data, exact, bad, _ = run_tasks(a, R, vg, settings, f"probe {v}", lv, with_exact=v in exact_v, brep=False)
+        stop_on_bad(a, bad)
+        L, T = max(1, lv["blocks"]), (lv.get("t_idle") if lv["mode"] != "none" else None)
+        for g, us in vg:
+            for j, u in enumerate(us):
+                for ex, per in ((False, data[g]), (True, exact[g] if exact else None)):
+                    if per is None:
+                        continue
+                    e = score_unit(R, u, per, k, L, T, maps=False)
+                    rows.append(dict(base_record(a, R, lv), test="ghz_probe", variant=v, exact=ex, seam_class=a.seam_class,
+                                     mode="tiles", unit_size=k, tiling=g, unit=j, **u,
+                                     **{q: e[q] for q in KEEP if q in e}))
+    key = "F_GHZ"
+    print(f"\nprobe, {R.name}, {a.seam_class} units: mean (per unit min .. max)")
+    print(f"  {'variant':<12}{'ref':<7}{'units':>6}{key:>8}{'P0+P1':>8}{'C':>8}{'F0':>8}   per unit")
+    for v in variants:
+        for ex in (False, True):
+            rs = [r for r in rows if r["variant"] == v and r["exact"] == ex]
+            if not rs:
+                continue
+            f = [r[key] for r in rs]
+            mm = {q: round(float(np.mean([r.get(q, np.nan) for r in rs])), 4) for q in (key, "pop", "C_parity", "F0")}
+            means.append(dict(variant=v, exact=ex, units=len(rs), **mm))
+            print(f"  {v:<12}{'exact' if ex else 'ACE':<7}{len(rs):>6}{mm[key]:>8.3f}{mm['pop']:>8.3f}"
+                  f"{mm['C_parity']:>8.3f}{mm['F0']:>8.3f}   {min(f):.2f} .. {max(f):.2f}")
+    write_records(a, R, rows, None)
+
+
+def cmd_stackmap(a):
+    """The three GHZ measurements of a stack run as heatmaps on the chip layout, side by side: per site the
+    lowest F_GHZ among the chains through it; a unit a pass did not rerun keeps the previous pass's value."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    from matplotlib.patches import Rectangle
+
+    recs = read_records(a.inp)
+    st = [r for r in recs if r.get("test") == "ghz_stack" and r.get("mode") == "tiles"
+          and (not a.register or r["register"] == a.register)]
+    if not st:
+        raise SystemExit(f"ghz stackmap: no tiles ghz_stack record{' for ' + a.register if a.register else ''} in {a.inp}")
+    when = max(r["when"] for r in st)                     # the latest stack run in the file
+    st = [r for r in st if r["when"] == when]
+    reg = st[0]["register"]
+    order = st[0].get("stack_order", "echo-code")
+    mp = [r for r in recs if r.get("test") == "ghz_map" and r["register"] == reg and r.get("when") == when][-1]
+    ghz = [r for r in recs if r.get("test") == "ghz" and r.get("when") == when and "stack_pass" in r]
+    P = (1, 2, "V") if order == "echo-code" else (1, "C", "E")
+    back = {2: 1, "V": 2, "C": 1, "E": None}
+    by = {p: {(r["tiling"], r["unit"]): r for r in ghz if r["stack_pass"] == p} for p in P}
+    layers = []
+    for p in P:
+        acc = collections.defaultdict(list)
+        for k_ in by[1]:
+            r, q_ = by[p].get(k_), p
+            while r is None:
+                q_ = back[q_]
+                r = by[q_][k_]
+            for q in r["qubits"]:
+                acc[q].append(min(1.05, max(0.0, r["F_GHZ"])))
+        layers.append({q: float(np.min(v)) for q, v in acc.items()})
+    fields = ("pass1", "pass2", "passV") if order == "echo-code" else ("pass1", "passC", "passE")
+    counts = collections.Counter(r["seam_class"] for r in st)
+
+    def cls_mean(c, i):
+        v = [(r.get(fields[i]) or (r["pass1"] if order == "code-echo" and i == 1 else None)) for r in st
+             if r["seam_class"] == c]
+        v = [d["F_GHZ"] for d in v if d]
+        return float(np.mean(v)) if v else None
+    sites = {s_[0]: (s_[1], s_[2]) for s_ in mp["sites"]}
+    seam = set(mp.get("seam", []))
+    cmap = LinearSegmentedColormap.from_list("div", [(0.0, "#a32c2b"), (0.25, "#e98584"), (0.5, "#e4e2dc"),
+                                                     (0.75, "#6da7ec"), (1.0, "#184f95")])
+    norm = Normalize(0.0, 1.0)
+    ink, ink2, muted, surf = "#1d1d1b", "#4a4944", "#6b6a64", "#fcfcfb"
+    names = (["Pass 1", "Pass 2", "V"] if order == "echo-code" else ["Pass 1", "C", "E"])
+    subs = (["Layer 1a, no drift", "Layer 2, anti-OTOC Walsh echo", "echo + Layer S repetition code"]
+            if order == "echo-code" else
+            ["Layer 1a, no drift", "Layer S repetition code", "code + Layer 2, anti-OTOC Walsh echo"])
+    l2 = next((r["layer2"] for r in ghz if r["stack_pass"] != 1), {})
+    rows_ = sorted({rc[0] for q, rc in sites.items() if q in layers[0]})
+    cols_ = sorted({rc[1] for q, rc in sites.items() if q in layers[0]})
+    fig = plt.figure(figsize=(17, 8.2), dpi=200, facecolor=surf)
+    W, X0, GAP = 0.265, 0.035, 0.035
+    for li, vals in enumerate(layers):
+        ax = fig.add_axes([X0 + li * (W + GAP), 0.20, W, 0.62], facecolor=surf)
+        for q, F in vals.items():
+            r_, c_ = sites[q]
+            ax.add_patch(Rectangle((c_ - 0.5, r_ - 0.5), 1, 1, facecolor=cmap(norm(F)), edgecolor=surf, lw=2.0))
+            dark = F > 0.82 or F < 0.12
+            ax.text(c_, r_ + 0.06, f"{F:.2f}", ha="center", va="center", fontsize=9.5, fontweight="bold",
+                    color="#ffffff" if dark else ink)
+            ax.text(c_ - 0.40, r_ - 0.32, str(q), ha="left", va="center", fontsize=6.5,
+                    color="#ffffff" if dark else muted)
+            if q in seam:
+                ax.add_patch(Rectangle((c_ - 0.44, r_ - 0.44), 0.88, 0.88, facecolor="none", edgecolor=ink, lw=2.0))
+        ax.set_xlim(cols_[0] - 0.55, cols_[-1] + 0.55)
+        ax.set_ylim(rows_[-1] + 0.55, rows_[0] - 0.55)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        x = X0 + li * (W + GAP)
+        fig.text(x, 0.815, names[li], fontsize=15, fontweight="bold", color=ink, ha="left")
+        fig.text(x + (0.048 if names[li].startswith("Pass") else 0.020), 0.816, subs[li], fontsize=11, color=ink2,
+                 ha="left")
+        m = [cls_mean(c, li) for c in SEAM_CLASSES]
+        fig.text(x, 0.195, "class means   " + "   ".join(
+            f"{lab} {v:.2f}" if v is not None else f"{lab} not rerun"
+            for lab, v in zip(("off seam", "replica", "cut"), m)), fontsize=10.5, color=ink, ha="left",
+            family="monospace")
+    cax = fig.add_axes([0.945, 0.26, 0.010, 0.50])
+    cb = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax)
+    cb.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
+    cb.set_ticklabels(["0", "0.25", "½", "0.75", "1"])
+    cb.ax.tick_params(labelsize=9.5, colors=ink2)
+    cb.outline.set_visible(False)
+    fig.text(0.935, 0.785, "F_GHZ", fontsize=11, fontweight="bold", color=ink)
+    k = st[0].get("unit_size", 3)
+    prot = l2.get("inside_zz") == "stabilizer"
+    fig.text(0.02, 0.955, f"{reg}: GHZ fidelity per measurement layer"
+             + ("  ·  code first, echo second" if order == "code-echo" else "  ·  echo first, code second")
+             + ("  ·  with seam protection" if prot else "  ·  without seam protection"), fontsize=19,
+             fontweight="bold", color=ink, ha="left")
+    if prot:
+        fig.text(0.02, 0.900, "Seam protection: the drift's ZZ inside a GHZ unit is not put through ACE (a global phase on "
+                 "the GHZ, Corollary 2.1; --inside-zz stabilizer).", fontsize=10.5, color=ink2, ha="left")
+    fig.text(0.02, 0.925, f"Each cell is the lowest F_GHZ among the {k}-qubit GHZ chains through that qubit (small "
+             f"number: qubit index). Ringed cells are ACE seam qubits. Below ½: no coherence between simulators.",
+             fontsize=10.5, color=ink2, ha="left")
+    fig.text(0.02, 0.10, f"Class means over {k}-qubit chains: off seam {counts.get('bulk', 0)} units, replica "
+             f"{counts.get('replica', 0)} (one simulator holds the shared qubit), cut {counts.get('cut', 0)} (split "
+             f"across two simulators). The code runs on the replica units Layer S plans it for; cut units are the "
+             f"control.", fontsize=9.5, color=ink2, ha="left")
+    zz = ", inside ZZ by stabiliser" if l2.get("inside_zz") == "stabilizer" else ""
+    fig.text(0.02, 0.065, f"{st[0]['shots']} shots × {st[0]['repeats']} realisations per setting · Layer 2 "
+             f"{l2.get('mode', 'none')}, L = {l2.get('blocks')}, T = {l2.get('t_idle')}, J = {l2.get('j_zz')} × "
+             f"U(0.75, 1.25), σ = {l2.get('sigma_qs')}{zz} · "
+             + ("V reruns the seam units on fresh draws; others keep pass 2" if order == "echo-code" else
+                "C reruns the seam units on fresh backends (others keep pass 1); E runs every unit"),
+             fontsize=8.5, color=muted, ha="left")
+    fig.text(0.02, 0.042, f"{os.path.basename(a.inp)} · run {when} · {st[0].get('qrack', '')} · nighthawk_ghz.py stack --order {order}",
+             fontsize=8.5, color=muted, ha="left")
+    png = a.png or f"ghz_stack_{reg}_{order}.png"
+    fig.savefig(png, facecolor=surf)
+    plt.close(fig)
+    print(f"stackmap: {reg}, order {order}, run {when}: {png}")
+    for c in SEAM_CLASSES:
+        print(f"  {c:<8} {counts.get(c, 0):>3} units  " + "  ".join(fmt(cls_mean(c, i)) for i in range(3)))
 
 
 # ================================================================== plot
@@ -2118,6 +2545,52 @@ def cmd_selftest(a):
     _colocate(st, 0, st.hq[0], 7, st.hq[7])
     check("partner 1 follows qubit 0 into patch 1; nothing moves before", unmoved and st._authority[1] == {1},
           str(st._authority))
+
+    print("[13] --inside-zz stabilizer on the exact simulator: a 3-qubit GHZ unit on a 2 x 3 grid, dropping the ZZ "
+          "inside it changes only a global phase (dd, unmitigated, compensated)")
+    lat = _Lattice(2, 3)
+    unit = dict(qubits=[0, 1, 2], root=0, edges=[[0, 1], [1, 2]], classes=["exact", "exact"])
+    for mode in ("dd", "unmitigated", "compensated"):
+        drift = Drift(lat.couplers, lat.n, lat.sub, j_zz=0.3, sigma_qs=0.2, t_idle=4.4, seed=11)
+        kets = []
+        for rule in ("gate", "stabilizer"):
+            sim = QrackSimulator(lat.n, is_gpu=False)
+            g = Gates(sim, list(range(lat.n)))
+            prepare(g, unit, [])
+            probe = Probe(drift, [unit], rule)
+            for _ in range(2):
+                idle_block(g, probe, mode, drift.eps(3))
+            kets.append(_ket(sim, lat.n))
+        fid = abs(np.vdot(kets[0], kets[1])) ** 2
+        check(f"{mode}: |<gate|stabilizer>|^2 = 1", abs(fid - 1) < 1e-6, f"{fid:.9f}")
+    sim_a, sim_b = QrackSimulator(lat.n, is_gpu=False), QrackSimulator(lat.n, is_gpu=False)
+    r_ = np.random.default_rng(4)
+    angles = r_.uniform(0, math.pi, (3, 3))
+    drift = Drift(lat.couplers, lat.n, lat.sub, j_zz=0.3, sigma_qs=0.0, t_idle=4.4, seed=11)
+    for sim, rule in ((sim_a, "gate"), (sim_b, "stabilizer")):
+        g = Gates(sim, list(range(lat.n)))
+        for q in range(3):
+            g.u(q, *angles[q])
+        idle_block(g, Probe(drift, [unit], rule), "unmitigated", drift.eps(0))
+    fid = abs(np.vdot(_ket(sim_a, lat.n), _ket(sim_b, lat.n))) ** 2
+    check("control: on a product state that is not a GHZ, dropping the ZZ is not the identity", fid < 0.999,
+          f"{fid:.6f}")
+    kets = []
+    for rule in ("gate", "target-seam", "target-bulk"):
+        sim = QrackSimulator(lat.n, is_gpu=False)
+        g = Gates(sim, list(range(lat.n)))
+        for q in range(3):
+            g.u(q, *angles[q])
+        idle_block(g, Probe(drift, [unit], rule, seam={1}), "dd", drift.eps(0))
+        kets.append(_ket(sim, lat.n))
+    fids = [abs(np.vdot(kets[0], kt)) ** 2 for kt in kets[1:]]
+    check("probe: the CX's target on the seam or the bulk qubit is the same unitary (product state, dd)",
+          all(abs(f_ - 1) < 1e-6 for f_ in fids), ", ".join(f"{f_:.9f}" for f_ in fids))
+    print("[14] probe: a chain unit re-rooted at one end keeps its qubits and its tree's edges as one path")
+    u = dict(qubits=[11, 10, 12], root=11, edges=[[11, 10], [11, 12]], classes=["replica", "replica"])
+    c = chain_from_end(u)
+    check("[11, 10, 12] from the middle -> 10 -> 11 -> 12", c["root"] == 10 and c["edges"] == [[10, 11], [11, 12]],
+          f"root {c['root']}, edges {c['edges']}")
     print("selftest " + ("passed" if ok else "FAILED"))
     if not ok:
         raise SystemExit(1)
@@ -2166,6 +2639,10 @@ def make_parser():
                         help="the boundary code's authority rule, wherever the code runs (--ace-boundary-rep; stack's "
                              "Layer V): lineage = PyQrack 2.29.5's own; colocated = lineage, and a seam qubit whose "
                              "authority moves to a simulator takes its seam partners' authority with it")
+    common.add_argument("--inside-zz", dest="inside_zz", choices=["gate", "stabilizer"], default="gate",
+                        help="Layer 2: the drift's ZZ between two qubits of one GHZ unit as CX Rz CX (gate), or dropped "
+                             "(stabilizer: a global phase on the GHZ, Corollary 2.1; on ACE it saves the seam "
+                             "crossings it would make)")
     common.add_argument("--gpu", action="store_true", help="ACE and the reference on OpenCL (QRACK_OCL_DEFAULT_DEVICE)")
     common.add_argument("--ocl-sync", dest="ocl_sync", action="store_true", help="with --gpu: QRACK_OCL_SYNC=1")
     common.add_argument("--jobs", type=int, default=1, help="worker processes, one circuit each (0 = every core)")
@@ -2201,6 +2678,40 @@ def make_parser():
                    help="Layer S: reorder each code unit's CXs, into the host simulator before into seam qubits (on), "
                         "or keep the preparation's order (off; with --code-authority colocated the code needs no "
                         "schedule)")
+    s.add_argument("--order", choices=["echo-code", "code-echo"], default="echo-code",
+                   help="echo-code: pass 2 = Layer 2 (the anti-OTOC echo), then Layer S and Layer V; code-echo: Layer S "
+                        "from pass 1, pass C = the code on pass 1's circuit, then pass E = Layer 2 with the code kept")
+
+    tiles_opts = argparse.ArgumentParser(add_help=False)
+    tiles_opts.add_argument("--unit", type=int, default=3, help="qubits per GHZ chain")
+    tiles_opts.add_argument("--orient", default="rows,cols", help="rows, cols or both")
+    tiles_opts.add_argument("--offsets", default="all", help="chain offsets along a line: all, or a comma list")
+
+    w = sub.add_parser("sweep", parents=[common, tiles_opts],
+                       help="tiles over a range of Walsh-echo window counts, by seam class (RESULTS 10.10)")
+    w.add_argument("--windows", default="0,1,2,3,4,5,6,8", help="window counts L, comma list (0 = no Layer 2; dd "
+                                                               "otherwise, overriding --layer2 and --blocks)")
+    w.add_argument("--code-at", dest="code_at", default="",
+                   help="window counts to run again under the boundary repetition code (--code-authority applies)")
+    w.add_argument("--summarise", nargs="+", default=None, metavar="JSONL",
+                   help="no runs: the means of the tiles records in these files")
+    w.add_argument("--summary", default=None, help="write the means as JSON here")
+
+    pr = sub.add_parser("probe", parents=[common, tiles_opts],
+                        help="one seam class's chains through Layer 2 (dd unless --layer2), the drift's inside ZZ "
+                             "put through ACE several ways (RESULTS 10.11)")
+    pr.add_argument("--seam-class", dest="seam_class", choices=SEAM_CLASSES, default="cut")
+    pr.add_argument("--variants", default=",".join(PROBE_VARIANTS),
+                    help="comma list of " + ", ".join(PROBE_VARIANTS) + " (chain-*: the GHZ prepared from one end; "
+                         "none: no Layer 2; gate, tseam, tbulk: the inside ZZ as CX Rz CX with the CX's target as "
+                         "listed, on the seam qubit, on the bulk qubit; stab: dropped)")
+    pr.add_argument("--exact-variants", dest="exact_variants", default="gate,stab,chain-stab",
+                    help="variants also run on the exact simulator")
+
+    m = sub.add_parser("stackmap", help="a stack run's three measurements as heatmaps on the chip layout")
+    m.add_argument("--in", dest="inp", required=True, help="JSONL written by stack --out (its latest run is drawn)")
+    m.add_argument("--register", default=None, help="which register (default: the latest stack run in the file)")
+    m.add_argument("--png", default=None, help="output image (default ghz_stack_<register>_<order>.png)")
 
     p = sub.add_parser("plot", help="the map of a records file")
     p.add_argument("--in", dest="inp", required=True, help="JSONL written by chip / tiles --out")
@@ -2217,9 +2728,10 @@ def main():
     a = make_parser().parse_args()
     if getattr(a, "ocl_sync", False):
         os.environ["QRACK_OCL_SYNC"] = "1"
-    if a.cmd in ("chip", "tiles", "stack"):
+    if a.cmd in ("chip", "tiles", "stack", "sweep", "probe"):
         nq.ensure_isolated(a)
-    dict(chip=cmd_chip, tiles=cmd_tiles, stack=cmd_stack, plot=cmd_plot, selftest=cmd_selftest)[a.cmd](a)
+    dict(chip=cmd_chip, tiles=cmd_tiles, stack=cmd_stack, sweep=cmd_sweep, probe=cmd_probe, stackmap=cmd_stackmap,
+         plot=cmd_plot, selftest=cmd_selftest)[a.cmd](a)
 
 
 if __name__ == "__main__":
