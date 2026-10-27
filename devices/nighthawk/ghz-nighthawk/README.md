@@ -53,6 +53,8 @@ No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit st
 | ACE's seam loss is set at the first crossing, so ZNE cannot undo it | coherence kept after the first crossing 0.391 (28 qubits), 0.390 (61); ×17 crossings move F by ≤ 0.08; ZNE − pass 2 −0.02 … +0.01 against a rerun's 0.04–0.06 | 10.6 |
 | A ghost link carries entanglement between chips | loom-only error, d = 8 / 12 / 16: ghost 1.000 / 0.989 / 0.656, mean-field 0.773 / 0.773 / 0.067 | 11 |
 | The Walsh echo's seam loss on ACE is a one-time step, and comes from the drift's ZZ inside a unit, which the GHZ stabiliser removes | replica units 0.78 → 0.72 by L = 2, then flat to L = 8; dropping the inside ZZ (a global phase on the GHZ) keeps the echo pass at the no-drift level: replica 0.764, cut 0.355 against 0.683, 0.228 | 10.10, 10.11 |
+| The loom between independent chips is a hard cut: a GHZ unit across it is separable there | every unit across the loom at 0.50 (the separable bound, sd 0.008) in every pass, code, echo and protection alike; ACE's seam is a slope by contrast (replica 0.56–0.93 before its code, 1.00 after). The ghost loom's 1.00 is a two-column replica band simulating a unit whole on one chip; 5-chains wider than the band stay at 0.26 | 10.14 |
+| QrackBridge carries GHZ states across the chip cut up to its bond capacity | `max_bonds` 6: every unit across it 1.00; 2 / 1: per circuit max_bonds units carried at 1.00, the rest separable at 0.50 (means 0.85 / 0.74); 0: the hard cut (0.51) | 10.15 |
 | Qrack's OpenCL engine had three host-memory defects | fixed without serialising dispatch; GPU reproduces CPU | 12 |
 
 ---
@@ -70,7 +72,7 @@ pip install numpy pyqrack matplotlib ortools qiskit
 |---|---|
 | Python ≥ 3.9 | everything (`argparse.BooleanOptionalAction`) |
 | numpy | every subcommand |
-| PyQrack | `hwxeb`, `run`, `selftest`, `aceplan`, `danmodel`, `shor9`; not `verify`, `seamgap` or `hamming`. ACE needs a build with `QrackAceBackend`; exact references above 32 qubits need Qrack built for > 32 qubits |
+| PyQrack | `hwxeb`, `run`, `selftest`, `aceplan`, `danmodel`, `shor9`; not `verify`, `seamgap` or `hamming`. ACE needs a build with `QrackAceBackend`; exact references above 32 qubits need Qrack built for > 32 qubits. `nighthawk_ghz.py stack --engine bridge` needs `QrackBridge` (PyQrack ≥ 2.30), or its `qrack_bridge.py` given with `--qrack-bridge` (runs on PyQrack 2.29.5 / Qrack 10.13.2) |
 | OR-Tools | the `exact` placement engine, `--register` presets, `layoutsearch` |
 | Qiskit | `--ace-transpile` |
 | matplotlib | `nighthawk_graph.py` (Tk for the viewer); `--grid3d` pages need a browser with WebGL, and three.js 0.160 from jsDelivr or a local npm `three` package (`--three DIR --serve`) |
@@ -455,10 +457,10 @@ Not in the paper: the Clifford witness F ≥ P0 + P1 + P(even X parity) − 1 (t
 | `tiles` | disjoint k-qubit chains (`--unit k`) along lattice rows and columns, every orientation and offset | MQC: `z`, `q0`–`q(2k+1)`, 2k + 3 settings |
 | `stack` | pass 1 (Layer 1a), pass 2 (Layer 2), Layer S (seam syndrome + repetition code), Layer V (the corrected measurement) on `tiles` or one `chip` state (`--mode`): below | as `tiles` / `chip` |
 | `plot` | per-site loss map, tree and coupler classes, fidelity by seam distance (`--in`, `--layer2`, `--png`) | — |
-| `selftest` | [1] Lemma 4 and the witness against numpy, [2] Lemma 4 on random ρ, [3] Lemma 3, [4] readout gates on Qrack, [5] Theorem 1, [6] Cor. 2.1 and 4.1, [7] outside-coupling identity, [8] fold = I, [9] ZNE amplification = I, [10] ZNE models on synthetic decays, [11] Layer S's seam classes, plan and the code's schedule, [12] the co-located authority step, [13] `--inside-zz stabilizer` = a global phase on a GHZ unit (dd, unmitigated, compensated), not the identity on a product state, and `probe`'s CX-target choices = the same unitary, [14] `probe`'s chain re-rooting, [15] `--engine loom`: LoomGates' matrices against Qrack's gates, and a GHZ across a link read on the covering chip (≈ 1) and from its real copies (≤ ½), when `nighthawk_cloverfield.py` and the release are found | — |
+| `selftest` | [1] Lemma 4 and the witness against numpy, [2] Lemma 4 on random ρ, [3] Lemma 3, [4] readout gates on Qrack, [5] Theorem 1, [6] Cor. 2.1 and 4.1, [7] outside-coupling identity, [8] fold = I, [9] ZNE amplification = I, [10] ZNE models on synthetic decays, [11] Layer S's seam classes, plan and the code's schedule, [12] the co-located authority step, [13] `--inside-zz stabilizer` = a global phase on a GHZ unit (dd, unmitigated, compensated), not the identity on a product state, and `probe`'s CX-target choices = the same unitary, [14] `probe`'s chain re-rooting, [16] `--engine bridge`: two GHZ units across one cut at `max_bonds` 0 / 1 / 2 (both ≤ ½, one carried, both exact), when `QrackBridge` is found; [15] `--engine loom`: LoomGates' matrices against Qrack's gates; with `nighthawk_cloverfield.py` and the release, a 3-chain across a link: on the ghost loom inside a ghost band ≈ 1 and on its own chips ≤ ½, and as a hard cut (the default) class cut and ≤ ½ whatever the read | — |
 | `sweep` | `tiles` once per window count (`--windows 0,1,2,3,4,5,6,8`; 0 = no Layer 2, dd otherwise, overriding `--layer2`, `--blocks`), again under the boundary code at `--code-at`; then the means per (setup, L, seam class): units, F_GHZ, P0 + P1, C, \|P1 − P0\|. `--summarise FILE…`: the means of records already written, no runs; `--summary FILE`: the means as JSON. Records: `tiles`' `ghz`, to `--out` (default `ghz_sweep_<register>.jsonl`) | as `tiles` |
 | `probe` | the `--seam-class` units (default `cut`) of every spread tiling through Layer 2 (dd unless `--layer2`), per `--variants`: `none` (no Layer 2), `gate` (inside ZZ as CX · Rz · CX), `tseam` / `tbulk` (the CX's target on the seam / bulk qubit), `stab` (dropped), and `chain-none`, `chain-gate`, `chain-stab` with the GHZ prepared from one end of the chain; `--exact-variants` (default `gate,stab,chain-stab`) also on the exact simulator. Prints means and per-unit ranges; records `ghz_probe` (not read by `nighthawk_graph.py`) | as `tiles` |
-| `stackmap` | the latest `stack` run in `--in` as three heatmaps on the chip layout (pass 1, 2, V, or 1, C, E): per site the lowest F_GHZ of the chains through it, seam qubits ringed, class means under each panel (`--png`) | — |
+| `stackmap` | the latest `stack` run in `--in` as three heatmaps on the chip layout (pass 1, 2, V, or 1, C, E): per site the lowest F_GHZ of the chains through it, seam qubits ringed, the loom's links as bars, class means under each panel (`--png`); side by side up to 10 columns, stacked above that | — |
 
 | Option | Default | Effect |
 |---|---|---|
@@ -492,13 +494,15 @@ Not in the paper: the Clifford witness F ≥ P0 + P1 + P(even X parity) − 1 (t
 | Layer V | the third GHZ measurement: the replica units under the correction, the cut units without it (the control: what a rerun moves), pass 2's Layer 2 and fresh ε draws, printed unit by unit beside pass 1, pass 2 and the exact reference | the units planned code or control, ACE |
 | ZNE (`--zne-k`) | for comparison: the seam units rerun pass 2 with every seam crossing scaled by λ (`AmpGates`: K × ZZ(φ) ZZ(−φ) after each, λ = 1 + 4K; `--zne-amp cx`: K × CX CX, λ = 1 + 2K); P0 + P1, Re c, Im c (or ⟨X…X⟩) extrapolated to λ = 0, linearly and exponentially | seam units × each K, ACE |
 
-| The seam on the loom (`--engine loom`) | ACE | Loom |
-|---|---|---|
-| a seam qubit | replicated in both patches and the crossbar | a link anchor: real on its chip, a ghost on the other |
-| a CX through the seam | real where a simulator holds both copies, classical shadow elsewhere | the link CZ exact on both chips; a neighbour's CZ reaches a ghost as the mean-field phase π P(1) |
-| reading a unit | ACE's sampler on the reconciled replicas | without the code: every qubit on its own chip, chips sampled apart (the cloverfield's estimator) |
-| Layer S's code | the boundary repetition code, authority decoding | the loom's authority: a unit read on the chip that holds copies of all its qubits (most real copies first) |
-| unit classes | bulk, replica, cut by the simulators holding every qubit | the same, by the chips holding a copy |
+| The seam between chips | ACE seam (inside a chip) | Loom, `--loom-read cut` (default) | Loom, `--loom-read ghost` | QrackBridge (`--engine bridge`) |
+|---|---|---|---|---|
+| what crosses | replicas in both patches and the crossbar, reconciled per coupling: part of the coherence | nothing: chips are independent simulators | nothing; each chip also simulates its partners' anchor qubits | entanglement, through bond qubits (virtual Bell pairs), up to `--bridge-max-bonds` bond qubits per cut |
+| a CX through the seam | real where a simulator holds both copies, classical shadow elsewhere | the mean-field phase π P(1) of the other side, on each side | exact between a qubit and the partner's ghost on both chips; a neighbour's CZ reaches a ghost as the mean-field phase | gate teleportation: CNOT onto a fresh bond, H and the controlled gate on the far side, then an MPS recompression of the cut (exact when only zero Schmidt values are dropped) |
+| a 3-chain across the seam, before any code | 0.55–0.95 (replica), 0.25–0.40 (cut): a slope | 0.50: separable across the cut, the bound for any such state | 0.26 read on its own chips | 1.00 within capacity; units beyond it lose their share (`max_bonds` 0 = the hard cut) |
+| Layer S's code | the boundary repetition code, authority decoding: replica units to 1.00 | nothing to correct across the loom (ACE's code inside ACE chips) | reading a unit on the chip whose ghost band holds it: 1.00, because that chip simulated it whole; a band of two columns covers every 3-chain, not every 5-chain | none: the bridge is exact up to its truncation, which it reports (`fidelity_estimate`) |
+| unit classes | bulk, replica, cut by the simulators holding every qubit | by the (chip, simulator) pairs holding the real qubit: every unit across the loom is cut | by the (chip, simulator) pairs holding a copy, ghosts included | units on two chips: class bridge (rerun as the control) |
+
+A unit across a hard cut is separable there, so its F_GHZ is at most ½ (F_GHZ > ½ witnesses genuine multipartite entanglement); the ghost band does not change that, it only moves the cut for the units it covers (RESULTS §10.14).
 
 | Seam class | Unit | Seam error | Layer S |
 |---|---|---|---|
@@ -518,8 +522,11 @@ A chip-wide GHZ over a register of two or more patches is always cut.
 |---|---|---|
 | `--mode` | `tiles` | `tiles` (with `--unit`, `--orient`, `--offsets`) or `chip` (with `--trees`, `--root`) |
 | `--code-schedule` | `on` | the code's schedule for the code units, or `off`: the preparation's order |
-| `--engine` | `ace` | `ace`: the register on ACE's patches. `loom`: two exact chips (`QrackSimulator` each, with ghosts) joined by `nighthawk_cloverfield.py`'s ghost loom as the seam; `tiles` only, no ZNE, no schedule |
-| `--loom-chips`, `--loom-link-rows` | `rect:1-8,2-5 rect:1-8,6-9`; 1 2 3 4 6 7 8 | the chips (cloverfield `--chips` tokens) and the rows that get a link. The defaults are `nighthawk61r2`'s 61 qubits as two chips of 30 and 31, the size of its two ACE patches, linked on every row where it has a coupler between columns 5 and 6 (row 5: qubit 55 is broken), so the field has `nighthawk61r2`'s coupling graph |
+| `--engine` | `ace` | `ace`: the register on ACE's patches. `loom`: chips joined by `nighthawk_cloverfield.py`'s ghost loom as the seam; `tiles` only, no ZNE |
+| `--loom-chips`, `--loom-link-rows` | `rect:1-8,2-5 rect:1-8,6-9`; auto | the chips (cloverfield `--chips` tokens, side by side in a row) and the rows that get a link. Default rows: every row whose facing border pair are lattice neighbours once the chips sit side by side. The default chips are `nighthawk61r2`'s 61 qubits as two chips of 30 and 31, the size of its two ACE patches, linked on rows 1–4, 6–8 (row 5: qubit 55 is broken), so the field has `nighthawk61r2`'s coupling graph |
+| `--loom-read` | `cut` | `cut`: the loom as a hard cut (the cloverfield's `--loom mean`, no ghosts, every qubit read on its own chip). `ghost`: the cloverfield's ghost loom, a replica band two columns wide; a unit inside one chip's band is read there. Records carry `loom.read`; `stackmap` labels the mode |
+| `--engine bridge`, `--bridge-max-bonds`, `--bridge-truncation`, `--bridge-lazy`, `--qrack-bridge` | —, 6, `greedy`, 0, auto | the chips of `--loom-chips` (exact) joined by PyQrack's `QrackBridge`, one patch per chip, instead of the loom. Each circuit's bridge holds the qubits its units touch, the patches padded to equal size (the bridge splits its qubits into equal contiguous blocks); idle qubits stay \|0⟩ and in product, their couplings classical rotations, as on ACE. `max_bonds`: bond qubits kept per cut (capacity 2^max_bonds Schmidt values; 0 is the hard cut); `greedy` or `born` truncation; `lazy_bonds` buffered before one recompression. Per pass the log and a `ghz_bridge` record give the peak bond count, the truncating circuits and the bridge's `fidelity_estimate` |
+| `--loom-chip-backend` | `exact` | `exact`: each chip a `QrackSimulator` (no schedule). `ace`: each chip its register's two-patch ACE preset (chips must be registers, e.g. `nighthawk61r2 nighthawk61r2`), ghosts on free ACE sites coupled to their anchor (the cloverfield's `place_ghosts`): ACE's seam inside each chip, the loom between them; Layer S's code is ACE's boundary repetition code inside (with `--code-authority`, `--code-schedule`) and the loom's authority across |
 | `--cloverfield` | auto | `nighthawk_cloverfield.py`: `$NIGHTHAWK_CLOVERFIELD`, next to this script, or `../rcs-nighthawk` |
 | `--order` | `echo-code` | `echo-code`: pass 2 (Layer 2), then Layer S from passes 1 and 2, then Layer V. `code-echo`: Layer S from pass 1 alone, pass C (pass 1's circuit, the replica units under the code, the cut units without), then pass E (Layer 2 on every unit, the code kept where it ran). The drift arrives with its echo in both orders, so pass E runs Layer V's circuit; `--zne-k` needs `echo-code` |
 | `--zne-k` | none | ZNE identities per crossing, e.g. `1,2`: λ = 1, 5, 9 with `zz` |
@@ -818,11 +825,24 @@ python3 nighthawk_ghz.py stack --register nighthawk61r2 --unit 3 --shots 256 --r
 python3 nighthawk_ghz.py stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --inside-zz stabilizer \
   --jobs 16 --out stack61_zz.jsonl
 python3 nighthawk_ghz.py stackmap --in stack61_ce.jsonl --png stack61_ce.png
-# the loom as the seam (E29): nighthawk61r2's 61 qubits as two exact chips of its patches' size
-python3 nighthawk_ghz.py stack --engine loom --order code-echo --shots 256 --repeats 4 --jobs 16 --out loom61.jsonl
+# the loom as the seam: nighthawk61r2's 61 qubits as two exact chips of its patches' size; a hard cut (E31), and
+# the ghost band (E29)
+python3 nighthawk_ghz.py stack --engine loom --order code-echo --shots 256 --repeats 4 --jobs 16 --out cut61.jsonl
+python3 nighthawk_ghz.py stack --engine loom --loom-read ghost --order code-echo --shots 256 --repeats 4 --jobs 16 \
+  --out loom61.jsonl
 python3 nighthawk_ghz.py stack --engine loom --order code-echo --shots 256 --repeats 4 --inside-zz stabilizer \
   --jobs 16 --out loom61_zz.jsonl
 python3 nighthawk_ghz.py stackmap --in loom61.jsonl --png loom61.png
+# the same two chips joined by QrackBridge instead of the loom (E32), its capacity from 6 bond qubits down to 0
+for mb in 6 2 1 0; do
+  python3 nighthawk_ghz.py stack --engine bridge --bridge-max-bonds $mb --order code-echo --shots 256 --repeats 4 \
+    --jobs 16 --out bridge61_mb$mb.jsonl
+done
+python3 nighthawk_ghz.py stackmap --in bridge61_mb1.jsonl --png bridge61_mb1.png
+# two-patch ACE chips joined by the loom (E30): two nighthawk61r2 cloverleaves, 122 qubits
+python3 nighthawk_ghz.py stack --engine loom --loom-chip-backend ace --loom-chips nighthawk61r2 nighthawk61r2 \
+  --order code-echo --shots 256 --repeats 4 --jobs 16 --out loomace61x2.jsonl
+python3 nighthawk_ghz.py stackmap --in loomace61x2.jsonl --png loomace61x2.png
 python3 nighthawk_ghz.py stackmap --in stack61_zz.jsonl --png stack61_zz.png
 # the Walsh echo window by window (E27), the cut units under Layer 2 (E28)
 python3 nighthawk_ghz.py sweep --register nighthawk2p28 --shots 256 --repeats 4 --no-exact --code-at 8 --jobs 16 \
