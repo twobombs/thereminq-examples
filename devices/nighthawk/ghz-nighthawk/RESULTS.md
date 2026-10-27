@@ -1,6 +1,6 @@
 # Results: `rcs/nighthawk`
 
-Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E28 in its §9); usage is in the [README](README.md). State as of 26 October 2026.
+Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E29 in its §9); usage is in the [README](README.md). State as of 27 October 2026.
 
 ## Index
 
@@ -27,6 +27,7 @@ Every measured number of the experiments, grouped by experiment. The procedure b
 | [10.9](#109-the-code-before-the-echo-e26) | E26: the stack with Layer S before Layer 2 (`--order code-echo`) | the code takes every replica unit to the exact value without the drift (0.770 → 1.000) and the echo keeps it there (1.000); the cut units stay at the rerun level (0.357), then lose to the drift (0.216) |
 | [10.10](#1010-the-walsh-echo-window-by-window-e27) | E27: GHZ fidelity against the number of Walsh-echo windows, by seam class | off the seam 1.000 at every L; replica units step down over the first two windows (0.78 → 0.72) and stay flat to L = 8; cut units fall in the first window to near the scrambled floor; the code at L = 8: replica 0.999 |
 | [10.11](#1011-protecting-the-cut-units-from-layer-2-e28) | E28: how the drift's inside ZZ is put through ACE; `--inside-zz stabilizer` | dropping the inside ZZ (a global phase on the GHZ) keeps the cut units at their no-drift level (0.353 against 0.205 as gates) and removes the replica units' echo dip (0.764 against 0.683); the ½ ceiling stays |
+| [10.12](#1012-the-loom-as-the-seam-e29) | E29: `nighthawk61r2`'s qubits as two exact chips of its patches' size, joined by the cloverfield's ghost loom | no cut class: every chain across a link is held by one chip's copies; read there it is 1.000, read on its own chips 0.265; the echo keeps it at 0.996 / 1.000 without / with seam protection |
 | [11](#11-cloverfield-e13) | E13: cloverfield | ghost link 1.000 / 0.989 / 0.656 vs mean-field 0.773 / 0.773 / 0.067 |
 | [12](#12-qracks-opencl-engine-and-vram-oversubscription-e14-e15) | E14, E15: OpenCL and GTT | three defects, fixed; GTT ceiling lifted |
 | [13](#13-tool-validation) | tool validation | GPU = CPU; layoutsearch matches the exact engine |
@@ -955,6 +956,37 @@ With the code first (`--order code-echo`, §10.9), `nighthawk61r2`, the same set
 - **The replica units lose their echo dip too.** Pass 2 under dd is at pass 1's level (0.764 against 0.771, 0.668 against 0.654 on `nighthawk61r2`; 0.781 against 0.770 on `nighthawk2p28`), where the gates took it to 0.683, 0.481, 0.720. The code still takes them to the exact value in V; the stabiliser rule does not replace it, since the replica error is set in the preparation.
 - **Which qubit the CX targets matters, the preparation's root does not help.** Target on the bulk qubit 0.258, on the seam qubit 0.133, as the coupling lists it 0.205: neither choice keeps the no-drift level. Preparing the GHZ from one end instead of from the seam qubit gives 0.332 without drift, no better than the seam root (0.355).
 - **Scope.** The rule holds because the units are GHZ states, which is all `nighthawk_ghz.py` prepares; with a payload inside the unit (Layer 3) the inside ZZ is not a phase. On hardware the coupling is already invisible to a GHZ (Corollary 2.1); the rule only keeps ACE from turning that identity into seam crossings.
+
+### 10.12 The loom as the seam (E29)
+
+`nighthawk_ghz.py stack --engine loom --order code-echo` (README §3.6, METHODOLOGY §6.8): `nighthawk61r2`'s 61 qubits as two chips of 30 and 31 qubits (`rect:1-8,2-5`, `rect:1-8,6-9`, broken qubits 17, 55, 62 out), the size of its two ACE patches, each an exact `QrackSimulator` with a ghost of every partner it is linked to (37 and 38 qubits), joined by `nighthawk_cloverfield.py`'s ghost loom on the 7 rows where `nighthawk61r2` has a coupler between columns 5 and 6: the field has `nighthawk61r2`'s coupling graph. Layer S's code on the loom is the loom's authority: a unit is read on the chip that holds copies of all its qubits; without it every qubit is read on its own chip, the chips sampled apart (the cloverfield's estimator). 3-qubit chains as in §10.9, 256 shots × K = 4 per setting, exact reference 128 shots; Layer 2 dd, L = 3, the §8 model; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ:
+
+| Units | Seam class, plan | Pass 1 (own chips) | C (authority read) | E (+ dd), gates | E (+ dd), inside ZZ dropped | Exact, E |
+|---|---|---|---|---|---|---|
+| off the seam (47) | bulk | 1.000 | 1.000 (pass 1) | 1.000 | 1.000 | 1.000–1.001 |
+| holding a link anchor, on one chip (22 / 21) | replica, clean | 1.000–1.002 | (pass 1) | 1.000 | 0.998–1.000 | 0.997–1.001 |
+| across a link (13) | replica, code | **0.265** (0.250–0.280) | **1.000** | **0.996** (0.990–1.002) | **1.000** (0.996–1.005) | 0.999 |
+| no chip holds it | cut | — (none) | — | — | — | — |
+
+| Across a link (13), pass 1 → E | P0 + P1 | C = 2\|c\| |
+|---|---|---|
+| pass 1, every qubit on its own chip | 0.507 | 0.023 |
+| E, read on the covering chip, gates | — | 0.992 |
+| E, read on the covering chip, inside ZZ dropped | — | 1.000 |
+
+(The run with the inside ZZ dropped planned one more unit for the code, [11, 7, 15], a column chain on one chip at 1.001 in pass 1 that the 3σ test against its exact value flagged; its pass-1 mean over the 13 link-crossing units is 0.264. E with the inside ZZ as gates took 193 s, dropped 58 s, on 2 cores; pass 1 15 s, C 1 s.)
+
+| ACE (§10.9, §10.11) against the loom, `nighthawk61r2`, class means | Pass 1 | After the code | After code + echo, gates | … inside ZZ dropped |
+|---|---|---|---|---|
+| ACE, replica (17) | 0.76 | 1.00 | 1.00 | 1.00 |
+| ACE, cut (7) | 0.36 | 0.36 | 0.22 | 0.35 |
+| loom, across a link (13) | 0.27 | 1.00 | 1.00 | 1.00 |
+| loom, cut | none | none | none | none |
+
+- **The loom has no cut class.** Each chip holds a ghost of every link anchor across from it, so a 3-chain through a link has two qubits on one side and the third as a ghost there: chip 0 holds [col 4, col 5, ghost col 6], chip 1 [ghost col 5, col 6, col 7]. On ACE the seam is a column of its own, replicated into both patches, and a chain [patch 0, seam, patch 1] has no simulator holding it (§10.7). The loom's boundary lies between two anchor columns, both ghosted, so no chain is left without a host.
+- **The loom's authority read is a complete code for these units.** Read on the covering chip, every link-crossing unit is at the exact value (1.000) where reading each qubit on its own chip gives 0.265: P0 + P1 0.51 and C 0.02, two chips in a product state. As on ACE, the code is a decoding choice among replicas, here without ancillas and without a repetition-code decoder: the ghost on the covering chip took the link CZ exactly.
+- **The echo works on the loom, with or without seam protection.** E stays at 0.996 with the inside ZZ as gates and 1.000 with it dropped: on the covering chip every inside coupling is exact, and the mean-field phases land only on copies that are not read. On ACE the gates cost the cut units 0.14 (§10.11); on the loom there is nothing for them to cost.
+- **Against ACE.** Pass 1 is lower on the loom (0.27 against ACE's replica 0.76), because reading across two chips loses all coherence while ACE's reconciled replicas keep part of it; after the code the loom is exact on every seam unit, where ACE leaves its 7 cut units at 0.35 or below. The loom pays in memory: each chip carries its partners' ghosts (37 and 38 qubits here, as ACE's patches carry their replicas), and reading is per unit.
 
 ---
 

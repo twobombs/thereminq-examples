@@ -1063,6 +1063,7 @@ def base_record(a, R, l2):
     return dict(register=R.name, n=R.n, shots=a.shots, repeats=a.repeats, layers=layers_name(parse_layers(a.layers)),
                 layer2=l2, estimator=a.estimator, stabilizer=bool(a.stab), boundary_rep=bool(a.ace_boundary_rep),
                 code_authority=getattr(a, "code_authority", "lineage"),
+                **({"engine": "loom", "loom": R.map["loom"]} if getattr(R, "engine", "ace") == "loom" else {}),
                 device="gpu" if a.gpu else "cpu", ocl_sync=os.environ.get("QRACK_OCL_SYNC") == "1",
                 qrack=nq.qrack_versions(), ace=dict(lrc=R.lrc, lrr=R.lrr, torus=bool(R.torus), width=R.size,
                                                    widths=R.widths))
@@ -1550,11 +1551,24 @@ def cmd_stack(a):
     if a.ace_boundary_rep:
         raise SystemExit("ghz stack: passes 1 and 2 measure the seam uncorrected and Layer S applies the boundary "
                          "repetition code itself: drop --ace-boundary-rep")
-    R = register(a.repo, a.register, False)
-    Rc = register(a.repo, a.register, True)
-    if Rc.idx != R.idx or Rc.size != R.size or Rc.sids != R.sids:
-        raise SystemExit(f"ghz stack: ACE places {R.name} differently with the boundary repetition code, so Layer V "
-                         f"would not rerun the same circuits")
+    if a.engine == "loom":
+        if a.mode != "tiles":
+            raise SystemExit("ghz stack --engine loom: tiles only (a chip-wide GHZ over two chips is always split)")
+        if a.zne_k:
+            raise SystemExit("ghz stack --engine loom: no ZNE on the loom")
+        a.loom_chips = a.loom_chips or list(LOOM_DEFAULT["chips"])
+        if a.loom_link_rows is None and list(a.loom_chips) == list(LOOM_DEFAULT["chips"]):
+            a.loom_link_rows = list(LOOM_DEFAULT["link_rows"])
+        a.code_schedule = "off"                          # the loom reads, it does not reorder: no ACE schedule
+        R = loom_register(a.repo, a.cloverfield, a.loom_chips, a.loom_link_rows)
+        runner = run_loom
+    else:
+        R = register(a.repo, a.register, False)
+        Rc = register(a.repo, a.register, True)
+        if Rc.idx != R.idx or Rc.size != R.size or Rc.sids != R.sids:
+            raise SystemExit(f"ghz stack: ACE places {R.name} differently with the boundary repetition code, so "
+                             f"Layer V would not rerun the same circuits")
+        runner = run_tasks
     if parse_layers(a.layers):
         raise SystemExit("ghz stack: --layers must be none: the passes compare the plain preparation")
     if parse_layer2(a.layer2) == "none":
@@ -1584,20 +1598,23 @@ def cmd_stack(a):
     if a.order == "code-echo":
         if lams:
             raise SystemExit("ghz stack: --zne-k extrapolates pass 2's circuit; with --order code-echo there is none")
-        print(f"passes (order code-echo): 1 = Layer 1a (no drift); S = the seam's syndrome from pass 1, then the replica "
-              f"repetition code where it corrects (authority {a.code_authority}, schedule {a.code_schedule}); C = pass "
-              f"1's circuit under the correction; E = Layer 2 {l2['mode']} on every unit, the code kept where it ran")
+        code = ("the loom's authority (each unit read on the chip holding copies of all its qubits)"
+                if a.engine == "loom" else
+                f"the replica repetition code (authority {a.code_authority}, schedule {a.code_schedule})")
+        print(f"passes (order code-echo): 1 = Layer 1a (no drift); S = the seam's syndrome from pass 1, then {code} "
+              f"where it corrects; C = pass 1's circuit under the correction; E = Layer 2 {l2['mode']} on every unit, "
+              f"the code kept where it ran")
     else:
         print(f"passes: 1 = Layer 1a (no drift); 2 = Layer 2 {l2['mode']}; S = the seam's syndrome from 1 and 2, then "
               f"the replica repetition code where it corrects (authority {a.code_authority}, schedule "
               f"{a.code_schedule})" + (f", and ZNE ({a.zne_amp}, lambda {lams})" if lams else "")
               + "; V = the third measurement: pass 2's circuit under the correction")
     print(f"{len(groups)} circuit groups, {sum(len(u) for _, u in groups)} units; readout settings: {' '.join(settings)}")
-    d1, x1, bad, t1 = run_tasks(a, R, groups, settings, "pass 1", l2_0)
+    d1, x1, bad, t1 = runner(a, R, groups, settings, "pass 1", l2_0)
     stop_on_bad(a, bad)
     if a.order == "code-echo":
-        return stack_code_echo(a, R, groups, settings, k, l2, l2_0, d1, x1, t1)
-    d2, x2, bad, t2 = run_tasks(a, R, groups, settings, "pass 2", l2)
+        return stack_code_echo(a, R, groups, settings, k, l2, l2_0, d1, x1, t1, runner)
+    d2, x2, bad, t2 = runner(a, R, groups, settings, "pass 2", l2)
     stop_on_bad(a, bad)
     rows = []
     for g, units in groups:
@@ -1641,7 +1658,7 @@ def cmd_stack(a):
         vg = [(f"{g}/{plan_}", [r["uV"] for r in rs]) for g, rs in by_g[plan_].items()]
         if not vg:
             continue
-        dV, _, _, t_ = run_tasks(a, R, vg, settings, f"Layer V, {plan_}", l2, with_exact=False, rep_offset=1000,
+        dV, _, _, t_ = runner(a, R, vg, settings, f"Layer V, {plan_}", l2, with_exact=False, rep_offset=1000,
                                  brep=brep)
         tV += t_
         for g, rs in by_g[plan_].items():
@@ -1683,11 +1700,12 @@ def cmd_stack(a):
     write_records(a, R, recs, None)
 
 
-def stack_code_echo(a, R, groups, settings, k, l2, l2_0, d1, x1, t1):
+def stack_code_echo(a, R, groups, settings, k, l2, l2_0, d1, x1, t1, runner=None):
     """--order code-echo: Layer S from pass 1's syndrome, pass C (pass 1's circuit under the correction: replica
     units with the code, cut units without, as the control), pass E (Layer 2 on every unit, the code kept on the
     replica units it ran on). Bulk and clean units keep pass 1's value in C; every unit runs in E, with the exact
     reference of Layer 2."""
+    runner = runner or run_tasks
     L, T = max(1, l2["blocks"]), l2["t_idle"]
     rows = []
     for g, units in groups:
@@ -1715,7 +1733,7 @@ def stack_code_echo(a, R, groups, settings, k, l2, l2_0, d1, x1, t1):
                 rs_g[r["g"]].append(r)
         if not rs_g:
             continue
-        dC, _, _, t_ = run_tasks(a, R, [(f"{g}/{plan_}", [r["uV"] for r in rs]) for g, rs in rs_g.items()], settings,
+        dC, _, _, t_ = runner(a, R, [(f"{g}/{plan_}", [r["uV"] for r in rs]) for g, rs in rs_g.items()], settings,
                                  f"pass C, {plan_}", l2_0, with_exact=False, rep_offset=1000, brep=brep)
         tC += t_
         for g, rs in rs_g.items():
@@ -1725,7 +1743,7 @@ def stack_code_echo(a, R, groups, settings, k, l2, l2_0, d1, x1, t1):
         vg = [(f"{g}/{part}", [r["uV"] for r in rs]) for g, rs in by_g[part].items()]
         if not vg:
             continue
-        dE, xE, bad, t_ = run_tasks(a, R, vg, settings, f"pass E, {part}", l2, brep=brep)
+        dE, xE, bad, t_ = runner(a, R, vg, settings, f"pass E, {part}", l2, brep=brep)
         stop_on_bad(a, bad)
         tE += t_
         for g, rs in by_g[part].items():
@@ -1870,6 +1888,309 @@ def report_stack(R, rows, key, lams):
         g = [r["zne"]["linear"]["F"] - r["e2"][key] for r in z]
         print(f"  ZNE (linear) minus pass 2 on the seam units: mean {np.mean(g):+.3f}, range {min(g):+.3f} .. "
               f"{max(g):+.3f}")
+
+
+# ================================================================== the loom as the seam (nighthawk_cloverfield.py)
+
+LOOM_DEFAULT = dict(chips=("rect:1-8,2-5", "rect:1-8,6-9"), link_rows=(1, 2, 3, 4, 6, 7, 8))
+_CF = {}
+
+
+def cloverfield(path=None):
+    """nighthawk_cloverfield.py, imported once: --cloverfield, $NIGHTHAWK_CLOVERFIELD, next to this script, or in
+    ../rcs-nighthawk (the layout of thereminq-examples). It imports nighthawk_qrack, which is this one."""
+    if "m" in _CF:
+        return _CF["m"]
+    here = Path(__file__).resolve().parent
+    cands = [Path(x) for x in (path, os.environ.get("NIGHTHAWK_CLOVERFIELD")) if x]
+    cands += [here / "nighthawk_cloverfield.py", here.parent / "rcs-nighthawk" / "nighthawk_cloverfield.py"]
+    for c in cands:
+        c = c / "nighthawk_cloverfield.py" if c.is_dir() else c
+        if c.is_file():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("nighthawk_cloverfield", str(c))
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["nighthawk_cloverfield"] = mod
+            spec.loader.exec_module(mod)
+            # it puts its own folder first on sys.path; workers would then import that folder's
+            # nighthawk_qrack.py instead of this one: keep this folder first
+            other = str(c.resolve().parent)
+            if other != str(here):
+                while other in sys.path:
+                    sys.path.remove(other)
+            if str(here) not in sys.path[:1]:
+                sys.path.insert(0, str(here))
+            _CF["m"], _CF["path"] = mod, str(c)
+            return mod
+    raise SystemExit("ghz --engine loom: nighthawk_cloverfield.py not found (give --cloverfield PATH, set "
+                     "NIGHTHAWK_CLOVERFIELD, or put it next to this script or in ../rcs-nighthawk)")
+
+
+class LoomRegister:
+    """Two (or more) chips of the cloverfield as one register: the chips side by side on the device lattice,
+    joined by the loom's links. Answers what Register answers for ACE, with chips in place of ACE simulators:
+    sids[q] = the chips holding a copy of q (its own, and every chip holding a ghost of it), seam = the link
+    anchors (a copy on both chips), cls of a coupler as for ACE. With the ghost loom a unit that one chip holds
+    copies of is read there exactly (the loom's authority, Layer S's code); real copies on two chips are a
+    product state."""
+
+    def __init__(self, repo, cf_path, chips, link_rows):
+        cf = cloverfield(cf_path)
+        nq.load_register_files()
+        self.repo = repo
+        self.specs = [cf.parse_chip(t, repo) for t in chips]
+        self.field = cf.Field(repo, self.specs, (1, len(self.specs)), "all", list(link_rows) if link_rows else None)
+        f = self.field
+        self.skipped = [list(x) for x in f.skipped]   # facing pairs with no CZ colour free at both ends
+        if f.skipped and link_rows:
+            raise SystemExit(f"ghz --engine loom: links asked for but without a free CZ colour: {f.skipped}")
+        if not f.links:
+            raise SystemExit("ghz --engine loom: no link between the chips")
+        self.n = f.n
+        self.name = "loom:" + "+".join(sp["name"] for sp in self.specs)
+        self.chip_of, self.local = list(f.chip_of), list(f.local)
+        self.ghosts = f.ghost_plan()                          # per chip [(partner global, anchor local, site)]
+        hold = [{f.chip_of[q]} for q in range(self.n)]
+        for c, plan in enumerate(self.ghosts):
+            for q, _, _ in plan:
+                hold[q].add(c)
+        self.sids = [frozenset(h) for h in hold]
+        self.seam = {q for q in range(self.n) if len(self.sids[q]) > 1}
+        self.couplers = [tuple(e) for e in f.edges]
+        self.links = [(u, v) for u, v, _ in f.links]
+        self.adj = collections.defaultdict(set)
+        for a_, b_ in self.couplers:
+            self.adj[a_].add(b_)
+            self.adj[b_].add(a_)
+        self.cell = {q: tuple(f.cells[f.chip_of[q]][f.local[q]]) for q in range(self.n)}
+        self.sub = [(r + c) % 2 for r, c in (self.cell[q] for q in range(self.n))]
+        bad = [(a_, b_) for a_, b_ in self.couplers if self.sub[a_] == self.sub[b_]]
+        if bad:
+            raise SystemExit(f"ghz --engine loom: the field is not bipartite under r + c parity: {bad[:5]}")
+        self.seam_dist = Register._bfs_dist(self, self.seam)
+        self.size, self.lrc, self.lrr, self.torus = None, None, None, False
+        self.widths = [f.chip_n[c] + len(self.ghosts[c]) for c in range(len(self.specs))]
+        self.engine = "loom"
+        self.map = dict(n=self.n, columns=COLUMNS,
+                        sites=[[q, self.cell[q][0], self.cell[q][1], sorted(self.sids[q])] for q in range(self.n)],
+                        couplers=[[a_, b_, self.cls(a_, b_)] for a_, b_ in self.couplers], ace=None,
+                        loom=dict(chips=[sp["name"] for sp in self.specs], chip_n=list(f.chip_n),
+                                  links=[list(x) for x in self.links],
+                                  ghosts=[[g[0] for g in plan] for plan in self.ghosts], widths=self.widths))
+
+    region = Register.region
+    cls = Register.cls
+
+    def describe(self):
+        return (f"{self.name} ({self.n} qubits; exact chips of {', '.join(str(x) for x in self.field.chip_n)} "
+                f"qubits + ghosts, widths {self.widths}; {len(self.links)} links, loom ghost"
+                + (f"; {len(self.skipped)} facing pairs without a free CZ colour left unlinked" if self.skipped else "")
+                + ")")
+
+    def unit_reads(self, u, policy):
+        """Where each qubit of a unit is read: (chip, local index) per qubit. real: its own copy. authority: on
+        the chip holding copies of every qubit of the unit (most real copies first), real where none does."""
+        f = self.field
+        if policy == "authority":
+            hosts = set.intersection(*(set(self.sids[q]) for q in u["qubits"]))
+            if hosts:
+                c = min(hosts, key=lambda c_: (-sum(1 for q in u["qubits"] if f.chip_of[q] == c_), c_))
+                out = []
+                for q in u["qubits"]:
+                    if f.chip_of[q] == c:
+                        out.append((c, f.local[q]))
+                    else:
+                        j = [g[0] for g in self.ghosts[c]].index(q)
+                        out.append((c, f.chip_n[c] + j))
+                return out
+        return [(f.chip_of[q], f.local[q]) for q in u["qubits"]]
+
+
+_LOOM_REGS = {}
+
+
+def loom_register(repo, cf_path, chips, link_rows):
+    key = (repo, cf_path, tuple(chips), tuple(link_rows or ()))
+    if key not in _LOOM_REGS:
+        _LOOM_REGS[key] = LoomRegister(repo, cf_path, chips, link_rows)
+    return _LOOM_REGS[key]
+
+
+class LoomChip:
+    """One chip for the loom, in this process: the cloverfield's ChipSim on an exact simulator with the chip's
+    ghosts, plus one op the loom's stream lacks, ("m", q, M): a 2 x 2 matrix on local qubit q."""
+
+    def __init__(self, cf, spec, repo, anchors):
+        self.sim = cf.ChipSim(spec, repo, dict(backend="exact", cpu=True, ace_gpu=False, ghost_anchors=anchors))
+        self._r = None
+
+    def put(self, msg):
+        ops, query = msg[1], msg[2]
+        e = self.sim.eng
+        run = []
+        for op in ops:
+            if op[0] == "m":
+                if run:
+                    self.sim.batch(run, [])
+                    run = []
+                e.g1(op[1], op[2])
+            else:
+                run.append(op)
+        if run:
+            self.sim.batch(run, [])
+        self._r = ("m", [self.sim.marg(q) for q in query])
+
+    def get(self, want):
+        return self._r
+
+
+_H = np.array([[1, 1], [1, -1]], dtype=complex) / math.sqrt(2)
+
+
+class LoomGates:
+    """Gates (the interface of Gates) through the loom: a one-qubit gate on every copy of the qubit, a CX as
+    H CZ H on the target, the CZ woven by the loom (exact where a chip holds both qubits, the mean-field phase
+    where it holds one)."""
+
+    def __init__(self, loom, queues):
+        self.loom, self.qs = loom, queues
+
+    def _m(self, q, M):
+        self.loom._emit1(self.qs, q, "m", np.asarray(M, dtype=complex))
+
+    def h(self, q):
+        self._m(q, _H)
+
+    def x(self, q):
+        self._m(q, [[0, 1], [1, 0]])
+
+    def z(self, q):
+        self._m(q, [[1, 0], [0, -1]])
+
+    def s(self, q):
+        self._m(q, [[1, 0], [0, 1j]])
+
+    def sdg(self, q):
+        self._m(q, [[1, 0], [0, -1j]])
+
+    def u(self, q, th, ph, lm):
+        c, s_ = math.cos(th / 2), math.sin(th / 2)
+        self._m(q, [[c, -np.exp(1j * lm) * s_], [np.exp(1j * ph) * s_, np.exp(1j * (ph + lm)) * c]])
+
+    def zrot(self, q, phi):
+        self._m(q, [[1, 0], [0, np.exp(2j * phi)]])
+
+    def cx(self, c, t):
+        self.h(t)
+        self.loom._layer([(c, t)], None, self.qs, None)
+        self.h(t)
+
+
+def _loom_task(spec):
+    """One circuit on the loom (or, exact, on one QrackSimulator over the field): every unit prepared, Layer 2,
+    the readout setting; shots of every unit qubit, read where spec['policy'] says (LoomRegister.unit_reads),
+    as ints with bit q = field qubit q. Copies on different chips are sampled apart and paired shot by shot after
+    an independent shuffle of each sample (the chips' samplers share a stream otherwise)."""
+    R = loom_register(spec["repo"], spec["cf"], spec["chips"], spec["link_rows"])
+    cf = cloverfield(spec["cf"])
+    units = spec["units"]
+    if spec["exact"]:
+        from pyqrack import QrackSimulator
+        sim = QrackSimulator(R.n, is_gpu=False)
+        g = Gates(sim, list(range(R.n)))
+    else:
+        f = R.field
+        chips = [LoomChip(cf, sp, spec["repo"], [anc for _, anc, _ in R.ghosts[c]]) for c, sp in enumerate(R.specs)]
+        loom = cf.Loom(f, chips, "ghost")
+        queues = [[] for _ in chips]
+        g = LoomGates(loom, queues)
+    for u in units:
+        prepare(g, u, [])
+    l2 = spec.get("layer2") or {}
+    if l2.get("mode", "none") != "none":
+        drift = Drift(R.couplers, R.n, R.sub, l2["j_zz"], l2["sigma_qs"], l2["t_idle"], l2["seed"])
+        probe = Probe(drift, units, l2.get("inside_zz", "gate"), R.seam)
+        eps = drift.eps(spec["realisation"])
+        for _ in range(int(l2["blocks"])):
+            idle_block(g, probe, l2["mode"], eps)
+    for u in units:
+        readout(g, u, spec["setting"])
+    if spec["exact"]:
+        return [int(x) for x in exact_shots(sim, R.n, spec["shots"], False)]
+    loom._flush(queues, [[] for _ in chips])
+    S = spec["shots"]
+    out = np.zeros(S, dtype=np.uint64)
+    pol = spec["policy"]
+    for ui, u in enumerate(units):
+        reads = R.unit_reads(u, pol.get(tuple(u["qubits"]), "real"))
+        per = collections.defaultdict(list)
+        for q, (c, l_) in zip(u["qubits"], reads):
+            per[c].append((q, l_))
+        for c, ql in per.items():
+            w = np.array(chips[c].sim.eng.sim.measure_shots([l_ for _, l_ in ql], S), dtype=np.uint64)
+            w = w[np.random.default_rng([spec["realisation"], ui, c, zlib_key(spec["setting"])]).permutation(S)]
+            for j, (q, _) in enumerate(ql):
+                out |= ((w >> np.uint64(j)) & np.uint64(1)) << np.uint64(q)
+    return [int(x) for x in out]
+
+
+def zlib_key(s):
+    import zlib
+    return zlib.crc32(s.encode())
+
+
+def run_loom(a, R, groups, settings, label, l2, amp=None, with_exact=True, rep_offset=0, brep=None):
+    """run_tasks for --engine loom: the same groups, settings and realisations on the loom. brep True: every
+    unit is read by the loom's authority (Layer S's code); otherwise every unit from its real copies (the
+    cloverfield's estimator)."""
+    if amp:
+        raise SystemExit("ghz --engine loom: no ZNE amplification on the loom")
+    reps = max(1, int(a.repeats))
+    ex_reps = reps if l2["mode"] != "none" else 1
+    no_exact = a.no_exact or not with_exact
+    pol_name = "authority" if brep else "real"
+    base = dict(repo=a.repo, cf=a.cloverfield, chips=list(a.loom_chips), link_rows=list(a.loom_link_rows or ()),
+                layer2=l2)
+    calls, labels, keys = [], [], []
+    for name, units in groups:
+        pol = {tuple(u["qubits"]): pol_name for u in units}
+        for st in settings:
+            for r in range(reps):
+                calls.append((_loom_task, (dict(base, units=units, setting=st, shots=a.shots, exact=False,
+                                                realisation=r + rep_offset, policy=pol),)))
+                labels.append(f"loom {label} {name} {st} realisation {r + 1}/{reps}")
+                keys.append((name, st, r, False))
+            if not no_exact:
+                for r in range(ex_reps):
+                    calls.append((_loom_task, (dict(base, units=units, setting=st, shots=a.exact_shots, exact=True,
+                                                    realisation=r + rep_offset, policy=pol),)))
+                    labels.append(f"exact {label} {name} {st} realisation {r + 1}/{ex_reps}")
+                    keys.append((name, st, r, True))
+    pool, workers = nq.shor_pool(a.jobs, len(calls))
+    every = float(a.progress or 0)
+    if every:
+        print(f"# ghz plan: {len(calls)} circuits on the loom ({len(groups)} groups x {len(settings)} settings x "
+              f"{reps} realisations" + (f" + exact x {ex_reps}" if not no_exact else "") + f"), {workers} "
+              f"process(es) [{label}]", flush=True)
+    t0 = time.time()
+    try:
+        res = nq.shor_pool_map(pool, calls, labels, every, what="ghz")
+    finally:
+        if pool is not None:
+            pool.shutdown()
+    data = {name: [dict() for _ in range(reps)] for name, _ in groups}
+    exact = {name: [dict() for _ in range(ex_reps)] for name, _ in groups}
+    unit_of = dict(groups)
+    bad = 0
+    pid = identity_idle(l2)
+    for (name, st, r, ex), shots in zip(keys, res):
+        bits = bit_matrix(shots, R.n)
+        if ex:
+            bad += check_exact(unit_of[name], st, bits, pid)
+            exact[name][r][st] = bits
+        else:
+            data[name][r][st] = bits
+    return data, (None if no_exact else exact), (None if no_exact else bad), time.time() - t0
 
 
 # ================================================================== sweep, probe, stackmap
@@ -2048,14 +2369,16 @@ def cmd_stackmap(a):
         return float(np.mean(v)) if v else None
     sites = {s_[0]: (s_[1], s_[2]) for s_ in mp["sites"]}
     seam = set(mp.get("seam", []))
+    loom = mp.get("loom")
     cmap = LinearSegmentedColormap.from_list("div", [(0.0, "#a32c2b"), (0.25, "#e98584"), (0.5, "#e4e2dc"),
                                                      (0.75, "#6da7ec"), (1.0, "#184f95")])
     norm = Normalize(0.0, 1.0)
     ink, ink2, muted, surf = "#1d1d1b", "#4a4944", "#6b6a64", "#fcfcfb"
     names = (["Pass 1", "Pass 2", "V"] if order == "echo-code" else ["Pass 1", "C", "E"])
-    subs = (["Layer 1a, no drift", "Layer 2, anti-OTOC Walsh echo", "echo + Layer S repetition code"]
+    code_name = "Layer S: the loom's authority read" if loom else "Layer S repetition code"
+    subs = (["Layer 1a, no drift", "Layer 2, anti-OTOC Walsh echo", "echo + " + code_name]
             if order == "echo-code" else
-            ["Layer 1a, no drift", "Layer S repetition code", "code + Layer 2, anti-OTOC Walsh echo"])
+            ["Layer 1a, no drift", code_name, "code + Layer 2, anti-OTOC Walsh echo"])
     l2 = next((r["layer2"] for r in ghz if r["stack_pass"] != 1), {})
     rows_ = sorted({rc[0] for q, rc in sites.items() if q in layers[0]})
     cols_ = sorted({rc[1] for q, rc in sites.items() if q in layers[0]})
@@ -2073,6 +2396,12 @@ def cmd_stackmap(a):
                     color="#ffffff" if dark else muted)
             if q in seam:
                 ax.add_patch(Rectangle((c_ - 0.44, r_ - 0.44), 0.88, 0.88, facecolor="none", edgecolor=ink, lw=2.0))
+        for u_, v_ in (loom or {}).get("links", []):           # the loom's links: a bar across the chip boundary
+            (ru, cu), (rv, cv) = sites[u_], sites[v_]
+            if ru == rv:
+                ax.plot([(cu + cv) / 2] * 2, [ru - 0.42, ru + 0.42], color=ink, lw=3.2, solid_capstyle="butt")
+            else:
+                ax.plot([cu - 0.42, cu + 0.42], [(ru + rv) / 2] * 2, color=ink, lw=3.2, solid_capstyle="butt")
         ax.set_xlim(cols_[0] - 0.55, cols_[-1] + 0.55)
         ax.set_ylim(rows_[-1] + 0.55, rows_[0] - 0.55)
         ax.set_aspect("equal")
@@ -2083,8 +2412,9 @@ def cmd_stackmap(a):
                  ha="left")
         m = [cls_mean(c, li) for c in SEAM_CLASSES]
         fig.text(x, 0.195, "class means   " + "   ".join(
-            f"{lab} {v:.2f}" if v is not None else f"{lab} not rerun"
-            for lab, v in zip(("off seam", "replica", "cut"), m)), fontsize=10.5, color=ink, ha="left",
+            f"{lab} {v:.2f}" if v is not None else f"{lab} {'none' if not counts.get(c_, 0) else 'not rerun'}"
+            for lab, v, c_ in zip(("off seam", "replica", "cut"), m, SEAM_CLASSES)), fontsize=10.5, color=ink,
+            ha="left",
             family="monospace")
     cax = fig.add_axes([0.945, 0.26, 0.010, 0.50])
     cb = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax)
@@ -2095,20 +2425,35 @@ def cmd_stackmap(a):
     fig.text(0.935, 0.785, "F_GHZ", fontsize=11, fontweight="bold", color=ink)
     k = st[0].get("unit_size", 3)
     prot = l2.get("inside_zz") == "stabilizer"
-    fig.text(0.02, 0.955, f"{reg}: GHZ fidelity per measurement layer"
+    reg_label = (f"loom, {len(loom['chips'])} exact chips of {' + '.join(str(x) for x in loom['chip_n'])} qubits"
+                 if loom else reg)
+    fig.text(0.02, 0.955, f"{reg_label}: GHZ fidelity per measurement layer"
              + ("  ·  code first, echo second" if order == "code-echo" else "  ·  echo first, code second")
              + ("  ·  with seam protection" if prot else "  ·  without seam protection"), fontsize=19,
              fontweight="bold", color=ink, ha="left")
+    import textwrap
+    lines = [f"Each cell is the lowest F_GHZ among the {k}-qubit GHZ chains through that qubit (small number: qubit "
+             f"index). " + ("Ringed cells are link anchors (a ghost copy on the other chip); bars are the loom's links. "
+                            "Below ½: no coherence between chips." if loom else
+                            "Ringed cells are ACE seam qubits. Below ½: no coherence between simulators.")]
+    if loom:
+        lines += textwrap.wrap(f"The seam is nighthawk_cloverfield.py's ghost loom between chips "
+                               f"{' and '.join(loom['chips'])}: the link CZ runs exactly on both chips, a neighbour's CZ "
+                               f"reaches a ghost as a mean-field phase. Layer S's code on the loom: a unit is read on the "
+                               f"chip that holds copies of all its qubits; without it, every qubit is read on its own "
+                               f"chip.", 205)
     if prot:
-        fig.text(0.02, 0.900, "Seam protection: the drift's ZZ inside a GHZ unit is not put through ACE (a global phase on "
-                 "the GHZ, Corollary 2.1; --inside-zz stabilizer).", fontsize=10.5, color=ink2, ha="left")
-    fig.text(0.02, 0.925, f"Each cell is the lowest F_GHZ among the {k}-qubit GHZ chains through that qubit (small "
-             f"number: qubit index). Ringed cells are ACE seam qubits. Below ½: no coherence between simulators.",
-             fontsize=10.5, color=ink2, ha="left")
+        lines.append("Seam protection: the drift's ZZ inside a GHZ unit is not put through the "
+                     + ("loom" if loom else "ACE seam") + " (a global phase on the GHZ, Corollary 2.1; --inside-zz "
+                     "stabilizer).")
+    for i, line in enumerate(lines):
+        fig.text(0.02, 0.925 - 0.023 * i, line, fontsize=10.5, color=ink2, ha="left")
+    host = "chip" if loom else "simulator"
     fig.text(0.02, 0.10, f"Class means over {k}-qubit chains: off seam {counts.get('bulk', 0)} units, replica "
-             f"{counts.get('replica', 0)} (one simulator holds the shared qubit), cut {counts.get('cut', 0)} (split "
-             f"across two simulators). The code runs on the replica units Layer S plans it for; cut units are the "
-             f"control.", fontsize=9.5, color=ink2, ha="left")
+             f"{counts.get('replica', 0)} (one {host} holds every qubit, the seam's through a "
+             f"{'ghost' if loom else 'replica'}), cut {counts.get('cut', 0)} (no {host} holds them all). The code runs "
+             f"on the replica units Layer S plans it for; cut units are the control.", fontsize=9.5, color=ink2,
+             ha="left")
     zz = ", inside ZZ by stabiliser" if l2.get("inside_zz") == "stabilizer" else ""
     fig.text(0.02, 0.065, f"{st[0]['shots']} shots × {st[0]['repeats']} realisations per setting · Layer 2 "
              f"{l2.get('mode', 'none')}, L = {l2.get('blocks')}, T = {l2.get('t_idle')}, J = {l2.get('j_zz')} × "
@@ -2116,7 +2461,8 @@ def cmd_stackmap(a):
              + ("V reruns the seam units on fresh draws; others keep pass 2" if order == "echo-code" else
                 "C reruns the seam units on fresh backends (others keep pass 1); E runs every unit"),
              fontsize=8.5, color=muted, ha="left")
-    fig.text(0.02, 0.042, f"{os.path.basename(a.inp)} · run {when} · {st[0].get('qrack', '')} · nighthawk_ghz.py stack --order {order}",
+    fig.text(0.02, 0.042, f"{os.path.basename(a.inp)} · run {when} · {st[0].get('qrack', '')} · nighthawk_ghz.py stack --order {order}"
+             + (" --engine loom" if loom else ""),
              fontsize=8.5, color=muted, ha="left")
     png = a.png or f"ghz_stack_{reg}_{order}.png"
     fig.savefig(png, facecolor=surf)
@@ -2591,6 +2937,51 @@ def cmd_selftest(a):
     c = chain_from_end(u)
     check("[11, 10, 12] from the middle -> 10 -> 11 -> 12", c["root"] == 10 and c["edges"] == [[10, 11], [11, 12]],
           f"root {c['root']}, edges {c['edges']}")
+
+    print("[15] --engine loom: LoomGates' matrices against Qrack's gates; a GHZ across a link on the ghost loom")
+
+    class _MatQ:                                          # LoomGates' matrices, applied with mtrx on one simulator
+        def __init__(self, sim):
+            self.sim = sim
+
+        def _emit1(self, qs, q, head, M):
+            self.sim.mtrx([complex(x) for x in np.asarray(M).reshape(-1)], q)
+    r_ = np.random.default_rng(9)
+    worst = 0.0
+    for name, args in (("u", tuple(r_.uniform(0, 2 * math.pi, 3))), ("zrot", (0.37,)), ("s", ()), ("sdg", ()),
+                       ("h", ()), ("x", ()), ("z", ())):
+        sims = [QrackSimulator(2, is_gpu=False) for _ in range(2)]
+        for sim in sims:
+            sim.u(0, 1.1, 0.4, 2.3)
+            sim.u(1, 0.7, 1.9, 0.2)
+            sim.mcx([0], 1)
+        getattr(Gates(sims[0], [0, 1]), name)(1, *args)
+        getattr(LoomGates(_MatQ(sims[1]), None), name)(1, *args)
+        worst = max(worst, 1 - abs(np.vdot(_ket(sims[0], 2), _ket(sims[1], 2))) ** 2)
+    check("u, zrot, s, sdg, h, x, z equal Qrack's on an entangled state", worst < 1e-6, f"worst 1 - fid {worst:.2e}")
+    try:
+        cloverfield(None)
+        repo = str(nq.find_repo(None))
+    except (SystemExit, Exception) as err:
+        print(f"  [skip] the loom part needs nighthawk_cloverfield.py and the rcs-nighthawk release ({err})")
+    else:
+        Rl = loom_register(repo, None, ["rect:8-10,0-2", "rect:8-10,3-5"], None)
+        u0, v0 = Rl.links[0]
+        x0 = next(q for q in sorted(Rl.adj[u0]) if Rl.chip_of[q] == Rl.chip_of[u0] and q != v0)
+        unit = chain_unit(Rl, [x0, u0, v0])
+        ok_cls = seam_class(Rl, unit) == "replica"
+        res = {}
+        for pol in ("authority", "real"):
+            per = [dict()]
+            for st in settings_for(3, "auto", 12):
+                sh = _loom_task(dict(repo=repo, cf=None, chips=["rect:8-10,0-2", "rect:8-10,3-5"], link_rows=[],
+                                     units=[unit], setting=st, shots=1024, exact=False, realisation=0,
+                                     layer2=dict(mode="none", blocks=0), policy={tuple(unit["qubits"]): pol}))
+                per[0][st] = bit_matrix(sh, Rl.n)
+            res[pol] = score_unit(Rl, unit, per, 3, 1, None, maps=False)["F_GHZ"]
+        check(f"chain {unit['qubits']} across link {u0}-{v0}: class replica; read on the covering chip F ~ 1, "
+              f"on the real copies F <= 1/2", ok_cls and res["authority"] > 0.95 and res["real"] < 0.55,
+              f"authority {res['authority']:.3f}, real {res['real']:.3f}")
     print("selftest " + ("passed" if ok else "FAILED"))
     if not ok:
         raise SystemExit(1)
@@ -2678,6 +3069,19 @@ def make_parser():
                    help="Layer S: reorder each code unit's CXs, into the host simulator before into seam qubits (on), "
                         "or keep the preparation's order (off; with --code-authority colocated the code needs no "
                         "schedule)")
+    s.add_argument("--engine", choices=["ace", "loom"], default="ace",
+                   help="ace: the register on ACE's patches (default). loom: two exact chips joined by "
+                        "nighthawk_cloverfield.py's ghost loom as the seam (--loom-chips, --loom-link-rows); Layer S's "
+                        "code is then the loom's authority (a unit read on the chip that holds copies of all of it)")
+    s.add_argument("--loom-chips", dest="loom_chips", nargs="+", default=None,
+                   help="loom: the chips, nighthawk_cloverfield.py --chips tokens (default rect:1-8,2-5 rect:1-8,6-9: "
+                        "nighthawk61r2's 61 qubits as two chips of 30 and 31, its two ACE patches' size)")
+    s.add_argument("--loom-link-rows", dest="loom_link_rows", type=int, nargs="+", default=None,
+                   help="loom: the rows that get a link (default with the default chips: 1 2 3 4 6 7 8, every coupler "
+                        "of nighthawk61r2 between columns 5 and 6; otherwise every facing pair)")
+    s.add_argument("--cloverfield", default=None,
+                   help="loom: nighthawk_cloverfield.py (default: $NIGHTHAWK_CLOVERFIELD, next to this script, or "
+                        "../rcs-nighthawk)")
     s.add_argument("--order", choices=["echo-code", "code-echo"], default="echo-code",
                    help="echo-code: pass 2 = Layer 2 (the anti-OTOC echo), then Layer S and Layer V; code-echo: Layer S "
                         "from pass 1, pass C = the code on pass 1's circuit, then pass E = Layer 2 with the code kept")
