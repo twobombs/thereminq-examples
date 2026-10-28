@@ -1,6 +1,6 @@
 # Results: `rcs/nighthawk`
 
-Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E32 in its §9); usage is in the [README](README.md). State as of 27 October 2026.
+Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E34 in its §9); usage is in the [README](README.md). State as of 28 October 2026.
 
 ## Index
 
@@ -31,6 +31,8 @@ Every measured number of the experiments, grouped by experiment. The procedure b
 | [10.13](#1013-two-patch-ace-chips-joined-by-the-loom-ghost-band-e30) | E30: two `nighthawk61r2` cloverleaves joined by the ghost loom, 122 qubits | ACE's code takes ACE's replica units to 1.00; the loom's 3-chains read 1.00 inside a ghost band (§10.14); the 14 ACE-cut units fall to 0.21 under the echo, 0.36 with seam protection |
 | [10.14](#1014-the-loom-as-a-hard-cut-and-what-the-ghost-band-does-e31) | E31: the loom as a hard cut; the ghost band explained | across a hard cut every GHZ unit sits at the separable bound 0.50 in every pass, code, echo and protection alike (sd 0.008); the ghost loom's 1.00 is a two-column replica band simulating a unit whole on one chip, and 5-chains wider than the band stay at 0.26 |
 | [10.15](#1015-qrackbridge-in-place-of-the-loom-e32) | E32: the two chips joined by PyQrack's QrackBridge instead of the loom, `max_bonds` 6 → 0 | the bridge carries entanglement: exact at 6 (every unit across it 1.00); below the demand it carries max_bonds whole units per circuit and leaves the rest separable (0.50): means 0.85 / 0.74 at 2 / 1; at 0 it is the hard cut (0.51) |
+| [10.16](#1016-a-closed-box-six-faces-on-a-qrackbridge-ring-e33) | E33: a closed 5 × 5 × 5 box, base, four walls and lid as six QrackBridge patches on a ring, `max_bonds` 6 → 0 | every box edge carries GHZ chains: exact at capacity, relayed through a third face or not; below it the inner cuts ration whole units as two chips do (0.75 / 0.63 at 2 / 1 against budgets 0.750 / 0.625), the ring's wrap cut falls short (0.67 / 0.61) and at 0–1 with bridged drift gates the ring zeroed the state |
+| [10.17](#1017-shors-code-across-qrackbridge-e34) | E34: Shor's [[m², 1, m]] code instead of GHZ across QrackBridge, Shor-9 on two chips and the box, Shor-16 and -25 across the chips, `max_bonds` 6 → 0 | a cut between the code's blocks needs one bond (for \|±_L⟩), a cut through them one per block it splits (for \|0/1_L⟩); short of that the bridge drops whole blocks and the decoder repairs them as a majority vote predicts (Shor-9 at 1 bond 0.745 against 0.750, Shor-16 at 2 / 1 0.874 / 0.688 against 0.875 / 0.688); at 0 it gives E20's ACE-seam pattern on the side that needs coherence |
 | [11](#11-cloverfield-e13) | E13: cloverfield | ghost link 1.000 / 0.989 / 0.656 vs mean-field 0.773 / 0.773 / 0.067 |
 | [12](#12-qracks-opencl-engine-and-vram-oversubscription-e14-e15) | E14, E15: OpenCL and GTT | three defects, fixed; GTT ceiling lifted |
 | [13](#13-tool-validation) | tool validation | GPU = CPU; layoutsearch matches the exact engine |
@@ -1087,6 +1089,137 @@ With the code first (`--order code-echo`, §10.9), `nighthawk61r2`, the same set
 - **At zero capacity the bridge is the hard cut.** `max_bonds` 0 keeps one Schmidt value per cut: every unit across it at 0.51 in every pass, as the loom's hard cut (0.50).
 - **The echo and seam protection.** E equals pass 1 at every capacity: the drift's couplings across the cut are bridged gates, exact within the capacity, and a unit already dropped is separable, where the drift is a local phase. Dropping the inside ZZ changes no fidelity (0.734 against 0.735 at `max_bonds` 1); it saves the bridged gates (E 81 s against 273 s).
 - **Three seams, three shapes.** ACE's seam inside a chip is a slope: every replica unit keeps part of its coherence (0.56–0.93), the cut class none, and the drift erodes them (§10.14). The loom between independent chips is a cliff at ½. The bridge is a budget: entanglement crosses exactly up to `max_bonds` bond qubits per cut, so its fidelity falls in steps of whole units as the demand on the cut exceeds the capacity, from 1.00 to the cliff at 0.
+
+
+### 10.16 A closed box: six faces on a QrackBridge ring (E33)
+
+`nighthawk_ghz.py stack --engine bridge --box 5 5` (README §3.6, METHODOLOGY §6.8): the 98 lattice points on the surface of a 5 × 5 × 5 block, 192 couplers at unit distance, six circuits (base 25, front 12, right 12, lid 25, back 12, left 12 qubits; base and lid whole, the walls sharing the vertical edges round the box), each a QrackBridge patch, the six patches closed into a ring (`wrap=True`) in the order base → front → right → lid → back → left → base. Opposite faces sit three apart on the ring and share no edge, so of the 12 box edges six are a ring cut (base–front, front–right, right–lid, lid–back, back–left, left–base, the last one the ring's wrap cut) and six are relayed through the face between (base–right via front, front–lid via right, lid–left via back, base–back via left, front–left via base, right–back via lid), one bond on each of two cuts. 3-qubit chains along straight lines in x, y and z: 144 units in 18 circuits, 100 inside a face, 22 across a direct edge, 22 across a relayed edge (every one of the 44 cross-face couplers in one unit). Bipartite under x + y + z. `--order code-echo`, 256 shots × K = 4 per setting, exact reference 128 shots on one 98-qubit `QrackSimulator`; Layer 2 dd, L = 3, the §8 model; greedy truncation, eager; container CPU, `qrack_bridge.py` of PyQrack 2.30.2 on PyQrack 2.29.5 / Qrack 10.13.2. Each circuit's bridge holds its units' qubits, 9 per patch at most (widest bridge 54). Mean F_GHZ, pass 1 / C / E (exact E):
+
+| `max_bonds`, inside ZZ | Inside a face (100) | Direct edge (22) | Relayed edge (22) | E range across edges | Peak bonds per cut | Truncating circuits (pass 1 / E of 648) | `fidelity_estimate` min (E) | Seconds, pass 1 / C / E |
+|---|---|---|---|---|---|---|---|---|
+| 6, gate | 1.000 / 1.000 / 1.000 (1.001) | **0.998 / 1.001 / 1.001** (1.001) | **1.000 / 0.999 / 1.000** (0.999) | 0.99–1.01 | 4 (5 in E) | 0 / 0 | 1.000 | 136 / 86 / 819 |
+| 6, dropped | 1.000 / 1.000 / 1.000 (1.000) | 0.999 / 1.000 / 1.001 (0.999) | 0.999 / 0.999 / 1.001 (1.001) | 0.99–1.01 | 4 | 0 / 0 | 1.000 | 139 / 84 / 194 |
+| 2, gate | 1.000 / 1.000 / 1.000 | **0.763 / 0.777 / 0.768** (1.000) | **0.843 / 0.835 / 0.812** (1.001) | 0.50–1.01 | 3 | 144 / 180 | 0.036 | 67 / 16 / 473 |
+| 2, dropped | 1.000 / 1.000 / 1.000 | 0.772 / 0.761 / 0.773 (1.001) | 0.840 / 0.847 / 0.840 (1.000) | 0.50–1.01 | 3 | 144 / 144 | 0.063 | 70 / 16 / 138 |
+| 1, gate | stopped in pass E: the ring's truncation zeroed the state (0 / 0, then an SVD that does not converge) | | | | 2 | 288 / — | — | — |
+| 1, dropped | 1.000 / 1.000 / 1.000 | **0.667 / 0.657 / 0.668** (1.000) | **0.691 / 0.692 / 0.696** (1.000) | 0.50–1.01 | 2 | 288 / 288 | 0.016 | 84 / 15 / 129 |
+| 0, gate | stopped in pass E, as at 1 | | | | 1 | 432 / — | — | — |
+| 0, dropped | 1.000 / 1.000 / 1.000 | **0.509 / 0.509 / 0.508** (1.001) | **0.509 / 0.509 / 0.510** (0.999) | 0.50–0.52 | 1 | 432 / 432 | 0.004 | 61 / 11 / 127 |
+
+E per box edge (units):
+
+| Edge | Ring cuts | Units | 6 | 6, dropped | 2 | 2, dropped | 1, dropped | 0, dropped |
+|---|---|---|---|---|---|---|---|---|
+| back–left | 1 | 3 | 1.002 | 1.002 | 1.002 | 1.002 | 0.835 | 0.510 |
+| front–right | 1 | 3 | 1.000 | 1.001 | 1.001 | 1.001 | 0.837 | 0.507 |
+| base–front | 1 | 4 | 1.000 | 1.001 | 0.973 | 0.960 | 0.755 | 0.511 |
+| base–left (wrap cut) | 1 | 4 | 1.000 | 1.000 | 0.731 | 0.774 | 0.646 | 0.505 |
+| right–lid | 1 | 4 | 1.001 | 1.003 | 0.510 | 0.509 | 0.508 | 0.509 |
+| lid–back | 1 | 4 | 1.000 | 1.001 | 0.509 | 0.508 | 0.510 | 0.509 |
+| right–back via lid | 2 | 3 | 0.999 | 1.001 | 1.001 | 1.001 | 0.836 | 0.506 |
+| front–left via base (and the wrap cut) | 2 | 3 | 1.000 | 0.997 | 0.778 | 0.999 | 0.819 | 0.509 |
+| front–lid via right | 2 | 4 | 1.002 | 1.004 | 1.003 | 1.003 | 0.754 | 0.509 |
+| lid–left via back | 2 | 4 | 0.997 | 1.002 | 0.999 | 0.995 | 0.753 | 0.512 |
+| base–right via front | 2 | 4 | 0.998 | 0.998 | 0.534 | 0.522 | 0.512 | 0.509 |
+| base–back via left (and the wrap cut) | 2 | 4 | 1.002 | 1.002 | 0.598 | 0.598 | 0.567 | 0.513 |
+
+The demand on a cut is the number of units of one circuit crossing it. The z-chain circuits load four cuts with four units each, two direct and two relayed: base|front (base–front, base–right via front), right|lid (right–lid, front–lid via right), lid|back (lid–back, lid–left via back) and the wrap cut left|base (base–left, base–back via left). Every other cut of every circuit carries at most 2. E over the 8 units at each demand-4 cut, against the budget (min(d, max_bonds) · 1 + the rest · ½) / d of §10.15:
+
+| Cut (demand 4) | `max_bonds` 2, gate | 2, dropped | 1, dropped | Budget at 2 / at 1 |
+|---|---|---|---|---|
+| base \| front | 0.754 | 0.741 | 0.633 | 0.750 / 0.625 |
+| right \| lid | 0.756 | 0.756 | 0.631 | 0.750 / 0.625 |
+| lid \| back | 0.754 | 0.752 | 0.632 | 0.750 / 0.625 |
+| left \| base, the wrap cut | **0.665** | **0.686** | **0.607** | 0.750 / 0.625 |
+| front–left via base, 2 units, demand 2 on base \| front and the wrap (pass 1 → E) | 1.002 → **0.666** | 1.005 → 1.000 | — | 1 at 2 |
+
+`bridge_ring_repro.py` (in this folder) takes the last row apart: the two front–left chains of that circuit, gate for gate, on a 24-qubit bridge of six patches, ring against open chain (where the same gates relay the long way, through four cuts):
+
+| `max_bonds` | Ring: `fidelity_estimate`, F_GHZ of the two chains (`out_ket`) | Open chain |
+|---|---|---|
+| 0 | the state vanishes in some runs (0 / 0 in the recompression); else 0.016, 0.50 / 0.50 | 0.250, 0.50 / 0.50 |
+| 1 | 0.250, **0.50 / 0.50** | 0.500, **1.00** / 0.50 |
+| 2 | **0.499** | 1.000 |
+| 3 | 1.000 | 1.000 |
+
+- **The box closes, and at capacity every edge is exact.** With `max_bonds` 6 (the peak demand is 4 bond qubits per cut, 5 while a drift coupling crosses) all 44 units across a box edge stay at the exact value through the three layers, 1.000 and 1.001 in E, the 22 relayed through a third face as the 22 on a direct cut; the bridge truncates nothing. Relaying costs bonds, one on each cut it passes, and no fidelity while they are there.
+- **Below capacity the inner cuts ration whole units, as between two chips.** At the three demand-4 inner cuts the mean is the §10.15 budget, 0.754 / 0.756 / 0.754 against 0.750 at `max_bonds` 2 and 0.63 against 0.625 at 1: per circuit `max_bonds` units keep their GHZ at 1.00 and the rest drop to the separable ½. Which keep it is the greedy truncation's choice between equal Schmidt values: here the relayed units at right|lid and lid|back (front–lid and lid–left stay at 1.00, right–lid and lid–back drop to 0.51), the direct one at base|front (base–front 0.97, base–right via front 0.53). Units alone or in pairs on their cuts keep 1.00 at 2 and 0.75–0.84 at 1.
+- **The ring's wrap cut is below the budget.** left|base: 0.665 / 0.686 at 2 (budget 0.750), 0.607 at 1 (0.625). QrackBridge truncates the wrap cut by a local SVD of its two patches, which on a ring is not the projection on the kept Schmidt vectors (a periodic MPS has no canonical form; the bridge's notes say its truncation there is locally optimal only and its `fidelity_estimate` an estimate). Within capacity it should cost nothing and it does: the two front–left chains through the wrap keep 1.00 in pass 1 and fall to 0.67 in E at `max_bonds` 2, when the drift's CX · Rz · CX cross the wrap again. Dropping the inside ZZ keeps those gates off the bridge and the chains at 1.00. The repro shows the same at 1 (the ring carries neither chain where the open chain carries one) and at 2 (`fidelity_estimate` 0.5 against 1.0).
+- **At 0 and 1 the ring can zero the state.** With the inside ZZ as gates, pass E stopped at `max_bonds` 1 and 0: a truncation of the wrap cut and of an inner cut kept opposite branches of tied GHZ units, the contracted state was zero, its renormalisation divided 0 / 0 and the NaN state broke the next SVD. Which branch a tie keeps follows rounding, so the same circuit vanishes in some runs and not in others. `nighthawk_ghz.py` now raises numpy's divide and invalid errors inside every bridge circuit and stops with the circuit named, so a NaN state is never sampled. With `--inside-zz stabilizer` no bridged gate runs in E and both capacities complete.
+- **At 0 the ring is the hard cut.** Every unit across an edge at 0.51 in every pass and on every edge, relayed or not, as the two-chip bridge at 0 (0.511) and the loom's hard cut (0.50).
+- **The echo and seam protection.** E equals pass 1 wherever the ring's wrap is not involved: inside the faces 1.000 in every run, across the edges within 0.01 of pass 1 at 6 and at the inner cuts. Dropping the inside ZZ saves the bridged gates in E (194 s against 819 s at 6, 138 s against 473 s at 2).
+
+
+### 10.17 Shor's code across QrackBridge (E34)
+
+`nighthawk_ghz.py shor` (README §3.6, METHODOLOGY §6.8) puts Shor's [[m², 1, m]] code across QrackBridge in place of a GHZ chain, encoded as `nighthawk_qrack.py shor9` encodes it (§10.3, E20). Every m × m placement whose encoder CXs are couplers runs in its own circuit, with all four logical states, and raw and decoded success are measured against an exact `QrackSimulator` of the unit. There are two geometries:
+
+- Nighthawk's 117 sites as two exact chips, `rect:0-11,0-5` + `rect:0-11,6-9` (70 + 47 qubits, 11 links on rows 0–4 and 6–11).
+- The 5 × 5 × 5 box of §10.16 (six patches on a ring), where a unit bends over the box edge it crosses.
+
+The cut meets a unit in one of three ways:
+
+- inside one circuit;
+- between its blocks: only leader-to-leader CXs cross, as E20's `patch_blocks`;
+- through its blocks: every block's own CXs cross, as E20's `seam_leaders`.
+
+Runs used 1024 shots per logical state (Shor-25: 256), exact 256 (128), greedy truncation, eager recompression, container CPU. Shor-9 and Shor-16 take 1.5–11 s per run on 2 cores; Shor-25 across the cut takes 194–323 s, almost all of it in the bridge's sampler over 2^20 outcomes for the X-basis readout. The default two chips (`rect:1-8,2-5` + `rect:1-8,6-9`, 61 qubits, 5 + 5 crossing units) gave the same numbers as the 117-qubit pair to 0.01.
+
+Shor-9, decoded logical Z / logical X (logical Z is the mean of \|0_L⟩ and \|1_L⟩; logical X of \|+_L⟩ and \|−_L⟩). Raw logical Z of the through-blocks units is in brackets:
+
+| `max_bonds` | Chips: inside (88) | Chips: between (12) | Chips: through (12) | Box: inside (48) | Box: between (24) | Box: through, not the wrap (18) | Box: through the wrap cut (6) |
+|---|---|---|---|---|---|---|---|
+| 6 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 (1.000) / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 (1.000) / 1.000 | 1.000 / 1.000 |
+| 3 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 (1.000) / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 (1.000) / 1.000 | 1.000 / 1.000 |
+| 2 | 1.000 / 1.000 | 1.000 / 1.000 | **1.000 (0.506)** / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | **1.000 (0.502)** / 1.000 | **0.807** / 1.000 |
+| 1 | 1.000 / 1.000 | 1.000 / 1.000 | **0.745 (0.502)** / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | **0.752 (0.495)** / 1.000 | 0.728 / 1.000 |
+| 0 | 1.000 / 1.000 | 1.000 / **0.495** | **0.495 (0.497)** / 1.000 | 1.000 / 1.000 | 1.000 / **0.498** | **0.503 (0.497)** / 1.000 | 0.501 / 1.000 |
+
+At `max_bonds` 0 on the box, 3 of the 384 logical-state circuits vanished on the ring's truncation (§10.16): two through the wrap, one between blocks. They are not scored. Exact reference: 1.000 for every unit and state.
+
+Bond qubits per cut that the prepared state keeps at full capacity (the most over the units):
+
+| Code | Between blocks: \|0/1_L⟩ / \|±_L⟩ | Through blocks: \|0/1_L⟩ / \|±_L⟩ |
+|---|---|---|
+| Shor-9 | 0 / 1 | 3 / 2 |
+| Shor-16 | 0 / 1 | 4 / 3 |
+| Shor-25 (one unit each, `max_bonds` 6) | 0 / 1 | 5 / 4 |
+| Shor-9 on the box, a unit through the wrap cut | 1 / 1 | 3 / 3 |
+
+Through blocks, decoded logical Z against the majority vote over m block signs, with min(m, `max_bonds`) carried and the rest coin flips (ties ½). Raw is in brackets: for odd m the parity of all outcomes, for even m the first block's sign:
+
+| `max_bonds` | Shor-9, chips (12) | Majority | Shor-16, chips (11) | Majority | Shor-25, chips (8) | Majority |
+|---|---|---|---|---|---|---|
+| 4 | — | — | 1.000 (1.000) | 1 | — | — |
+| 3 | 1.000 (1.000) | 1 | 1.000 (1.000) | 1 | **1.000** (0.495) | 1 |
+| 2 | 1.000 (0.506) | 1 | **0.874** (1.000) | 0.875 | **0.875** (0.501) | 0.875 |
+| 1 | **0.745** (0.502) | 0.750 | **0.688** (1.000) | 0.688 | **0.677** (0.497) | 0.688 |
+| 0 | 0.495 (0.497) | 0.500 | 0.502 (0.502) | 0.500 | — | 0.500 |
+
+Against ACE's seam (§10.3, E20, the 3 × 3 register):
+
+| Seam | Between blocks: logical Z / X | Through blocks: logical Z / X |
+|---|---|---|
+| ACE, `long_range_columns = 1` (E20) | 1.000 / 0.486 | 0.499 / 0.669 |
+| QrackBridge, `max_bonds` 0 | 1.000 / 0.495 | 0.495 / 1.000 |
+| QrackBridge, `max_bonds` 1 | 1.000 / 1.000 | 0.745 / 1.000 |
+| QrackBridge, `max_bonds` ≥ m | 1.000 / 1.000 | 1.000 / 1.000 |
+
+- **What crosses is countable.**
+  - Cut between blocks: \|0_L⟩ and \|1_L⟩ are products of block states, so they need no bond. \|±_L⟩ is their superposition and needs one, which is the logical coherence itself.
+  - Cut through blocks: every split block's GHZ needs one bond for \|0/1_L⟩ (m in all), and m − 1 for \|±_L⟩.
+  - The bridge keeps exactly these at capacity, and every unit stays at 1.000.
+- **Short of capacity, the bridge drops whole blocks, and the code corrects that.**
+  - A dropped block keeps its bits and loses its sign. \|±_L⟩, read in Z, stays at 1.000 at any capacity; \|0/1_L⟩, read in X, sees m − `max_bonds` random block signs.
+  - The decoder's majority vote then gives what counting predicts: Shor-9 0.745 at 1 (0.750), Shor-16 0.874 / 0.688 at 2 / 1 (0.875 / 0.688), Shor-25 0.875 / 0.677 at 2 / 1 (0.875 / 0.688).
+  - Up to ⌊(m − 1)/2⌋ blocks short, the raw parity is 0.50 and the decoded value 1.000: Shor-9 at 2, Shor-16 at 3, Shor-25 at 3 (two blocks short). The bridge's truncation is the error the code is built for: a block-sign error confined to whole blocks.
+  - ACE's seam is different (E20: decoding cannot repair it). There, every block through the seam loses part of its coherence at once, and part of its bits too (logical X 0.67).
+- **At 0 the bridge is ACE's seam on the side that needs coherence.**
+  - Between blocks, logical X is 0.495 (ACE 0.486); through blocks, logical Z is 0.495 (ACE 0.499).
+  - On the side that needs only bits, the bridge keeps 1.000 where ACE drops to 0.669: a hard cut destroys coherence across it, while ACE's seam also scrambles populations.
+- **On the box, direct and relayed edges are alike; the wrap cut is again the exception.**
+  - Units across a direct or a relayed edge give the chips' numbers.
+  - Through-blocks units across the ring's wrap cut fall below the count at 2 (0.807 against 1.000), and at 1 (0.728 against 0.750). They keep a bond more than they need (3 for \|±_L⟩, 1 for \|0/1_L⟩ between blocks), and at 0 some circuits vanish (§10.16).
 
 ---
 

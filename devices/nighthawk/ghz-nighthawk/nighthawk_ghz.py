@@ -101,6 +101,13 @@ Commands
             through ACE several ways (--variants: none, gate, tseam, tbulk, stab, and chain-* with the GHZ
             prepared from one end), against the exact reference (--exact-variants); ghz_probe records.
   stackmap  a stack run's three measurements (pass 1, 2, V or 1, C, E) as heatmaps on the chip layout (--in).
+  shor      Shor's [[m^2, 1, m]] code instead of GHZ, across QrackBridge circuits (--engine bridge: two chips, or
+            the box with --box L H): every placement of an m x m unit (--size m) whose encoder CXs are couplers,
+            each in its own circuit, all four logical states encoded as nighthawk_qrack.py shor9 encodes them;
+            raw and decoded success, the outcome distribution against the exact one, the bond qubits per cut
+            the prepared state keeps, per unit and by how the cut meets the code (inside one circuit, between
+            its blocks, through them; on the box direct or relayed, and the wrap cut).
+  shormap   a shor run as heatmaps (--in): logical Z and X side by side, one row per way the cut meets the code.
   plot      the map of a records file (--in).
   selftest  Lemma 3, Lemma 4 and the witness against numpy; the readout gates, Theorem 1, Corollaries 2.1
             and 4.1, the outside-coupling identity, fold and the ZNE amplification on the exact simulator;
@@ -119,7 +126,10 @@ sum_dw_estimate) for ACE and, prefixed exact_, for the exact reference. stack ad
 seam_plan), one ghz_stack per unit (seam_class, seam_plan, syndrome per pass, pass1, pass2, passV, exact1,
 exact2, seam_crossings; code-echo: pass1, passC, passE, exact1, exactE; with --zne-k layerS: the observables at
 every lambda and both fits, F_zne_linear, F_zne_exp) and one ghz_seam_model (Layer S's extraction and plan).
-probe writes one ghz_probe record per unit, variant and reference (variant, exact, seam_class and the Layer 1a
+shor writes one shor_map (the register's map) and one shor_bridge record per unit (blocks, outer and inner trees,
+layout, chips, crossing CXs, per logical state raw, decoded, tvd, impossible, bonds kept, peak bonds, truncations,
+fidelity_estimate, vanished and the exact reference's decoded success; logical_Z, logical_X). probe writes one
+ghz_probe record per unit, variant and reference (variant, exact, seam_class and the Layer 1a
 names); sweep writes tiles' ghz records.
 
 Examples
@@ -139,6 +149,8 @@ Examples
           --out sweep28.jsonl --summary sweep28.json
   python3 nighthawk_ghz.py probe --register nighthawk61r2 --shots 256 --repeats 4 --out probe61.jsonl
   python3 nighthawk_ghz.py plot  --in ghz61.jsonl --register nighthawk61r2 --png ghz61.png
+  python3 nighthawk_ghz.py shor  --box 5 5 --bridge-max-bonds 1 --jobs 2 --out shor9_box5_mb1.jsonl
+  python3 nighthawk_ghz.py shormap --in shor9_box5_mb1.jsonl --png shor9_box5_mb1.png
 
 Environment: no CUDA. CPU by default; --gpu runs ACE and the reference on the OpenCL device
 QRACK_OCL_DEFAULT_DEVICE names (--ocl-sync: QRACK_OCL_SYNC=1, Qrack >= 10.13.2).
@@ -557,7 +569,8 @@ def unit_info(R, u):
     kind = "seam" if d == 0 else "near seam" if d == 1 else "bulk"
     return dict(regions=dict(regions), cx_classes=dict(collections.Counter(u["classes"])),
                 seam_distance=(None if d == math.inf else int(d)), kind=kind,
-                cells=[list(R.cell[q]) for q in u["qubits"]])
+                cells=[list(R.cell[q]) for q in u["qubits"]],
+                **({"box": R.unit_box(u)} if hasattr(R, "unit_box") else {}))
 
 
 # ================================================================== per-unit layers
@@ -1205,7 +1218,11 @@ def tile_groups(a, R, k, apart):
     if k < 2:
         raise SystemExit("ghz: --unit must be 2 or more")
     offs = None if a.offsets in (None, "all") else [int(x) for x in a.offsets.split(",")]
-    tl = tilings(R, k, tuple(x.strip() for x in a.orient.split(",")), offs)
+    orients = tuple(x.strip() for x in a.orient.split(","))
+    if hasattr(R, "tilings"):                            # the box: straight lines along x, y and z
+        tl = R.tilings(k, ("x", "y", "z") if a.orient == "rows,cols" else orients, offs)
+    else:
+        tl = tilings(R, k, orients, offs)
     if not tl:
         raise SystemExit(f"ghz: no chain of {k} coupled qubits along a lattice line of {R.name}")
     groups = []
@@ -1555,6 +1572,8 @@ def cmd_stack(a):
     if a.ace_boundary_rep:
         raise SystemExit("ghz stack: passes 1 and 2 measure the seam uncorrected and Layer S applies the boundary "
                          "repetition code itself: drop --ace-boundary-rep")
+    if getattr(a, "box", None) and a.engine != "bridge":
+        raise SystemExit("ghz stack --box: the box's faces are joined by QrackBridge: add --engine bridge")
     if a.engine == "bridge":
         if a.loom_chip_backend != "exact":
             raise SystemExit("ghz stack --engine bridge: QrackBridge patches are exact simulators; drop "
@@ -1568,11 +1587,17 @@ def cmd_stack(a):
             raise SystemExit("ghz stack --engine loom: tiles only (a chip-wide GHZ over two chips is always split)")
         if a.zne_k:
             raise SystemExit("ghz stack --engine loom: no ZNE on the loom")
-        a.loom_chips = a.loom_chips or list(LOOM_DEFAULT["chips"])
         if a.loom_chip_backend == "exact":
             a.code_schedule = "off"                      # exact chips: the loom reads, nothing to reorder
-        R = loom_register(a.repo, a.cloverfield, a.loom_chips, a.loom_link_rows, a.loom_chip_backend, a.loom_read)
-        a.loom_link_rows = list(R.link_rows)
+        if getattr(a, "box", None):
+            if a.loom_chips or a.loom_link_rows:
+                raise SystemExit("ghz stack --box: the faces are the chips; drop --loom-chips / --loom-link-rows")
+            R = box_register(*a.box)
+            a.loom_chips, a.loom_link_rows = list(BOX_FACES), []
+        else:
+            a.loom_chips = a.loom_chips or list(LOOM_DEFAULT["chips"])
+            R = loom_register(a.repo, a.cloverfield, a.loom_chips, a.loom_link_rows, a.loom_chip_backend, a.loom_read)
+            a.loom_link_rows = list(R.link_rows)
         if R.read == "bridge":
             R.map["loom"]["bridge"] = dict(max_bonds=a.bridge_max_bonds, truncation=a.bridge_truncation,
                                            lazy_bonds=a.bridge_lazy, source=_QB.get("src"))
@@ -1682,6 +1707,7 @@ def cmd_stack(a):
             for r in rs:
                 r["eV"] = score_unit(R, r["uV"], dV[f"{g}/{plan_}"], k, L, T)
     report_stack(R, rows, key, lams)
+    report_box(R, rows, (("pass 1", "e1"), ("pass 2", "e2"), ("V", "eV")))
     print(f"seconds: pass 1 {t1:.1f}, pass 2 {t2:.1f}" + (f", ZNE {tS:.1f}" if lams else "") + f", Layer V {tV:.1f}")
     recs = []
     for r in rows:
@@ -1770,6 +1796,7 @@ def stack_code_echo(a, R, groups, settings, k, l2, l2_0, d1, x1, t1, runner=None
                 r["eE"] = score_unit(R, r["uV"], dE[f"{g}/{part}"], k, L, T)
                 r["xE"] = exact_fields(R, r["uV"], xE[f"{g}/{part}"] if xE else None, k, l2)
     report_code_echo(rows, key)
+    report_box(R, rows, (("pass 1", "e1"), ("C", "eC"), ("E", "eE")))
     print(f"seconds: pass 1 {t1:.1f}, pass C {tC:.1f}, pass E {tE:.1f}")
     recs = []
     for r in rows:
@@ -1802,6 +1829,28 @@ def stack_code_echo(a, R, groups, settings, k, l2, l2_0, d1, x1, t1, runner=None
     if getattr(a, "_bridge_log", None):
         recs.append(dict(base_record(a, R, l2), test="ghz_bridge", passes=a._bridge_log))
     write_records(a, R, recs, None)
+
+
+def report_box(R, rows, passes):
+    """--box: F_GHZ per box edge (the face pair a unit crosses, relayed or not) and pass; a pass that did not rerun
+    a unit keeps the previous pass's value, as in the stackmap."""
+    if not hasattr(R, "unit_box"):
+        return
+    by = collections.defaultdict(list)
+    for r in rows:
+        b = R.unit_box(r["u"])
+        by[(len(b["cuts"]), b["edge"] or "inside one face")].append(r)
+    print("\nBox: F_GHZ by box edge crossed (ring cuts per unit: 0 inside a face, 1 a direct cut, 2 relayed)")
+    print(f"  {'edge':<26}{'cuts':>5}{'units':>6}" + "".join(f"{n_:>9}" for n_, _ in passes))
+    for (nc, edge), rs in sorted(by.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        vals = []
+        for i, (_, key_) in enumerate(passes):
+            v = []
+            for r in rs:
+                e = r.get(key_) or next((r[k_] for _, k_ in reversed(passes[:i]) if r.get(k_)), None)
+                v.append(e["F_GHZ"])
+            vals.append(float(np.mean(v)))
+        print(f"  {edge:<26}{nc:>5}{len(rs):>6}" + "".join(f"{x:>9.3f}" for x in vals))
 
 
 def report_code_echo(rows, key):
@@ -2096,6 +2145,188 @@ def loom_register(repo, cf_path, chips, link_rows, backend="exact", read="cut"):
     return _LOOM_REGS[key]
 
 
+BOX_FACES = ("base", "front", "right", "lid", "back", "left")          # the bridge ring, in this order
+BOX_NORMAL = dict(base=(0, 0, -1), lid=(0, 0, 1), front=(0, -1, 0), back=(0, 1, 0), left=(-1, 0, 0), right=(1, 0, 0))
+
+
+class BoxRegister:
+    """A closed box: the lattice points on the surface of an L x L x H block (x, y in 0..L-1, z in 0..H-1),
+    couplers between points at unit distance, six circuits, one per face: the base (z = 0), four walls and the
+    lid (z = H-1), each a QrackBridge patch. A point on a box edge belongs to one face: base and lid keep their
+    whole square; the walls share the vertical edges round the box (front y = 0 holds x = 0..L-2, right x = L-1
+    holds y = 0..L-2, back y = L-1 holds x = 1..L-1, left x = 0 holds y = 1..L-1). Qubits are numbered face by
+    face in the ring order base, front, right, lid, back, left, and the six patches close into a ring
+    (QrackBridge wrap=True): opposite faces sit three apart on it, so every box edge joins faces one apart (six
+    edges, a direct cut) or two apart (six edges, relayed through the face between, one bond on each of the two
+    cuts). Bipartite under x + y + z parity, so the Walsh echo's sublattices are exact. cell[q] places q on the
+    unfolded net: the base in the middle, the walls folded out round it, the lid beyond the back wall."""
+
+    def __init__(self, L=5, H=5):
+        if L < 3 or H < 3:
+            raise SystemExit("ghz --box: L and H must be 3 or more")
+        self.L, self.H = L, H
+
+        def face(p):
+            x, y, z = p
+            if z == 0:
+                return "base"
+            if z == H - 1:
+                return "lid"
+            if y == 0 and x <= L - 2:
+                return "front"
+            if x == L - 1 and y <= L - 2:
+                return "right"
+            if y == L - 1 and x >= 1:
+                return "back"
+            return "left"
+        pts = [(x, y, z) for x in range(L) for y in range(L) for z in range(H)
+               if x in (0, L - 1) or y in (0, L - 1) or z in (0, H - 1)]
+        pts.sort(key=lambda p: (BOX_FACES.index(face(p)), p[2], p[1], p[0]))
+        self.xyz = pts
+        pos = {p: q for q, p in enumerate(pts)}
+        self.n = len(pts)
+        self.face = [face(p) for p in pts]
+        self.chip_of = [BOX_FACES.index(f) for f in self.face]
+        self.chip_n = [self.chip_of.count(c) for c in range(len(BOX_FACES))]
+        self.local = [q - sum(self.chip_n[:self.chip_of[q]]) for q in range(self.n)]
+        self.couplers = []
+        for q, (x, y, z) in enumerate(pts):
+            for d in ((1, 0, 0), (0, 1, 0), (0, 0, 1)):
+                p = (x + d[0], y + d[1], z + d[2])
+                if p in pos:
+                    self.couplers.append((q, pos[p]))
+        self.adj = collections.defaultdict(set)
+        for a_, b_ in self.couplers:
+            self.adj[a_].add(b_)
+            self.adj[b_].add(a_)
+        self.links = [(a_, b_) for a_, b_ in self.couplers if self.chip_of[a_] != self.chip_of[b_]]
+        self.sub = [(x + y + z) % 2 for x, y, z in pts]
+        self.cell = {q: self.net(p, self.face[q]) for q, p in enumerate(pts)}
+        assert len(set(self.cell.values())) == self.n
+        self.sids = [frozenset({(self.chip_of[q], 0)}) for q in range(self.n)]
+        self.seam = set()                                 # no simulator holds a copy of another face's qubit
+        self.seam_dist = {q: math.inf for q in range(self.n)}
+        self.specs = [dict(name=f, kind="face") for f in BOX_FACES]
+        self.backend, self.read, self.engine = "exact", "bridge", "loom"
+        self.name = f"box{L}x{L}x{H}"
+        self.size, self.lrc, self.lrr, self.torus = None, None, None, False
+        self.widths = list(self.chip_n)
+        self.link_rows, self.skipped = [], []
+        P = len(BOX_FACES)
+        pairs = collections.Counter(tuple(sorted((self.chip_of[a_], self.chip_of[b_]))) for a_, b_ in self.links)
+        self.edges = []
+        for (i, j), cnt in sorted(pairs.items()):
+            d = (j - i) % P
+            step = 1 if d <= P - d else -1
+            via = [BOX_FACES[(i + step * s_) % P] for s_ in range(1, min(d, P - d))]
+            self.edges.append(dict(faces=[BOX_FACES[i], BOX_FACES[j]], couplers=cnt, ring_distance=min(d, P - d),
+                                   via=via))
+        self.map = dict(n=self.n, columns=None,
+                        sites=[[q, self.cell[q][0], self.cell[q][1], [[self.chip_of[q], 0]], list(self.xyz[q]),
+                                self.face[q]] for q in range(self.n)],
+                        couplers=[[a_, b_, self.cls(a_, b_)] for a_, b_ in self.couplers], ace=None,
+                        loom=dict(chips=list(BOX_FACES), chip_n=list(self.chip_n), backend="exact", read="bridge",
+                                  links=[list(x) for x in self.links], link_rows=[], ghosts=[[] for _ in BOX_FACES],
+                                  widths=[[x] for x in self.chip_n],
+                                  box=dict(L=L, H=H, ring=list(BOX_FACES), wrap=True, edges=self.edges)))
+
+    region = Register.region
+    cls = Register.cls
+
+    def net(self, p, f):
+        """(row, column) of point p (on face f) on the unfolded net."""
+        L, H = self.L, self.H
+        x, y, z = p
+        return dict(base=(H - 1 + y, H - 1 + x), front=(H - 1 - z, H - 1 + x), back=(H + L - 2 + z, H - 1 + x),
+                    left=(H - 1 + y, H - 1 - z), right=(H - 1 + y, H + L - 2 + z),
+                    lid=(2 * H + 2 * L - 4 - y, H - 1 + x))[f]
+
+    def describe(self):
+        direct = sum(1 for e in self.edges if e["ring_distance"] == 1)
+        return (f"{self.name} ({self.n} qubits on the surface of a {self.L} x {self.L} x {self.H} box, "
+                f"{len(self.couplers)} couplers; six faces "
+                + ", ".join(f"{f} {n_}" for f, n_ in zip(BOX_FACES, self.chip_n))
+                + f", one QrackBridge patch each on a ring in that order; {len(self.links)} couplers across the "
+                f"{len(self.edges)} box edges, {direct} edges on a ring cut, {len(self.edges) - direct} relayed "
+                f"through one face)")
+
+    def ring_cuts(self, i, j):
+        """The ring cuts (cut c joins patches c and c + 1, cut P-1 the wrap) a bridged gate from patch i to patch
+        j crosses, the shorter way round, as QrackBridge routes it."""
+        P = len(BOX_FACES)
+        d = (j - i) % P
+        step = 1 if d <= P - d else -1
+        out, p = [], i
+        while p != j:
+            nx = (p + step) % P
+            out.append(p if step == 1 else nx)
+            p = nx
+        return out
+
+    def unit_box(self, u):
+        """A unit's place on the box: its faces (ring order), the box edge it crosses (one line: 'base-right via
+        front'), the ring cuts its preparation's bridged CXs cross (one bond each per crossing unit)."""
+        faces = sorted({self.chip_of[q] for q in u["qubits"]})
+        cuts = set()
+        for p_, c_ in u["edges"]:
+            if self.chip_of[p_] != self.chip_of[c_]:
+                cuts.update(self.ring_cuts(self.chip_of[p_], self.chip_of[c_]))
+        names = [BOX_FACES[f] for f in faces]
+        via = []
+        for p_, c_ in u["edges"]:
+            a_, b_ = self.chip_of[p_], self.chip_of[c_]
+            if a_ != b_:
+                cs = self.ring_cuts(a_, b_)
+                if len(cs) > 1:
+                    P = len(BOX_FACES)
+                    d = (b_ - a_) % P
+                    step = 1 if d <= P - d else -1
+                    via += [BOX_FACES[(a_ + step * s_) % P] for s_ in range(1, len(cs))]
+        edge = "-".join(names) + (" via " + "+".join(sorted(set(via), key=BOX_FACES.index)) if via else "")
+        return dict(faces=names, edge=(edge if len(names) > 1 else None), cuts=sorted(cuts),
+                    hops=max((len(self.ring_cuts(self.chip_of[p_], self.chip_of[c_])) for p_, c_ in u["edges"]),
+                             default=0))
+
+    def tilings(self, k, orients=("x", "y", "z"), offsets=None):
+        """[(orientation, offset, [units])]: k-qubit chains along straight lattice lines of the surface (x, y or
+        z), split where the line leaves the surface, cut into chunks of k from the offset. A chain can turn no
+        corner, so the units across a box edge are the ones whose line runs off one face onto the next."""
+        pos = {p: q for q, p in enumerate(self.xyz)}
+        ax = dict(x=0, y=1, z=2)
+        out = []
+        for ori in orients:
+            i = ax[ori]
+            line = collections.defaultdict(list)
+            for p in self.xyz:
+                line[tuple(v for j, v in enumerate(p) if j != i)].append(p)
+            runs = []
+            for key in sorted(line):
+                ps = sorted(line[key], key=lambda p: p[i])
+                run = [ps[0]]
+                for a_, b_ in zip(ps, ps[1:]):
+                    if b_[i] == a_[i] + 1:
+                        run.append(b_)
+                    else:
+                        runs.append(run)
+                        run = [b_]
+                runs.append(run)
+            for f in (range(k) if offsets is None else offsets):
+                units = [chain_unit(self, [pos[p] for p in run[j:j + k]]) for run in runs
+                         for j in range(f, len(run) - k + 1, k)]
+                if units:
+                    out.append((ori, f, units))
+        return out
+
+
+_BOX_REGS = {}
+
+
+def box_register(L=5, H=5):
+    if (L, H) not in _BOX_REGS:
+        _BOX_REGS[(L, H)] = BoxRegister(L, H)
+    return _BOX_REGS[(L, H)]
+
+
 def ace_chip_engine(cf, spec, repo, anchors, brep):
     """nighthawk_qrack's AceEngine on a register chip's ACE preset, with the boundary repetition code on or off
     (the same sites and patches either way) and the chip's ghosts on free ACE sites coupled to their anchors
@@ -2275,15 +2506,39 @@ def _bridge_layout(R, units):
 
 
 def _loom_task(spec):
+    """_loom_task_once, on QrackBridge with numpy's divide / invalid errors raised: on a ring (the box) the bridge
+    truncates the wrap cut by a local SVD of its two patches, which on a ring is not a projection of the state (a
+    periodic MPS has no canonical form), and where a GHZ unit's branches tie the wrap cut and an inner cut can keep
+    opposite branches. The contracted state is then zero: its renormalisation divides 0 / 0 and the NaN state
+    would be sampled or break a later SVD. Here it stops the run with the circuit named (RESULTS 10.16; the
+    repro is bridge_ring_repro.py)."""
+    if spec["exact"] or spec.get("read") != "bridge":
+        return _loom_task_once(spec)
+    try:
+        with np.errstate(divide="raise", invalid="raise"):
+            return _loom_task_once(spec)
+    except (np.linalg.LinAlgError, FloatingPointError) as err:
+        raise RuntimeError(f"ghz --engine bridge: the bridge's state vanished ({err}) on group {spec.get('group')}, "
+                           f"setting {spec['setting']}, realisation {spec['realisation']}, max_bonds "
+                           f"{spec.get('max_bonds')}" + (": a truncation on the ring (wrap cut) zeroed it; raise "
+                                                         "--bridge-max-bonds, or keep bridged gates out of Layer 2 "
+                                                         "with --inside-zz stabilizer" if spec.get("box") else "")
+                           ) from err
+
+
+def _loom_task_once(spec):
     """One circuit on the loom (or, exact, on one QrackSimulator over the field): every unit prepared, Layer 2,
     the readout setting; shots of every unit qubit, read where spec['policy'] says (LoomRegister.unit_reads),
     as ints with bit q = field qubit q. Each chip's copies are sampled in calls of up to 32 qubits (Qrack returns
     32 bits per shot), each sample shuffled by its own seeded permutation and the samples paired shot by shot:
     chips (and calls) are independent, as the units are. ACE chips run with the boundary repetition code where
     spec['brep'] (Layer S's code) and the authority rule spec['authority']."""
-    R = loom_register(spec["repo"], spec["cf"], spec["chips"], spec["link_rows"], spec.get("backend", "exact"),
-                      spec.get("read", "cut"))
-    cf = cloverfield(spec["cf"])
+    if spec.get("box"):
+        R, cf = box_register(*spec["box"]), None
+    else:
+        R = loom_register(spec["repo"], spec["cf"], spec["chips"], spec["link_rows"], spec.get("backend", "exact"),
+                          spec.get("read", "cut"))
+        cf = cloverfield(spec["cf"])
     units = spec["units"]
     bridge = None
     if spec["exact"]:
@@ -2294,7 +2549,7 @@ def _loom_task(spec):
         QB = qrack_bridge(spec.get("qrack_bridge"))
         width, P, idx = _bridge_layout(R, units)
         bridge = QB(width, max_bonds=int(spec["max_bonds"]), patches=P, truncation=spec.get("truncation", "greedy"),
-                    lazy_bonds=int(spec.get("lazy_bonds", 0)),
+                    lazy_bonds=int(spec.get("lazy_bonds", 0)), wrap=bool(spec.get("box")),
                     seed=[int(spec["realisation"]), zlib_key(spec["setting"]), zlib_key(spec.get("group", ""))])
         g = BridgeGates(bridge, idx)
     else:
@@ -2363,7 +2618,7 @@ def run_loom(a, R, groups, settings, label, l2, amp=None, with_exact=True, rep_o
     no_exact = a.no_exact or not with_exact
     pol_name = "authority" if brep else "real"
     base = dict(repo=a.repo, cf=a.cloverfield, chips=list(a.loom_chips), link_rows=list(a.loom_link_rows or ()),
-                layer2=l2, backend=R.backend, read=R.read, brep=bool(brep),
+                box=([R.L, R.H] if isinstance(R, BoxRegister) else None), layer2=l2, backend=R.backend, read=R.read, brep=bool(brep),
                 authority=getattr(a, "code_authority", "lineage"),
                 **(dict(max_bonds=a.bridge_max_bonds, truncation=a.bridge_truncation, lazy_bonds=a.bridge_lazy,
                         qrack_bridge=a.qrack_bridge) if R.read == "bridge" else {}))
@@ -2421,6 +2676,433 @@ def run_loom(a, R, groups, settings, label, l2, amp=None, with_exact=True, rep_o
               f"(max_bonds {summ['max_bonds']}), {summ['truncating']} truncated, fidelity_estimate mean "
               f"{summ['fidelity_mean']:.3f}, min {summ['fidelity_min']:.3f}; widest bridge {summ['max_width']} qubits")
     return data, (None if no_exact else exact), (None if no_exact else bad), time.time() - t0
+
+
+# ================================================================== Shor's code across QrackBridge circuits
+
+def shor_grid_unit(at, m):
+    """Shor's [[m^2, 1, m]] unit on a grid at(i, j) (block i, position j), built as nighthawk_qrack's shor9_tiles
+    builds it: leaders at the middle position, the outer tree along the leaders from the middle outwards, each
+    inner tree along its block from the leader outwards."""
+    L = (m - 1) // 2
+    order = [L] + [i for k in range(1, m) for i in (L - k, L + k) if 0 <= i < m]
+    chain = [(i, i - 1) for i in range(L, 0, -1)] + [(i, i + 1) for i in range(L, m - 1)]
+    return dict(blocks=[[at(i, j) for j in order] for i in order],
+                outer=[[at(i, L), at(k, L)] for i, k in chain],
+                inner=[[at(i, j), at(i, k)] for i in order for j, k in chain])
+
+
+def box_cross_ring(R, ax):
+    """The box's cross-section perpendicular to axis ax (0 = x, 1 = y, 2 = z) as a closed ring of (a, b) points in
+    the other two coordinates, in order round it."""
+    ext = (R.L, R.L, R.H)
+    o = [i for i in range(3) if i != ax]
+    A, B = ext[o[0]], ext[o[1]]
+    return o, ([(a_, 0) for a_ in range(A)] + [(A - 1, b_) for b_ in range(1, B)]
+               + [(a_, B - 1) for a_ in range(A - 2, -1, -1)] + [(0, b_) for b_ in range(B - 2, 0, -1)])
+
+
+def shor_candidates(R, m):
+    """[(unit, where)]: every placement of an m x m Shor unit whose encoder CXs are couplers of R, in both
+    orientations. On the box: m consecutive points along an axis, inside the box's extent (not on its end faces),
+    times m consecutive points round the box's cross-section there, so a unit bends over the box edges it crosses;
+    blocks round the cross-section (orientation ring) or along the axis (axis). Elsewhere: m x m squares of lattice
+    cells, blocks along rows or along columns."""
+    grids = []
+    if isinstance(R, BoxRegister):
+        pos = {p: q for q, p in enumerate(R.xyz)}
+        ext = (R.L, R.L, R.H)
+        for ax in range(3):
+            o, ring = box_cross_ring(R, ax)
+            for s0 in range(1, ext[ax] - m):
+                for t0 in range(len(ring)):
+                    def at(i, j, ax=ax, o=o, ring=ring, s0=s0, t0=t0):
+                        p = [0, 0, 0]
+                        p[ax] = s0 + i
+                        p[o[0]], p[o[1]] = ring[(t0 + j) % len(ring)]
+                        return pos[tuple(p)]
+                    grids.append((at, dict(axis="xyz"[ax], start=s0, ring_start=t0), ("ring", "axis")))
+    else:
+        cell = {rc: q for q, rc in R.cell.items()}
+        for (r0, c0) in sorted(cell):
+            if all((r0 + i, c0 + j) in cell for i in range(m) for j in range(m)):
+                grids.append((lambda i, j, r0=r0, c0=c0: cell[(r0 + i, c0 + j)], dict(row=r0, col=c0),
+                              ("rows", "cols")))
+    out = []
+    for at, where, names in grids:
+        for name, f in ((names[0], at), (names[1], lambda i, j, at=at: at(j, i))):
+            u = shor_grid_unit(f, m)
+            if all(c in R.adj[p] for p, c in u["outer"] + u["inner"]):
+                out.append((u, dict(where, blocks=name)))
+    return out
+
+
+def shor_unit_info(R, u):
+    """Where a Shor unit sits against the bridge's cuts: the chips (faces) it spans, its encoder CXs that cross
+    between chips (outer: leader to leader; inner: inside a block), the blocks the cut splits, and its layout:
+    inside (one circuit), blocks whole (only outer CXs cross: the cut runs between blocks, as nighthawk_qrack's
+    patch_blocks) or blocks split (inner CXs cross: the cut runs through blocks, as its seam_leaders). On the box
+    also the ring cuts the bridged CXs cross, the most cuts one CX crosses (hops: 1 direct, 2 relayed) and whether
+    one is the ring's wrap cut."""
+    ch = R.chip_of
+    names = [sp["name"] for sp in R.specs]
+    qs = [q for b in u["blocks"] for q in b]
+    xo = sum(1 for p, c in u["outer"] if ch[p] != ch[c])
+    xi = sum(1 for p, c in u["inner"] if ch[p] != ch[c])
+    split = sum(1 for b in u["blocks"] if len({ch[q] for q in b}) > 1)
+    info = dict(chips=[names[c] for c in sorted({ch[q] for q in qs})], cross_outer=xo, cross_inner=xi,
+                blocks_split=split, layout="inside" if not (xo or xi) else "blocks whole" if not split else
+                "blocks split", qubits=qs, cells=[list(R.cell[q]) for q in qs])
+    if isinstance(R, BoxRegister):
+        cuts, hops = set(), 0
+        for p, c in u["outer"] + u["inner"]:
+            if ch[p] != ch[c]:
+                cs = R.ring_cuts(ch[p], ch[c])
+                cuts.update(cs)
+                hops = max(hops, len(cs))
+        info.update(cuts=sorted(cuts), hops=hops, wrap=(len(BOX_FACES) - 1) in cuts)
+    return info
+
+
+def shor_class(info):
+    """The report's class of a unit: its layout, blocks split and, on the box, direct or relayed (and the wrap)."""
+    c = info["layout"] + (f", {info['blocks_split']} split" if info["blocks_split"] else "")
+    if info.get("hops"):
+        c += (", relayed" if info["hops"] > 1 else ", direct") + (", wrap" if info.get("wrap") else "")
+    return c
+
+
+def _shor_register(spec):
+    if spec.get("box"):
+        return box_register(*spec["box"])
+    return loom_register(spec["repo"], spec["cf"], spec["chips"], spec["link_rows"], "exact", "bridge")
+
+
+def _shor_task(spec):
+    """One logical state of one Shor unit: nighthawk_qrack's shor9_prepare (input, encoder, readout basis) on a
+    QrackBridge holding the unit's qubits, one patch per chip (a ring on the box), or on a QrackSimulator of the
+    unit (exact); shots over the unit's qubits in block order (bit i = i-th qubit of the blocks in turn). Returns
+    (shots, info); a bridge whose truncation zeroed the state (0 / 0 in a recompression, possible on a ring)
+    returns (None, info with vanished)."""
+    u = spec["unit"]
+    qs = [q for b in u["blocks"] for q in b]
+    if spec["exact"]:
+        from pyqrack import QrackSimulator
+        sim = QrackSimulator(len(qs), is_gpu=False)
+        nq.shor9_prepare(sim, u, spec["state"], {q: i for i, q in enumerate(qs)})
+        return [int(x) for x in sim.measure_shots(list(range(len(qs))), spec["shots"])], {}
+    R = _shor_register(spec)
+    QB = qrack_bridge(spec.get("qrack_bridge"))
+    width, P, idx = _bridge_layout(R, [dict(qubits=qs)])
+    br = QB(width, max_bonds=int(spec["max_bonds"]), patches=P, truncation=spec.get("truncation", "greedy"),
+            lazy_bonds=int(spec.get("lazy_bonds", 0)), wrap=bool(spec.get("box")),
+            seed=[int(spec["realisation"]), zlib_key(spec["state"]), int(spec["index"])])
+    kept = []
+    stats = lambda: dict(fidelity=float(br.fidelity_estimate), truncations=int(br.truncations),  # noqa: E731
+                         peak_bonds=int(br.peak_bonds), width=int(width), bonds=(kept[0] if kept else None))
+    try:
+        with np.errstate(divide="raise", invalid="raise"):
+            nq.shor9_prepare(br, u, spec["state"], idx)
+            br.flush()
+            kept.append([int(x) for x in br.bond])      # bond qubits per cut the prepared state keeps
+            w = br.measure_shots([idx[q] for q in qs], spec["shots"])
+    except (np.linalg.LinAlgError, FloatingPointError) as err:
+        return None, dict(stats(), vanished=str(err))
+    return [int(x) for x in w], stats()
+
+
+def cmd_shor(a):
+    """Shor's [[m^2, 1, m]] code across QrackBridge circuits: every placement of a unit on the chips (or the box),
+    each in its own circuit, all four logical states, raw and decoded success against the exact reference."""
+    if a.engine != "bridge":
+        raise SystemExit("ghz shor: --engine bridge (Shor's code across ACE's seam is nighthawk_qrack.py shor9)")
+    m = int(a.size)
+    if m < 3:
+        raise SystemExit("ghz shor: --size m >= 3")
+    QB_src = qrack_bridge(a.qrack_bridge) and _QB.get("src")
+    if a.box:
+        R = box_register(*a.box)
+        a.loom_chips, a.loom_link_rows = list(BOX_FACES), []
+    else:
+        a.loom_chips = a.loom_chips or list(LOOM_DEFAULT["chips"])
+        R = loom_register(a.repo, a.cloverfield, a.loom_chips, a.loom_link_rows, "exact", "bridge")
+        a.loom_link_rows = list(R.link_rows)
+    R.map["loom"]["bridge"] = dict(max_bonds=a.bridge_max_bonds, truncation=a.bridge_truncation,
+                                   lazy_bonds=a.bridge_lazy, source=QB_src)
+    cands = shor_candidates(R, m)
+    if a.shor_units == "cross":
+        cands = [c for c in cands if shor_unit_info(R, c[0])["layout"] != "inside"]
+    if not cands:
+        raise SystemExit(f"ghz shor: no {m} x {m} Shor unit fits on {R.name}")
+    infos = [shor_unit_info(R, u) for u, _ in cands]
+    reps = max(1, int(a.repeats))
+    states = nq.SHOR9_STATES
+    base = dict(repo=a.repo, cf=a.cloverfield, chips=list(a.loom_chips), link_rows=list(a.loom_link_rows or ()),
+                box=([R.L, R.H] if isinstance(R, BoxRegister) else None), max_bonds=a.bridge_max_bonds,
+                truncation=a.bridge_truncation, lazy_bonds=a.bridge_lazy, qrack_bridge=a.qrack_bridge)
+    calls, labels, keys = [], [], []
+    for j, (u, _) in enumerate(cands):
+        for s in states:
+            for r in range(reps):
+                calls.append((_shor_task, (dict(base, unit=u, state=s, shots=a.shots, exact=False, realisation=r,
+                                                index=j),)))
+                labels.append(f"shor unit {j} |{s}_L> realisation {r + 1}/{reps}")
+                keys.append((j, s, False))
+            if not a.no_exact:
+                calls.append((_shor_task, (dict(base, unit=u, state=s, shots=a.exact_shots, exact=True,
+                                                realisation=0, index=j),)))
+                labels.append(f"exact shor unit {j} |{s}_L>")
+                keys.append((j, s, True))
+    print(f"Shor-{m * m} ([[{m * m}, 1, {m}]]) across QrackBridge on {R.describe()}; max_bonds {a.bridge_max_bonds} "
+          f"({a.bridge_truncation}, lazy {a.bridge_lazy}); {len(cands)} units ("
+          + ", ".join(f"{k} {v}" for k, v in sorted(collections.Counter(shor_class(i) for i in infos).items()))
+          + f"), each in its own circuit; {a.shots} shots x {reps} realisation(s) per logical state"
+          + ("" if a.no_exact else f", exact {a.exact_shots}") + f"; {nq.qrack_versions()}")
+    pool, workers = nq.shor_pool(a.jobs, len(calls))
+    every = float(a.progress or 0)
+    if every:
+        print(f"# ghz shor plan: {len(calls)} circuits, {workers} process(es)", flush=True)
+    t0 = time.time()
+    try:
+        res = nq.shor_pool_map(pool, calls, labels, every, what="ghz shor")
+    finally:
+        if pool is not None:
+            pool.shutdown()
+    secs = time.time() - t0
+    hist = collections.defaultdict(collections.Counter)
+    stat = collections.defaultdict(list)
+    for (j, s, ex), (shots, info) in zip(keys, res):
+        if shots is None:
+            stat[(j, s)].append(info)
+            continue
+        hist[(j, s, ex)].update(shots)
+        if not ex:
+            stat[(j, s)].append(info)
+    recs = []
+    when = time.strftime("%Y-%m-%dT%H:%M:%S")
+    for j, ((u, where), info) in enumerate(zip(cands, infos)):
+        _, local = nq._local_unit(u)
+        per = {}
+        for s in states:
+            h = hist.get((j, s, False))
+            st_ = stat[(j, s)]
+            kb = [max(x["bonds"]) for x in st_ if x.get("bonds")]
+            d = dict(peak_bonds=max(x["peak_bonds"] for x in st_), bonds=(max(kb) if kb else None),
+                     bonds_per_cut=next((x["bonds"] for x in st_ if x.get("bonds")), None),
+                     truncations=max(x["truncations"] for x in st_),
+                     fidelity_estimate=min(x["fidelity"] for x in st_),
+                     vanished=sum(1 for x in st_ if x.get("vanished")))
+            if h:
+                n_ = sum(h.values())
+                ok = [(nq.shor9_decode(k, local, s), v) for k, v in h.items()]
+                d.update(raw=sum(v * r_ for (r_, _), v in ok) / n_, decoded=sum(v * d_ for (_, d_), v in ok) / n_,
+                         shots=n_, **{k_: v_ for k_, v_ in nq.shor9_compare(h, local, s).items()
+                                      if k_ in ("tvd", "tvd_floor", "impossible", "top_wrong")})
+            hx = hist.get((j, s, True))
+            if hx:
+                n_ = sum(hx.values())
+                d["exact_decoded"] = sum(v * nq.shor9_decode(k, local, s)[1] for k, v in hx.items()) / n_
+            per[s] = d
+        lz = [per[s]["decoded"] for s in ("0", "1") if "decoded" in per[s]]
+        lx = [per[s]["decoded"] for s in ("+", "-") if "decoded" in per[s]]
+        recs.append(dict(test="shor_bridge", register=R.name, when=when, size=m, unit=j, where=where, **info,
+                         shor_class=shor_class(info), blocks=u["blocks"], outer=u["outer"], inner=u["inner"],
+                         states=per, logical_Z=(float(np.mean(lz)) if len(lz) == 2 else None),
+                         logical_X=(float(np.mean(lx)) if len(lx) == 2 else None),
+                         bonds_Z=max((per[s]["bonds"] or 0) for s in ("0", "1")),
+                         bonds_X=max((per[s]["bonds"] or 0) for s in ("+", "-")),
+                         peak_bonds=max(per[s]["peak_bonds"] for s in states),
+                         shots=a.shots, repeats=reps, exact_shots=(None if a.no_exact else a.exact_shots),
+                         loom=R.map["loom"], qrack=nq.qrack_versions()))
+    report_shor(recs)
+    print(f"seconds: {secs:.1f}")
+    if a.out:
+        with open(a.out, "a") as fh:
+            fh.write(json.dumps(dict(test="shor_map", register=R.name, when=when, **R.map)) + "\n")
+            for r in recs:
+                fh.write(json.dumps(r) + "\n")
+        print(f"  appended {len(recs)} records and the register map to {a.out}")
+
+
+def report_shor(recs):
+    """Decoded success per class and logical state, logical Z and X, and the bond qubits per cut the prepared
+    state kept (the most over the class's units; Z states / X states)."""
+    by = collections.defaultdict(list)
+    for r in recs:
+        by[r["shor_class"]].append(r)
+    print(f"\n{'class':<40}{'units':>6}" + "".join(f"{'|' + s + '_L>':>8}" for s in nq.SHOR9_STATES)
+          + f"{'log Z':>8}{'log X':>8}{'exact':>7}{'bonds Z/X':>11}{'vanished':>9}")
+    for c in sorted(by, key=lambda c_: (c_.split(",")[0] != "inside", c_)):
+        rs = by[c]
+        cell = []
+        for s in nq.SHOR9_STATES:
+            v = [r["states"][s]["decoded"] for r in rs if "decoded" in r["states"][s]]
+            cell.append(f"{np.mean(v):>8.3f}" if v else f"{'-':>8}")
+        lz = [r["logical_Z"] for r in rs if r["logical_Z"] is not None]
+        lx = [r["logical_X"] for r in rs if r["logical_X"] is not None]
+        ex = [r["states"][s]["exact_decoded"] for r in rs for s in nq.SHOR9_STATES if "exact_decoded" in r["states"][s]]
+        van = sum(r["states"][s]["vanished"] for r in rs for s in nq.SHOR9_STATES)
+        print(f"{c:<40}{len(rs):>6}" + "".join(cell) + (f"{np.mean(lz):>8.3f}" if lz else f"{'-':>8}")
+              + (f"{np.mean(lx):>8.3f}" if lx else f"{'-':>8}") + (f"{np.mean(ex):>7.3f}" if ex else f"{'-':>7}")
+              + f"{max(r['bonds_Z'] for r in rs):>6}/{max(r['bonds_X'] for r in rs)}" + f"{van:>9}")
+
+
+def cmd_shormap(a):
+    """A shor run as heatmaps, logical Z (|0_L>, |1_L>) and logical X (|+_L>, |-_L>) side by side, one row per way
+    a cut meets the code (between its blocks, through them): per site the lowest decoded success among the units
+    through it of that layout or inside one circuit; on the box's unfolded net or the chips side by side."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    from matplotlib.patches import Rectangle
+    import textwrap
+    recs = read_records(a.inp)
+    sr = [r for r in recs if r.get("test") == "shor_bridge"]
+    if not sr:
+        raise SystemExit(f"ghz shormap: no shor_bridge record in {a.inp}")
+    when = max(r["when"] for r in sr)
+    sr = [r for r in sr if r["when"] == when]
+    mp = [r for r in recs if r.get("test") == "shor_map" and r.get("when") == when][-1]
+    reg, m, loom = sr[0]["register"], sr[0]["size"], mp["loom"]
+    bp = loom.get("bridge") or {}
+    box = loom.get("box")
+    sites = {s_[0]: (s_[1], s_[2]) for s_ in mp["sites"]}
+    lays = [x for x in ("blocks whole", "blocks split") if any(r["layout"] == x for r in sr)] or ["inside"]
+    panels = []
+    for lay in lays:
+        for key in ("logical_Z", "logical_X"):
+            d = collections.defaultdict(list)
+            for r in sr:
+                if r["layout"] in ("inside", lay) and r[key] is not None:
+                    for q in r["qubits"]:
+                        d[q].append(r[key])
+            panels.append((lay, key, {q: float(min(v)) for q, v in d.items()}))
+    cmap = LinearSegmentedColormap.from_list("div", [(0.0, "#a32c2b"), (0.25, "#e98584"), (0.5, "#e4e2dc"),
+                                                     (0.75, "#6da7ec"), (1.0, "#184f95")])
+    norm = Normalize(0.0, 1.0)
+    ink, ink2, muted, surf = "#1d1d1b", "#4a4944", "#6b6a64", "#fcfcfb"
+    if box:
+        R = box_register(box["L"], box["H"])
+        dec = box_net_decor(R, loom, sites)
+        rows_, cols_ = dec["rows"], dec["cols"]
+    else:
+        rows_ = sorted({rc[0] for rc in sites.values()})
+        cols_ = sorted({rc[1] for rc in sites.values()})
+    nrow, ncol = rows_[-1] - rows_[0] + 1, cols_[-1] - cols_[0] + 1
+    classes = ["inside", "blocks whole", "blocks split"]
+    if box:
+        classes = ["inside", "blocks whole, direct", "blocks whole, relayed", "blocks split, direct",
+                   "blocks split, relayed"]
+
+    def cls_of(r):
+        c = r["layout"]
+        if box and c != "inside":
+            c += ", relayed" if r["hops"] > 1 else ", direct"
+        return c
+    counts = collections.Counter(cls_of(r) for r in sr)
+
+    def mean_of(c, key):
+        v = [r[key] for r in sr if cls_of(r) == c and r[key] is not None]
+        return float(np.mean(v)) if v else None
+    van = sum(r["states"][s]["vanished"] for r in sr for s in nq.SHOR9_STATES)
+    cross_only = not any(r["layout"] == "inside" for r in sr)
+    what = (f"a closed {box['L']} × {box['L']} × {box['H']} box, six faces on a QrackBridge ring ({' → '.join(box['ring'])})"
+            if box else f"{' + '.join(loom['chips'])}, {len(loom['chips'])} exact chips joined by QrackBridge")
+    lines = textwrap.wrap(
+        f"Shor's [[{m * m}, 1, {m}]] code on {what}: every placement of a {m} × {m} unit whose encoder CXs are "
+        f"couplers ({len(sr)} units" + (" across the cut; units inside one chip not run"
+                                                                   if cross_only else "") + ", each in its own circuit"
+        + (", bent over the box edges it crosses; the box's 8 corner points are in none" if box else "")
+        + f"), all four logical states. Each cell is the "
+        f"lowest decoded success among the units through that qubit that sit inside one circuit or meet the cut as "
+        f"the row says (1: perfect, ½: no logical information). Cut between blocks: only leader-to-leader CXs "
+        f"cross (nighthawk_qrack shor9's patch_blocks); cut through blocks: CXs inside the blocks cross "
+        f"(seam_leaders). Cuts kept to max_bonds "
+        f"{bp.get('max_bonds')} bond qubits ({bp.get('truncation', 'greedy')})."
+        + (f" {van} logical-state circuits vanished on the ring's truncation (not counted)." if van else ""), 150)
+    if box:
+        lines += textwrap.wrap("Net: base in the middle, walls folded out, lid beyond the back wall; bars on the "
+                               "couplers across box edges, solid on a ring cut, dashed relayed through the face "
+                               "between; edges the net cuts open lettered on both faces: "
+                               + ", ".join(f"{ch} {'–'.join(kk)}" for kk, ch in sorted(dec["letters"].items(),
+                                                                                        key=lambda x: x[1])) + ".", 150)
+    else:
+        lines.append("Bars: the couplers between the chips, each a bridged gate (teleported through a bond pair).")
+    FW = 17.0
+    nr = len(lays)
+    cell = min(0.75, 6.8 / ncol, (8.5 if nr == 1 else 5.6 if not box else 7.8) / nrow)
+    PW, PH = cell * ncol, cell * nrow
+    X0, GAP, RG = 0.45, 0.9, 1.15                          # left margin, gap between columns, between rows
+    Hh = 1.0 + 0.22 * len(lines) + 0.4
+    FH = Hh + nr * (0.45 + PH + 0.55) + (nr - 1) * (RG - 1.0) + 0.6
+    fig = plt.figure(figsize=(FW, FH), dpi=170 if FH > 14 else 200, facecolor=surf)
+    sub = dict(logical_Z=("Logical Z", "|0_L⟩, |1_L⟩: read in X, a block's sign = parity of its bits"),
+               logical_X=("Logical X", "|+_L⟩, |−_L⟩: read in Z, a block's bit = majority of its bits"))
+    row_name = {"blocks whole": "Cut between blocks", "blocks split": "Cut through blocks", "inside": "Inside"}
+    for pi, (lay, key, vals_) in enumerate(panels):
+        ri, ci = divmod(pi, 2)
+        x0 = X0 + ci * (PW + GAP)
+        y0 = FH - Hh - (ri + 1) * (0.45 + PH) - ri * (0.55 + RG - 1.0)
+        ax = fig.add_axes([x0 / FW, y0 / FH, PW / FW, PH / FH], facecolor=surf)
+        fs = 7.0 if cell < 0.5 else 9.5
+        for q, F in vals_.items():
+            r_, c_ = sites[q]
+            ax.add_patch(Rectangle((c_ - 0.5, r_ - 0.5), 1, 1, facecolor=cmap(norm(F)), edgecolor=surf, lw=1.4))
+            dark = F > 0.82 or F < 0.12
+            ax.text(c_, r_ + 0.08, f"{F:.2f}", ha="center", va="center", fontsize=fs, fontweight="bold",
+                    color="#ffffff" if dark else ink)
+            ax.text(c_ - 0.42, r_ - 0.30, str(q), ha="left", va="center", fontsize=fs * 0.64,
+                    color="#ffffff" if dark else muted)
+        if box:
+            draw_box_net(ax, dec, ink, ink2, surf)
+        else:
+            for u_, v_ in loom.get("links", []):
+                (ru, cu), (rv, cv) = sites[u_], sites[v_]
+                xs, ys = (([(cu + cv) / 2] * 2, [ru - 0.42, ru + 0.42]) if ru == rv else
+                          ([cu - 0.42, cu + 0.42], [(ru + rv) / 2] * 2))
+                ax.plot(xs, ys, color=surf, lw=5.5, solid_capstyle="butt")
+                ax.plot(xs, ys, color=ink, lw=2.8, solid_capstyle="butt")
+            ax.set_xlim(cols_[0] - 0.6, cols_[-1] + 0.6)
+            ax.set_ylim(rows_[-1] + 0.6, rows_[0] - 0.6)
+            ax.set_aspect("equal")
+            ax.axis("off")
+        ytop = (y0 + PH + 0.25) / FH
+        fig.text(x0 / FW, ytop, f"{row_name[lay]} · {sub[key][0]}", fontsize=13, fontweight="bold", color=ink,
+                 ha="left")
+        fig.text(x0 / FW, ytop - 0.24 / FH, sub[key][1], fontsize=9, color=ink2, ha="left")
+        txt = [f"{c_.split(', ')[-1]} {mean_of(c_, key):.2f}" for c_ in classes if counts.get(c_)
+               and (c_ == "inside" or c_.startswith(lay))]
+        fig.text(x0 / FW, (y0 - 0.32) / FH, "   ".join(txt), fontsize=9.5, color=ink, ha="left", family="monospace")
+    yc = FH - Hh - nr * (0.45 + PH) - (nr - 1) * (0.55 + RG - 1.0)
+    hc = FH - Hh - 0.45 - yc
+    cax = fig.add_axes([(X0 + 2 * PW + GAP + 0.35) / FW, (yc + 0.25 * hc) / FH, 0.13 / FW, 0.5 * hc / FH])
+    cb = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax)
+    cb.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
+    cb.set_ticklabels(["0", "0.25", "½", "0.75", "1"])
+    cb.ax.tick_params(labelsize=9, colors=ink2)
+    cb.outline.set_visible(False)
+    fig.text((X0 + 2 * PW + GAP + 0.15) / FW, (yc + 0.78 * hc) / FH, "success", fontsize=10.5, fontweight="bold",
+             color=ink)
+    title = (f"Shor-{m * m} across QrackBridge: " + (f"box {box['L']}×{box['L']}×{box['H']}" if box else
+                                                     f"{len(loom['chips'])} chips") + f", max_bonds {bp.get('max_bonds')}")
+    fig.text(0.02, (FH - 0.5) / FH, title, fontsize=18, fontweight="bold", color=ink, ha="left")
+    for i, line in enumerate(lines):
+        fig.text(0.02, (FH - 1.0 - 0.22 * i) / FH, line, fontsize=9.8, color=ink2, ha="left")
+    fig.text(0.02, 0.42 / FH, f"{os.path.basename(a.inp)} · run {when} · {sr[0]['shots']} shots × {sr[0]['repeats']} "
+             f"per logical state · {sr[0].get('qrack', '')} · nighthawk_ghz.py shor --size {m}"
+             + (f" --box {box['L']} {box['H']}" if box else
+                "" if tuple(loom["chips"]) == LOOM_DEFAULT["chips"] else " --loom-chips " + " ".join(loom["chips"]))
+             + (" --shor-units cross" if cross_only else "") + f" --bridge-max-bonds {bp.get('max_bonds')}",
+             fontsize=8.3, color=muted, ha="left")
+    png = a.png or f"shor_{reg}_mb{bp.get('max_bonds')}.png"
+    fig.savefig(png, facecolor=surf)
+    plt.close(fig)
+    print(f"shormap: {reg}, run {when}: {png}")
+    for c in classes:
+        if counts.get(c):
+            print(f"  {c:<24} {counts[c]:>3} units  logical Z {fmt(mean_of(c, 'logical_Z'))}  "
+                  f"logical X {fmt(mean_of(c, 'logical_X'))}")
 
 
 # ================================================================== sweep, probe, stackmap
@@ -2591,6 +3273,8 @@ def cmd_stackmap(a):
         layers.append({q: float(np.min(v)) for q, v in acc.items()})
     fields = ("pass1", "pass2", "passV") if order == "echo-code" else ("pass1", "passC", "passE")
     loom = mp.get("loom")
+    if loom and loom.get("box"):
+        return stackmap_box(a, st, layers, mp, order, fields, ghz, when)
     if loom:                                              # a unit whose qubits sit on two chips: its own class
         ends = list(np.cumsum(loom["chip_n"]))
         chip_of = lambda q: next(i for i, e in enumerate(ends) if q < e)        # noqa: E731
@@ -2795,6 +3479,222 @@ def cmd_stackmap(a):
     print(f"stackmap: {reg}, order {order}, run {when}: {png}")
     for c in classes:
         print(f"  {c:<8} {counts.get(c, 0):>3} units  " + "  ".join(fmt(cls_mean(c, i)) for i in range(3)))
+
+
+def box_net_decor(R, loom, sites):
+    """The box net's decoration for a heatmap: a bar on every coupler across a box edge (on the cell side facing
+    the other face; relayed edges flagged), a letter on each edge the net cuts open (on both faces), and each
+    face's name where it clears every cell and letter."""
+    ring = loom["box"]["ring"]
+    hops = {tuple(sorted(e["faces"], key=ring.index)): e for e in loom["box"]["edges"]}
+    # every coupler across a box edge: one bar per end, on the cell side facing the other face
+    letters, bars = {}, []
+    for u_, v_ in loom["links"]:
+        fu, fv = R.face[u_], R.face[v_]
+        key = tuple(sorted((fu, fv), key=ring.index))
+        relayed = hops[key]["ring_distance"] > 1
+        rc_u, rc_v = sites[u_], sites[v_]
+        folded = abs(rc_u[0] - rc_v[0]) + abs(rc_u[1] - rc_v[1]) == 1
+        if not folded and key not in letters:
+            letters[key] = "abcdefghijklmnop"[len(letters)]
+        for q, f_other in ((u_, fv), (v_, fu)):
+            p = R.xyz[q]
+            nrm = BOX_NORMAL[f_other]
+            r0, c0 = R.net(p, R.face[q])
+            r1, c1 = R.net(tuple(p[i] + nrm[i] for i in range(3)), R.face[q])
+            bars.append((r0, c0, r1 - r0, c1 - c0, relayed, None if folded else key))
+            if folded:
+                break
+    rows_ = sorted({rc[0] for rc in sites.values()})
+    cols_ = sorted({rc[1] for rc in sites.values()})
+    nrow, ncol = rows_[-1] - rows_[0] + 1, cols_[-1] - cols_[0] + 1
+    at = {rc: q for q, rc in sites.items()}
+    letter_at = []
+    for key, ch in letters.items():
+        for f_ in key:
+            pts = [(r0 + dr * 0.8, c0 + dc * 0.8) for r0, c0, dr, dc, _, kk in bars
+                   if kk == key and R.face[at[(r0, c0)]] == f_]
+            if pts:
+                letter_at.append(((float(np.mean([p_[0] for p_ in pts])), float(np.mean([p_[1] for p_ in pts]))), ch))
+    name_at = {}                                         # each face's name where it clears every cell and letter
+    for f_ in ring:
+        qs = [q for q in range(R.n) if R.face[q] == f_]
+        r_lo, r_hi = min(sites[q][0] for q in qs), max(sites[q][0] for q in qs)
+        c_lo, c_hi = min(sites[q][1] for q in qs), max(sites[q][1] for q in qs)
+        r_mid, c_mid = (r_lo + r_hi) / 2, (c_lo + c_hi) / 2
+        hw = 0.09 * len(f_) + 0.05                       # half the label's width, in cells (9 pt bold, 0.44 in cells)
+        obst = ([(rc[0], rc[1], 0.5, 0.5) for rc in sites.values()] + [(p_[0], p_[1], 0.2, 0.15) for p_, _ in letter_at]
+                + [(v[3], v[4], 0.2, v[5]) for v in name_at.values()])
+        best = fallback = None
+        if f_ == "base":                                 # boxed in by the walls: the notch under its first column
+            name_at[f_] = (r_hi + 0.9, c_lo, "center", r_hi + 0.9, c_lo, hw)
+            continue
+        for rr, cc in ((r_lo - 0.85, c_lo - 0.2 - hw), (r_lo - 0.85, c_hi + 0.2 + hw), (r_hi + 0.85, c_lo - 0.2 - hw),
+                       (r_hi + 0.85, c_hi + 0.2 + hw), (r_mid, c_lo - 1.25 - hw), (r_mid, c_hi + 1.25 + hw),
+                       (r_lo - 1.4, c_mid), (r_hi + 1.4, c_mid)):
+            if not (rows_[0] - 1.3 <= rr <= rows_[-1] + 1.0 and cols_[0] - 0.5 <= cc - hw and cc + hw <= cols_[-1] + 0.5):
+                continue
+            fallback = fallback or (rr, cc, "center", rr, cc, hw)
+            near = sorted(((rr - q_r) ** 2 + (cc - q_c) ** 2, R.face[at[(q_r, q_c)]]) for q_r, q_c in sites.values())
+            if near[0][1] != f_ or any(d_ < near[0][0] + 0.6 and g_ != f_ for d_, g_ in near[1:]):
+                continue                                 # nearer (or as near) another face: ambiguous
+            clear = min(max(abs(rr - o[0]) - o[2] - 0.2, abs(cc - o[1]) - o[3] - hw) for o in obst)
+            if best is None or clear > best[0] + 0.05:
+                best = (clear, (rr, cc, "center", rr, cc, hw))
+        name_at[f_] = best[1] if best else (fallback or (r_lo - 0.85, c_mid, "center", r_lo - 0.85, c_mid, hw))
+    return dict(bars=bars, letters=letters, letter_at=letter_at, name_at=name_at, rows=rows_, cols=cols_,
+                nrow=nrow, ncol=ncol)
+
+
+def draw_box_net(ax, dec, ink, ink2, surf):
+    for r0, c0, dr, dc, relayed, key in dec["bars"]:   # a surface halo under each bar keeps it legible on dark cells
+        xs, ys = (([c0 - 0.40, c0 + 0.40], [r0 + dr / 2] * 2) if dr else ([c0 + dc / 2] * 2, [r0 - 0.40, r0 + 0.40]))
+        ax.plot(xs, ys, color=surf, lw=5.0, solid_capstyle="butt")
+        ax.plot(xs, ys, color=ink, lw=2.4, ls=(0, (2.0, 1.2)) if relayed else "solid", solid_capstyle="butt",
+                dash_capstyle="butt")
+    for (rr, cc), ch in dec["letter_at"]:              # one letter beside each cut-open side
+        ax.text(cc, rr, ch, ha="center", va="center", fontsize=8.5, fontweight="bold", color=ink2, style="italic")
+    for f_, (rr, cc, ha, _, _, _) in dec["name_at"].items():
+        ax.text(cc, rr, f_, ha=ha, va="center", fontsize=9, fontweight="bold", color=ink)
+    ax.set_xlim(dec["cols"][0] - 0.6, dec["cols"][-1] + 0.6)
+    ax.set_ylim(dec["rows"][-1] + 0.6, dec["rows"][0] - 1.4)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+
+def stackmap_box(a, st, layers, mp, order, fields, ghz, when):
+    """cmd_stackmap for --box: the three GHZ measurements on the box's unfolded net, side by side. Bars mark the
+    couplers across a box edge: solid where the edge's faces share a ring cut of the bridge, dashed where the
+    bridge relays through the face between; an edge the net cuts open is drawn on both faces with one letter."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, Normalize
+    from matplotlib.patches import Rectangle
+    import textwrap
+    loom, box = mp["loom"], mp["loom"]["box"]
+    L, H = box["L"], box["H"]
+    reg = st[0]["register"]
+    R = box_register(L, H)
+    bp = loom.get("bridge") or {}
+    sites = {s_[0]: (s_[1], s_[2]) for s_ in mp["sites"]}
+    ring = box["ring"]
+
+    def cls_of(r):
+        b = r.get("box") or R.unit_box(r)
+        n_ = len(b["cuts"])
+        return "face" if n_ == 0 else "direct" if n_ == 1 else "relayed"
+    classes = ("face", "direct", "relayed")
+    labels = dict(face="face", direct="direct", relayed="relayed")
+    counts = collections.Counter(cls_of(r) for r in st)
+
+    def mean_of(rs, i):
+        v = []
+        for r in rs:
+            d = r.get(fields[i]) or (r.get(fields[i - 1]) if i else None) or r["pass1"]
+            v.append(d["F_GHZ"])
+        return float(np.mean(v)) if v else None
+    cmap = LinearSegmentedColormap.from_list("div", [(0.0, "#a32c2b"), (0.25, "#e98584"), (0.5, "#e4e2dc"),
+                                                     (0.75, "#6da7ec"), (1.0, "#184f95")])
+    norm = Normalize(0.0, 1.0)
+    ink, ink2, muted, surf = "#1d1d1b", "#4a4944", "#6b6a64", "#fcfcfb"
+    names = (["Pass 1", "Pass 2", "V"] if order == "echo-code" else ["Pass 1", "C", "E"])
+    code_name = "Layer S: nothing to correct (the bridge is exact up to truncation)"
+    subs = (["Layer 1a, no drift", "Layer 2, anti-OTOC Walsh echo", "echo + " + code_name]
+            if order == "echo-code" else ["Layer 1a, no drift", "Layer S: bridged units rerun (control)",
+                                          "Layer 2, anti-OTOC Walsh echo"])
+    l2 = next((r["layer2"] for r in ghz if r["stack_pass"] != 1), {})
+    prot = l2.get("inside_zz") == "stabilizer"
+    k = st[0].get("unit_size", 3)
+    dec = box_net_decor(R, loom, sites)
+    letters, nrow, ncol = dec["letters"], dec["nrow"], dec["ncol"]
+    direct = [e for e in box["edges"] if e["ring_distance"] == 1]
+    relay = [e for e in box["edges"] if e["ring_distance"] > 1]
+    lines = textwrap.wrap(
+        f"A closed {L} × {L} × {H} box: the {R.n} lattice points on its surface, couplers at unit distance, "
+        f"the base, four walls and the lid each one circuit and one QrackBridge patch, the six patches on a ring "
+        f"({' → '.join(ring)} → {ring[0]}). Opposite faces sit three apart on the ring, so every box edge joins "
+        f"faces one apart (solid bars: "
+        + ", ".join("–".join(e["faces"]) for e in direct) + ") or two apart (dashed: "
+        + ", ".join(f"{'–'.join(e['faces'])} via {e['via'][0]}" for e in relay)
+        + "), where a bridged gate is teleported through the face between, one bond on each of the two cuts. "
+        f"Cuts kept to max_bonds {bp.get('max_bonds')} bond qubits ({bp.get('truncation', 'greedy')}); the wrap cut "
+        f"{ring[-1]}|{ring[0]} is truncated by a local SVD, on a ring not a projection (below capacity it carries "
+        f"less than the inner cuts).", 172)
+    lines += textwrap.wrap(
+        f"The net: base in the middle, walls folded out round it, the lid beyond the back wall. Each cell is the "
+        f"lowest F_GHZ among the {k}-qubit chains through that qubit (chains run along straight lines in x, y and "
+        f"z, so they cross a box edge where a line runs off one face onto the next; small number: qubit index). "
+        f"Edges the net cuts open are drawn on both faces with one letter: "
+        + ", ".join(f"{letters[kk]} {'–'.join(kk)}" for kk in sorted(letters, key=letters.get)) + ".", 172)
+    if prot:
+        lines.append("Seam protection: the drift's ZZ inside a GHZ unit is not put through the bridge (a global "
+                     "phase on the GHZ, Corollary 2.1; --inside-zz stabilizer).")
+    order_txt = (("code first, echo second" if order == "code-echo" else "echo first, code second")
+                 + ("  ·  with seam protection" if prot else "  ·  without seam protection"))
+    reg_label = f"Box {L}×{L}×{H}, six faces on a QrackBridge ring, max_bonds {bp.get('max_bonds')}"
+    FW, cell, X0, GAP = 17.0, 0.44, 0.35, 0.55
+    PW, PH = cell * ncol, cell * nrow
+    Hh = 1.25 + 0.21 * len(lines) + 0.35
+    FH = Hh + 0.35 + PH + 0.55 + 0.95
+    fig = plt.figure(figsize=(FW, FH), dpi=200, facecolor=surf)
+    for li, vals in enumerate(layers):
+        x0 = X0 + li * (PW + GAP)
+        ax = fig.add_axes([x0 / FW, (0.95 + 0.55) / FH, PW / FW, PH / FH], facecolor=surf)
+        for q, F in vals.items():
+            r_, c_ = sites[q]
+            ax.add_patch(Rectangle((c_ - 0.5, r_ - 0.5), 1, 1, facecolor=cmap(norm(F)), edgecolor=surf, lw=1.4))
+            dark = F > 0.82 or F < 0.12
+            ax.text(c_, r_ + 0.08, f"{F:.2f}", ha="center", va="center", fontsize=7.2, fontweight="bold",
+                    color="#ffffff" if dark else ink)
+            ax.text(c_ - 0.42, r_ - 0.30, str(q), ha="left", va="center", fontsize=4.6,
+                    color="#ffffff" if dark else muted)
+        draw_box_net(ax, dec, ink, ink2, surf)
+        ytop = (0.95 + 0.55 + PH + 0.30) / FH
+        fig.text(x0 / FW, ytop, names[li], fontsize=14, fontweight="bold", color=ink, ha="left")
+        fig.text((x0 + (0.80 if names[li].startswith("Pass") else 0.30)) / FW, ytop, subs[li], fontsize=9.5,
+                 color=ink2, ha="left")
+        fig.text(x0 / FW, (0.95 + 0.20) / FH, "   ".join(
+            f"{labels[c_]} {mean_of([r for r in st if cls_of(r) == c_], li):.2f}" for c_ in classes
+            if counts.get(c_)), fontsize=9.5, color=ink, ha="left", family="monospace")
+    cax = fig.add_axes([(X0 + 3 * PW + 2 * GAP + 0.25) / FW, (0.95 + 0.55 + 0.15 * PH) / FH, 0.13 / FW,
+                        0.7 * PH / FH])
+    cb = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax)
+    cb.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
+    cb.set_ticklabels(["0", "0.25", "½", "0.75", "1"])
+    cb.ax.tick_params(labelsize=9, colors=ink2)
+    cb.outline.set_visible(False)
+    fig.text((X0 + 3 * PW + 2 * GAP + 0.10) / FW, (0.95 + 0.55 + 0.88 * PH) / FH, "F_GHZ", fontsize=10.5,
+             fontweight="bold", color=ink)
+    fig.text(0.02, (FH - 0.45) / FH, f"{reg_label}: GHZ fidelity per measurement layer", fontsize=18,
+             fontweight="bold", color=ink, ha="left")
+    fig.text(0.02, (FH - 0.85) / FH, order_txt, fontsize=14, fontweight="bold", color=ink2, ha="left")
+    for i, line in enumerate(lines):
+        fig.text(0.02, (FH - 1.25 - 0.21 * i) / FH, line, fontsize=9.8, color=ink2, ha="left")
+    desc = dict(face=f"inside a face {counts.get('face', 0)}",
+                direct=f"direct cut {counts.get('direct', 0)} (one ring cut, one bond per unit)",
+                relayed=f"relayed {counts.get('relayed', 0)} (two ring cuts, a bond on each)")
+    fig.text(0.02, 0.78 / FH, f"Means over {k}-qubit chains: " + ", ".join(desc[c_] for c_ in classes
+                                                                           if counts.get(c_)) + ".",
+             fontsize=9, color=ink2, ha="left")
+    zz = ", inside ZZ by stabiliser" if prot else ""
+    fig.text(0.02, 0.52 / FH, f"{st[0]['shots']} shots × {st[0]['repeats']} realisations per setting · Layer 2 "
+             f"{l2.get('mode', 'none')}, L = {l2.get('blocks')}, T = {l2.get('t_idle')}, J = {l2.get('j_zz')} × "
+             f"U(0.75, 1.25), σ = {l2.get('sigma_qs')}{zz} · "
+             + ("V reruns the bridged units on fresh draws; others keep pass 2" if order == "echo-code" else
+                "C reruns the bridged units (others keep pass 1); E runs every unit"),
+             fontsize=8.3, color=muted, ha="left")
+    fig.text(0.02, 0.30 / FH, f"{os.path.basename(a.inp)} · run {when} · {st[0].get('qrack', '')} · nighthawk_ghz.py "
+             f"stack --engine bridge --box {L} {H} --bridge-max-bonds {bp.get('max_bonds')} --order {order}",
+             fontsize=8.3, color=muted, ha="left")
+    png = a.png or f"ghz_stack_{reg}_{order}.png"
+    fig.savefig(png, facecolor=surf)
+    plt.close(fig)
+    print(f"stackmap: {reg}, order {order}, run {when}: {png}")
+    for c in classes:
+        rs = [r for r in st if cls_of(r) == c]
+        if rs:
+            print(f"  {c:<8} {len(rs):>3} units  " + "  ".join(fmt(mean_of(rs, i)) for i in range(3)))
 
 
 # ================================================================== plot
@@ -3338,6 +4238,73 @@ def cmd_selftest(a):
         check("max_bonds 0: both <= 1/2 (a hard cut); 1: one unit carried; 2: both exact",
               got[0][1] < 0.51 and got[1][0] < 0.51 and got[1][1] > 0.99 and got[2][0] > 0.99,
               "; ".join(f"{mb}: {a_:.3f} {b_:.3f}" for mb, (a_, b_) in zip((0, 1, 2), got)))
+    print("[17] --box: the 5 x 5 x 5 box's geometry; on the 3 x 3 x 3 box, a GHZ chain across a relayed edge "
+          "through the ring's wrap cut, max_bonds 0 / 1")
+    Rb = BoxRegister(5, 5)
+    ring_d = {tuple(e["faces"]): e["ring_distance"] for e in Rb.edges}
+    check("98 qubits (base and lid 25, walls 12), 192 couplers, bipartite under x + y + z, 12 box edges: 6 on a "
+          "ring cut, 6 relayed; opposite faces never share an edge",
+          Rb.n == 98 and Rb.chip_n == [25, 12, 12, 25, 12, 12] and len(Rb.couplers) == 192
+          and all(Rb.sub[a_] != Rb.sub[b_] for a_, b_ in Rb.couplers) and len(ring_d) == 12
+          and sorted(ring_d.values()) == [1] * 6 + [2] * 6
+          and not any(set(k_) in ({"base", "lid"}, {"front", "back"}, {"left", "right"}) for k_ in ring_d),
+          f"n {Rb.n}, faces {Rb.chip_n}, couplers {len(Rb.couplers)}, ring distances {sorted(ring_d.values())}")
+    units = [u for _, _, us in Rb.tilings(3) for u in us]
+    cross = [u for u in units if Rb.unit_box(u)["edge"]]
+    check("3-qubit chains along x, y and z: 144 units, 44 across a box edge, every cross-face coupler in one",
+          len(units) == 144 and len(cross) == 44
+          and {tuple(sorted(e)) for u in cross for e in u["edges"] if Rb.chip_of[e[0]] != Rb.chip_of[e[1]]}
+          == {tuple(sorted(x)) for x in Rb.links}, f"{len(units)} units, {len(cross)} across an edge")
+    try:
+        QB = qrack_bridge(None)
+    except SystemExit as err:
+        print(f"  [skip] {err}")
+    else:
+        R3 = BoxRegister(3, 3)
+        u = next(u for _, _, us in R3.tilings(3) for u in us
+                 if R3.unit_box(u)["hops"] == 2 and len(BOX_FACES) - 1 in R3.unit_box(u)["cuts"])
+        cuts = R3.unit_box(u)["cuts"]
+        got = []
+        for mb in (0, 1):
+            width, P, idx = _bridge_layout(R3, [u])
+            b = QB(width, max_bonds=mb, patches=P, wrap=True)
+            prepare(BridgeGates(b, idx), u, [])
+            v = np.asarray(b.out_ket())
+            got.append(fghz(v, [idx[q] for q in u["qubits"]], width))
+        check(f"chain {u['qubits']} ({R3.unit_box(u)['edge']}, ring cuts {cuts}): max_bonds 0 <= 1/2, 1 exact",
+              got[0] < 0.51 and got[1] > 0.99, f"{got[0]:.3f} / {got[1]:.3f}")
+    print("[18] shor: Shor-9 placements on the 5 x 5 x 5 box; across one direct edge (not the wrap), the cut between "
+          "blocks and through them at max_bonds 0 / 1 / 3 (256 shots)")
+    Rb = BoxRegister(5, 5)
+    cands = shor_candidates(Rb, 3)
+    cl = collections.Counter(shor_unit_info(Rb, u)["layout"] for u, _ in cands)
+    check("96 placements: 48 inside a face, 24 with the cut between blocks, 24 through them; every encoder CX a coupler",
+          len(cands) == 96 and cl == {"inside": 48, "blocks whole": 24, "blocks split": 24},
+          f"{len(cands)}: {dict(cl)}")
+    try:
+        qrack_bridge(None)
+    except SystemExit as err:
+        print(f"  [skip] {err}")
+    else:
+        got = {}
+        for lay in ("blocks whole", "blocks split"):
+            u = next(u for u, _ in cands if shor_unit_info(Rb, u)["layout"] == lay
+                     and shor_unit_info(Rb, u)["hops"] == 1 and not shor_unit_info(Rb, u)["wrap"])
+            _, local = nq._local_unit(u)
+            for mb in (0, 1, 3):
+                for st in ("0", "+"):
+                    sh, _ = _shor_task(dict(unit=u, state=st, shots=256, exact=False, realisation=0, index=0,
+                                            box=[5, 5], max_bonds=mb))
+                    got[(lay, mb, st)] = float(np.mean([nq.shor9_decode(x, local, st)[1] for x in sh]))
+        w, sp = (lambda mb, st: got[("blocks whole", mb, st)]), (lambda mb, st: got[("blocks split", mb, st)])
+        check("cut between blocks: |0_L> needs no bond (1 at max_bonds 0), |+_L> one (~1/2 at 0, 1 at 1)",
+              w(0, "0") > 0.99 and abs(w(0, "+") - 0.5) < 0.12 and w(1, "+") > 0.99,
+              f"|0_L> {w(0, '0'):.3f}; |+_L> {w(0, '+'):.3f} / {w(1, '+'):.3f}")
+        check("cut through blocks: |+_L> survives any capacity; |0_L> ~1/2 at 0, ~3/4 at 1 (the decoder's majority over "
+              "one carried and two random block signs), 1 at 3",
+              sp(0, "+") > 0.99 and abs(sp(0, "0") - 0.5) < 0.12 and abs(sp(1, "0") - 0.75) < 0.12
+              and sp(3, "0") > 0.99, f"|+_L> {sp(0, '+'):.3f}; |0_L> {sp(0, '0'):.3f} / {sp(1, '0'):.3f} / "
+                                     f"{sp(3, '0'):.3f}")
     print("selftest " + ("passed" if ok else "FAILED"))
     if not ok:
         raise SystemExit(1)
@@ -3405,7 +4372,33 @@ def make_parser():
     t.add_argument("--orient", default="rows,cols", help="rows, cols or both")
     t.add_argument("--offsets", default="all", help="chain offsets along a line: all, or a comma list")
 
-    s = sub.add_parser("stack", parents=[common],
+    bridge_opts = argparse.ArgumentParser(add_help=False)
+    bridge_opts.add_argument("--bridge-max-bonds", dest="bridge_max_bonds", type=int, default=6,
+                   help="bridge: bond qubits kept per cut after each recompression (QrackBridge max_bonds): its "
+                        "capacity, 2^max_bonds Schmidt values; 0 keeps none (a hard cut)")
+    bridge_opts.add_argument("--bridge-truncation", dest="bridge_truncation", choices=["greedy", "born"], default="greedy",
+                   help="bridge: keep the largest Schmidt values (greedy) or draw a group by the Born rule")
+    bridge_opts.add_argument("--bridge-lazy", dest="bridge_lazy", type=int, default=0,
+                   help="bridge: lazy_bonds, bond qubits buffered before one recompression (0: after every gate)")
+    bridge_opts.add_argument("--qrack-bridge", dest="qrack_bridge", default=None,
+                   help="bridge: qrack_bridge.py to load when this PyQrack has no QrackBridge (PyQrack >= 2.30 has it; "
+                        "default $NIGHTHAWK_QRACK_BRIDGE)")
+    bridge_opts.add_argument("--box", type=int, nargs=2, metavar=("L", "H"), default=None,
+                   help="bridge: a closed box instead of chips: the lattice points on the surface of an L x L x H "
+                        "block, six faces (base, four walls, lid) as six QrackBridge patches on a ring (base, front, "
+                        "right, lid, back, left); chains along x, y and z, so units cross every box edge")
+    bridge_opts.add_argument("--loom-chips", dest="loom_chips", nargs="+", default=None,
+                   help="loom: the chips, nighthawk_cloverfield.py --chips tokens (default rect:1-8,2-5 rect:1-8,6-9: "
+                        "nighthawk61r2's 61 qubits as two chips of 30 and 31, its two ACE patches' size)")
+    bridge_opts.add_argument("--loom-link-rows", dest="loom_link_rows", type=int, nargs="+", default=None,
+                   help="loom: the rows that get a link (default: every row whose facing border pair are lattice "
+                        "neighbours once the chips sit side by side; the default chips: 1 2 3 4 6 7 8, every coupler "
+                        "of nighthawk61r2 between columns 5 and 6)")
+    bridge_opts.add_argument("--cloverfield", default=None,
+                   help="loom: nighthawk_cloverfield.py (default: $NIGHTHAWK_CLOVERFIELD, next to this script, or "
+                        "../rcs-nighthawk)")
+
+    s = sub.add_parser("stack", parents=[common, bridge_opts],
                        help="pass 1 Layer 1a, pass 2 Layer 2, Layer S (seam syndrome + repetition code), Layer V "
                             "(the corrected measurement)")
     s.add_argument("--mode", choices=["tiles", "chip"], default="tiles", help="GHZ chains tiled, or one over the register")
@@ -3429,23 +4422,6 @@ def make_parser():
                    help="ace: the register on ACE's patches (default). loom: two exact chips joined by "
                         "nighthawk_cloverfield.py's ghost loom as the seam (--loom-chips, --loom-link-rows); Layer S's "
                         "code is then the loom's authority (a unit read on the chip that holds copies of all of it)")
-    s.add_argument("--bridge-max-bonds", dest="bridge_max_bonds", type=int, default=6,
-                   help="bridge: bond qubits kept per cut after each recompression (QrackBridge max_bonds): its "
-                        "capacity, 2^max_bonds Schmidt values; 0 keeps none (a hard cut)")
-    s.add_argument("--bridge-truncation", dest="bridge_truncation", choices=["greedy", "born"], default="greedy",
-                   help="bridge: keep the largest Schmidt values (greedy) or draw a group by the Born rule")
-    s.add_argument("--bridge-lazy", dest="bridge_lazy", type=int, default=0,
-                   help="bridge: lazy_bonds, bond qubits buffered before one recompression (0: after every gate)")
-    s.add_argument("--qrack-bridge", dest="qrack_bridge", default=None,
-                   help="bridge: qrack_bridge.py to load when this PyQrack has no QrackBridge (PyQrack >= 2.30 has it; "
-                        "default $NIGHTHAWK_QRACK_BRIDGE)")
-    s.add_argument("--loom-chips", dest="loom_chips", nargs="+", default=None,
-                   help="loom: the chips, nighthawk_cloverfield.py --chips tokens (default rect:1-8,2-5 rect:1-8,6-9: "
-                        "nighthawk61r2's 61 qubits as two chips of 30 and 31, its two ACE patches' size)")
-    s.add_argument("--loom-link-rows", dest="loom_link_rows", type=int, nargs="+", default=None,
-                   help="loom: the rows that get a link (default: every row whose facing border pair are lattice "
-                        "neighbours once the chips sit side by side; the default chips: 1 2 3 4 6 7 8, every coupler "
-                        "of nighthawk61r2 between columns 5 and 6)")
     s.add_argument("--loom-read", dest="loom_read", choices=["cut", "ghost"], default="cut",
                    help="loom: cut (default) = a hard cut, chips independent, a link CZ as the mean-field phase on "
                         "each side, every qubit read on its own chip: a unit across the loom is a product state; "
@@ -3457,9 +4433,6 @@ def make_parser():
                         "(chips must be registers, e.g. nighthawk61r2 nighthawk61r2): ACE's seam inside each chip, "
                         "the loom between them; Layer S's code is then ACE's boundary repetition code inside and the "
                         "loom's authority across")
-    s.add_argument("--cloverfield", default=None,
-                   help="loom: nighthawk_cloverfield.py (default: $NIGHTHAWK_CLOVERFIELD, next to this script, or "
-                        "../rcs-nighthawk)")
     s.add_argument("--order", choices=["echo-code", "code-echo"], default="echo-code",
                    help="echo-code: pass 2 = Layer 2 (the anti-OTOC echo), then Layer S and Layer V; code-echo: Layer S "
                         "from pass 1, pass C = the code on pass 1's circuit, then pass E = Layer 2 with the code kept")
@@ -3490,6 +4463,18 @@ def make_parser():
     pr.add_argument("--exact-variants", dest="exact_variants", default="gate,stab,chain-stab",
                     help="variants also run on the exact simulator")
 
+    sh = sub.add_parser("shor", parents=[common, bridge_opts],
+                        help="Shor's [[m^2, 1, m]] code across QrackBridge circuits (two chips, or the box)")
+    sh.add_argument("--engine", choices=["bridge"], default="bridge", help="the chips joined by QrackBridge")
+    sh.add_argument("--size", type=int, default=3, help="m: Shor-m^2 (3 = Shor-9)")
+    sh.add_argument("--shor-units", dest="shor_units", choices=["all", "cross"], default="all",
+                    help="every placement of a unit, or only those across a cut")
+    sh.set_defaults(shots=1024, repeats=1, exact_shots=256)
+
+    sm = sub.add_parser("shormap", help="a shor run's logical Z and X success as heatmaps on the chips or the box net")
+    sm.add_argument("--in", dest="inp", required=True, help="JSONL written by shor --out (its latest run is drawn)")
+    sm.add_argument("--png", default=None, help="output image (default shor_<register>_mb<max_bonds>.png)")
+
     m = sub.add_parser("stackmap", help="a stack run's three measurements as heatmaps on the chip layout")
     m.add_argument("--in", dest="inp", required=True, help="JSONL written by stack --out (its latest run is drawn)")
     m.add_argument("--register", default=None, help="which register (default: the latest stack run in the file)")
@@ -3510,10 +4495,10 @@ def main():
     a = make_parser().parse_args()
     if getattr(a, "ocl_sync", False):
         os.environ["QRACK_OCL_SYNC"] = "1"
-    if a.cmd in ("chip", "tiles", "stack", "sweep", "probe"):
+    if a.cmd in ("chip", "tiles", "stack", "sweep", "probe", "shor"):
         nq.ensure_isolated(a)
     dict(chip=cmd_chip, tiles=cmd_tiles, stack=cmd_stack, sweep=cmd_sweep, probe=cmd_probe, stackmap=cmd_stackmap,
-         plot=cmd_plot, selftest=cmd_selftest)[a.cmd](a)
+         shor=cmd_shor, shormap=cmd_shormap, plot=cmd_plot, selftest=cmd_selftest)[a.cmd](a)
 
 
 if __name__ == "__main__":
