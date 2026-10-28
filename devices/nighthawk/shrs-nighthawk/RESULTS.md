@@ -1,6 +1,6 @@
 # Results: `rcs/nighthawk`
 
-Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E20 in its §9); usage is in the [README](README.md). State as of 21 October 2026.
+Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E34 in its §9); usage is in the [README](README.md). State as of 28 October 2026.
 
 ## Index
 
@@ -19,6 +19,20 @@ Every measured number of the experiments, grouped by experiment. The procedure b
 | [10.1](#101-dans-circuits-past-the-xeb-ceiling-his-mirror-hamming-weight-e18) | E18: his mirror Hamming weight, 16–57 qubits | 0.95–1.11× at d = 4–6 from 36 to 57 qubits; at d = 12 0.58–0.63× at 36–40, 0.91× at 45 (4-qubit seam); folding exponent 0.04–0.41 against his 1.606 |
 | [10.2](#102-vqe-on-the-two-patch-ladder-e19) | E19: VQE energy, 16–28 qubits | the angles transfer (88–99.7 % of E₀'s correlation energy); ACE keeps 70–97 % of it at 16 qubits, less with depth from 20 on; the seam acts as local dephasing, never below E₀ |
 | [10.3](#103-shors-9-qubit-code-across-a-seam-e20) | E20: Shor's code (9 to 36 qubits) on a two-patch ACE register, and tiled over 61 and 112 qubits | outer layer across the seam: logical Z 1.000, X 0.49; inner blocks across it: Z 0.50, X 0.67; tiled: decided by each unit's replica CXs (Z 0.73, X 0.44 at seven); in-patch units lose 2–7 % of X in ACE's sampler |
+| [10.4](#104-ghz-states-across-the-seams-e21) | E21: GHZ Layer 1a on two-patch registers (16, 28, 57, 61 qubits), chip-wide and tiled | every 3-qubit unit at distance ≥ 1 from a seam qubit: F_GHZ 1.000; units holding one: 0.77 (1 seam CX), 0.43 (2); chip-wide the coherence does not cross the seam; fold:1 changes 0.638 → 0.622 |
+| [10.5](#105-layer-2-across-the-seams-walsh-echo-compensation-e22) | E22: the formal proof's Layer 2 (Walsh echo, compensation) on the same tiles | off the seam ACE = exact in every mode, the echo restores 1.000; on the seam every mode costs (61: 0.773 → 0.671 dd, 0.426 → 0.240 on 2-seam-CX units) |
+| [10.6](#106-seam-error-extraction-and-zne-e23) | E23: seam error extracted from passes 1–2, ZNE over seam scales λ = 1, 5, 9, a fresh Layer 2 check | the first crossing keeps 0.39 of the coherence on 28 and 61 qubits; no amplifier scales the loss, so ZNE returns pass 2 (−0.02 … +0.01), less than a rerun moves it (0.04–0.06) |
+| [10.7](#107-seam-error-correction-syndrome-replica-repetition-code-the-third-measurement-e24) | E24: seam syndrome from passes 1–2, the replica repetition code with its schedule, the corrected third measurement | every unit one simulator holds is corrected to the exact reference (28: 0.720 → 1.001; 61: 0.683 → 0.999, 0.481 → 1.002), +0.28–0.34 against a rerun's 0.09; units across two simulators keep no coherence (≤ 0.06), F ≤ ½ |
+| [10.8](#108-pyqracks-ace-source-the-authority-rule-the-crossbar-the-gadget-e25) | E25: PyQrack's lineage authority, a co-located variant, the crossbar, the error-detection gadget | the lineage rule strands a seam partner's authority on the crossbar ([48, 40, 56] 0.463 in the preparation's order); the co-located step corrects every replica unit in any order (1.000–1.003); seam-to-seam GHZ 0.99–1.01 through the crossbar; the gadget does not make the one-sided loss |
+| [10.9](#109-the-code-before-the-echo-e26) | E26: the stack with Layer S before Layer 2 (`--order code-echo`) | the code takes every replica unit to the exact value without the drift (0.770 → 1.000) and the echo keeps it there (1.000); the cut units stay at the rerun level (0.357), then lose to the drift (0.216) |
+| [10.10](#1010-the-walsh-echo-window-by-window-e27) | E27: GHZ fidelity against the number of Walsh-echo windows, by seam class | off the seam 1.000 at every L; replica units step down over the first two windows (0.78 → 0.72) and stay flat to L = 8; cut units fall in the first window to near the scrambled floor; the code at L = 8: replica 0.999 |
+| [10.11](#1011-protecting-the-cut-units-from-layer-2-e28) | E28: how the drift's inside ZZ is put through ACE; `--inside-zz stabilizer` | dropping the inside ZZ (a global phase on the GHZ) keeps the cut units at their no-drift level (0.353 against 0.205 as gates) and removes the replica units' echo dip (0.764 against 0.683); the ½ ceiling stays |
+| [10.12](#1012-the-loom-as-the-seam-ghost-band-e29) | E29: `nighthawk61r2`'s qubits as two exact chips joined by the cloverfield's ghost loom | every 3-chain across a link lies in one chip's ghost band and reads 1.000 there, 0.265 on its own chips; the ghost band moves the cut, it does not correct across it (§10.14) |
+| [10.13](#1013-two-patch-ace-chips-joined-by-the-loom-ghost-band-e30) | E30: two `nighthawk61r2` cloverleaves joined by the ghost loom, 122 qubits | ACE's code takes ACE's replica units to 1.00; the loom's 3-chains read 1.00 inside a ghost band (§10.14); the 14 ACE-cut units fall to 0.21 under the echo, 0.36 with seam protection |
+| [10.14](#1014-the-loom-as-a-hard-cut-and-what-the-ghost-band-does-e31) | E31: the loom as a hard cut; the ghost band explained | across a hard cut every GHZ unit sits at the separable bound 0.50 in every pass, code, echo and protection alike (sd 0.008); the ghost loom's 1.00 is a two-column replica band simulating a unit whole on one chip, and 5-chains wider than the band stay at 0.26 |
+| [10.15](#1015-qrackbridge-in-place-of-the-loom-e32) | E32: the two chips joined by PyQrack's QrackBridge instead of the loom, `max_bonds` 6 → 0 | the bridge carries entanglement: exact at 6 (every unit across it 1.00); below the demand it carries max_bonds whole units per circuit and leaves the rest separable (0.50): means 0.85 / 0.74 at 2 / 1; at 0 it is the hard cut (0.51) |
+| [10.16](#1016-a-closed-box-six-faces-on-a-qrackbridge-ring-e33) | E33: a closed 5 × 5 × 5 box, base, four walls and lid as six QrackBridge patches on a ring, `max_bonds` 6 → 0 | every box edge carries GHZ chains: exact at capacity, relayed through a third face or not; below it the inner cuts ration whole units as two chips do (0.75 / 0.63 at 2 / 1 against budgets 0.750 / 0.625), the ring's wrap cut falls short (0.67 / 0.61) and at 0–1 with bridged drift gates the ring zeroed the state |
+| [10.17](#1017-shors-code-across-qrackbridge-e34) | E34: Shor's [[m², 1, m]] code instead of GHZ across QrackBridge, Shor-9 on two chips and the box, Shor-16 and -25 across the chips, `max_bonds` 6 → 0 | a cut between the code's blocks needs one bond (for \|±_L⟩), a cut through them one per block it splits (for \|0/1_L⟩); short of that the bridge drops whole blocks and the decoder repairs them as a majority vote predicts (Shor-9 at 1 bond 0.745 against 0.750, Shor-16 at 2 / 1 0.874 / 0.688 against 0.875 / 0.688); at 0 it gives E20's ACE-seam pattern on the side that needs coherence |
 | [11](#11-cloverfield-e13) | E13: cloverfield | ghost link 1.000 / 0.989 / 0.656 vs mean-field 0.773 / 0.773 / 0.067 |
 | [12](#12-qracks-opencl-engine-and-vram-oversubscription-e14-e15) | E14, E15: OpenCL and GTT | three defects, fixed; GTT ceiling lifted |
 | [13](#13-tool-validation) | tool validation | GPU = CPU; layoutsearch matches the exact engine |
@@ -657,6 +671,556 @@ OpenCL validity (PoCL 3.0, CPU device, in the container; 1024 shots; the 10.13.2
 - **Seam load decides, unit by unit.** Units with one replica CX keep both logical bases; 3–4 replica CXs cost up to 0.1; the unit sitting on five seam qubits with seven replica CXs falls to Z 0.73 and X 0.44.
 - **Units inside one patch lose 2–7 % of logical X, though every CX is exact.** ACE's sampler returns odd block parities (e.g. all three blocks 111) about 5 % of the time for a unit wholly in one patch, on every fresh backend; the qubits' marginals are exactly 0.5. Logical Z is untouched. This is ACE's sampling path, not the seam.
 
+### 10.4 GHZ states across the seams (E21)
+
+`nighthawk_ghz.py` (README §3.6, METHODOLOGY §6.8): the formal proof's Layer 1a on each register's ACE preset placement, no Layer 2. Container, CPU, PyQrack 2.29.5 / Qrack 10.13.2 (PyPI), boundary repetition code off; exact reference (`QrackSimulator`, 128 shots per setting): every deterministic shot ideal in every run below. F_GHZ = (P0 + P1 + C)/2 from Lemma 4's MQC (2k + 2 phases); F0 = fidelity to GHZ_0; the witness is the Clifford bound F ≥ P0 + P1 + P(even X parity) − 1.
+
+3-qubit chains tiled over the register (`tiles --unit 3`: rows and columns, offsets 0–2), 256 shots × 4 backends per setting (61) or × 2 (28):
+
+| Register | Units | Off the seam (distance ≥ 1) | Holding a seam qubit, 1 seam CX | Holding one, 2 seam CXs (both patches) |
+|---|---|---|---|---|
+| `nighthawk2p28` (3 seam qubits) | 30 | 1.002 (16 units) | 0.767 (9) | 0.353 (5) |
+| `nighthawk61r2` (6) | 82 | 1.000 (58) | 0.773 (15) | 0.426 (9) |
+
+(mean F_GHZ; exact reference 0.996–1.002 in every row; λ per block from Lemma 3: 1.000 / 0.80–0.83 / 0.55–0.62)
+
+| `nighthawk61r2`, earlier run (F0, 3 angles, 512 × 2) | Seam distance 0 | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|---|
+| layers none | 0.638 (24) | 1.000 (23) | 1.000 (21) | 1.000 (11) | 1.000 (3) |
+| `fold:1` | 0.622 (24) | 1.000 | 1.000 | 1.000 | 1.000 |
+
+One GHZ over the whole register (`chip`, stabilizer-hybrid patches, witness readout), 512 shots × 2 backends per setting:
+
+| Register | Tree | Root | Depth | CX exact / seam | P0 + P1, run 1 / run 2 | F ≥ (witness) | Seam CXs that break (Z) |
+|---|---|---|---|---|---|---|---|
+| `nighthawk2p28` | bfs | 10 | 5 | 21 / 6 | 0.293 / — | −0.19 | 3 of 6 at 0.45–0.47 |
+| | seam | 10 | 6 | 23 / 4 | 0.513 / — | 0.02 | 2 of 4 at 0.47–0.48 |
+| `nighthawk2p57` | bfs | 26 | 7 | 44 / 12 | 0.267 / 0.000 | −0.24 / −0.50 | 4 of 12 at 0.47–0.50 |
+| | seam | 9 | 10 | 50 / 6 | 0.000 / 0.005 | −0.51 / −0.46 | 3 of 6 at 0.47–0.52 |
+| `nighthawk2p16` (MQC, 256 × 4) | bfs | 11 | 5 | 10 / 5 | 0.583 | F_GHZ 0.293 | |
+| | seam | 3 | 6 | 11 / 4 | 0.456 | F_GHZ 0.238 | |
+
+- **The loss sits on the seam qubits, not around them.** Every unit that only couples to a seam qubit (distance 1) is at F_GHZ 1.000 on both registers, phase 0.00 ± 0.01; the per-site map's halo around each seam column comes from sites sharing units with seam qubits.
+- **A breaking seam CX cuts off its whole subtree.** Only some seam CXs break, each at 0.45–0.52, into a seam qubit or out of one; every qubit behind such a CX then flips with it (the map's blocks of equal break rate). The other seam CXs break at 0.000–0.010, and no CX inside one simulator breaks (0.0000 on every run).
+- **Chip-wide, the state does not survive the seam.** ⟨X…X⟩ and C are ≈ 0 in every chip-wide run: the coherence does not cross. Populations vary from run to run by more than the trees differ (`nighthawk2p57` bfs 0.267, then 0.000), so fewer seam crossings are not shown to help.
+- **Folding barely moves it.** Three times the seam CXs (`fold:1`) lower the seam units from 0.638 to 0.622 and leave every other unit at 1.000: the seam's loss behaves as a decorrelation at a crossing, not as an error per gate.
+- **`nighthawk61r2` chip-wide is not measured** on this build: its stabilizer patches leave the tableau in ACE's sampler (README §3.6, §8).
+
+### 10.5 Layer 2 across the seams: Walsh echo, compensation (E22)
+
+The formal proof's Layer 2 on the same tiles: after the preparation, L = 3 idle windows of T = 4.4 under H_D (Definition 2, η = 0; J_ij = 0.065 × U(0.75, 1.25), δω_q = 0.022 ((q mod 3) − 1), σ_qs = 0.015, seed 42: the paper's §8 model), in each mode; 256 shots × K = 4 realisations (fresh backend and ε) per setting; exact reference with the same ε draws. Mean F_GHZ (F0 in brackets where the phase matters):
+
+| `nighthawk61r2` units | none | unmitigated | compensated (oracle Ĥ) | dd (Walsh echo) | exact: unmit. / comp. / dd |
+|---|---|---|---|---|---|
+| off the seam (58) | 1.000 | 0.901 (F0 0.581) | 0.900 (F0 0.877) | **1.001** | 0.901 / 0.900 / 1.002 |
+| holding a seam qubit, 1 seam CX (15) | 0.773 | 0.650 | 0.627 | 0.671 | 0.880 / 0.884 / 0.999 |
+| holding one, 2 seam CXs (9) | 0.426 | 0.304 | 0.274 | 0.240 | 0.886 / 0.887 / 1.000 |
+
+| `nighthawk2p28` units | none | unmitigated | compensated | dd | exact: unmit. / comp. / dd |
+|---|---|---|---|---|---|
+| off the seam (16) | 1.002 | 0.913 (F0 0.634) | 0.911 (F0 0.888) | **1.000** | 0.910 / 0.913 / 1.001 |
+| 1 seam CX (9) | 0.767 | 0.688 | 0.654 | 0.724 | 0.889 / 0.890 / 0.999 |
+| 2 seam CXs (5) | 0.353 | 0.257 | 0.194 | 0.183 | 0.897 / 0.898 / 0.997 |
+
+One GHZ over `nighthawk2p16` (MQC, dense patches): P0 + P1 bfs / seam tree 0.583 / 0.456 without Layer 2; 0.262 / 0.308 unmitigated; 0.279 / 0.295 compensated; **0.000** / 0.298 dd; the exact reference 1.000 under dd, F_GHZ 0.67 under the other two.
+
+- **Off the seam, ACE reproduces the paper.** In every mode ACE equals the exact reference within shot noise, and the Walsh echo returns F_GHZ = 1.000 with the phase at 0.00 ± 0.01 (Theorem 1, Corollary 7.1). Unmitigated drift leaves F_GHZ at 0.90 (the ε dephasing over K = 4 draws) and F0 at 0.58 (the deterministic phase of δω and of the couplings to idle neighbours); compensation removes that phase (F0 0.88) but not ε, as Proposition 1 says.
+- **On the seam, every Layer 2 mode costs more than it refocuses.** The drift's couplings through the seam are themselves seam CXs on ACE, so each window adds crossings (§10.6: their count alone does not lower F; their rotations do): units holding a seam qubit fall below their no-drift values in every mode, and most where a window passes the drift most often (dd: four passes; compensated: two; unmitigated: one) on the two-seam-CX units. The exact reference keeps them at 0.88–1.00.
+- **Chip-wide, the echo makes it worse on ACE.** With every seam coupler inside the state, the dd windows break the 16-qubit bfs GHZ completely (P0 + P1 = 0.000); the exact reference under the same echo is ideal.
+- **Corollary 4.1 needs the paper's K.** With K = 4 and σ_qs = 0.015, the ε phase spread over L T = 13.2 is 2LTσ√k ≈ 0.7 rad per 3-qubit unit (1.6 rad at 16 qubits), larger than the δω signal; `sum_dw_estimate` needs K ≈ 256 as in the paper's calibration.
+
+### 10.6 Seam error extraction and ZNE (E23)
+
+`nighthawk_ghz.py stack` in its first version, now `stack --zne-k 1,2` (README §3.6, METHODOLOGY §6.8): pass 1 (Layer 1a), pass 2 (Layer 2 dd, the §8 model, L = 3), the seam's error read from passes 1 and 2, then ZNE with every seam crossing scaled by λ = 1, 5, 9, and a rerun of pass 2 with fresh ε and backends (the column "Rerun" below; since §10.7 Layer V is the corrected measurement). 256 shots × K = 4 per setting and λ, exact reference 128 shots; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ (Lemma 4):
+
+| Register, units | Pass 1 (L1a) | Pass 2 (L2 dd) | Rerun (L2) | ZNE linear | ZNE exp | Exact, pass 2 |
+|---|---|---|---|---|---|---|
+| `nighthawk2p28`, off the seam (16) | 1.001 | 1.000 | — | — | — | 1.002 |
+| `nighthawk2p28`, 1 seam CX (9) | 0.766 | 0.737 | 0.723 | 0.714 | 0.779 (8 of 9) | 1.000 |
+| `nighthawk2p28`, 2 seam CXs (5) | 0.360 | 0.185 | 0.156 | 0.164 | undefined | 0.996 |
+| `nighthawk61r2`, off the seam (58) | 1.001 | 0.999 | — | — | — | 1.000 |
+| `nighthawk61r2`, 1 seam CX (15) | 0.761 | 0.672 | 0.699 | 0.671 | 0.765 (13 of 15) | 1.000 |
+| `nighthawk61r2`, 2 seam CXs (9) | 0.424 | 0.262 | 0.222 | 0.232 | 0.417 (3 of 9) | 0.996 |
+| `nighthawk2p16` chip, seam tree (4 seam CXs) | 0.159 | 0.149 | 0.226 | 0.173 | 0.181 | 1.002 |
+| `nighthawk2p16` chip, bfs tree (5 seam CXs) | 0.230 | 0.004 | 0.002 | 0.003 | undefined | 0.999 |
+
+(ZNE exp is defined only where the population excess and \|c\| stay positive at every λ; its mean covers those units, the higher ones, so it reads high.)
+
+| Layer S extraction: kept against exact, log(kept) = a + b·n | P0 + P1 first crossing | per further crossing | Coherence first crossing | per further crossing |
+|---|---|---|---|---|
+| `nighthawk2p28` (28 unit-passes, n = 1…50) | 0.867 | 0.986 | 0.391 | 0.965 |
+| `nighthawk61r2` (48, n = 1…50) | 0.773 | 0.984 | 0.390 | 0.975 |
+| `nighthawk2p16` chip (4, n = 4…149) | 0.409 | 0.979 | 0.014 | 0.997 |
+
+| Seam units: F at λ = 1 / 5 / 9 | Mean | Slope per λ, mean (range) |
+|---|---|---|
+| `nighthawk2p28`, 1 seam CX | 0.737 / 0.715 / 0.750 | +0.002 (−0.004 … +0.010) |
+| `nighthawk2p28`, 2 seam CXs | 0.185 / 0.135 / 0.161 | −0.003 (−0.018 … +0.008) |
+| `nighthawk61r2`, 1 seam CX | 0.672 / 0.726 / 0.711 | +0.005 (−0.007 … +0.048) |
+| `nighthawk61r2`, 2 seam CXs | 0.262 / 0.143 / 0.224 | −0.005 (−0.044 … +0.021) |
+
+| Amplifier check, `nighthawk2p28` tiles, no drift (256 × 2), mean F_GHZ | none | `fold:1` / `fold:3` (×3, ×7) | `zzfold:1` / `2` / `4` (×5, ×9, ×17) | `gfold:1` / `2` (×3, ×5) |
+|---|---|---|---|---|
+| 1 seam CX (9 units) | 0.780 | 0.763 / 0.760 | 0.753 / 0.771 / 0.759 | 0.740 / 0.776 |
+| 2 seam CXs (5 units) | 0.371 | 0.357 / 0.355 | 0.317 / 0.326 / 0.292 | 0.363 / 0.346 |
+
+| ZNE (linear) − pass 2 against the rerun spread \|rerun − pass 2\| | ZNE − pass 2, mean (range) | \|rerun − pass 2\|, mean (max) |
+|---|---|---|
+| `nighthawk2p28` (14 seam units) | −0.022 (−0.234 … +0.014) | 0.056 (0.196) |
+| `nighthawk61r2` (24) | −0.012 (−0.077 … +0.036) | 0.059 (0.332) |
+| `nighthawk2p16` chip (2) | +0.012 (−0.001 … +0.024) | 0.040 (0.077) |
+
+- **The seam's loss is set at the first crossing.** Layer S finds the same coherence share after the first crossing on both tiled registers, 0.391 and 0.390; each further crossing costs 1.4–3.5 % against that. A unit's F_GHZ sits at one of a few levels (≈ 0.9, ≈ 0.6, ≈ 0.35 with no drift) whatever the amplification.
+- **No amplifier scales it.** Seventeen times the seam crossings (`zzfold:4`) move the seam units by 0.02–0.08; CX folding and global folding move them less. In Layer S an amplified point moves from λ = 1 about as far as a rerun does (median \|F(λ) − F(1)\| 0.024 / 0.041 against median \|rerun − pass 2\| 0.038 / 0.026 on 28 / 61 qubits) and in no consistent direction: the mean slope per λ is +0.002 to +0.005 on 1-seam-CX units, −0.003 to −0.005 on 2-seam-CX units.
+- **ZNE therefore returns pass 2.** Linear ZNE differs from pass 2 by −0.022 to +0.012 on average, less than a fresh run differs from pass 2 (0.040–0.059): it corrects nothing that a rerun does not change as much. The exponential model is undefined on most 2-seam-CX units (their populations fall under 2/d) and its class means are selected high.
+- **Pass 2's extra loss is not the crossing count.** The per-crossing rate between passes 1 and 2 (0.965–0.975 for coherence) would predict a further fall at λ = 5 and 9; the amplified runs show none. What Layer 2 adds on the seam comes from what its windows do there, the ZZ rotations and the X pulses on seam replicas, not from how many crossings they make (this revises §10.5's reading). Identities of the same crossings cost nothing.
+- **Chip-wide, nothing to extrapolate from.** On `nighthawk2p16` the coherence kept after the first crossing is 0.014: the bfs state under the echo is gone at every λ (0.004 / 0.004 / 0.007); the seam tree keeps 0.15–0.23, again within its rerun spread.
+
+### 10.7 Seam error correction: syndrome, replica repetition code, the third measurement (E24)
+
+`nighthawk_ghz.py stack` (README §3.6, METHODOLOGY §6.8): pass 1 (Layer 1a), pass 2 (Layer 2 dd, the §8 model, L = 3), Layer S (the seam's syndrome from passes 1 and 2, every unit classed and planned; the replica repetition code with its schedule on the replica units that lost F), Layer V (pass 2's circuit again, realisations 1000–1003: the code units under the correction, the cut units without it as the control). 256 shots × K = 4 per setting, exact reference 128 shots; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ (Lemma 4; chip: MQC over 16 qubits):
+
+| Register, units | Seam class, plan | Pass 1 (L1a) | Pass 2 (L2 dd) | V (L2 + correction) | Exact, pass 2 |
+|---|---|---|---|---|---|
+| `nighthawk2p28`, off the seam (16) | bulk | 1.000 | 1.000 | — | 1.000 |
+| `nighthawk2p28`, 1 seam CX (9) | replica, code | 0.777 | 0.720 | **1.001** | 1.000 |
+| `nighthawk2p28`, 2 seam CXs (5) | cut, control | 0.358 | 0.222 | 0.162 | 0.998 |
+| `nighthawk61r2`, off the seam (58) | bulk | 0.999 | 1.001 | — | 1.000 |
+| `nighthawk61r2`, 1 seam CX (15) | replica, code | 0.769 | 0.683 | **0.999** | 1.002 |
+| `nighthawk61r2`, 2 seam CXs, two seam qubits (2) | replica, code | 0.625 | 0.481 | **1.002** | 1.002 |
+| `nighthawk61r2`, 2 seam CXs (7) | cut, control | 0.350 | 0.228 | 0.154 | 1.003 |
+| `nighthawk2p16` chip, seam tree (4 seam CXs) | cut, control | 0.225 | 0.149 | 0.206 | 0.999 |
+| `nighthawk2p16` chip, bfs tree (5 seam CXs) | cut, control | 0.068 | 0.135 | 0.081 | 0.997 |
+
+| What V changes | Code units: V − pass 2, mean (range) | Control units: \|V − pass 2\|, mean (max) | Control: V at most; coherence |
+|---|---|---|---|
+| `nighthawk2p28` | +0.280 (+0.102 … +0.572); exact − V −0.001 | 0.093 (0.243) | 0.259; 0.024 |
+| `nighthawk61r2` | +0.340 (+0.084 … +0.913); exact − V +0.002 | 0.088 (0.194) | 0.263; 0.024 |
+| `nighthawk2p16` chip | — | 0.055 (0.057) | 0.206; 0.007 |
+
+| Layer S syndrome, pass 1 / pass 2 | Units | P0 + P1 kept | Coherence kept | P1 − P0 | Most-breaking qubit is a seam qubit |
+|---|---|---|---|---|---|
+| `nighthawk2p28`, replica | 9 | 0.868 / 0.794 | 0.689 / 0.647 | −0.156 / +0.110 | 4 of 4 / 3 of 4 |
+| `nighthawk2p28`, cut | 5 | 0.661 / 0.401 | 0.055 / 0.043 | −0.021 / −0.024 | 0 of 5 / 0 of 5 |
+| `nighthawk61r2`, replica | 17 | 0.853 / 0.756 | 0.655 / 0.562 | −0.151 / −0.064 | 8 of 9 / 7 of 9 |
+| `nighthawk61r2`, cut | 7 | 0.664 / 0.417 | 0.035 / 0.039 | −0.043 / +0.038 | 0 of 7 / 0 of 7 |
+| `nighthawk2p16` chip, cut | 2 | 0.283 / 0.278 | 0.010 / 0.007 | ± 0.28 | 0 of 2 / 1 of 2 |
+
+(Most-breaking qubit: counted over the units whose highest rate of leaving the unit's Z majority exceeds 0.02. P1 − P0 is a mean over units of both signs; per unit it reaches ± 0.3.)
+
+| Tomography, `nighthawk2p28`, no drift (27 Pauli settings × 2048 shots; exact 1024) | F(GHZ₀) | P0 / P1 | c = ρ₀…₀,₁…₁ | Error weight in the GHZ basis |
+|---|---|---|---|---|
+| [19, 18, 20], seam qubit 18 a leaf (replica), ACE, two backends | 0.579 / 0.699 | 0.16–0.19 / 0.51–0.55 | 0.22 / 0.35 | 0.29–0.30 on 010 ± (the seam qubit flipped), from the 0…0 branch |
+| the same, boundary repetition code | 1.000 | 0.498 / 0.502 | 0.500 | none above 0.01 |
+| [11, 10, 12], seam qubit 11 the root between the patches (cut), ACE | 0.296 / 0.297 | 0.30 / 0.29 | 0.000 / 0.002 | 000 + and − equal (0.30 each): no coherence; 0.28 on 010 (q10), 0.16 on 110 (q12) |
+| the same, boundary repetition code | 0.329 | 0.33 / 0.33 | −0.003 | as without |
+| exact reference, both | 1.000 | 0.49–0.51 | 0.500 | — |
+
+| The code's schedule, `nighthawk61r2` [48, 40, 56] (48→40 seam to seam, 48→56 into patch 1), dd, realisations 1000–1003, two repeats | F_GHZ |
+|---|---|
+| boundary repetition code, the preparation's order (48→40 first) | 0.446 / 0.230 (per realisation 0.05–0.61) |
+| boundary repetition code, the code's schedule (48→56 first) | 1.000 / 1.005 |
+| no code, realisations 0–2: no drift / dd | 0.654 / 0.429 |
+
+- **The replica error is a bit flip, and a code removes it.** Where one simulator holds the unit, the seam qubit's Z value leaves the unit's (most-breaking qubit a seam qubit in 22 of 26 cases over both registers), mostly from one branch (P0 0.16–0.19 against P1 0.51–0.55 in the tomography), with part of the coherence kept (0.56–0.69). ACE's replica repetition code with authority decoding takes all 26 replica units, Layer 2 included, to the exact reference: 1.001, 0.999 and 1.002 against 1.000–1.002. That is +0.28 to +0.34 on average over pass 2, three to four times what a rerun moves a unit (0.09), and 0.22–0.25 over pass 1.
+- **The code needs its schedule.** A CX between two seam qubits is matched in every simulator and clears the decoder's authority record; met before the seam qubit's partner in the host simulator, it leaves no replica to trust ([48, 40, 56]: 0.23–0.45 under the code). Reordering the tree so a qubit's CXs into one simulator come first (the same state: CXs from one control commute) gives 1.000 there, and every replica unit of both registers is corrected.
+- **The cut class is beyond any code on ACE.** A unit no simulator holds keeps 0.02–0.06 of its coherence in every pass (tomography: c = 0.000, GHZ⁺ and GHZ⁻ equal), because ACE joins its simulators only through replicas and the classical shadow: no state of two simulators is entangled between them. F_GHZ ≤ (P0 + P1)/2 ≤ ½ for any decoder; measured at most 0.26. The boundary code leaves it there (0.30 → 0.33 in the tomography), and so does the chip-wide GHZ (coherence 0.007–0.010), which on a register of two patches is always cut.
+- **Against §10.6.** ZNE moved F by −0.02 … +0.01 because the seam's loss is set at the first crossing; the code removes it outright on the replica class. What remains of the seam's GHZ loss after Layer S is exactly the cut class, the coherence ACE does not carry between simulators.
+- **Layer 2 on a corrected seam.** Under the code the Walsh echo is back to Theorem 1 on the seam units: V (pass 2's dd circuit) = exact on every replica unit, where pass 2 without the code had fallen to 0.48–0.72.
+
+### 10.8 PyQrack's ACE source: the authority rule, the crossbar, the gadget (E25)
+
+PyQrack's main branch (unitaryfoundation/pyqrack, last change to `qrack_ace_backend.py` on 21 October 2026) is byte-identical to the 2.29.5 used here. Its newest change replaced the fresh-copy authority of the boundary code with lineage tracking (`_update_lineage`): a replica stays the decoder's authority while every coupling it took part in was a real gate with a clean replica of the partner, and when two boundary qubits meet, their crossbar pair becomes the sole authority. `nighthawk_ghz.py --code-authority colocated` adds one step after it: a boundary qubit whose authority moves to a simulator takes the authority of every boundary qubit it has coupled with to that qubit's replica in the same simulator. `stack --code-schedule off` keeps the preparation's CX order. 256 shots × K = 4 per setting, Layer V on realisations 1000–1003; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Layer V, mean F_GHZ of the replica units under the code (E24: lineage with the schedule):
+
+| Register, replica units | Lineage + schedule (E24) | Lineage, preparation order | Co-located, preparation order | Co-located + schedule | Exact |
+|---|---|---|---|---|---|
+| `nighthawk2p28`, 1 seam CX (9) | 1.001 | 1.000 | 1.000 | 1.002 | 1.000–1.003 |
+| `nighthawk61r2`, 1 seam CX (15) | 0.999 | 1.001 | 1.001 | 1.002 | 0.998–1.002 |
+| `nighthawk61r2`, 2 seam CXs, two seam qubits (2) | 1.002 | **0.732** | 1.001 | 0.999 | 0.990–1.002 |
+| of these, [48, 40, 56] (48→40 seam to seam first) | 1.000 | **0.463** | 1.003 | 0.994 | 0.990–1.001 |
+| `nighthawk61r2`, code units: V − pass 2, mean | +0.340 | +0.320 | +0.338 | +0.346 | — |
+
+The cut units run without the code in every configuration: V 0.15–0.22, coherence 0.03–0.05, the control as in §10.7.
+
+| In-process probe, `nighthawk61r2`, preparation order, F_GHZ (no drift / echo) | No code | Code, lineage | Code, co-located |
+|---|---|---|---|
+| [48, 40, 56] | 0.648 / 0.157 | 0.780 / 0.584 | 0.998 / 1.003 |
+| [18, 10, 26] | 0.658 / 0.570 | 0.999 / 1.002 | 1.001 / 0.997 |
+| seam pair [18, 26] | 0.935 / 0.822 | 1.007 / 0.999 | 1.002 / 0.996 |
+| seam pair [40, 48] | 0.927 / 0.770 | 1.001 / 0.993 | 0.997 / 1.004 |
+| all 17 replica units, echo, 2 realisations: mean (lowest) | — | 0.970 (0.469, [48, 40, 56]) | 0.999 (0.989) |
+| all 7 cut units, echo: mean | — | 0.160 | 0.147 |
+
+| Z populations of a seam unit, no code, 6 backends × 256 shots | Error detection | P000 | P111 | Seam qubit flipped (010 / 101) |
+|---|---|---|---|---|
+| `nighthawk61r2` [19, 18, 20] | on | 0.514 | 0.157 | 0.06 / 0.27 |
+| | off | 0.232 | 0.377 | 0.27 / 0.12 |
+| `nighthawk61r2` [58, 57, 59] | on | 0.367 | 0.244 | 0.11 / 0.28 |
+| | off | 0.247 | 0.434 | 0.21 / 0.11 |
+| `nighthawk61r2` [11, 10, 12], cut | on / off | 0.354 / 0.363 | 0.327 / 0.310 | patches decorrelate (§10.7) |
+
+- **The lineage rule strands a partner on the crossbar.** A CX between two seam qubits runs in every simulator, and the crossbar pair becomes the sole authority of both. When one of them then couples into a patch, its authority moves there; its partner's stays on the crossbar, whose copy is correlated with a stale copy of the first. [48, 40, 56] in the preparation's order: 0.463 through the stack, 0.58 in the probe, against 1.00 for every other replica unit.
+- **The co-located step removes it, and with it the need for the schedule.** Moving the partner's authority to its copy in the same simulator, which shares the whole history, corrects [48, 40, 56] in the preparation's order (1.003) and every replica class of both registers (means 1.000–1.001); with the schedule as well it changes nothing (means 0.999–1.002). It costs nothing on the other classes. The schedule of §10.7 works around the same stranding from the circuit side; the co-located step fixes it in the decoder, for any order.
+- **The crossbar carries a seam-to-seam GHZ.** Pairs of seam qubits reach 0.99–1.01 under the code with the echo: the crossbar simulator holds a replica of every boundary qubit, so seam-to-seam circuits stay coherent across the whole boundary, as the source says. Bulk qubits have no crossbar replica, so the cut class (§10.7) stays.
+- **The error-detection gadget does not make the one-sided loss.** With it on or off, the seam qubit leaves its unit in about a third of shots, and which branch loses changes from backend to backend (P000 0.51 against P111 0.16 with it on, 0.23 against 0.38 off): a per-backend reconcile choice, not the gadget's forced ancilla measurement.
+- **Two readings of the source, not run.** `measure_shots_consensus` forces every qubit to its majority marginal across clones, which erases a GHZ's correlations (every marginal is ½): an XEB tool. `QrackAceBackend` turns `is_boundary_repetition_code` on by default since 2.29; `nighthawk_qrack.py` passes it off for comparability, so the uncorrected passes here are that choice, not ACE's default.
+
+### 10.9 The code before the echo (E26)
+
+`nighthawk_ghz.py stack --order code-echo` (README §3.6, METHODOLOGY §6.8) flips Layers 2 and S of §10.7: pass 1 (Layer 1a), Layer S from pass 1's syndrome alone, pass C (pass 1's circuit, realisations 1000–1003: the replica units under the code with its schedule, the cut units without as the control; bulk units keep pass 1), pass E (Layer 2 dd on every unit, the §8 model, L = 3, realisations 0–3 as in §10.7's pass 2, the code kept on the replica units). The drift arrives with its echo in both orders, so pass E runs §10.7's Layer V circuit on the replica units. `nighthawk61r2`, 256 shots × K = 4 per setting, exact reference 128 shots; container CPU, PyQrack 2.29.5 / Qrack 10.13.2; authority `lineage`. Mean F_GHZ (Lemma 4):
+
+| Units | Seam class, plan | Pass 1 (L1a) | C (L1a + code) | E (code + L2 dd) | Exact, E |
+|---|---|---|---|---|---|
+| off the seam (58) | bulk | 1.000 | 1.000 (pass 1) | 1.000 | 1.000 |
+| 1 seam CX (15) | replica, code | 0.770 | **1.000** | **1.000** | 1.001 |
+| 2 seam CXs, two seam qubits (2) | replica, code | 0.666 | **0.997** | **0.999** | 0.998 |
+| 2 seam CXs (7) | cut, control | 0.365 | 0.357 | 0.216 | 1.001 |
+
+| The two orders, `nighthawk61r2`, class means | Second measurement | Third measurement |
+|---|---|---|
+| echo, then code (§10.7): replica (17) | 0.660 (echo, no code) | 1.000 (V) |
+| code, then echo: replica (17) | **1.000** (C, code, no drift) | 1.000 (E) |
+| echo, then code: cut (7) | 0.228 | 0.154 (V, realisations 1000–1003) |
+| code, then echo: cut (7) | 0.357 (C, no drift) | 0.216 (E, realisations 0–3; §10.7 pass 2 on the same draws: 0.228) |
+
+| Per unit | Pass 1 | C | E |
+|---|---|---|---|
+| [48, 40, 56] (48→40 seam to seam; the code's schedule) | 0.669 | 0.993 | 1.003 |
+| [18, 10, 26] | 0.663 | 1.000 | 0.994 |
+| replica units, range | 0.59–0.94 | 0.993–1.008 | 0.994–1.005 |
+| cut units: coherence (C_parity), mean | — | 0.046 | 0.040 |
+
+- **Pass 1 alone plans the same correction.** Every replica unit lost more than 0.02 and 3σ in pass 1 (17 of 17 planned code, as with passes 1 and 2 in §10.7); the syndrome's classes are those of §10.7 (most-breaking qubit a seam qubit in 8 of 9). The seam-crossing fit is not identifiable from pass 1: its units have 1 or 2 crossings, one count per class, so `seam_model` now needs three counts and reports none.
+- **The code works without the echo, and the echo works on the code.** C takes the replica class from 0.770 to 1.000 before any drift is applied; E adds the drift and the Walsh echo and stays at 1.000 (E − C +0.000, exact − E +0.001). Theorem 1 holds on a corrected seam whichever layer comes first; with the code first, the echo never sees the replica error, so the dip of §10.7's pass 2 (0.660) does not occur.
+- **The cut class follows the drift, not the order.** Without drift a rerun moves it by 0.018 (C 0.357 against pass 1 0.365); with drift and echo it falls to 0.216, the same as §10.7's pass 2 on the same ε draws (0.228). Coherence stays at 0.04–0.05 throughout: no order of these layers gives ACE coherence between simulators.
+- **The final measurement does not depend on the order.** Replica 1.000 in V and in E, bulk 1.000 in both; the order decides only what the middle measurement shows and which passes the syndrome is read from.
+
+### 10.10 The Walsh echo window by window (E27)
+
+`nighthawk_ghz.py sweep` (README §3.6; run as `tiles` once per L, which is what `sweep` does): `nighthawk2p28`, 3-qubit chains, Layer 2 dd with L = 0 (none) to 8 windows of four Walsh segments each, the §8 model (T = 4.4); L = 8 once more under the boundary repetition code (lineage authority, the preparation's order). 256 shots × K = 4 per setting, ACE only (the exact reference under dd is ideal by Theorem 1, checked in §10.5); container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean over units:
+
+| L (windows) | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 8 | 8, code |
+|---|---|---|---|---|---|---|---|---|---|
+| off the seam (16), F_GHZ | 1.001 | 0.999 | 1.000 | 1.000 | 1.001 | 1.001 | 0.999 | 1.000 | 0.998 |
+| replica (9), F_GHZ | 0.779 | 0.753 | 0.720 | 0.722 | 0.724 | 0.714 | 0.722 | 0.705 | **0.999** |
+| replica, C = 2\|c\| | 0.697 | 0.642 | 0.621 | 0.622 | 0.613 | 0.621 | 0.608 | 0.596 | 0.998 |
+| replica, P0 + P1 | 0.862 | 0.865 | 0.819 | 0.823 | 0.835 | 0.806 | 0.836 | 0.814 | 1.000 |
+| cut (5), F_GHZ | 0.355 | 0.150 | 0.217 | 0.189 | 0.180 | 0.168 | 0.142 | 0.163 | 0.173 |
+| cut, P0 + P1 | 0.666 | 0.270 | 0.406 | 0.339 | 0.323 | 0.306 | 0.261 | 0.285 | 0.282 |
+| cut, C | 0.043 | 0.030 | 0.029 | 0.039 | 0.037 | 0.030 | 0.023 | 0.041 | 0.065 |
+
+- **Off the seam the echo is exact in every window.** F_GHZ 1.000 from L = 0 to 8: each window refocuses its own drift (Theorem 1), so nothing carries into the next.
+- **The replica loss is a step, not a decay.** 0.779 → 0.720 over the first two windows, then 0.705–0.724 to L = 8, although every window adds 8 seam crossings per unit (64 at L = 8). A fixed loss per crossing, as §10.6's fit across units suggests, would take L = 8 far below L = 2. Within one unit the seam qubit's replicas disagree once; further crossings add no more.
+- **The cut units fall to near the scrambled floor in the first window.** P0 + P1 0.666 → 0.270 at L = 1, then 0.26–0.41, against 2/8 = 0.25 for Z bits with no correlation left; the coherence is 0.02–0.04 at every L. The odd / even swing (0.270 at L = 1, 0.406 at L = 2) is within the backend-to-backend spread of 5 units × 4 backends.
+- **With the code the plateau is gone.** At L = 8 the replica units are at 0.999 and the cut units where they are without it (0.173).
+
+### 10.11 Protecting the cut units from Layer 2 (E28)
+
+A ZZ coupling between two qubits of a GHZ unit is a global phase on the GHZ (Z_iZ_j stabilises it, and every Walsh-flipped image of it: Corollary 2.1), yet on ACE it is two CXs through the seam wherever the coupling crosses one, and before every such CX ACE reconciles the seam qubit's replicas. `nighthawk_ghz.py probe` (README §3.6; run as a standalone script with the same circuits before it was folded in) puts the cut units of `nighthawk61r2` (all 7, every spread tiling) through Layer 2 dd, L = 3, the §8 model, with the inside ZZ applied several ways; 256 shots × K = 4 per setting, exact reference 128 shots; container CPU, PyQrack 2.29.5 / Qrack 10.13.2:
+
+| Cut units, `nighthawk61r2` (7) | F_GHZ | P0 + P1 | C | Per unit | Exact |
+|---|---|---|---|---|---|
+| no Layer 2 | 0.355 | 0.666 | 0.044 | 0.32–0.37 | — |
+| inside ZZ as CX · Rz · CX (`gate`, as in §10.5–10.9) | 0.205 | 0.379 | 0.030 | 0.05–0.30 | 1.001 |
+| the same, CX target on the seam qubit | 0.133 | 0.222 | 0.043 | 0.07–0.22 | — |
+| the same, CX target on the bulk qubit | 0.258 | 0.480 | 0.036 | 0.17–0.34 | — |
+| **inside ZZ dropped (`stab`)** | **0.353** | **0.669** | 0.038 | **0.34–0.37** | **1.001** |
+| chain preparation from one end, no Layer 2 | 0.332 | 0.646 | 0.017 | 0.32–0.34 | — |
+| chain preparation, inside ZZ as gates | 0.276 | 0.532 | 0.019 | 0.20–0.34 | — |
+| chain preparation, inside ZZ dropped | 0.333 | 0.650 | 0.016 | 0.32–0.35 | 1.002 |
+
+(A first run of the same variants with the units grouped by tiling gave gate 0.187, target on the seam qubit 0.168, on the bulk qubit 0.242, dropped 0.358, chain with gates 0.214: the gate variants scatter by ± 0.03–0.06 between runs, the dropped variants by ± 0.005.)
+
+`nighthawk_ghz.py --inside-zz stabilizer` makes the dropped variant the stack's rule. `stack` (§10.7's settings, `echo-code`, lineage authority with the code's schedule), mean F_GHZ:
+
+| Register, units | Seam class, plan | Pass 1 | Pass 2 (dd), gates (§10.7) | Pass 2 (dd), dropped | V, gates (§10.7) | V, dropped | Exact |
+|---|---|---|---|---|---|---|---|
+| `nighthawk2p28`, off the seam (16) | bulk | 1.000 | 1.000 | 1.001 | — | — | 0.997 |
+| `nighthawk2p28`, 1 seam CX (9) | replica, code | 0.770 | 0.720 | **0.781** | 1.001 | 0.999 | 1.001 |
+| `nighthawk2p28`, 2 seam CXs (5) | cut, control | 0.361 | 0.222 | **0.355** | 0.162 | **0.345** | 1.001 |
+| `nighthawk61r2`, off the seam (58) | bulk | 1.000 | 1.001 | 1.000 | — | — | 1.001 |
+| `nighthawk61r2`, 1 seam CX (15) | replica, code | 0.771 | 0.683 | **0.764** | 0.999 | 1.001 | 1.001 |
+| `nighthawk61r2`, 2 seam CXs, two seam qubits (2) | replica, code | 0.654 | 0.481 | **0.668** | 1.002 | 0.999 | 0.999 |
+| `nighthawk61r2`, 2 seam CXs (7) | cut, control | 0.347 | 0.228 | **0.355** | 0.154 | **0.362** | 1.000 |
+
+With the code first (`--order code-echo`, §10.9), `nighthawk61r2`, the same settings:
+
+| Units | Seam class, plan | Pass 1 | C (code) | E (code + dd), gates (§10.9) | E (code + dd), dropped | Exact, E |
+|---|---|---|---|---|---|---|
+| off the seam (58) | bulk | 1.000 | 1.000 (pass 1) | 1.000 | 1.001 | 1.000 |
+| 1 seam CX (15) | replica, code | 0.773 | 0.999 | 1.000 | 1.000 | 0.998 |
+| 2 seam CXs, two seam qubits (2) | replica, code | 0.626 | 0.994 | 0.999 | 1.004 | 0.999 |
+| 2 seam CXs (7) | cut, control | 0.356 | 0.353 | 0.216 | **0.352** | 1.003 |
+
+(Pass 1 and C are from the run with the inside ZZ dropped; §10.9's are within 0.01, except pass 1 of the two units with two seam qubits, 0.666 there: two units, four backends each. With the code first and the inside ZZ dropped, no class loses fidelity to Layer 2: E − C +0.002 on the replica units, −0.001 on the cut units.)
+
+(Pass 1 is from this run; §10.7's pass 1 is within 0.03 of it in every row. Cut units in V: \|V − pass 2\| 0.011 / 0.018, coherence 0.028 / 0.046 on `nighthawk2p28` / `nighthawk61r2`.)
+
+- **The drop under Layer 2 comes from the inside ZZ, and dropping it removes the drop.** With the inside ZZ dropped, the cut units keep their no-drift level through the echo (0.353 against 0.355; per unit 0.34–0.37), on ACE and in the stack on both registers (0.345–0.362 against 0.154–0.228 with the gates). The exact reference is the same with and without it (1.001, 1.002): the same circuit.
+- **The ½ ceiling stays.** C = 0.016–0.044 in every variant, so F_GHZ ≤ (P0 + P1)/2 ≈ 0.33–0.36. What the stabiliser rule protects is the level the preparation leaves, not coherence between simulators: that still needs a unit held by one simulator (§10.7) or the crossbar (§10.8).
+- **The replica units lose their echo dip too.** Pass 2 under dd is at pass 1's level (0.764 against 0.771, 0.668 against 0.654 on `nighthawk61r2`; 0.781 against 0.770 on `nighthawk2p28`), where the gates took it to 0.683, 0.481, 0.720. The code still takes them to the exact value in V; the stabiliser rule does not replace it, since the replica error is set in the preparation.
+- **Which qubit the CX targets matters, the preparation's root does not help.** Target on the bulk qubit 0.258, on the seam qubit 0.133, as the coupling lists it 0.205: neither choice keeps the no-drift level. Preparing the GHZ from one end instead of from the seam qubit gives 0.332 without drift, no better than the seam root (0.355).
+- **Scope.** The rule holds because the units are GHZ states, which is all `nighthawk_ghz.py` prepares; with a payload inside the unit (Layer 3) the inside ZZ is not a phase. On hardware the coupling is already invisible to a GHZ (Corollary 2.1); the rule only keeps ACE from turning that identity into seam crossings.
+
+### 10.12 The loom as the seam, ghost band (E29)
+
+> **Read with §10.14.** These runs use the ghost loom (`--loom-read ghost`, the only mode then). Each chip also simulates its partners' anchor qubits, so a 3-chain across a link is simulated whole on one chip; "Layer S's code" below reads it there. Nothing crosses the loom: as a hard cut (`--loom-read cut`, now the default) the same units sit at 0.50 in every pass, and 5-chains that no ghost band holds stay at 0.26 here too.
+
+`nighthawk_ghz.py stack --engine loom --order code-echo` (README §3.6, METHODOLOGY §6.8): `nighthawk61r2`'s 61 qubits as two chips of 30 and 31 qubits (`rect:1-8,2-5`, `rect:1-8,6-9`, broken qubits 17, 55, 62 out), the size of its two ACE patches, each an exact `QrackSimulator` with a ghost of every partner it is linked to (37 and 38 qubits), joined by `nighthawk_cloverfield.py`'s ghost loom on the 7 rows where `nighthawk61r2` has a coupler between columns 5 and 6: the field has `nighthawk61r2`'s coupling graph. Layer S's code on the loom is the loom's authority: a unit is read on the chip that holds copies of all its qubits; without it every qubit is read on its own chip, the chips sampled apart (the cloverfield's estimator). 3-qubit chains as in §10.9, 256 shots × K = 4 per setting, exact reference 128 shots; Layer 2 dd, L = 3, the §8 model; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ:
+
+| Units | Seam class, plan | Pass 1 (own chips) | C (authority read) | E (+ dd), gates | E (+ dd), inside ZZ dropped | Exact, E |
+|---|---|---|---|---|---|---|
+| off the seam (47) | bulk | 1.000 | 1.000 (pass 1) | 1.000 | 1.000 | 1.000–1.001 |
+| holding a link anchor, on one chip (22 / 21) | replica, clean | 1.000–1.002 | (pass 1) | 1.000 | 0.998–1.000 | 0.997–1.001 |
+| across a link, read inside a ghost band (13) | replica, code | **0.265** (0.250–0.280) | **1.000** | **0.996** (0.990–1.002) | **1.000** (0.996–1.005) | 0.999 |
+| no chip holds it | cut | — (none) | — | — | — | — |
+
+| Across a link (13), pass 1 → E | P0 + P1 | C = 2\|c\| |
+|---|---|---|
+| pass 1, every qubit on its own chip | 0.507 | 0.023 |
+| E, read on the covering chip, gates | — | 0.992 |
+| E, read on the covering chip, inside ZZ dropped | — | 1.000 |
+
+(The run with the inside ZZ dropped planned one more unit for the code, [11, 7, 15], a column chain on one chip at 1.001 in pass 1 that the 3σ test against its exact value flagged; its pass-1 mean over the 13 link-crossing units is 0.264. E with the inside ZZ as gates took 193 s, dropped 58 s, on 2 cores; pass 1 15 s, C 1 s.)
+
+| ACE (§10.9, §10.11) against the loom, `nighthawk61r2`, class means | Pass 1 | After the code | After code + echo, gates | … inside ZZ dropped |
+|---|---|---|---|---|
+| ACE, replica (17) | 0.76 | 1.00 | 1.00 | 1.00 |
+| ACE, cut (7) | 0.36 | 0.36 | 0.22 | 0.35 |
+| loom (ghost band), across a link (13) | 0.27 | 1.00 (read inside the band) | 1.00 | 1.00 |
+| loom (ghost band), cut | none | none | none | none |
+| loom as a hard cut, across a link (13; §10.14) | 0.50 | 0.50 | 0.50 | 0.50 |
+
+- **No 3-chain is cut, because the ghost band is two columns wide.** Each chip holds a ghost of every link anchor across from it, so a 3-chain through a link has two qubits on one side and the third as a ghost there: chip 0 simulates [col 4, col 5, ghost col 6], chip 1 [ghost col 5, col 6, col 7]. On ACE the seam is one column, replicated into both patches, and a chain [patch 0, seam, patch 1] has no simulator holding it (§10.7). Chains wider than the band are cut on the loom too (§10.14).
+- **Reading inside the band is not a correction across the loom.** Read on the chip whose band holds it, every link-crossing unit is at the exact value (1.000), where reading each qubit on its own chip gives 0.265 (P0 + P1 0.51, C 0.02). The 1.000 is the covering chip's own simulation of the whole unit: its ghost received every gate, the link CZ included, so the unit never crossed the loom. It says how wide the replica band is, not what the loom carries; the loom carries nothing (§10.14).
+- **The echo inside the band.** E stays at 0.996 with the inside ZZ as gates and 1.000 with it dropped: on the covering chip every inside coupling is exact, and the mean-field phases land only on copies that are not read.
+- **Against ACE.** ACE's seam is a slope: replica units keep part of their coherence through the reconciled replicas (0.55–0.95 before the code). The loom is a cliff: read on their own chips the crossing units have none (0.265 here, 0.50 as a hard cut, §10.14). The ghost band hides the cliff for the units it covers by simulating them whole on one chip, at the cost of each chip carrying its partners' anchors (37 and 38 qubits here).
+
+### 10.13 Two-patch ACE chips joined by the loom, ghost band (E30)
+
+> **Read with §10.14.** The loom here is the ghost loom (`--loom-read ghost`): "across the loom" units read 1.00 because one chip's ghost band simulates them whole, not because anything crosses the loom. ACE's numbers inside each chip are unaffected by the loom's mode.
+
+`nighthawk_ghz.py stack --engine loom --loom-chip-backend ace --loom-chips nighthawk61r2 nighthawk61r2 --order code-echo` (README §3.6, METHODOLOGY §6.8): two copies of `nighthawk61r2`, each on its stored two-patch ACE preset (the cloverleaf), side by side as a 122-qubit field, joined by `nighthawk_cloverfield.py`'s ghost loom on the 7 rows whose facing border pair are lattice neighbours (rows 1–5, 7, 8; row 6 of the second chip starts at the broken qubit 62). Each chip holds a ghost of each partner it is linked to on a free ACE site coupled to the anchor (simulator widths with ghosts 42 / 34 and 35 / 41, against 35 / 34 without). Two seams in one field: ACE's inside each chip and the loom's between them. Layer S's code is both decoders, ACE's boundary repetition code inside each chip (lineage authority, the code's schedule) and the loom's authority across; without it ACE runs uncorrected and every qubit is read on its own chip. 3-qubit chains, 256 shots × K = 4 per setting, exact reference 128 shots; Layer 2 dd, L = 3, the §8 model; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ (range of E in brackets):
+
+| Units | Pass 1 | C (code) | E (code + dd), gates | E (code + dd), inside ZZ dropped | Exact, E |
+|---|---|---|---|---|---|
+| off the seam (94) | 1.000 | 1.000 | 1.001 (0.991–1.010) | 1.001 (0.991–1.011) | 1.000 |
+| ACE replica, inside a chip (56; 34 coded, 22 on their host simulator) | 0.847 / 0.843 | 0.999 | **1.001** (0.988–1.011) | **1.000** (0.989–1.007) | 1.000–1.001 |
+| across the loom, read inside a ghost band (14) | 0.258 / 0.264 | 0.999 / 1.001 | **1.001** (0.995–1.006) | **0.999** (0.992–1.006) | 0.998–1.001 |
+| ACE cut (14: 7 per chip) | 0.356 | 0.360 / 0.356 | **0.205** (0.074–0.293) | **0.358** (0.346–0.375) | 1.000 |
+
+(Pass 1 and C per run, gates / dropped where they differ. Coherence C = 2\|c\| in E: 1.00 on every replica class, 0.04 on the cut units in both runs. Seconds on 2 cores: pass 1 392 / 390, C 253 / 219, E 1277 / 547.)
+
+| Same layers, `nighthawk61r2` class means: one ACE chip (§10.9, §10.11), two exact chips on the loom (§10.12), two ACE chips on the loom | Pass 1 | After the code | E, gates | E, inside ZZ dropped |
+|---|---|---|---|---|
+| one ACE chip, replica | 0.76 | 1.00 | 1.00 | 1.00 |
+| one ACE chip, cut | 0.36 | 0.36 | 0.22 | 0.35 |
+| two exact chips, across the ghost loom | 0.27 | 1.00 (inside the band) | 1.00 | 1.00 |
+| two ACE chips, ACE replica | 0.85 | 1.00 | 1.00 | 1.00 |
+| two ACE chips, across the ghost loom | 0.26 | 1.00 (inside the band) | 1.00 | 1.00 |
+| two ACE chips, cut | 0.36 | 0.36 | 0.21 | 0.36 |
+
+- **The two seams add.** Inside each chip ACE's seam behaves as on one chip (§10.9: 0.85 with the hosted replica units, 1.00 under the code); between the chips the ghost loom behaves as with exact chips (§10.12: 0.26 read apart, 1.00 read inside a ghost band, which is a whole-unit simulation on one chip, not a transfer across the loom). The ghost on an ACE chip sits on a free site coupled to its anchor, so the link CZ is a real gate inside one ACE simulator of that chip.
+- **ACE's cut class, once per chip.** No 3-chain across the loom is cut here, only because each is held by one chip's ghost band (§10.12, §10.14). The 14 cut units are `nighthawk61r2`'s 7 per chip: no ACE simulator holds them, coherence 0.04, F_GHZ ≤ ½. They lose 0.15 to the drift's inside ZZ under the echo (0.36 → 0.21), and keep their no-drift level with it dropped (0.358), as on one chip (§10.11).
+- **The echo is exact on every corrected unit, with or without seam protection.** E − C is +0.003 / 0.000 on the coded units; seam protection matters only for the cut units, and cuts pass E's time from 1277 s to 547 s.
+- **What the field shows and what it does not.** Twice the qubits and two ACE seams: every ACE class is where it is on one chip. Across the loom the 1.00 is the ghost band's; as a hard cut the same units are separable across the loom (§10.14).
+
+### 10.14 The loom as a hard cut, and what the ghost band does (E31)
+
+`nighthawk_ghz.py stack --engine loom` now models the loom as what it is between independent chip processes, a hard cut (`--loom-read cut`, the default): each chip an independent simulator with no copy of any qubit of the other, a link CZ reaching each side only as the mean-field phase π P(1) of the other (the cloverfield's `--loom mean`), every qubit read on its own chip. The ghost loom of §10.12–10.13 stays available as `--loom-read ghost`. `--order code-echo`, 3-qubit chains, 256 shots × K = 4 per setting, exact reference 128 shots (5-chains: 128 × 2, exact 64); Layer 2 dd, L = 3, the §8 model; container CPU, PyQrack 2.29.5 / Qrack 10.13.2.
+
+| Ghost loom, 5-qubit chains, two exact chips (`rect:1-8,2-5` + `rect:1-8,6-9`) | Units | Class | Pass 1 | C ("code") | E | Exact |
+|---|---|---|---|---|---|---|
+| across a link, 4 qubits on one side + 1 | 12 | replica: inside one chip's ghost band | 0.271 | **0.999** | **1.002** | 1.000 |
+| across a link, 2 + 3 | 12 | cut: no ghost band holds them | 0.272 | **0.265** | **0.263** (0.24–0.31) | 1.004 |
+| on one chip | 24 | bulk, replica | 1.000–1.001 | — | 1.000–1.001 | 1.002–1.003 |
+
+| Hard cut, two exact chips of 30 + 31 (`nighthawk61r2`'s qubits) | Units | Pass 1 | C | E, gates | E, inside ZZ dropped | Exact |
+|---|---|---|---|---|---|---|
+| on one chip | 69 | 1.001 / 1.000 | (pass 1) | 1.000 | 1.001 | 1.000 |
+| across a link | 13 | **0.502 / 0.506** | **0.499 / 0.500** | **0.499** | **0.502** | 1.000–1.001 |
+
+| Hard cut, two `nighthawk61r2` ACE chips (122 qubits) | Units | Pass 1 | C (ACE's code) | E, gates | E, inside ZZ dropped | Exact |
+|---|---|---|---|---|---|---|
+| off the seams | 116 | 1.001 / 0.999 | (pass 1) | 1.000 (0.99–1.01) | 1.001 (0.99–1.01) | 1.000 |
+| ACE replica, inside a chip | 34 | 0.749 / 0.755 | 1.001 / 1.000 | **1.000** (0.99–1.01) | **1.000** (0.99–1.01) | 0.998–1.006 |
+| ACE cut, inside a chip (7 per chip) | 14 | 0.361 / 0.354 | 0.364 / 0.355 | **0.201** (0.08–0.29) | **0.354** (0.33–0.38) | 1.000 |
+| across the loom | 14 | **0.501 / 0.499** | **0.504 / 0.499** | **0.498** (0.48–0.51) | **0.502** (0.48–0.53) | 0.997–0.999 |
+
+(Pass 1 and C per run: gates / dropped. Seconds on 2 cores, gates / dropped: pass 1 370 / 381, C 241 / 235, E 1218 / 507.)
+
+| A slope and a cliff: pass 1 per unit, two ACE chips, hard cut | F_GHZ | sd over units | Range | P0 + P1 | C = 2\|c\| | Under the drift (E, no protection) |
+|---|---|---|---|---|---|---|
+| ACE replica (the seam inside a chip) | 0.749 | 0.132 | 0.56–0.93 | 0.846 | 0.653 | 1.000 under the code |
+| ACE cut | 0.361 | 0.015 | 0.34–0.39 | 0.670 | 0.052 | 0.201 (0.08–0.29) |
+| across the loom | 0.501 | 0.008 | 0.48–0.51 | 0.502 | 0.500 | 0.498 (0.48–0.51) |
+
+- **Why the ghost loom looked like a perfect correction.** With ghosts, each chip also simulates its partners' anchor qubits and the loom replays every gate on them, the link CZ included, exactly. Each chip so simulates a band of two columns beyond its own edge, and a 3-chain across a link always lies inside one chip's band: read there, it is that chip's own exact simulation of the whole unit. Nothing crossed the loom. 5-chains test it: those with four qubits on one side lie in a band and read 0.999; those split 2 + 3 do not, and stay at 0.26 in every pass.
+- **A hard cut caps every unit across it at ½.** No entanglement crosses, so a unit across the loom is separable there, and F_GHZ ≤ ½ for any state separable across a cut (F_GHZ > ½ witnesses genuine multipartite entanglement). The hard cut sits exactly on the bound: each side is prepared perfectly, a Bell pair on one chip and a definite single-qubit state on the other, so P0 + P1 = ½ and C = ½ (the product of the two sides' own coherences), F_GHZ = 0.50 with a spread of shot noise (sd 0.008). No code lifts it, and the echo cannot lower it: across the cut the drift is a local phase on each side, which the fidelity's best phase θ absorbs.
+- **ACE's seam is a slope, the loom a cliff.** ACE keeps part of a unit's coherence through its reconciled replicas, so its seam loss is graded and unit-dependent (replica 0.56–0.93, sd 0.13), sensitive to the drift (the cut class 0.36 → 0.20) and partly correctable (replica → 1.00). The loom keeps none and loses none further: every unit across it is at 0.50, in every pass, with or without protection. The heatmaps show it as a neutral band two columns either side of the links, flat through all three layers, next to ACE's red slope around each chip's seam.
+- **Seam protection matters only inside ACE.** It holds ACE's cut units at their no-drift level (0.354 against 0.201) as on one chip (§10.11); across the hard cut there is nothing for the drift to damage.
+- **What would carry a GHZ state across the loom.** A transport gadget: a pair entangled across the two chips, consumed by measurement and classically controlled corrections (a teleported CZ). The measurement outcomes are classical and the loom can carry them, but the shared pair is a joint state of two chips, which independent chip simulators cannot hold. The ghost loom holds it by simulating the far side on the near chip, which is a wider replica band, not a channel. Until a joint state is simulated somewhere, every GHZ unit across the loom is capped at ½.
+
+### 10.15 QrackBridge in place of the loom (E32)
+
+`nighthawk_ghz.py stack --engine bridge` (README §3.6, METHODOLOGY §6.8) joins the same two exact chips as §10.14 (`rect:1-8,2-5` + `rect:1-8,6-9`, `nighthawk61r2`'s 61 qubits, 7 links) with PyQrack's `QrackBridge` (Claude and Dan Strano; `qrack_bridge.py` of PyQrack 2.30.2, loaded onto PyQrack 2.29.5 / Qrack 10.13.2) instead of the loom: one patch per chip, a gate across the cut teleported through a pair of bond qubits, the cut recompressed to at most `max_bonds` bond qubits (greedy truncation, eager). Each circuit's bridge holds its units' qubits (widest: 30, 15 per patch). `--order code-echo`, 3-qubit chains, 256 shots × K = 4 per setting, exact reference 128 shots; Layer 2 dd, L = 3, the §8 model; container CPU. Every unit across the bridge is class bridge (no code; C reruns it as the control). Mean F_GHZ:
+
+| `max_bonds` | Off the seam (69): pass 1 / E | Across the bridge (13): pass 1 | C | E | Exact | Peak bonds per cut | Truncating circuits (pass 1) | `fidelity_estimate`, truncating circuits |
+|---|---|---|---|---|---|---|---|---|
+| 6 | 1.000 / 1.000 | **1.000** | 1.000 | **1.001** (0.99–1.01) | 1.001 | 4 (5 in E) | 0 of 684 | — |
+| 2 | 1.000 / 1.000 | **0.849** | 0.851 | **0.851** (0.51–1.01) | 1.000 | 3 | 108 of 684 | down to 0.25 |
+| 1 | 1.000 / 1.000 | **0.736** | 0.735 | **0.735** (0.50–1.00) | 0.999 | 2 | 108 of 684 | down to 0.125 |
+| 1, inside ZZ dropped | 1.000 / 1.000 | 0.736 | 0.735 | 0.734 (0.50–1.00) | 0.998 | 2 | 108 of 684 | down to 0.125 |
+| 0 | 1.000 / 1.000 | **0.509** | 0.508 | **0.511** (0.50–0.52) | 0.999 | 1 | 216 of 684 | down to 0.0625 |
+| loom, hard cut (§10.14) | 1.001 / 1.000 | 0.502 | 0.499 | 0.499 | 1.001 | — | — | — |
+
+| E per unit, by how many units cross the cut in its circuit | 1 per circuit (3 units) | 3 per circuit (6) | 4 per circuit (4) |
+|---|---|---|---|
+| bonds an exact cut needs | 1 | 3 | 4 |
+| `max_bonds` 6 | 0.999 | 1.001 | 1.001 |
+| `max_bonds` 2 | 0.999 | 0.839 = (2 · 1 + ½) / 3 | 0.758 = (2 · 1 + 2 · ½) / 4 |
+| `max_bonds` 1 | 0.999 | 0.673 = (1 + 2 · ½) / 3 | 0.629 = (1 + 3 · ½) / 4 |
+| `max_bonds` 0 | 0.511 | 0.511 | 0.511 |
+
+(Seconds on 2 cores, pass 1 / E: 47 / 392 at 6, 40 / 294 at 2, 40 / 273 at 1, 43 / 81 at 1 with the inside ZZ dropped, 40 / 238 at 0.)
+
+- **The bridge carries entanglement across the cut.** At `max_bonds` 6 every unit across it is at the exact value through all three layers (1.000, 1.001 in E), with no truncation: a GHZ unit across the cut needs one bond qubit, a circuit with k such units k of them (Schmidt rank 2^k), here at most 4 (5 transiently while a drift coupling crosses). That is what the loom cannot do (§10.14), and what the ghost loom only imitated by simulating whole units on one chip (§10.12).
+- **Its capacity rations whole units.** With the cut's Schmidt values all equal, the greedy truncation keeps `max_bonds` units' worth of entanglement and drops the rest: per circuit, `max_bonds` units stay at 1.00 and the others become separable across the cut, at the hard-cut value ½. A unit's fidelity is so either 1.00 or 0.50, and the class mean is the share carried: (carried + ½ · dropped) / units, which the per-circuit table reproduces to 0.01. Units alone on the cut in their circuit are carried at any capacity ≥ 1.
+- **At zero capacity the bridge is the hard cut.** `max_bonds` 0 keeps one Schmidt value per cut: every unit across it at 0.51 in every pass, as the loom's hard cut (0.50).
+- **The echo and seam protection.** E equals pass 1 at every capacity: the drift's couplings across the cut are bridged gates, exact within the capacity, and a unit already dropped is separable, where the drift is a local phase. Dropping the inside ZZ changes no fidelity (0.734 against 0.735 at `max_bonds` 1); it saves the bridged gates (E 81 s against 273 s).
+- **Three seams, three shapes.** ACE's seam inside a chip is a slope: every replica unit keeps part of its coherence (0.56–0.93), the cut class none, and the drift erodes them (§10.14). The loom between independent chips is a cliff at ½. The bridge is a budget: entanglement crosses exactly up to `max_bonds` bond qubits per cut, so its fidelity falls in steps of whole units as the demand on the cut exceeds the capacity, from 1.00 to the cliff at 0.
+
+
+### 10.16 A closed box: six faces on a QrackBridge ring (E33)
+
+`nighthawk_ghz.py stack --engine bridge --box 5 5` (README §3.6, METHODOLOGY §6.8): the 98 lattice points on the surface of a 5 × 5 × 5 block, 192 couplers at unit distance, six circuits (base 25, front 12, right 12, lid 25, back 12, left 12 qubits; base and lid whole, the walls sharing the vertical edges round the box), each a QrackBridge patch, the six patches closed into a ring (`wrap=True`) in the order base → front → right → lid → back → left → base. Opposite faces sit three apart on the ring and share no edge, so of the 12 box edges six are a ring cut (base–front, front–right, right–lid, lid–back, back–left, left–base, the last one the ring's wrap cut) and six are relayed through the face between (base–right via front, front–lid via right, lid–left via back, base–back via left, front–left via base, right–back via lid), one bond on each of two cuts. 3-qubit chains along straight lines in x, y and z: 144 units in 18 circuits, 100 inside a face, 22 across a direct edge, 22 across a relayed edge (every one of the 44 cross-face couplers in one unit). Bipartite under x + y + z. `--order code-echo`, 256 shots × K = 4 per setting, exact reference 128 shots on one 98-qubit `QrackSimulator`; Layer 2 dd, L = 3, the §8 model; greedy truncation, eager; container CPU, `qrack_bridge.py` of PyQrack 2.30.2 on PyQrack 2.29.5 / Qrack 10.13.2. Each circuit's bridge holds its units' qubits, 9 per patch at most (widest bridge 54). Mean F_GHZ, pass 1 / C / E (exact E):
+
+| `max_bonds`, inside ZZ | Inside a face (100) | Direct edge (22) | Relayed edge (22) | E range across edges | Peak bonds per cut | Truncating circuits (pass 1 / E of 648) | `fidelity_estimate` min (E) | Seconds, pass 1 / C / E |
+|---|---|---|---|---|---|---|---|---|
+| 6, gate | 1.000 / 1.000 / 1.000 (1.001) | **0.998 / 1.001 / 1.001** (1.001) | **1.000 / 0.999 / 1.000** (0.999) | 0.99–1.01 | 4 (5 in E) | 0 / 0 | 1.000 | 136 / 86 / 819 |
+| 6, dropped | 1.000 / 1.000 / 1.000 (1.000) | 0.999 / 1.000 / 1.001 (0.999) | 0.999 / 0.999 / 1.001 (1.001) | 0.99–1.01 | 4 | 0 / 0 | 1.000 | 139 / 84 / 194 |
+| 2, gate | 1.000 / 1.000 / 1.000 | **0.763 / 0.777 / 0.768** (1.000) | **0.843 / 0.835 / 0.812** (1.001) | 0.50–1.01 | 3 | 144 / 180 | 0.036 | 67 / 16 / 473 |
+| 2, dropped | 1.000 / 1.000 / 1.000 | 0.772 / 0.761 / 0.773 (1.001) | 0.840 / 0.847 / 0.840 (1.000) | 0.50–1.01 | 3 | 144 / 144 | 0.063 | 70 / 16 / 138 |
+| 1, gate | stopped in pass E: the ring's truncation zeroed the state (0 / 0, then an SVD that does not converge) | | | | 2 | 288 / — | — | — |
+| 1, dropped | 1.000 / 1.000 / 1.000 | **0.667 / 0.657 / 0.668** (1.000) | **0.691 / 0.692 / 0.696** (1.000) | 0.50–1.01 | 2 | 288 / 288 | 0.016 | 84 / 15 / 129 |
+| 0, gate | stopped in pass E, as at 1 | | | | 1 | 432 / — | — | — |
+| 0, dropped | 1.000 / 1.000 / 1.000 | **0.509 / 0.509 / 0.508** (1.001) | **0.509 / 0.509 / 0.510** (0.999) | 0.50–0.52 | 1 | 432 / 432 | 0.004 | 61 / 11 / 127 |
+
+E per box edge (units):
+
+| Edge | Ring cuts | Units | 6 | 6, dropped | 2 | 2, dropped | 1, dropped | 0, dropped |
+|---|---|---|---|---|---|---|---|---|
+| back–left | 1 | 3 | 1.002 | 1.002 | 1.002 | 1.002 | 0.835 | 0.510 |
+| front–right | 1 | 3 | 1.000 | 1.001 | 1.001 | 1.001 | 0.837 | 0.507 |
+| base–front | 1 | 4 | 1.000 | 1.001 | 0.973 | 0.960 | 0.755 | 0.511 |
+| base–left (wrap cut) | 1 | 4 | 1.000 | 1.000 | 0.731 | 0.774 | 0.646 | 0.505 |
+| right–lid | 1 | 4 | 1.001 | 1.003 | 0.510 | 0.509 | 0.508 | 0.509 |
+| lid–back | 1 | 4 | 1.000 | 1.001 | 0.509 | 0.508 | 0.510 | 0.509 |
+| right–back via lid | 2 | 3 | 0.999 | 1.001 | 1.001 | 1.001 | 0.836 | 0.506 |
+| front–left via base (and the wrap cut) | 2 | 3 | 1.000 | 0.997 | 0.778 | 0.999 | 0.819 | 0.509 |
+| front–lid via right | 2 | 4 | 1.002 | 1.004 | 1.003 | 1.003 | 0.754 | 0.509 |
+| lid–left via back | 2 | 4 | 0.997 | 1.002 | 0.999 | 0.995 | 0.753 | 0.512 |
+| base–right via front | 2 | 4 | 0.998 | 0.998 | 0.534 | 0.522 | 0.512 | 0.509 |
+| base–back via left (and the wrap cut) | 2 | 4 | 1.002 | 1.002 | 0.598 | 0.598 | 0.567 | 0.513 |
+
+The demand on a cut is the number of units of one circuit crossing it. The z-chain circuits load four cuts with four units each, two direct and two relayed: base|front (base–front, base–right via front), right|lid (right–lid, front–lid via right), lid|back (lid–back, lid–left via back) and the wrap cut left|base (base–left, base–back via left). Every other cut of every circuit carries at most 2. E over the 8 units at each demand-4 cut, against the budget (min(d, max_bonds) · 1 + the rest · ½) / d of §10.15:
+
+| Cut (demand 4) | `max_bonds` 2, gate | 2, dropped | 1, dropped | Budget at 2 / at 1 |
+|---|---|---|---|---|
+| base \| front | 0.754 | 0.741 | 0.633 | 0.750 / 0.625 |
+| right \| lid | 0.756 | 0.756 | 0.631 | 0.750 / 0.625 |
+| lid \| back | 0.754 | 0.752 | 0.632 | 0.750 / 0.625 |
+| left \| base, the wrap cut | **0.665** | **0.686** | **0.607** | 0.750 / 0.625 |
+| front–left via base, 2 units, demand 2 on base \| front and the wrap (pass 1 → E) | 1.002 → **0.666** | 1.005 → 1.000 | — | 1 at 2 |
+
+`bridge_ring_repro.py` (in this folder) takes the last row apart: the two front–left chains of that circuit, gate for gate, on a 24-qubit bridge of six patches, ring against open chain (where the same gates relay the long way, through four cuts):
+
+| `max_bonds` | Ring: `fidelity_estimate`, F_GHZ of the two chains (`out_ket`) | Open chain |
+|---|---|---|
+| 0 | the state vanishes in some runs (0 / 0 in the recompression); else 0.016, 0.50 / 0.50 | 0.250, 0.50 / 0.50 |
+| 1 | 0.250, **0.50 / 0.50** | 0.500, **1.00** / 0.50 |
+| 2 | **0.499** | 1.000 |
+| 3 | 1.000 | 1.000 |
+
+- **The box closes, and at capacity every edge is exact.** With `max_bonds` 6 (the peak demand is 4 bond qubits per cut, 5 while a drift coupling crosses) all 44 units across a box edge stay at the exact value through the three layers, 1.000 and 1.001 in E, the 22 relayed through a third face as the 22 on a direct cut; the bridge truncates nothing. Relaying costs bonds, one on each cut it passes, and no fidelity while they are there.
+- **Below capacity the inner cuts ration whole units, as between two chips.** At the three demand-4 inner cuts the mean is the §10.15 budget, 0.754 / 0.756 / 0.754 against 0.750 at `max_bonds` 2 and 0.63 against 0.625 at 1: per circuit `max_bonds` units keep their GHZ at 1.00 and the rest drop to the separable ½. Which keep it is the greedy truncation's choice between equal Schmidt values: here the relayed units at right|lid and lid|back (front–lid and lid–left stay at 1.00, right–lid and lid–back drop to 0.51), the direct one at base|front (base–front 0.97, base–right via front 0.53). Units alone or in pairs on their cuts keep 1.00 at 2 and 0.75–0.84 at 1.
+- **The ring's wrap cut is below the budget.** left|base: 0.665 / 0.686 at 2 (budget 0.750), 0.607 at 1 (0.625). QrackBridge truncates the wrap cut by a local SVD of its two patches, which on a ring is not the projection on the kept Schmidt vectors (a periodic MPS has no canonical form; the bridge's notes say its truncation there is locally optimal only and its `fidelity_estimate` an estimate). Within capacity it should cost nothing and it does: the two front–left chains through the wrap keep 1.00 in pass 1 and fall to 0.67 in E at `max_bonds` 2, when the drift's CX · Rz · CX cross the wrap again. Dropping the inside ZZ keeps those gates off the bridge and the chains at 1.00. The repro shows the same at 1 (the ring carries neither chain where the open chain carries one) and at 2 (`fidelity_estimate` 0.5 against 1.0).
+- **At 0 and 1 the ring can zero the state.** With the inside ZZ as gates, pass E stopped at `max_bonds` 1 and 0: a truncation of the wrap cut and of an inner cut kept opposite branches of tied GHZ units, the contracted state was zero, its renormalisation divided 0 / 0 and the NaN state broke the next SVD. Which branch a tie keeps follows rounding, so the same circuit vanishes in some runs and not in others. `nighthawk_ghz.py` now raises numpy's divide and invalid errors inside every bridge circuit and stops with the circuit named, so a NaN state is never sampled. With `--inside-zz stabilizer` no bridged gate runs in E and both capacities complete.
+- **At 0 the ring is the hard cut.** Every unit across an edge at 0.51 in every pass and on every edge, relayed or not, as the two-chip bridge at 0 (0.511) and the loom's hard cut (0.50).
+- **The echo and seam protection.** E equals pass 1 wherever the ring's wrap is not involved: inside the faces 1.000 in every run, across the edges within 0.01 of pass 1 at 6 and at the inner cuts. Dropping the inside ZZ saves the bridged gates in E (194 s against 819 s at 6, 138 s against 473 s at 2).
+
+
+### 10.17 Shor's code across QrackBridge (E34)
+
+`nighthawk_ghz.py shor` (README §3.6, METHODOLOGY §6.8) puts Shor's [[m², 1, m]] code across QrackBridge in place of a GHZ chain, encoded as `nighthawk_qrack.py shor9` encodes it (§10.3, E20). Every m × m placement whose encoder CXs are couplers runs in its own circuit, with all four logical states, and raw and decoded success are measured against an exact `QrackSimulator` of the unit. There are two geometries:
+
+- Nighthawk's 117 sites as two exact chips, `rect:0-11,0-5` + `rect:0-11,6-9` (70 + 47 qubits, 11 links on rows 0–4 and 6–11).
+- The 5 × 5 × 5 box of §10.16 (six patches on a ring), where a unit bends over the box edge it crosses.
+
+The cut meets a unit in one of three ways:
+
+- inside one circuit;
+- between its blocks: only leader-to-leader CXs cross, as E20's `patch_blocks`;
+- through its blocks: every block's own CXs cross, as E20's `seam_leaders`.
+
+Runs used 1024 shots per logical state (Shor-25: 256), exact 256 (128), greedy truncation, eager recompression, container CPU. Shor-9 and Shor-16 take 1.5–11 s per run on 2 cores; Shor-25 across the cut takes 194–323 s, almost all of it in the bridge's sampler over 2^20 outcomes for the X-basis readout. The default two chips (`rect:1-8,2-5` + `rect:1-8,6-9`, 61 qubits, 5 + 5 crossing units) gave the same numbers as the 117-qubit pair to 0.01.
+
+Shor-9, decoded logical Z / logical X (logical Z is the mean of \|0_L⟩ and \|1_L⟩; logical X of \|+_L⟩ and \|−_L⟩). Raw logical Z of the through-blocks units is in brackets:
+
+| `max_bonds` | Chips: inside (88) | Chips: between (12) | Chips: through (12) | Box: inside (48) | Box: between (24) | Box: through, not the wrap (18) | Box: through the wrap cut (6) |
+|---|---|---|---|---|---|---|---|
+| 6 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 (1.000) / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 (1.000) / 1.000 | 1.000 / 1.000 |
+| 3 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 (1.000) / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 (1.000) / 1.000 | 1.000 / 1.000 |
+| 2 | 1.000 / 1.000 | 1.000 / 1.000 | **1.000 (0.506)** / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | **1.000 (0.502)** / 1.000 | **0.807** / 1.000 |
+| 1 | 1.000 / 1.000 | 1.000 / 1.000 | **0.745 (0.502)** / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | **0.752 (0.495)** / 1.000 | 0.728 / 1.000 |
+| 0 | 1.000 / 1.000 | 1.000 / **0.495** | **0.495 (0.497)** / 1.000 | 1.000 / 1.000 | 1.000 / **0.498** | **0.503 (0.497)** / 1.000 | 0.501 / 1.000 |
+
+At `max_bonds` 0 on the box, 3 of the 384 logical-state circuits vanished on the ring's truncation (§10.16): two through the wrap, one between blocks. They are not scored. Exact reference: 1.000 for every unit and state.
+
+Bond qubits per cut that the prepared state keeps at full capacity (the most over the units):
+
+| Code | Between blocks: \|0/1_L⟩ / \|±_L⟩ | Through blocks: \|0/1_L⟩ / \|±_L⟩ |
+|---|---|---|
+| Shor-9 | 0 / 1 | 3 / 2 |
+| Shor-16 | 0 / 1 | 4 / 3 |
+| Shor-25 (one unit each, `max_bonds` 6) | 0 / 1 | 5 / 4 |
+| Shor-9 on the box, a unit through the wrap cut | 1 / 1 | 3 / 3 |
+
+Through blocks, decoded logical Z against the majority vote over m block signs, with min(m, `max_bonds`) carried and the rest coin flips (ties ½). Raw is in brackets: for odd m the parity of all outcomes, for even m the first block's sign:
+
+| `max_bonds` | Shor-9, chips (12) | Majority | Shor-16, chips (11) | Majority | Shor-25, chips (8) | Majority |
+|---|---|---|---|---|---|---|
+| 4 | — | — | 1.000 (1.000) | 1 | — | — |
+| 3 | 1.000 (1.000) | 1 | 1.000 (1.000) | 1 | **1.000** (0.495) | 1 |
+| 2 | 1.000 (0.506) | 1 | **0.874** (1.000) | 0.875 | **0.875** (0.501) | 0.875 |
+| 1 | **0.745** (0.502) | 0.750 | **0.688** (1.000) | 0.688 | **0.677** (0.497) | 0.688 |
+| 0 | 0.495 (0.497) | 0.500 | 0.502 (0.502) | 0.500 | — | 0.500 |
+
+Against ACE's seam (§10.3, E20, the 3 × 3 register):
+
+| Seam | Between blocks: logical Z / X | Through blocks: logical Z / X |
+|---|---|---|
+| ACE, `long_range_columns = 1` (E20) | 1.000 / 0.486 | 0.499 / 0.669 |
+| QrackBridge, `max_bonds` 0 | 1.000 / 0.495 | 0.495 / 1.000 |
+| QrackBridge, `max_bonds` 1 | 1.000 / 1.000 | 0.745 / 1.000 |
+| QrackBridge, `max_bonds` ≥ m | 1.000 / 1.000 | 1.000 / 1.000 |
+
+- **What crosses is countable.**
+  - Cut between blocks: \|0_L⟩ and \|1_L⟩ are products of block states, so they need no bond. \|±_L⟩ is their superposition and needs one, which is the logical coherence itself.
+  - Cut through blocks: every split block's GHZ needs one bond for \|0/1_L⟩ (m in all), and m − 1 for \|±_L⟩.
+  - The bridge keeps exactly these at capacity, and every unit stays at 1.000.
+- **Short of capacity, the bridge drops whole blocks, and the code corrects that.**
+  - A dropped block keeps its bits and loses its sign. \|±_L⟩, read in Z, stays at 1.000 at any capacity; \|0/1_L⟩, read in X, sees m − `max_bonds` random block signs.
+  - The decoder's majority vote then gives what counting predicts: Shor-9 0.745 at 1 (0.750), Shor-16 0.874 / 0.688 at 2 / 1 (0.875 / 0.688), Shor-25 0.875 / 0.677 at 2 / 1 (0.875 / 0.688).
+  - Up to ⌊(m − 1)/2⌋ blocks short, the raw parity is 0.50 and the decoded value 1.000: Shor-9 at 2, Shor-16 at 3, Shor-25 at 3 (two blocks short). The bridge's truncation is the error the code is built for: a block-sign error confined to whole blocks.
+  - ACE's seam is different (E20: decoding cannot repair it). There, every block through the seam loses part of its coherence at once, and part of its bits too (logical X 0.67).
+- **At 0 the bridge is ACE's seam on the side that needs coherence.**
+  - Between blocks, logical X is 0.495 (ACE 0.486); through blocks, logical Z is 0.495 (ACE 0.499).
+  - On the side that needs only bits, the bridge keeps 1.000 where ACE drops to 0.669: a hard cut destroys coherence across it, while ACE's seam also scrambles populations.
+- **On the box, direct and relayed edges are alike; the wrap cut is again the exception.**
+  - Units across a direct or a relayed edge give the chips' numbers.
+  - Through-blocks units across the ring's wrap cut fall below the count at 2 (0.807 against 1.000), and at 1 (0.728 against 0.750). They keep a bond more than they need (3 for \|±_L⟩, 1 for \|0/1_L⟩ between blocks), and at 0 some circuits vanish (§10.16).
+
 ---
 
 ## 11. Cloverfield (E13)
@@ -834,6 +1398,11 @@ Our Nighthawk two-patch registers, 3 seam qubits each (release prefixes; `nn_qab
 | ladder n = 49, 53, 57; n ≥ 40 with 3 instances | EPYC |
 | 45-qubit ladder, Haar, d = 20 | not finished |
 | `fxeb` ladder, n = 32 | EPYC (48 GiB reference) |
+| a noise knob ACE's seam loss follows (E23): ACE's own thresholds (`_epsilon`, `_rot_epsilon`) | not tried: the gate-level amplifiers (CX, ZZ-echo and global folding) do not scale it; the boundary repetition code is not a noise level but a correction (§10.7) |
+| Layer 2 at the paper's K = 32 (E22); Layer 1b and the OTOC on ACE | not run here: K = 4; 1b and OTOC only in the numpy reference |
+| ACE's lineage authority after a seam-to-seam CX (E24, E25) | the crossbar pair becomes the sole authority and a partner stays there when the other qubit couples into a patch; `nighthawk_ghz.py` schedules around it (`--code-schedule`) or moves the partner along (`--code-authority colocated`). To report upstream: the co-located step in `_update_lineage`, with `nighthawk61r2` [48, 40, 56] (0.463 → 1.003) |
+| GHZ across two ACE simulators (E24) | no coherence by construction (replicas and classical shadows only): a chip-wide GHZ on a register of two or more patches is not correctable on ACE |
+| GHZ chip-wide on `nighthawk61r2` (E21) | stabilizer patches leave the tableau in ACE's sampler on PyQrack 2.29.5 / Qrack 10.13.2: test on the EPYC build |
 | Hamming ladder n = 45–57 and `nighthawk61r2` (E18) | EPYC: README §7 recipe; 57 needs 64 GiB patches, 61 RAM + swap (≈ 385 GiB) |
 | VQE ladder n = 28–61 (E19) | EPYC: README §7 recipe; numpy circuit reference to 28–30 there (`--vqe-exact-max`, 4–16 GiB), Lanczos E₀ to 26–28 |
 | `QrackSimulator.measure_shots` beyond 31 qubits (PyQrack 2.28.1) | returns bits 0–31 only (a qubit above 31 reads 0; `QrackAceBackend` returns all); reproducer: `QrackSimulator(40)`, `x(35)`, `measure_shots(range(40), 3)` gives 0. `shor9` samples per unit; the exact engine now refuses to draw shots above 32 qubits instead of returning truncated ones. To report upstream |
