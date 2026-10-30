@@ -43,26 +43,26 @@ Figures (one window each; --save writes PNGs too):
      unit's square filled by its weaker logical basis and labelled Z / X / impossible share.
      The map is the run's shor9_map record; older runs' maps are rebuilt (release + PyQrack)
 
- 18  ghz tiles (nighthawk_ghz.py tiles) on the lattice: per register, unit size and Layer 2 mode, each site
+ 18  ghz tiles (nighthawk_qrack.py ghz tiles) on the lattice: per register, unit size and Layer 2 mode, each site
      coloured by the mean fidelity of the units holding it (F_GHZ of the formal proof's Lemma 4, else the
      Clifford witness), seam qubits and lines, couplers by class
  19  ghz tiles: mean fidelity by placement (off the seam; holding a seam qubit with k CXs through the seam),
      one bar per Layer 2 mode (none, unmitigated, compensated, dd = Walsh echo), the exact reference as a tick
  20  ghz tiles: every unit's ACE fidelity against its exact reference, one panel per Layer 2 mode, by placement
- 21  ghz chip (nighthawk_ghz.py chip): per register, tree and Layer 2 mode, each site's share of Z shots that
+ 21  ghz chip (nighthawk_qrack.py ghz chip): per register, tree and Layer 2 mode, each site's share of Z shots that
      differ from the state's majority, the tree's CXs, the breaking ones labelled, the root
- 22  engines (nighthawk_ghz.py stack / tiles with --engine loom|bridge, --box L H): mean F_GHZ per placement
+ 22  engines (nighthawk_qrack.py ghz stack / tiles with --engine loom|bridge, --box L H): mean F_GHZ per placement
      (inside a chip or face; across the loom, the bridge, a box edge direct / relayed, through the box ring's
      wrap cut) against QrackBridge max_bonds, one panel per geometry, the loom's hard cut at the left
- 23  shor across QrackBridge (nighthawk_ghz.py shor): decoded logical Z and X per geometry and code size
+ 23  shor across QrackBridge (nighthawk_qrack.py ghz shor): decoded logical Z and X per geometry and code size
      against max_bonds, by how the cut meets the code (inside one circuit, between blocks, through blocks,
      through the wrap cut), with the majority-over-block-signs prediction min(m, max_bonds)
- 24  dual Nighthawk R1 (nighthawk_ghz.py dual, arXiv:2610.29986): every state's fidelity under each model
+ 24  dual Nighthawk R1 (nighthawk_qrack.py ghz dual, arXiv:2610.29986): every state's fidelity under each model
      (hard cut, exact bridge, constituent budget, measured distant CZ) with IBM's raw and mitigated values
- 25  dual Nighthawk R1 heatmap (nighthawk_ghz.py dualmap): both 12 x 10 modules (B turned 180 degrees), the
+ 25  dual Nighthawk R1 heatmap (nighthawk_qrack.py ghz dualmap): both 12 x 10 modules (B turned 180 degrees), the
      L-qubits and their cables labelled with the distant-CZ fidelity, each site the lowest F_GHZ of the
      3-qubit chains through it, one panel per model
- 26  Layer 3, Shor order finding (nighthawk_ghz.py shoralg) on QrackBridge: per geometry, N, a and counting width,
+ 26  Layer 3, Shor order finding (nighthawk_qrack.py ghz shoralg) on QrackBridge: per geometry, N, a and counting width,
      the per-shot factoring success (the order found where r is odd) of every layout and placement against max_bonds,
      the ideal circuit and a uniform guess as lines, the bonds the rule needs (ceil(log2 r) + 1 across the registers)
  27  the same, the total variation distance to the ideal distribution (shot-noise floors dotted)
@@ -82,14 +82,14 @@ with --shor; views 14-16 need no BlueQubit release. --table FILE also writes
 FILE_shor9.csv (one row per code, layout and setup, and one per register unit, with the top
 wrong patterns) and prints the shor9 summary.
 
-ghz records (`nighthawk_ghz.py chip|tiles --out`) are found in the harvested *.jsonl or given with --ghz;
+ghz records (`nighthawk_qrack.py ghz chip|tiles --out`) are found in the harvested *.jsonl or given with --ghz;
 views 18-21 need no BlueQubit release (the register map comes from the run's ghz_map record). --table FILE
 also writes FILE_ghz.csv (one row per state: Layer 1a numbers in the reference implementation's names, ACE
 and exact, the Layer 2 model, placement, and the engine: engine, loom_read, chip_backend, chips, max_bonds,
 truncation, lazy_bonds, box, box_edge, box_cuts, chips_spanned, inside_zz, stack_order, stack_pass,
 seam_class, seam_plan) and prints the ghz summary.
 
-shor_bridge, dual_r1 and dual_map records (nighthawk_ghz.py shor / dual / dualmap --out) are read the same
+shor_bridge, dual_r1 and dual_map records (nighthawk_qrack.py ghz shor / dual / dualmap --out) are read the same
 way; --table FILE writes FILE_shorbridge.csv (one row per unit: layout, hops, wrap, bonds kept for Z and X,
 decoded and raw per logical state), FILE_dual.csv (one row per state and model, with IBM's values) and
 FILE_dualmap.csv (one row per chain and model) and, for shor_alg records, FILE_shoralg.csv (one row per circuit), and
@@ -1251,17 +1251,17 @@ def shor_setup(r):
     sht = f"py {pv}" if r.get("qrack") else "py ?"
     if shor_brep(r):
         lng, sht = lng + ", boundary code", sht + " brep"
-        if r.get("code_authority") == "colocated":                   # nighthawk_ghz.py --code-authority
+        if r.get("code_authority") == "colocated":                   # nighthawk_qrack.py ghz --code-authority
             lng, sht = lng + " (co-located)", sht + " coloc"
         if r.get("stack_pass") in ("V", "C", "E") and r.get("code_schedule") is False:   # --code-schedule off
             lng, sht = lng + ", preparation order", sht + " prep"
-    eng = engine_setup(r)                                              # nighthawk_ghz.py --engine loom / bridge, --box
+    eng = engine_setup(r)                                              # nighthawk_qrack.py ghz --engine loom / bridge, --box
     if eng:
         lng, sht = lng + ", " + eng[0], sht + " " + eng[1]
-    if r.get("stack_order") == "code-echo":                            # nighthawk_ghz.py stack --order code-echo
+    if r.get("stack_order") == "code-echo":                            # nighthawk_qrack.py ghz stack --order code-echo
         lng, sht = lng + ", code first", sht + " ce"
     l2 = r.get("layer2")
-    if isinstance(l2, dict) and l2.get("inside_zz") == "stabilizer":   # nighthawk_ghz.py --inside-zz stabilizer
+    if isinstance(l2, dict) and l2.get("inside_zz") == "stabilizer":   # nighthawk_qrack.py ghz --inside-zz stabilizer
         lng, sht = lng + ", inside ZZ by stabiliser", sht + " zzstab"
     if r.get("device") == "gpu":
         lng += ", OpenCL" + (" (sync)" if r.get("ocl_sync") else "")
@@ -1270,7 +1270,7 @@ def shor_setup(r):
 
 
 def engine_setup(r):
-    """(long, short) label of a nighthawk_ghz.py record's seam engine, or None on ACE: the loom (hard cut or ghost,
+    """(long, short) label of a nighthawk_qrack.py ghz record's seam engine, or None on ACE: the loom (hard cut or ghost,
     exact or ACE chips) or QrackBridge (max_bonds, truncation, lazy bonds), on chips or on the closed box."""
     lo = r.get("loom")
     if not isinstance(lo, dict):
@@ -1752,7 +1752,7 @@ def print_shor_summary(store):
 
 
 # ================================================================== ghz (views 18-21)
-# Records of `nighthawk_ghz.py chip|tiles --out`: one ghz per state (chip: per tree; tiles: per unit) and one
+# Records of `nighthawk_qrack.py ghz chip|tiles --out`: one ghz per state (chip: per tree; tiles: per unit) and one
 # ghz_map per run (the register as placed, the shor9_map format plus the sublattice). The formal proof's Layer 1a
 # numbers in the reference implementation's names (P0, P1, C_parity, Phi_coh, F_GHZ, lambda_per_block), the
 # same prefixed exact_ from the exact reference, and `layer2` (mode none / unmitigated / compensated / dd).
@@ -1765,7 +1765,7 @@ GHZ_MODE_COLOR = {"none": "#7f7f7f", "unmitigated": "C3", "compensated": "C1", "
 
 def read_ghz(paths, test="ghz"):
     """Every ghz (or ghz_map) record in these files, once each (the same file may be harvested and given). Layer V's
-    control records of nighthawk_ghz.py stack (pass 2's circuit rerun without the code) are left out: they repeat
+    control records of nighthawk_qrack.py ghz stack (pass 2's circuit rerun without the code) are left out: they repeat
     pass 2; so are --order code-echo's pass C control records (they repeat pass 1). Its corrected records (boundary_rep true) stay, under their own setup (", boundary code")."""
     out, seen = [], set()
     for p in paths:
@@ -1799,7 +1799,7 @@ def ghz_mode(r):
 
 def ghz_F(r, prefix=""):
     """(name, value) of a record's fidelity: F_GHZ (Lemma 4) where measured, else the witness bound. Records of
-    nighthawk_ghz.py's first version name them f_exact (the fidelity to GHZ_0, from k angles) and f_witness."""
+    nighthawk_qrack.py ghz's first version name them f_exact (the fidelity to GHZ_0, from k angles) and f_witness."""
     for k in ("F_GHZ", "F_witness", "f_exact", "f_witness"):
         v = r.get(prefix + k)
         if v is not None:
@@ -1818,7 +1818,7 @@ def ghz_chips_of(r):
 
 def ghz_place(r):
     """(sort key, label) of a tile's placement: off the seam, or holding a seam qubit with k CXs through it; with
-    nighthawk_ghz.py's seam engines: inside one chip (or box face), or across the loom / the bridge (on the box:
+    nighthawk_qrack.py ghz's seam engines: inside one chip (or box face), or across the loom / the bridge (on the box:
     a direct ring cut, or relayed through a face, and whether the ring's wrap cut is among them)."""
     lo = r.get("loom")
     if isinstance(lo, dict):
@@ -1868,7 +1868,7 @@ def ghz_chips(recs):
 
 
 def ghz_register_map(store, reg):
-    """The register as nighthawk_ghz.py placed it: the newest ghz_map record, else the shor9 map (same
+    """The register as nighthawk_qrack.py ghz placed it: the newest ghz_map record, else the shor9 map (same
     placement: the register's ACE preset), else None."""
     recs = [r for r in store.ghz_maps if r.get("register") == reg]
     if recs:
@@ -2145,7 +2145,7 @@ def fig_ghz_chip(plt, store):
 
 
 # ================================================================== the seam engines, Shor across the bridge, the dual Nighthawk R1
-# (views 22-25). Records of nighthawk_ghz.py: ghz / ghz_stack with `loom` (engine loom or bridge: chips, read cut /
+# (views 22-25). Records of nighthawk_qrack.py ghz: ghz / ghz_stack with `loom` (engine loom or bridge: chips, read cut /
 # ghost / bridge, chip backend, bridge max_bonds / truncation / lazy_bonds, box L, H, ring, edges) and per unit `box`
 # (faces, edge, ring cuts); shor_bridge + shor_map (shor); dual_r1 (dual), dual_map + dual_map_layout (dualmap).
 
@@ -2262,7 +2262,7 @@ SHOR_BRIDGE_COLOR = {"inside one circuit": "#7f7f7f", "cut between blocks": "C0"
 
 
 def fig_shor_bridge(plt, store):
-    """23: Shor's code across QrackBridge (nighthawk_ghz.py shor): per geometry and code size, the mean decoded
+    """23: Shor's code across QrackBridge (nighthawk_qrack.py ghz shor): per geometry and code size, the mean decoded
     logical Z (solid) and logical X (dashed) of each way the cut meets the code against max_bonds, with the majority
     count over the block signs for the cut through blocks (dotted)."""
     rs = store.shor_bridge
@@ -2311,7 +2311,7 @@ def fig_shor_bridge(plt, store):
     return fig
 
 
-# ================================================================== Layer 3: Shor order finding (nighthawk_ghz.py shoralg)
+# ================================================================== Layer 3: Shor order finding (nighthawk_qrack.py ghz shoralg)
 SHA_LAYOUTS = ("inside", "split", "direct", "countsplit", "worksplit")
 SHA_LAYOUT_LABEL = dict(inside="inside one circuit", split="counting | work, fan-out ancilla",
                         direct="counting | work, direct", countsplit="cut through the counting register",
@@ -2334,7 +2334,7 @@ def sha_case(r):
 
 
 def fig_shor_alg(plt, store, metric="success"):
-    """26 (success) / 27 (tvd): Layer 3 across QrackBridge (nighthawk_ghz.py shoralg), newest run per case: per
+    """26 (success) / 27 (tvd): Layer 3 across QrackBridge (nighthawk_qrack.py ghz shoralg), newest run per case: per
     geometry, N, a and counting width, the per-shot factoring success (the paper's rule) or the distance to the ideal
     distribution of every layout and placement against max_bonds; the ideal circuit's and a uniform guess's success
     as lines, the bond count the rule says the split layouts need as a mark."""
@@ -2411,7 +2411,7 @@ def fig_shor_alg(plt, store, metric="success"):
 
 
 def fig_shor_alg_dual(plt, store):
-    """28: Layer 3 on the dual Nighthawk R1 (nighthawk_ghz.py shoralg --dual), newest run per case: per N, a and
+    """28: Layer 3 on the dual Nighthawk R1 (nighthawk_qrack.py ghz shoralg --dual), newest run per case: per N, a and
     counting width, every layout's per-shot factoring success under each model, with the ideal circuit and a
     uniform guess."""
     rs = [r for r in store.shor_alg if r.get("engine") == "dual" and "success" in r]
@@ -2491,7 +2491,7 @@ DUAL_MODELS = ("hardcut", "ideal", "exact", "budget", "measured")
 
 
 def fig_dual(plt, store):
-    """24: the dual Nighthawk R1 (nighthawk_ghz.py dual, arXiv:2610.29986): the paper's Bell and GHZ states under each
+    """24: the dual Nighthawk R1 (nighthawk_qrack.py ghz dual, arXiv:2610.29986): the paper's Bell and GHZ states under each
     model (newest run), against IBM's raw and readout-mitigated values."""
     if not store.dual:
         return None
@@ -2530,7 +2530,7 @@ def fig_dual(plt, store):
 
 
 def fig_dual_map(plt, store):
-    """25: GHZ fidelity over both modules of the dual Nighthawk R1 and their L-couplers (nighthawk_ghz.py dualmap,
+    """25: GHZ fidelity over both modules of the dual Nighthawk R1 and their L-couplers (nighthawk_qrack.py ghz dualmap,
     newest run): per model, each site the lowest F_GHZ of the 3-qubit chains through it, module B drawn rotated by
     180 degrees facing A, the L-qubits and cables between them."""
     if not store.dual_map:
@@ -3431,7 +3431,7 @@ def write_shor3d(store, outdir, three=None):
         p.write_text(shor3d_html(pl, base))
         pages.append(p)
         print("wrote", p)
-    for reg in sorted({r["register"] for r in store.ghz}):          # nighthawk_ghz.py records: one page per register
+    for reg in sorted({r["register"] for r in store.ghz}):          # nighthawk_qrack.py ghz records: one page per register
         pl = ghz3d_payload(store, reg)
         if pl is None:
             print(f"# 3D: no register map of {reg} for its ghz records; skipped")
@@ -3483,7 +3483,7 @@ def open_shor3d(store, folder=None, three=None, serve=False, port=0):
 
 
 # ================================================================== ghz in 3D (--grid3d, viewer button)
-# A page per register with nighthawk_ghz.py records, on the shor9 page's scene (the lattice, ACE patches, seam
+# A page per register with nighthawk_qrack.py ghz records, on the shor9 page's scene (the lattice, ACE patches, seam
 # lines, couplers by class, the switch that pulls the patches apart into ACE's simulators, theme, camera): its
 # JavaScript is SHOR3D_JS cut at its section markers, with the text, the columns and the controls replaced.
 # Every site is a column: for tiles its height is the mean GHZ fidelity of the units holding it (views 18-19),
@@ -3507,7 +3507,7 @@ const nSeam = sites.filter(s => s.region === "seam").length;
 const cnt = { exact: 0, replica: 0, cross: 0 };
 for (const [, , k] of D.couplers) cnt[k] = (cnt[k] || 0) + 1;
 const bulkCounts = bulkIds.map(p => sites.filter(s => s.region === `p${p}`).length);
-document.getElementById("t-eyebrow").textContent = `rcs/nighthawk · nighthawk_ghz.py --register ${D.register}`
+document.getElementById("t-eyebrow").textContent = `rcs/nighthawk · nighthawk_qrack.py ghz --register ${D.register}`
   + ` · stored ACE placement, lrc ${D.ace.lrc} · lrr ${D.ace.lrr} · nighthawk_graph.py views 18 and 21 in three dimensions`;
 document.getElementById("t-h1").innerHTML = `${D.register}<span>GHZ states on the Nighthawk lattice</span>`;
 document.getElementById("t-sub").textContent = `Every site of the ${D.n}-qubit register rises by what the GHZ states holding it kept: `
@@ -3521,7 +3521,7 @@ document.getElementById("figs").innerHTML = [
   ['<span id="f-mean">–</span>', '<span id="f-mean-l">off the seam / on it</span>'],
   ['<span id="f-exact">–</span>', "exact reference, same"],
 ].map(([v, k]) => `<div class="fig"><b>${v}</b><span>${k}</span></div>`).join("");
-document.getElementById("t-foot").textContent = `Source: twobombs/thereminq-examples rcs/nighthawk, nighthawk_ghz.py --register ${D.register}`
+document.getElementById("t-foot").textContent = `Source: twobombs/thereminq-examples rcs/nighthawk, nighthawk_qrack.py ghz --register ${D.register}`
   + ` (ghz records and the ghz_map record of the placement); ` + D.datasets.map(d => `${d.label}: ${d.runs} run${d.runs === 1 ? "" : "s"}, `
   + `${d.shots} shots × ${d.realisations} realisation${d.realisations === 1 ? "" : "s"} per setting`).join("; ")
   + `. Fidelity: F_GHZ = (P0 + P1 + C)/2 of the formal proof's Lemma 4 where measured, else the Clifford witness; values above 1 are shot noise, `
@@ -3535,7 +3535,7 @@ document.getElementById("legend").innerHTML = bulkIds.map(p => `<span><i style="
   + `<span><i class="bar" style="background:linear-gradient(90deg,#c8352e,#f1cf55,#1f9a5a);height:7px"></i>column: 0.5 → 1.0</span>`;
 if (!hasSims) {
   const sw = document.getElementById("sw-split"); sw.disabled = true;
-  document.getElementById("split-note").textContent = "This register map does not say which simulators hold each seam qubit; rerun nighthawk_ghz.py once to pull the patches apart.";
+  document.getElementById("split-note").textContent = "This register map does not say which simulators hold each seam qubit; rerun nighthawk_qrack.py ghz once to pull the patches apart.";
 }
 
 """
@@ -4177,7 +4177,7 @@ def main():
     ap.add_argument("--shor", action="append", default=[],
                     help="shor9 --out file(s) (views 14-16); harvested *.jsonl are searched for shor9 records too")
     ap.add_argument("--ghz", action="append", default=[],
-                    help="nighthawk_ghz.py --out file(s) (views 18-28: ghz, stack, shor, dual, dualmap, shoralg); harvested *.jsonl "
+                    help="nighthawk_qrack.py ghz --out file(s) (views 18-28: ghz, stack, shor, dual, dualmap, shoralg); harvested *.jsonl "
                          "are searched for these records too")
     ap.add_argument("--repo", default=None, help="rcs-nighthawk clone (default: auto-detect)")
     ap.add_argument("--shots-dir", dest="shots_dir", default=None, help="as given to run --shots-dir")

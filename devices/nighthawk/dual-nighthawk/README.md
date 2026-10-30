@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Script | [`rcs/nighthawk/nighthawk_qrack.py`](https://github.com/twobombs/thereminq-examples/tree/main/rcs/nighthawk) (ThereminQ examples), 5026 lines, 16 October 2026 |
+| Script | [`rcs/nighthawk/nighthawk_qrack.py`](https://github.com/twobombs/thereminq-examples/tree/main/rcs/nighthawk) (ThereminQ examples), 14,084 lines with the `ghz` command, 30 October 2026 |
 | Companions | `nighthawk_graph.py` (harvest, views, CSV) · `nighthawk_3dgraph.py` (interactive 3D, dark mode) · `nighthawk_cloverfield.py` (several chips, one virtual chip) · [`rcs/nn_qab/`](https://github.com/twobombs/thereminq-examples/tree/main/rcs/nn_qab) |
 | Methodology | [`METHODOLOGY.md`](METHODOLOGY.md): every procedure behind the code and the experiments |
 | Results | [`RESULTS.md`](RESULTS.md): every measured number, by experiment |
@@ -30,9 +30,10 @@ BlueQubit ran 61-qubit random circuits on IBM's `ibm_phoenix` and estimated thei
 | `danmodel` | Dan Strano's ACE XEB calculator, alone or against measured points |
 | `hamming` | the Hamming ladder against his calculator: per register, a measured ÷ Dan grid by coupler load, Richardson over the folds |
 | `shor9` | one unit of Shor's code (9 qubits, or `--size m`: Shor-16, Shor-36, …) on a two-patch ACE register, or units tiled over a whole register: logical success, raw and decoded, for the four logical states, against the exact distribution |
+| `bridgebench` | the horizontal QrackBridge: each patch on its own PyQrack instance (patch server), the glue on a separate one (glue server); same states and shots as PyQrack's QrackBridge, timed, with a profile per workload (§3.3.3) |
 | `seamgap` | data-only analysis of the release |
 | `nighthawk_cloverfield.py` | chips in isolated workers, joined by a coordinator (the *loom*) |
-| `nighthawk_ghz.py` | the formal proof's Layer 1a (GHZ populations + MQC) and Layer 2 (Walsh echo, compensation) on a register under ACE: F_GHZ per state, seam maps, refocusing across the seams; `stack`: seam layers S (syndrome + repetition code) and V (the corrected measurement), in either order; `sweep`: F_GHZ against the number of Walsh-echo windows; `probe`: the drift's inside ZZ put through ACE several ways; `stackmap`: a stack run as three heatmaps on the chip layout; `stack --engine bridge --box L H`: the stack on a closed box of six QrackBridge-joined faces; `shor` / `shormap`: Shor's [[m², 1, m]] code across QrackBridge circuits, every placement, logical Z and X against the bridge's capacity; `dual`: IBM's two-module Nighthawk R1 experiment (arXiv:2610.29986) on the bridge, its Bell and GHZ states under four models against its Table 1; `shoralg`: Layer 3, the formal proof's Shor order finding, as gates across the bridge (two chips, the box) and the dual R1, factoring success and distance to the ideal distribution against the bridge's capacity or the dual's models |
+| `nighthawk_qrack.py ghz` | the formal proof's Layer 1a (GHZ populations + MQC) and Layer 2 (Walsh echo, compensation) on a register under ACE: F_GHZ per state, seam maps, refocusing across the seams; `stack`: seam layers S (syndrome + repetition code) and V (the corrected measurement), in either order; `sweep`: F_GHZ against the number of Walsh-echo windows; `probe`: the drift's inside ZZ put through ACE several ways; `stackmap`: a stack run as three heatmaps on the chip layout; `stack --engine bridge --box L H`: the stack on a closed box of six QrackBridge-joined faces; `shor` / `shormap`: Shor's [[m², 1, m]] code across QrackBridge circuits, every placement, logical Z and X against the bridge's capacity; `dual`: IBM's two-module Nighthawk R1 experiment (arXiv:2610.29986) on the bridge, its Bell and GHZ states under four models against its Table 1; `shoralg`: Layer 3, the formal proof's Shor order finding, as gates across the bridge (two chips, the box) and the dual R1, factoring success and distance to the ideal distribution against the bridge's capacity or the dual's models |
 | `bridge_ring_repro.py` | QrackBridge on a ring (`wrap=True`) against an open chain: two GHZ chains through the wrap cut, the truncation that carries fewer units than the open chain or zeroes the state (RESULTS §10.16) |
 | `nighthawk_graph.py` | harvests every run, `shor9`, `ghz`, `shor_bridge`, `dual_r1`, `dual_map` and `shor_alg` record, views 1–28, CSV export, `shor9` registers in 3D (`--grid3d`); views 18–21: GHZ tiles on the lattice (chips, loom, bridge, box net), by placement × Layer 2 mode, engine vs exact, chip-wide break maps; 22–25: placements against QrackBridge `max_bonds`, Shor across the bridge, dual Nighthawk R1 models and heatmap; 26–28: Layer 3's factoring success and TVD against `max_bonds`, and on the dual R1; GHZ registers in 3D too |
 | `nighthawk_3dgraph.py` | interactive 3D in Python (matplotlib, no browser), dark mode by default: every shape the tools write (run landscapes and bits on the lattice, `shor9` registers, GHZ registers on ACE patches, loom and bridge chips, the folded box, Shor across QrackBridge, the dual Nighthawk R1 with its cables, Layer 3's landscapes), one data set and measure at a time, telemetry panel, site picking (§4.1) |
@@ -61,6 +62,7 @@ No XEB can be scored on the full 61-qubit circuits (§5.7), so every 61-qubit st
 | Shor's code across QrackBridge needs a countable number of bonds, and its decoder repairs a cut short of them | between blocks 1 bond (for \|±_L⟩), through blocks one per block split; short of that the bridge drops whole blocks and decoding follows the majority count: Shor-9 / -16 / -25 at 1 bond 0.745 / 0.688 / 0.677 (0.750 / 0.688 / 0.688), 1.000 up to ⌊(m − 1)/2⌋ blocks short; at 0 E20's ACE-seam pattern (0.50 on the side that needs coherence) | 10.17 |
 | IBM's two-module Nighthawk R1 (arXiv:2610.29986): its benchmarked links explain its Bell and GHZ states to 1.5–3 points, except where the paper names a cause | the hard cut caps every state at 0.50; the bridge with the measured distant CZ predicts Bell 115–233 0.954 (IBM mitigated 0.939), GHZ-4 0.944 (0.917), GHZ-6 0.938 (0.909); Bell 117–231 0.956 against 0.870 (the paper's worst-readout qubit Q231) and the simultaneous drop (−0.064) are outside the model | 10.18 |
 | Shor order finding across a cut needs ⌈log₂ r⌉ + 1 bonds; a power-of-two order needs none, so the formal proof's N = 15 cannot show a quantum link | N 21: exact from 4 bonds (r = 6) and 3 (r = 3) on two chips and every box placement, uniform guess at 0; N 15 a 7 and N 21 a 8: the ideal ½ at `max_bonds` 0 in every layout, and through the dual R1's hard cut; dual R1 with its benchmarked distant CZ: 0.414 of ½ (t = 4) | 10.19 |
+| QrackBridge splits by workload over processes without changing a number, and the split shows where its time goes | patch servers (own PyQrack instance each) + a numpy glue server: QrackBridge's states, shots, fidelity estimates and truncations; 2 cores: 0.97–1.01× at 36 qubits; the glue is 56 % of the wall time there, and a BLAS readout cut its sampling 24 % | 10.20 |
 | Qrack's OpenCL engine had three host-memory defects | fixed without serialising dispatch; GPU reproduces CPU | 12 |
 
 ---
@@ -78,8 +80,9 @@ pip install numpy pyqrack matplotlib ortools qiskit
 |---|---|
 | Python ≥ 3.9 | everything (`argparse.BooleanOptionalAction`) |
 | numpy | every subcommand |
-| PyQrack | `hwxeb`, `run`, `selftest`, `aceplan`, `danmodel`, `shor9`; not `verify`, `seamgap` or `hamming`. ACE needs a build with `QrackAceBackend`; exact references above 32 qubits need Qrack built for > 32 qubits. `nighthawk_ghz.py stack --engine bridge` needs `QrackBridge` (PyQrack ≥ 2.30), or its `qrack_bridge.py` given with `--qrack-bridge` (runs on PyQrack 2.29.5 / Qrack 10.13.2) |
+| PyQrack | `hwxeb`, `run`, `selftest`, `aceplan`, `danmodel`, `shor9`; not `verify`, `seamgap` or `hamming`. ACE needs a build with `QrackAceBackend`; exact references above 32 qubits need Qrack built for > 32 qubits. `nighthawk_qrack.py ghz stack --engine bridge` needs `QrackBridge` (PyQrack ≥ 2.30), or its `qrack_bridge.py` given with `--qrack-bridge` (runs on PyQrack 2.29.5 / Qrack 10.13.2) |
 | OR-Tools | the `exact` placement engine, `--register` presets, `layoutsearch` |
+| Linux (or another POSIX host) | the horizontal bridge (`bridgebench`, `--bridge-engine horizontal`): Unix-domain sockets, POSIX shared memory (`/dev/shm` sized for the largest patch ket), `sched_setaffinity` for `patch_cpus` / `glue_cpus`; Python ≥ 3.13 attaches shared memory untracked, older versions unregister it |
 | Qiskit | `--ace-transpile` |
 | matplotlib | `nighthawk_graph.py` (Tk for the viewer); `nighthawk_3dgraph.py` (any interactive backend: TkAgg, QtAgg, GTK, macOS); `--grid3d` pages need a browser with WebGL, and three.js 0.160 from jsDelivr or a local npm `three` package (`--three DIR --serve`) |
 | GPU | OpenCL (`QRACK_OCL_DEFAULT_DEVICE`) or `--cpu`; use the Qrack build of §5.3 |
@@ -373,6 +376,54 @@ Every layout (and every unit with `--register`) is also compared outcome by outc
 
 **Sampling above 32 qubits.** `QrackSimulator.measure_shots` and `m_all` return bits 0–31 only (PyQrack 2.28.1). The exact reference of a unit wider than 32 qubits (Shor-36, Shor-49) therefore draws each shot from a clone, qubit by qubit; ACE's own shots carry every bit.
 
+### 3.3.3 `bridgebench`: the horizontal QrackBridge
+
+PyQrack's QrackBridge (≥ 2.30, `qrack_bridge.py`) runs in the caller's process. It holds every patch as a `QrackSimulator` and does the glue (the per-cut recompression sweep, the ring's wrap-cut step, the readout's sampling and contraction) in numpy. `nighthawk_qrack.py`'s `HBridge` keeps that algorithm and its arithmetic, and splits it by workload over processes:
+
+| Part | Process | What it runs | Tuned by |
+|---|---|---|---|
+| patch servers | one per `devices` entry; each its own PyQrack instance and environment | the patch simulators (data, bond and scratch qubits) of every bridge in this process, patch p on server p mod S (S servers), so one side of a cut always meets the same server and device; gates, bond allocation, ket export into and load from shared memory | `devices` (`cpu`, or `gpu:N`: OpenCL device N, isolated as `run --gpus` isolates its workers), `patch_cpus` (CPU affinity), `patch_threads` (OpenMP), `host_pointer` |
+| glue server | one, no Qrack loaded | per bridge: the truncation and sampling RNG, the QR / Gram-SVD sweeps over the touched patches, the wrap cut, the sampling, the contraction; patch tensors read from and written back to shared memory | `glue_cpus`, `glue_threads` (BLAS / OpenMP), `glue_fast` |
+| coordinator | the caller | the bridge's bookkeeping (layout, bonds per cut, orthogonality centre, touched patches); ops queued per server and sent in batches | `batch` |
+
+Every bridge gate is local to one patch: a gate between patches is teleported through fresh bond pairs, whose Bell projection is applied only when the glue contracts. The patch servers therefore run their op streams in parallel and never exchange data. They meet the glue at each recompression, where they export their kets, and again at readout. The servers start once per process and spec, and are shared by every bridge made there. With `nighthawk_qrack.py ghz --jobs J`, each worker has its own set: J × (servers + 1) processes.
+
+With the same seed, `HBridge` gives QrackBridge's state, shots, fidelity estimate and truncation count (selftest [14], `bridgebench --check`). The exception is a state with exactly equal Schmidt values above the bond limit, such as Shor's work register (RESULTS §10.19). There the kept subspace is a tie that single-precision rounding breaks, and it differs between runs of either engine.
+
+Spec (`--hbridge`, `$NIGHTHAWK_HBRIDGE`; `key=value;…` or JSON):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `devices` | `cpu,cpu` | one patch server per entry: `cpu` or `gpu:N` |
+| `patch_cpus` | — | CPU affinity per patch server, `/`-separated (`0-3/4-7`; Linux) |
+| `glue_cpus`, `glue_threads` | —, 1 | the glue server's affinity and BLAS / OpenMP threads |
+| `patch_threads` | — | OpenMP threads of each patch server |
+| `host_pointer` | 0 | 1: `gpu:N` simulators with `is_host_pointer` (state in host memory) |
+| `batch` | 512 | ops queued per server before they are sent |
+| `glue_fast` | 0 | 1: the readout's per-prefix contraction as one BLAS matmul (threaded by `glue_threads`) instead of QrackBridge's einsum; the same algorithm with sums in another order |
+
+`bridgebench` options:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--n`, `--patches`, `--wrap` | 20, 2, off | qubits, patches, ring |
+| `--depth`, `--cross` | 12, 0.2 | layers of U3 on every qubit + CX on a random matching; share of each layer's CXs between neighbouring patches |
+| `--max-bonds`, `--lazy` | 4, 0 | `max_bonds`, `lazy_bonds` |
+| `--reps`, `--seed`, `--shots`, `--ket-max` | 3, 11, 1024, 24 | circuits, their seed, shots read per circuit, kets compared up to this many qubits |
+| `--hbridge`, `--qrack-bridge` | — | the spec; PyQrack's `qrack_bridge.py` for the local reference (PyQrack < 2.30) |
+| `--check`, `--out` | off | exit 1 unless the engines agree; append a `bridgebench` record with the profile |
+
+Profile columns, per patch server:
+
+- busy s, and calls and seconds for gates, ket out and ket in, with the MB moved;
+- idle s;
+- the glue's seconds per call kind;
+- the coordinator's ops, batches and time waiting on the servers.
+
+Qrack defers gate work (QUnit), so a deferred gate's cost shows up in the call that forces it. That is usually the next bond allocation, which grows the patch's ket, or the ket export. The patch columns therefore measure the patch workload as a whole, not each gate.
+
+`nighthawk_qrack.py ghz --bridge-engine horizontal [--hbridge SPEC]` runs `stack`, `tiles`, `shor`, `shoralg`, `dual` and `dualmap` on `HBridge`. `shoralg` then records each circuit's profile (`hbridge` field) and prints the sum per server.
+
 ### 3.4 `layoutsearch`
 
 One CP-SAT model chooses n sites of the 12 × 10 lattice and an ACE group (a patch's bulk or a seam) for each:
@@ -429,9 +480,9 @@ Options: `--chips` (`nighthawk88e*2`, `release,nighthawk88d`, `rect:r0-r1,c0-c1`
 
 Results: [RESULTS.md §11](RESULTS.md#11-cloverfield-e13).
 
-### 3.6 `nighthawk_ghz.py`
+### 3.6 `nighthawk_qrack.py ghz`
 
-Layers 1a and 2 of *Exact Refocusing of Diagonal Crosstalk for Shor Order Finding on a 10 × 12 Square-Lattice Processor: Analysis and Simulation* (numpy reference `shrs_nighthawk_stealth.py`, the 2 × 4 plaquette Π), run on a Nighthawk register's ACE preset placement, so the paper's exact statements meet ACE's seams. Standalone; imports `nighthawk_qrack.py` for registers, placement, coupler classes and the worker pool. Gates are exact; the departures from the paper's model are ACE's seam approximation and its sampler. An exact `QrackSimulator` reference runs beside every ACE run, with the same quasi-static draws.
+Layers 1a and 2 of *Exact Refocusing of Diagonal Crosstalk for Shor Order Finding on a 10 × 12 Square-Lattice Processor: Analysis and Simulation* (numpy reference `shrs_nighthawk_stealth.py`, the 2 × 4 plaquette Π), run on a Nighthawk register's ACE preset placement, so the paper's exact statements meet ACE's seams. The `ghz` command of `nighthawk_qrack.py` (formerly the separate `nighthawk_ghz.py`, which is now a stub that forwards its command line here and, imported, is `nighthawk_qrack`), on its registers, placement, coupler classes and worker pool. Its subcommands keep their names and options: `nighthawk_qrack.py ghz tiles …` for the former `nighthawk_ghz.py tiles …`. Gates are exact; the departures from the paper's model are ACE's seam approximation and its sampler. An exact `QrackSimulator` reference runs beside every ACE run, with the same quasi-static draws.
 
 | Paper | Here |
 |---|---|
@@ -541,10 +592,11 @@ A chip-wide GHZ over a register of two or more patches is always cut.
 | `--size`, `--shor-units` (`shor`) | 3, `all` | m of Shor-m² (3 = Shor-9, 4 = Shor-16, 5 = Shor-25); `cross` keeps only the units across a cut (a unit inside one chip runs on one patch and never meets the bridge; Shor-16 and larger inside units are slow to sample there). Placements: on chips every m × m square of lattice cells, blocks along rows or columns; on the box m consecutive points along an axis inside the box's extent times m consecutive points round its cross-section, so a unit bends over the edges it crosses (the 8 corner points are in none). `shor`'s defaults: 1024 shots, 1 realisation (the bridge is deterministic up to its sampler), exact 256 |
 | `--models`, `--trajectories`, `--batch`, `--local-cz-error`, `--lattice-1q-error`, `--seed` (`dual`) | `hardcut,ideal,budget,measured`, 2000, 100, 0.00355, 0.0005, 7 | the models above; Pauli trajectories per noisy circuit, split into batches (the standard error is over batches); the error of a CZ inside a module (default: the paper's budget for CZ111-237, its three local CZs 40 % of 2.66 %; the paper gives no lattice CZ benchmark) and of a lattice single-qubit gate (not in the paper; L-qubits take Extended Data Table 1's EPG). Per link: transfer F (Extended Data Table 2) and distant CZ F (Fig. 3b: 96.42 and 95.54 from the text, 91.2 for 113–235 and 95.8 for 117–231 read from the figure, together the text's mean 94.75) |
 | `--N`, `--a`, `--counting` (`shoralg`) | 15 21; 7 for N = 15, else the smallest base of every order r > 1; 4 and 2n for N = 15, else 2n | the numbers, bases and counting widths, every combination (gcd(a, N) must be 1) |
-| `--layouts`, `--bonds`, `--faces`, `--repeats` (`shoralg`) | all five; `--bridge-max-bonds`; the two chips, or `base/front base/right base/left` on the box; 1 | layouts as above; `max_bonds` values swept; side pairs A/B (counting side first; on the box direct, relayed through front, the ring's wrap cut); bridge realisations per circuit (below capacity a greedy truncation picks among equal Schmidt values, so the outcome depends on the seed; P is their mean, per-realisation values in `success_runs`, `tvd_runs`) |
+| `--layouts`, `--bonds`, `--faces`, `--repeats` (`shoralg`) | all five; `--bridge-max-bonds`; the two chips, or `base/front base/right base/left` on the box; 1 | layouts as above; `max_bonds` values swept; side pairs A/B (counting side first; on the box direct, relayed through front, the ring's wrap cut); bridge runs per circuit (below capacity a greedy truncation picks among equal Schmidt values, a tie Qrack's single-precision rounding breaks differently on every run, whatever the seed; P is their mean, per-run values in `success_runs`, `tvd_runs`) |
 | `--synth`, `--shots`, `--ket-max`, `--no-exact`, `--pair` (`shoralg`) | `auto`, 4096, 22, off, off | multiplication synthesis: `generic` (the permutation's transpositions, multi-controlled X on n − 2 ancillas), `structured` (N = 2^n − 1, a^(2^k) = ±2^j: a bit rotation by controlled SWAPs, the same unitary), `auto` (structured where it applies); shots when the bridge is wider than `--ket-max`; skip the QrackSimulator runs; two bare patches instead of chips |
 | `--dual`, `--models`, `--trajectories`, `--link`, `--local-cz-error`, `--lattice-1q-error`, `--seed` (`shoralg`) | off, `hardcut,ideal,budget,measured`, 200, `242-245`, 0.00355, 0.0005, 7 | on the dual Nighthawk R1 under `dual`'s models (layouts inside, split, direct); Pauli trajectories per noisy circuit; the L-coupler every distant CNOT uses; as `dual` |
 | `--loom-read` | `cut` | `cut`: the loom as a hard cut (the cloverfield's `--loom mean`, no ghosts, every qubit read on its own chip). `ghost`: the cloverfield's ghost loom, a replica band two columns wide; a unit inside one chip's band is read there. Records carry `loom.read`; `stackmap` labels the mode |
+| `--bridge-engine`, `--hbridge` | `local`, `$NIGHTHAWK_HBRIDGE` | every bridge command (`stack`, `tiles`, `shor`, `shoralg`, `dual`, `dualmap`): `local` = PyQrack's QrackBridge in the worker process; `horizontal` = `nighthawk_qrack.py`'s HBridge (patch servers + glue server, §3.3.3) with this spec |
 | `--engine bridge`, `--bridge-max-bonds`, `--bridge-truncation`, `--bridge-lazy`, `--qrack-bridge` | —, 6, `greedy`, 0, auto | the chips of `--loom-chips` (exact) joined by PyQrack's `QrackBridge`, one patch per chip, instead of the loom. Each circuit's bridge holds the qubits its units touch, the patches padded to equal size (the bridge splits its qubits into equal contiguous blocks); idle qubits stay \|0⟩ and in product, their couplings classical rotations, as on ACE. `max_bonds`: bond qubits kept per cut (capacity 2^max_bonds Schmidt values; 0 is the hard cut); `greedy` or `born` truncation; `lazy_bonds` buffered before one recompression. Per pass the log and a `ghz_bridge` record give the peak bond count, the truncating circuits and the bridge's `fidelity_estimate` |
 | `--loom-chip-backend` | `exact` | `exact`: each chip a `QrackSimulator` (no schedule). `ace`: each chip its register's two-patch ACE preset (chips must be registers, e.g. `nighthawk61r2 nighthawk61r2`), ghosts on free ACE sites coupled to their anchor (the cloverfield's `place_ghosts`): ACE's seam inside each chip, the loom between them; Layer S's code is ACE's boundary repetition code inside (with `--code-authority`, `--code-schedule`) and the loom's authority across |
 | `--cloverfield` | auto | `nighthawk_cloverfield.py`: `$NIGHTHAWK_CLOVERFIELD`, next to this script, or `../rcs-nighthawk` |
@@ -564,7 +616,7 @@ A code corrects ACE's seam where ZNE cannot: the loss is set at the first crossi
 
 **Stabilizer patches.** ACE's default dense patches hold a chip-wide GHZ as 2^width amplitudes per patch. Preparation and Clifford readout keep a stabilizer-hybrid patch a tableau, but ACE's seam corrections are not Clifford: on PyPI's PyQrack 2.29.5 / Qrack 10.13.2 the tableau holds on the two-patch ladder up to `nighthawk2p57` (internal simulators 41/41/9, < 1 s per 8 shots), while `nighthawk61r2` (43/43/8) leaves it in sampling (Z: a zero-probability forced replica measurement; X: no shot in 15 min). Not yet traced. MQC (not Clifford) and Layer 2 (Z rotations by arbitrary angles) run dense; `tiles` stay small because QUnit keeps every chain separate.
 
-**Views.** `nighthawk_ghz.py stackmap --in FILE`: one stack run, three heatmaps. `nighthawk_graph.py --ghz FILE` (or harvest): 18 tiles on the lattice per register and Layer 2 mode, 19 fidelity by placement with one bar per mode and the exact reference, 20 ACE against exact per unit, 21 chip-wide break maps per tree, 22–25 as in the views table below; `--table FILE` writes `FILE_ghz.csv` (with the engine columns `engine`, `loom_read`, `chip_backend`, `chips`, `max_bonds`, `truncation`, `lazy_bonds`, `box`, `box_edge`, `box_cuts`, `chips_spanned`, `inside_zz`, `stack_order`, `stack_pass`, `seam_class`, `seam_plan`), `FILE_shorbridge.csv` (per unit: layout, hops, wrap, bonds for Z and X, decoded and raw per logical state), `FILE_dual.csv` (per state and model, with IBM's values), `FILE_dualmap.csv` (per chain and model), `FILE_shoralg.csv` (per circuit: layout, placement, `max_bonds` or model, success, order, TVD, peak bonds, routing) and prints the summaries. Loom, bridge and box registers also get a `--grid3d` page, the patches being the chips. `--grid3d DIR` (or the viewer's 3D button) also writes `<register>_ghz_3d.html` per register: every site a column of height (v − 0.5)/0.5, v the mean F_GHZ of the chains through it or a chip-wide state's agreement with its majority; one switch per Layer 2 mode and chip-wide tree, ACE or the exact reference, the chains through a clicked site, the patches pulled apart into ACE's simulators as on the shor9 pages.
+**Views.** `nighthawk_qrack.py ghz stackmap --in FILE`: one stack run, three heatmaps. `nighthawk_graph.py --ghz FILE` (or harvest): 18 tiles on the lattice per register and Layer 2 mode, 19 fidelity by placement with one bar per mode and the exact reference, 20 ACE against exact per unit, 21 chip-wide break maps per tree, 22–25 as in the views table below; `--table FILE` writes `FILE_ghz.csv` (with the engine columns `engine`, `loom_read`, `chip_backend`, `chips`, `max_bonds`, `truncation`, `lazy_bonds`, `box`, `box_edge`, `box_cuts`, `chips_spanned`, `inside_zz`, `stack_order`, `stack_pass`, `seam_class`, `seam_plan`), `FILE_shorbridge.csv` (per unit: layout, hops, wrap, bonds for Z and X, decoded and raw per logical state), `FILE_dual.csv` (per state and model, with IBM's values), `FILE_dualmap.csv` (per chain and model), `FILE_shoralg.csv` (per circuit: layout, placement, `max_bonds` or model, success, order, TVD, peak bonds, routing) and prints the summaries. Loom, bridge and box registers also get a `--grid3d` page, the patches being the chips. `--grid3d DIR` (or the viewer's 3D button) also writes `<register>_ghz_3d.html` per register: every site a column of height (v − 0.5)/0.5, v the mean F_GHZ of the chains through it or a chip-wide state's agreement with its majority; one switch per Layer 2 mode and chip-wide tree, ACE or the exact reference, the chains through a clicked site, the patches pulled apart into ACE's simulators as on the shor9 pages.
 
 **Estimator bias.** C = 2\|ĉ\| is biased upward at finite shots, so F_GHZ of a perfect unit scatters around and above 1 (± 0.013 at 256 × 2 shots per setting); `F0` and the witness are linear and are not.
 
@@ -600,7 +652,7 @@ An example of the gap is in [RESULTS.md §4](RESULTS.md#4-the-nn_qab-ensemble-e6
 | 15 | `shor9`: per logical state, impossible-outcome share and distance to the exact distribution against its shot-noise floor |
 | 16 | `shor9 --register`: each unit's decoded Z / X and Z-basis impossible share against its encoder CXs through the seam; units matched by their square, pooled over runs |
 | 17 | `shor9 --register` on the lattice, per register, code size and setup: qubits by ACE patch, seam qubits and the seam lines (a band through neighbouring seam qubits, labelled with the two patches it joins), couplers by class (exact / replica / cross), block leaders, each unit's square filled by min(Z, X) and labelled Z / X / impossible share. Map from the run's `shor9_map` record, else rebuilt (release + PyQrack), else the bare lattice |
-| 18 | `nighthawk_ghz.py tiles` / `stack` on the lattice, per register, unit size, Layer 2 mode and setup: each site the mean F_GHZ of the units holding it; seam qubits and lines, couplers by class, the links between chips (loom / bridge) in black; box runs on the unfolded net. The subtitle names the engine's parameters (`max_bonds`, box ring, loom hard cut or ghost band, code first, inside ZZ by stabiliser) |
+| 18 | `nighthawk_qrack.py ghz tiles` / `stack` on the lattice, per register, unit size, Layer 2 mode and setup: each site the mean F_GHZ of the units holding it; seam qubits and lines, couplers by class, the links between chips (loom / bridge) in black; box runs on the unfolded net. The subtitle names the engine's parameters (`max_bonds`, box ring, loom hard cut or ghost band, code first, inside ZZ by stabiliser) |
 | 19 | mean fidelity by placement, one bar per Layer 2 mode, the exact reference as a tick; placements include across the loom, across the bridge, across a box edge (direct / relayed, wrap cut) |
 | 20 | every unit's engine read (ACE, loom or QrackBridge) against its exact reference, per Layer 2 mode, by placement and register |
 | 21 | `chip`: chip-wide break maps per tree |
@@ -791,7 +843,7 @@ The release holds every sampled 61-qubit bitstring of the full and patched circu
 
 ## 6. Results
 
-Every measured number is in [RESULTS.md](RESULTS.md), grouped by experiment (E1–E36 of [METHODOLOGY.md](METHODOLOGY.md) §9), with the points not yet measured in its §15.
+Every measured number is in [RESULTS.md](RESULTS.md), grouped by experiment (E1–E37 of [METHODOLOGY.md](METHODOLOGY.md) §9), with the points not yet measured in its §15.
 
 ---
 
@@ -886,97 +938,106 @@ python3 nighthawk_qrack.py layoutsearch --n 88 --geometries 114:4:5 102:4:5 --re
   --hint nighthawk88e --candidates 3 --cpsat-time 600 --test-depths 4 8 --test-jobs 3 --cpu --save-best nighthawk88x
 
 # GHZ (§3.6): Layer 1a tiles over 61 qubits; Layer 2 per mode (the paper's K = 32 realisations); chip-wide; the map
-python3 nighthawk_ghz.py selftest
-python3 nighthawk_ghz.py tiles --register nighthawk61r2 --unit 3 --shots 4096 --repeats 5 --jobs 16 --out ghz.jsonl
+python3 nighthawk_qrack.py ghz selftest
+python3 nighthawk_qrack.py ghz tiles --register nighthawk61r2 --unit 3 --shots 4096 --repeats 5 --jobs 16 --out ghz.jsonl
 for m in unmitigated compensated dd; do
-  python3 nighthawk_ghz.py tiles --register nighthawk61r2 --unit 3 --layer2 $m --blocks 3 --shots 512 --repeats 32 \
+  python3 nighthawk_qrack.py ghz tiles --register nighthawk61r2 --unit 3 --layer2 $m --blocks 3 --shots 512 --repeats 32 \
     --jobs 16 --out ghz_l2.jsonl
 done
-python3 nighthawk_ghz.py chip  --register nighthawk2p57 --shots 4096 --repeats 5 --jobs 16 --out ghz.jsonl
-python3 nighthawk_ghz.py chip  --register nighthawk2p16 --layer2 dd --mqc-max 16 --repeats 32 --out ghz_l2.jsonl
-python3 nighthawk_ghz.py plot  --in ghz_l2.jsonl --register nighthawk61r2 --layer2 dd --png ghz61_dd.png
+python3 nighthawk_qrack.py ghz chip  --register nighthawk2p57 --shots 4096 --repeats 5 --jobs 16 --out ghz.jsonl
+python3 nighthawk_qrack.py ghz chip  --register nighthawk2p16 --layer2 dd --mqc-max 16 --repeats 32 --out ghz_l2.jsonl
+python3 nighthawk_qrack.py ghz plot  --in ghz_l2.jsonl --register nighthawk61r2 --layer2 dd --png ghz61_dd.png
 # the seam layers (§3.6): passes 1 and 2, Layer S (syndrome + repetition code), Layer V (the corrected measurement)
-python3 nighthawk_ghz.py stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --jobs 16 --out stack61.jsonl
-python3 nighthawk_ghz.py stack --register nighthawk2p16 --mode chip --mqc-max 16 --repeats 8 --jobs 16 --out stack16.jsonl
+python3 nighthawk_qrack.py ghz stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --jobs 16 --out stack61.jsonl
+python3 nighthawk_qrack.py ghz stack --register nighthawk2p16 --mode chip --mqc-max 16 --repeats 8 --jobs 16 --out stack16.jsonl
 # the same with ZNE beside the code (lambda 1, 5, 9)
-python3 nighthawk_ghz.py stack --register nighthawk2p28 --unit 3 --zne-k 1,2 --out stack28.jsonl
+python3 nighthawk_qrack.py ghz stack --register nighthawk2p28 --unit 3 --zne-k 1,2 --out stack28.jsonl
 # the code before the echo (E26), the inside ZZ by the GHZ stabiliser (E28), each run as three heatmaps
-python3 nighthawk_ghz.py stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --order code-echo --jobs 16 \
+python3 nighthawk_qrack.py ghz stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --order code-echo --jobs 16 \
   --out stack61_ce.jsonl
-python3 nighthawk_ghz.py stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --inside-zz stabilizer \
+python3 nighthawk_qrack.py ghz stack --register nighthawk61r2 --unit 3 --shots 256 --repeats 4 --inside-zz stabilizer \
   --jobs 16 --out stack61_zz.jsonl
-python3 nighthawk_ghz.py stackmap --in stack61_ce.jsonl --png stack61_ce.png
+python3 nighthawk_qrack.py ghz stackmap --in stack61_ce.jsonl --png stack61_ce.png
 # the loom as the seam: nighthawk61r2's 61 qubits as two exact chips of its patches' size; a hard cut (E31), and
 # the ghost band (E29)
-python3 nighthawk_ghz.py stack --engine loom --order code-echo --shots 256 --repeats 4 --jobs 16 --out cut61.jsonl
-python3 nighthawk_ghz.py stack --engine loom --loom-read ghost --order code-echo --shots 256 --repeats 4 --jobs 16 \
+python3 nighthawk_qrack.py ghz stack --engine loom --order code-echo --shots 256 --repeats 4 --jobs 16 --out cut61.jsonl
+python3 nighthawk_qrack.py ghz stack --engine loom --loom-read ghost --order code-echo --shots 256 --repeats 4 --jobs 16 \
   --out loom61.jsonl
-python3 nighthawk_ghz.py stack --engine loom --order code-echo --shots 256 --repeats 4 --inside-zz stabilizer \
+python3 nighthawk_qrack.py ghz stack --engine loom --order code-echo --shots 256 --repeats 4 --inside-zz stabilizer \
   --jobs 16 --out loom61_zz.jsonl
-python3 nighthawk_ghz.py stackmap --in loom61.jsonl --png loom61.png
+python3 nighthawk_qrack.py ghz stackmap --in loom61.jsonl --png loom61.png
 # the same two chips joined by QrackBridge instead of the loom (E32), its capacity from 6 bond qubits down to 0
 for mb in 6 2 1 0; do
-  python3 nighthawk_ghz.py stack --engine bridge --bridge-max-bonds $mb --order code-echo --shots 256 --repeats 4 \
+  python3 nighthawk_qrack.py ghz stack --engine bridge --bridge-max-bonds $mb --order code-echo --shots 256 --repeats 4 \
     --jobs 16 --out bridge61_mb$mb.jsonl
 done
-python3 nighthawk_ghz.py stackmap --in bridge61_mb1.jsonl --png bridge61_mb1.png
+python3 nighthawk_qrack.py ghz stackmap --in bridge61_mb1.jsonl --png bridge61_mb1.png
 # a closed 5 x 5 x 5 box (E33): six faces on a QrackBridge ring, chains across all twelve box edges; at max_bonds
 # 1 and 0 the drift's ZZ as bridged gates can zero the ring's state (RESULTS 10.16), so those run with it dropped
 for mb in 6 2; do
-  python3 nighthawk_ghz.py stack --engine bridge --box 5 5 --bridge-max-bonds $mb --order code-echo --shots 256 \
+  python3 nighthawk_qrack.py ghz stack --engine bridge --box 5 5 --bridge-max-bonds $mb --order code-echo --shots 256 \
     --repeats 4 --jobs 16 --out box_mb${mb}_gate.jsonl
 done
 for mb in 6 2 1 0; do
-  python3 nighthawk_ghz.py stack --engine bridge --box 5 5 --bridge-max-bonds $mb --inside-zz stabilizer \
+  python3 nighthawk_qrack.py ghz stack --engine bridge --box 5 5 --bridge-max-bonds $mb --inside-zz stabilizer \
     --order code-echo --shots 256 --repeats 4 --jobs 16 --out box_mb${mb}_stabilizer.jsonl
 done
-python3 nighthawk_ghz.py stackmap --in box_mb2_gate.jsonl --png box_mb2_gate.png
+python3 nighthawk_qrack.py ghz stackmap --in box_mb2_gate.jsonl --png box_mb2_gate.png
 python3 bridge_ring_repro.py      # the ring's wrap cut against an open chain
 # Shor's code across QrackBridge (E34): Shor-9 on Nighthawk's sites as two chips and on the box; Shor-16, -25 across
 for mb in 6 3 2 1 0; do
-  python3 nighthawk_ghz.py shor --loom-chips rect:0-11,0-5 rect:0-11,6-9 --bridge-max-bonds $mb --jobs 16 \
+  python3 nighthawk_qrack.py ghz shor --loom-chips rect:0-11,0-5 rect:0-11,6-9 --bridge-max-bonds $mb --jobs 16 \
     --out shor9_big_mb$mb.jsonl
-  python3 nighthawk_ghz.py shor --box 5 5 --bridge-max-bonds $mb --jobs 16 --out shor9_box5_mb$mb.jsonl
+  python3 nighthawk_qrack.py ghz shor --box 5 5 --bridge-max-bonds $mb --jobs 16 --out shor9_box5_mb$mb.jsonl
 done
 for mb in 6 4 3 2 1 0; do
-  python3 nighthawk_ghz.py shor --loom-chips rect:0-11,0-5 rect:0-11,6-9 --size 4 --shor-units cross \
+  python3 nighthawk_qrack.py ghz shor --loom-chips rect:0-11,0-5 rect:0-11,6-9 --size 4 --shor-units cross \
     --bridge-max-bonds $mb --jobs 16 --out shor16_big_mb$mb.jsonl
 done
 for mb in 3 2 1; do
-  python3 nighthawk_ghz.py shor --loom-chips rect:0-11,0-5 rect:0-11,6-9 --size 5 --shor-units cross \
+  python3 nighthawk_qrack.py ghz shor --loom-chips rect:0-11,0-5 rect:0-11,6-9 --size 5 --shor-units cross \
     --bridge-max-bonds $mb --shots 256 --exact-shots 128 --jobs 16 --out shor25_big_mb$mb.jsonl
 done
-python3 nighthawk_ghz.py shormap --in shor9_box5_mb1.jsonl --png shor9_box5_mb1.png
+python3 nighthawk_qrack.py ghz shormap --in shor9_box5_mb1.jsonl --png shor9_box5_mb1.png
 # IBM's two-module Nighthawk R1 (arXiv:2610.29986) on the bridge (E35), and its sensitivity to the local CZ error
-python3 nighthawk_ghz.py dual --models hardcut,ideal,exact,budget,measured --trajectories 20000 --batch 500 \
+python3 nighthawk_qrack.py ghz dual --models hardcut,ideal,exact,budget,measured --trajectories 20000 --batch 500 \
   --jobs 16 --out dual_r1.jsonl --png dual_r1.png
-python3 nighthawk_ghz.py dualmap --trajectories 2000 --trajectories-link 4000 --jobs 16 --out dualmap.jsonl \
+python3 nighthawk_qrack.py ghz dualmap --trajectories 2000 --trajectories-link 4000 --jobs 16 --out dualmap.jsonl \
   --png dualmap.png
 for e in 0 0.0071; do
-  python3 nighthawk_ghz.py dual --models measured --local-cz-error $e --trajectories 10000 --batch 500 --jobs 16 \
+  python3 nighthawk_qrack.py ghz dual --models measured --local-cz-error $e --trajectories 10000 --batch 500 --jobs 16 \
     --out dual_r1_cz$e.jsonl
 done
+# the horizontal QrackBridge (E37): agreement with QrackBridge, wall times, profile per workload
+python3 nighthawk_qrack.py bridgebench --n 12 --patches 2 --depth 6 --reps 2 --max-bonds 2 --check
+python3 nighthawk_qrack.py bridgebench --n 36 --patches 2 --depth 8 --cross 0.05 --reps 2 --max-bonds 4 --shots 256 \
+  --check --hbridge "devices=cpu,cpu;glue_threads=2;glue_fast=1" --out bench.jsonl
+python3 nighthawk_qrack.py bridgebench --n 24 --patches 4 --wrap --depth 8 --cross 0.3 --reps 2 --max-bonds 2 --check
+python3 nighthawk_qrack.py bridgebench --n 36 --patches 2 --depth 8 --cross 0.05 --max-bonds 4 \
+  --hbridge "devices=gpu:0,gpu:1;patch_cpus=0-7/8-15;glue_cpus=16-23;glue_threads=8;glue_fast=1"   # a 2-GPU host
+python3 nighthawk_qrack.py ghz shoralg --N 21 --a 2 --layouts split,direct --bonds 3 4 --repeats 2 --bridge-engine horizontal \
+  --hbridge "devices=cpu,gpu:0" --out shoralg_hz.jsonl            # work-side patches on the GPU
 # Layer 3, Shor order finding, across the configurations (E36)
-python3 nighthawk_ghz.py shoralg --N 15 --counting 4 8 --repeats 4 --bonds 0 1 2 3 4 5 --jobs 16 --out shoralg_chips.jsonl
-python3 nighthawk_ghz.py shoralg --N 21 --repeats 4 --bonds 0 1 2 3 4 5 --jobs 16 --out shoralg_chips.jsonl
-python3 nighthawk_ghz.py shoralg --box 5 5 --N 15 --counting 4 8 --layouts split,direct --repeats 4 --bonds 0 1 2 3 4 5 \
+python3 nighthawk_qrack.py ghz shoralg --N 15 --counting 4 8 --repeats 4 --bonds 0 1 2 3 4 5 --jobs 16 --out shoralg_chips.jsonl
+python3 nighthawk_qrack.py ghz shoralg --N 21 --repeats 4 --bonds 0 1 2 3 4 5 --jobs 16 --out shoralg_chips.jsonl
+python3 nighthawk_qrack.py ghz shoralg --box 5 5 --N 15 --counting 4 8 --layouts split,direct --repeats 4 --bonds 0 1 2 3 4 5 \
   --jobs 16 --out shoralg_box.jsonl
-python3 nighthawk_ghz.py shoralg --box 5 5 --N 21 --a 2 4 --layouts split,direct --repeats 4 --bonds 0 1 2 3 4 5 \
+python3 nighthawk_qrack.py ghz shoralg --box 5 5 --N 21 --a 2 4 --layouts split,direct --repeats 4 --bonds 0 1 2 3 4 5 \
   --jobs 16 --out shoralg_box.jsonl
-python3 nighthawk_ghz.py shoralg --dual --N 15 --counting 4 8 --layouts inside,split,direct \
+python3 nighthawk_qrack.py ghz shoralg --dual --N 15 --counting 4 8 --layouts inside,split,direct \
   --models hardcut,ideal,exact,budget,measured --trajectories 400 --jobs 16 --out shoralg_dual.jsonl
-python3 nighthawk_ghz.py shoralg --dual --N 21 --a 2 --layouts split --models exact,measured --trajectories 24 \
+python3 nighthawk_qrack.py ghz shoralg --dual --N 21 --a 2 --layouts split --models exact,measured --trajectories 24 \
   --jobs 16 --out shoralg_dual.jsonl
 python3 nighthawk_graph.py --ghz shoralg_chips.jsonl --ghz shoralg_box.jsonl --ghz shoralg_dual.jsonl --figs 26-28 --save plots
 # two-patch ACE chips joined by the loom (E30): two nighthawk61r2 cloverleaves, 122 qubits
-python3 nighthawk_ghz.py stack --engine loom --loom-chip-backend ace --loom-chips nighthawk61r2 nighthawk61r2 \
+python3 nighthawk_qrack.py ghz stack --engine loom --loom-chip-backend ace --loom-chips nighthawk61r2 nighthawk61r2 \
   --order code-echo --shots 256 --repeats 4 --jobs 16 --out loomace61x2.jsonl
-python3 nighthawk_ghz.py stackmap --in loomace61x2.jsonl --png loomace61x2.png
-python3 nighthawk_ghz.py stackmap --in stack61_zz.jsonl --png stack61_zz.png
+python3 nighthawk_qrack.py ghz stackmap --in loomace61x2.jsonl --png loomace61x2.png
+python3 nighthawk_qrack.py ghz stackmap --in stack61_zz.jsonl --png stack61_zz.png
 # the Walsh echo window by window (E27), the cut units under Layer 2 (E28)
-python3 nighthawk_ghz.py sweep --register nighthawk2p28 --shots 256 --repeats 4 --no-exact --code-at 8 --jobs 16 \
+python3 nighthawk_qrack.py ghz sweep --register nighthawk2p28 --shots 256 --repeats 4 --no-exact --code-at 8 --jobs 16 \
   --out sweep28.jsonl --summary sweep28.json
-python3 nighthawk_ghz.py probe --register nighthawk61r2 --shots 256 --repeats 4 --jobs 16 --out probe61.jsonl
+python3 nighthawk_qrack.py ghz probe --register nighthawk61r2 --shots 256 --repeats 4 --jobs 16 --out probe61.jsonl
 
 # the cloverfield (§3.5)
 python3 nighthawk_cloverfield.py plan --chips nighthawk88e*2 --links 4 --png field.png
@@ -999,7 +1060,7 @@ Progress of any run: the same command with `--status`. Deep points at 57–61 qu
 - **Weights.** Tiling and layoutsearch optimise proxy costs; their weights are not claimed optimal.
 - **GPU builds.** GPU results depend on the Qrack build (§5.3): check one point against the CPU on every new device or driver.
 - **Comparability.** Registers with disabled sites or waists change the circuit graph, so their fidelities are not comparable one-to-one with the release's.
-- **GHZ on stabilizer patches.** `nighthawk_ghz.py chip` on `nighthawk61r2` does not sample on stabilizer-hybrid patches with PyQrack 2.29.5 / Qrack 10.13.2 (§3.6); its `tiles` run dense and are unaffected.
+- **GHZ on stabilizer patches.** `nighthawk_qrack.py ghz chip` on `nighthawk61r2` does not sample on stabilizer-hybrid patches with PyQrack 2.29.5 / Qrack 10.13.2 (§3.6); its `tiles` run dense and are unaffected.
 - **GHZ across simulators.** ACE joins its simulators through replicas and classical shadows, so a GHZ state no single simulator holds (a chip-wide state on two or more patches, a chain through a seam qubit into both patches) keeps no coherence and F_GHZ ≤ ½: `stack`'s Layer S corrects the replica class only (RESULTS §10.7).
 - **Open failure.** A CPU-side C++ exception at d = 16 (61-qubit i0, 45-qubit `nn_qab`) is not yet traced.
 - **Preprint.** arXiv:2609.28657 is a preprint (v1), not peer reviewed at the time of writing.

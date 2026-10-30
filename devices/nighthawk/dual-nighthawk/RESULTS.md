@@ -1,6 +1,6 @@
 # Results: `rcs/nighthawk`
 
-Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E36 in its §9); usage is in the [README](README.md). State as of 29 October 2026.
+Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E37 in its §9); usage is in the [README](README.md). State as of 29 October 2026.
 
 ## Index
 
@@ -35,6 +35,7 @@ Every measured number of the experiments, grouped by experiment. The procedure b
 | [10.17](#1017-shors-code-across-qrackbridge-e34) | E34: Shor's [[m², 1, m]] code instead of GHZ across QrackBridge, Shor-9 on two chips and the box, Shor-16 and -25 across the chips, `max_bonds` 6 → 0 | a cut between the code's blocks needs one bond (for \|±_L⟩), a cut through them one per block it splits (for \|0/1_L⟩); short of that the bridge drops whole blocks and the decoder repairs them as a majority vote predicts (Shor-9 at 1 bond 0.745 against 0.750, Shor-16 at 2 / 1 0.874 / 0.688 against 0.875 / 0.688); at 0 it gives E20's ACE-seam pattern on the side that needs coherence |
 | [10.18](#1018-ibms-two-module-nighthawk-r1-on-the-bridge-e35) | E35: IBM's two Nighthawk R1 modules and four L-couplers (arXiv:2610.29986) on QrackBridge, its Bell and GHZ states under four models against its Table 1 | the hard cut caps every state at 0.50; the benchmarked distant CZ predicts the readout-mitigated Bell 115–233 and GHZ-4/6 to 1.5–3 points (0.954 / 0.944 / 0.938 against 0.939 / 0.917 / 0.909); Bell 117–231 and the simultaneous pairs fall outside the gate model |
 | [10.19](#1019-layer-3-shor-order-finding-across-the-configurations-e36) | E36: Layer 3, the paper's Shor order finding (N 15, a 7) and N 21 at orders 2, 3, 6, as gates across QrackBridge (two chips, the box), and on the dual Nighthawk R1 | a cut between the registers needs ⌈log₂ r⌉ + 1 bonds (4 for r = 6, 3 for r = 3; exact from there on the chips and at every box placement); a power-of-two order needs none: the paper's N = 15 gives its ideal ½ through a hard cut, so it cannot show a link; on the dual R1 with the benchmarked distant CZ 0.414 against ½ (t 4), N 21 at the uniform guess |
+| [10.20](#1020-the-horizontal-qrackbridge-patch-servers-and-a-glue-server-e37) | E37: QrackBridge split over processes, each patch on its own PyQrack instance and the glue on a separate one | same states, shots, fidelity estimates and truncations as PyQrack's QrackBridge; on 2 cores no speed-up (0.97–1.01× at 36 qubits, slower when small); the profile puts 56 % of the wall time in the glue, where a BLAS readout cut sampling 24 % |
 | [11](#11-cloverfield-e13) | E13: cloverfield | ghost link 1.000 / 0.989 / 0.656 vs mean-field 0.773 / 0.773 / 0.067 |
 | [12](#12-qracks-opencl-engine-and-vram-oversubscription-e14-e15) | E14, E15: OpenCL and GTT | three defects, fixed; GTT ceiling lifted |
 | [13](#13-tool-validation) | tool validation | GPU = CPU; layoutsearch matches the exact engine |
@@ -675,7 +676,7 @@ OpenCL validity (PoCL 3.0, CPU device, in the container; 1024 shots; the 10.13.2
 
 ### 10.4 GHZ states across the seams (E21)
 
-`nighthawk_ghz.py` (README §3.6, METHODOLOGY §6.8): the formal proof's Layer 1a on each register's ACE preset placement, no Layer 2. Container, CPU, PyQrack 2.29.5 / Qrack 10.13.2 (PyPI), boundary repetition code off; exact reference (`QrackSimulator`, 128 shots per setting): every deterministic shot ideal in every run below. F_GHZ = (P0 + P1 + C)/2 from Lemma 4's MQC (2k + 2 phases); F0 = fidelity to GHZ_0; the witness is the Clifford bound F ≥ P0 + P1 + P(even X parity) − 1.
+`nighthawk_qrack.py ghz` (README §3.6, METHODOLOGY §6.8): the formal proof's Layer 1a on each register's ACE preset placement, no Layer 2. Container, CPU, PyQrack 2.29.5 / Qrack 10.13.2 (PyPI), boundary repetition code off; exact reference (`QrackSimulator`, 128 shots per setting): every deterministic shot ideal in every run below. F_GHZ = (P0 + P1 + C)/2 from Lemma 4's MQC (2k + 2 phases); F0 = fidelity to GHZ_0; the witness is the Clifford bound F ≥ P0 + P1 + P(even X parity) − 1.
 
 3-qubit chains tiled over the register (`tiles --unit 3`: rows and columns, offsets 0–2), 256 shots × 4 backends per setting (61) or × 2 (28):
 
@@ -733,7 +734,7 @@ One GHZ over `nighthawk2p16` (MQC, dense patches): P0 + P1 bfs / seam tree 0.583
 
 ### 10.6 Seam error extraction and ZNE (E23)
 
-`nighthawk_ghz.py stack` in its first version, now `stack --zne-k 1,2` (README §3.6, METHODOLOGY §6.8): pass 1 (Layer 1a), pass 2 (Layer 2 dd, the §8 model, L = 3), the seam's error read from passes 1 and 2, then ZNE with every seam crossing scaled by λ = 1, 5, 9, and a rerun of pass 2 with fresh ε and backends (the column "Rerun" below; since §10.7 Layer V is the corrected measurement). 256 shots × K = 4 per setting and λ, exact reference 128 shots; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ (Lemma 4):
+`nighthawk_qrack.py ghz stack` in its first version, now `stack --zne-k 1,2` (README §3.6, METHODOLOGY §6.8): pass 1 (Layer 1a), pass 2 (Layer 2 dd, the §8 model, L = 3), the seam's error read from passes 1 and 2, then ZNE with every seam crossing scaled by λ = 1, 5, 9, and a rerun of pass 2 with fresh ε and backends (the column "Rerun" below; since §10.7 Layer V is the corrected measurement). 256 shots × K = 4 per setting and λ, exact reference 128 shots; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ (Lemma 4):
 
 | Register, units | Pass 1 (L1a) | Pass 2 (L2 dd) | Rerun (L2) | ZNE linear | ZNE exp | Exact, pass 2 |
 |---|---|---|---|---|---|---|
@@ -780,7 +781,7 @@ One GHZ over `nighthawk2p16` (MQC, dense patches): P0 + P1 bfs / seam tree 0.583
 
 ### 10.7 Seam error correction: syndrome, replica repetition code, the third measurement (E24)
 
-`nighthawk_ghz.py stack` (README §3.6, METHODOLOGY §6.8): pass 1 (Layer 1a), pass 2 (Layer 2 dd, the §8 model, L = 3), Layer S (the seam's syndrome from passes 1 and 2, every unit classed and planned; the replica repetition code with its schedule on the replica units that lost F), Layer V (pass 2's circuit again, realisations 1000–1003: the code units under the correction, the cut units without it as the control). 256 shots × K = 4 per setting, exact reference 128 shots; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ (Lemma 4; chip: MQC over 16 qubits):
+`nighthawk_qrack.py ghz stack` (README §3.6, METHODOLOGY §6.8): pass 1 (Layer 1a), pass 2 (Layer 2 dd, the §8 model, L = 3), Layer S (the seam's syndrome from passes 1 and 2, every unit classed and planned; the replica repetition code with its schedule on the replica units that lost F), Layer V (pass 2's circuit again, realisations 1000–1003: the code units under the correction, the cut units without it as the control). 256 shots × K = 4 per setting, exact reference 128 shots; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ (Lemma 4; chip: MQC over 16 qubits):
 
 | Register, units | Seam class, plan | Pass 1 (L1a) | Pass 2 (L2 dd) | V (L2 + correction) | Exact, pass 2 |
 |---|---|---|---|---|---|
@@ -832,7 +833,7 @@ One GHZ over `nighthawk2p16` (MQC, dense patches): P0 + P1 bfs / seam tree 0.583
 
 ### 10.8 PyQrack's ACE source: the authority rule, the crossbar, the gadget (E25)
 
-PyQrack's main branch (unitaryfoundation/pyqrack, last change to `qrack_ace_backend.py` on 21 October 2026) is byte-identical to the 2.29.5 used here. Its newest change replaced the fresh-copy authority of the boundary code with lineage tracking (`_update_lineage`): a replica stays the decoder's authority while every coupling it took part in was a real gate with a clean replica of the partner, and when two boundary qubits meet, their crossbar pair becomes the sole authority. `nighthawk_ghz.py --code-authority colocated` adds one step after it: a boundary qubit whose authority moves to a simulator takes the authority of every boundary qubit it has coupled with to that qubit's replica in the same simulator. `stack --code-schedule off` keeps the preparation's CX order. 256 shots × K = 4 per setting, Layer V on realisations 1000–1003; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Layer V, mean F_GHZ of the replica units under the code (E24: lineage with the schedule):
+PyQrack's main branch (unitaryfoundation/pyqrack, last change to `qrack_ace_backend.py` on 21 October 2026) is byte-identical to the 2.29.5 used here. Its newest change replaced the fresh-copy authority of the boundary code with lineage tracking (`_update_lineage`): a replica stays the decoder's authority while every coupling it took part in was a real gate with a clean replica of the partner, and when two boundary qubits meet, their crossbar pair becomes the sole authority. `nighthawk_qrack.py ghz --code-authority colocated` adds one step after it: a boundary qubit whose authority moves to a simulator takes the authority of every boundary qubit it has coupled with to that qubit's replica in the same simulator. `stack --code-schedule off` keeps the preparation's CX order. 256 shots × K = 4 per setting, Layer V on realisations 1000–1003; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Layer V, mean F_GHZ of the replica units under the code (E24: lineage with the schedule):
 
 | Register, replica units | Lineage + schedule (E24) | Lineage, preparation order | Co-located, preparation order | Co-located + schedule | Exact |
 |---|---|---|---|---|---|
@@ -869,7 +870,7 @@ The cut units run without the code in every configuration: V 0.15–0.22, cohere
 
 ### 10.9 The code before the echo (E26)
 
-`nighthawk_ghz.py stack --order code-echo` (README §3.6, METHODOLOGY §6.8) flips Layers 2 and S of §10.7: pass 1 (Layer 1a), Layer S from pass 1's syndrome alone, pass C (pass 1's circuit, realisations 1000–1003: the replica units under the code with its schedule, the cut units without as the control; bulk units keep pass 1), pass E (Layer 2 dd on every unit, the §8 model, L = 3, realisations 0–3 as in §10.7's pass 2, the code kept on the replica units). The drift arrives with its echo in both orders, so pass E runs §10.7's Layer V circuit on the replica units. `nighthawk61r2`, 256 shots × K = 4 per setting, exact reference 128 shots; container CPU, PyQrack 2.29.5 / Qrack 10.13.2; authority `lineage`. Mean F_GHZ (Lemma 4):
+`nighthawk_qrack.py ghz stack --order code-echo` (README §3.6, METHODOLOGY §6.8) flips Layers 2 and S of §10.7: pass 1 (Layer 1a), Layer S from pass 1's syndrome alone, pass C (pass 1's circuit, realisations 1000–1003: the replica units under the code with its schedule, the cut units without as the control; bulk units keep pass 1), pass E (Layer 2 dd on every unit, the §8 model, L = 3, realisations 0–3 as in §10.7's pass 2, the code kept on the replica units). The drift arrives with its echo in both orders, so pass E runs §10.7's Layer V circuit on the replica units. `nighthawk61r2`, 256 shots × K = 4 per setting, exact reference 128 shots; container CPU, PyQrack 2.29.5 / Qrack 10.13.2; authority `lineage`. Mean F_GHZ (Lemma 4):
 
 | Units | Seam class, plan | Pass 1 (L1a) | C (L1a + code) | E (code + L2 dd) | Exact, E |
 |---|---|---|---|---|---|
@@ -899,7 +900,7 @@ The cut units run without the code in every configuration: V 0.15–0.22, cohere
 
 ### 10.10 The Walsh echo window by window (E27)
 
-`nighthawk_ghz.py sweep` (README §3.6; run as `tiles` once per L, which is what `sweep` does): `nighthawk2p28`, 3-qubit chains, Layer 2 dd with L = 0 (none) to 8 windows of four Walsh segments each, the §8 model (T = 4.4); L = 8 once more under the boundary repetition code (lineage authority, the preparation's order). 256 shots × K = 4 per setting, ACE only (the exact reference under dd is ideal by Theorem 1, checked in §10.5); container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean over units:
+`nighthawk_qrack.py ghz sweep` (README §3.6; run as `tiles` once per L, which is what `sweep` does): `nighthawk2p28`, 3-qubit chains, Layer 2 dd with L = 0 (none) to 8 windows of four Walsh segments each, the §8 model (T = 4.4); L = 8 once more under the boundary repetition code (lineage authority, the preparation's order). 256 shots × K = 4 per setting, ACE only (the exact reference under dd is ideal by Theorem 1, checked in §10.5); container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean over units:
 
 | L (windows) | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 8 | 8, code |
 |---|---|---|---|---|---|---|---|---|---|
@@ -918,7 +919,7 @@ The cut units run without the code in every configuration: V 0.15–0.22, cohere
 
 ### 10.11 Protecting the cut units from Layer 2 (E28)
 
-A ZZ coupling between two qubits of a GHZ unit is a global phase on the GHZ (Z_iZ_j stabilises it, and every Walsh-flipped image of it: Corollary 2.1), yet on ACE it is two CXs through the seam wherever the coupling crosses one, and before every such CX ACE reconciles the seam qubit's replicas. `nighthawk_ghz.py probe` (README §3.6; run as a standalone script with the same circuits before it was folded in) puts the cut units of `nighthawk61r2` (all 7, every spread tiling) through Layer 2 dd, L = 3, the §8 model, with the inside ZZ applied several ways; 256 shots × K = 4 per setting, exact reference 128 shots; container CPU, PyQrack 2.29.5 / Qrack 10.13.2:
+A ZZ coupling between two qubits of a GHZ unit is a global phase on the GHZ (Z_iZ_j stabilises it, and every Walsh-flipped image of it: Corollary 2.1), yet on ACE it is two CXs through the seam wherever the coupling crosses one, and before every such CX ACE reconciles the seam qubit's replicas. `nighthawk_qrack.py ghz probe` (README §3.6; run as a standalone script with the same circuits before it was folded in) puts the cut units of `nighthawk61r2` (all 7, every spread tiling) through Layer 2 dd, L = 3, the §8 model, with the inside ZZ applied several ways; 256 shots × K = 4 per setting, exact reference 128 shots; container CPU, PyQrack 2.29.5 / Qrack 10.13.2:
 
 | Cut units, `nighthawk61r2` (7) | F_GHZ | P0 + P1 | C | Per unit | Exact |
 |---|---|---|---|---|---|
@@ -933,7 +934,7 @@ A ZZ coupling between two qubits of a GHZ unit is a global phase on the GHZ (Z_i
 
 (A first run of the same variants with the units grouped by tiling gave gate 0.187, target on the seam qubit 0.168, on the bulk qubit 0.242, dropped 0.358, chain with gates 0.214: the gate variants scatter by ± 0.03–0.06 between runs, the dropped variants by ± 0.005.)
 
-`nighthawk_ghz.py --inside-zz stabilizer` makes the dropped variant the stack's rule. `stack` (§10.7's settings, `echo-code`, lineage authority with the code's schedule), mean F_GHZ:
+`nighthawk_qrack.py ghz --inside-zz stabilizer` makes the dropped variant the stack's rule. `stack` (§10.7's settings, `echo-code`, lineage authority with the code's schedule), mean F_GHZ:
 
 | Register, units | Seam class, plan | Pass 1 | Pass 2 (dd), gates (§10.7) | Pass 2 (dd), dropped | V, gates (§10.7) | V, dropped | Exact |
 |---|---|---|---|---|---|---|---|
@@ -962,13 +963,13 @@ With the code first (`--order code-echo`, §10.9), `nighthawk61r2`, the same set
 - **The ½ ceiling stays.** C = 0.016–0.044 in every variant, so F_GHZ ≤ (P0 + P1)/2 ≈ 0.33–0.36. What the stabiliser rule protects is the level the preparation leaves, not coherence between simulators: that still needs a unit held by one simulator (§10.7) or the crossbar (§10.8).
 - **The replica units lose their echo dip too.** Pass 2 under dd is at pass 1's level (0.764 against 0.771, 0.668 against 0.654 on `nighthawk61r2`; 0.781 against 0.770 on `nighthawk2p28`), where the gates took it to 0.683, 0.481, 0.720. The code still takes them to the exact value in V; the stabiliser rule does not replace it, since the replica error is set in the preparation.
 - **Which qubit the CX targets matters, the preparation's root does not help.** Target on the bulk qubit 0.258, on the seam qubit 0.133, as the coupling lists it 0.205: neither choice keeps the no-drift level. Preparing the GHZ from one end instead of from the seam qubit gives 0.332 without drift, no better than the seam root (0.355).
-- **Scope.** The rule holds because the units are GHZ states, which is all `nighthawk_ghz.py` prepares; with a payload inside the unit (Layer 3) the inside ZZ is not a phase. On hardware the coupling is already invisible to a GHZ (Corollary 2.1); the rule only keeps ACE from turning that identity into seam crossings.
+- **Scope.** The rule holds because the units are GHZ states, which is all `nighthawk_qrack.py ghz` prepares; with a payload inside the unit (Layer 3) the inside ZZ is not a phase. On hardware the coupling is already invisible to a GHZ (Corollary 2.1); the rule only keeps ACE from turning that identity into seam crossings.
 
 ### 10.12 The loom as the seam, ghost band (E29)
 
 > **Read with §10.14.** These runs use the ghost loom (`--loom-read ghost`, the only mode then). Each chip also simulates its partners' anchor qubits, so a 3-chain across a link is simulated whole on one chip; "Layer S's code" below reads it there. Nothing crosses the loom: as a hard cut (`--loom-read cut`, now the default) the same units sit at 0.50 in every pass, and 5-chains that no ghost band holds stay at 0.26 here too.
 
-`nighthawk_ghz.py stack --engine loom --order code-echo` (README §3.6, METHODOLOGY §6.8): `nighthawk61r2`'s 61 qubits as two chips of 30 and 31 qubits (`rect:1-8,2-5`, `rect:1-8,6-9`, broken qubits 17, 55, 62 out), the size of its two ACE patches, each an exact `QrackSimulator` with a ghost of every partner it is linked to (37 and 38 qubits), joined by `nighthawk_cloverfield.py`'s ghost loom on the 7 rows where `nighthawk61r2` has a coupler between columns 5 and 6: the field has `nighthawk61r2`'s coupling graph. Layer S's code on the loom is the loom's authority: a unit is read on the chip that holds copies of all its qubits; without it every qubit is read on its own chip, the chips sampled apart (the cloverfield's estimator). 3-qubit chains as in §10.9, 256 shots × K = 4 per setting, exact reference 128 shots; Layer 2 dd, L = 3, the §8 model; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ:
+`nighthawk_qrack.py ghz stack --engine loom --order code-echo` (README §3.6, METHODOLOGY §6.8): `nighthawk61r2`'s 61 qubits as two chips of 30 and 31 qubits (`rect:1-8,2-5`, `rect:1-8,6-9`, broken qubits 17, 55, 62 out), the size of its two ACE patches, each an exact `QrackSimulator` with a ghost of every partner it is linked to (37 and 38 qubits), joined by `nighthawk_cloverfield.py`'s ghost loom on the 7 rows where `nighthawk61r2` has a coupler between columns 5 and 6: the field has `nighthawk61r2`'s coupling graph. Layer S's code on the loom is the loom's authority: a unit is read on the chip that holds copies of all its qubits; without it every qubit is read on its own chip, the chips sampled apart (the cloverfield's estimator). 3-qubit chains as in §10.9, 256 shots × K = 4 per setting, exact reference 128 shots; Layer 2 dd, L = 3, the §8 model; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ:
 
 | Units | Seam class, plan | Pass 1 (own chips) | C (authority read) | E (+ dd), gates | E (+ dd), inside ZZ dropped | Exact, E |
 |---|---|---|---|---|---|---|
@@ -1002,7 +1003,7 @@ With the code first (`--order code-echo`, §10.9), `nighthawk61r2`, the same set
 
 > **Read with §10.14.** The loom here is the ghost loom (`--loom-read ghost`): "across the loom" units read 1.00 because one chip's ghost band simulates them whole, not because anything crosses the loom. ACE's numbers inside each chip are unaffected by the loom's mode.
 
-`nighthawk_ghz.py stack --engine loom --loom-chip-backend ace --loom-chips nighthawk61r2 nighthawk61r2 --order code-echo` (README §3.6, METHODOLOGY §6.8): two copies of `nighthawk61r2`, each on its stored two-patch ACE preset (the cloverleaf), side by side as a 122-qubit field, joined by `nighthawk_cloverfield.py`'s ghost loom on the 7 rows whose facing border pair are lattice neighbours (rows 1–5, 7, 8; row 6 of the second chip starts at the broken qubit 62). Each chip holds a ghost of each partner it is linked to on a free ACE site coupled to the anchor (simulator widths with ghosts 42 / 34 and 35 / 41, against 35 / 34 without). Two seams in one field: ACE's inside each chip and the loom's between them. Layer S's code is both decoders, ACE's boundary repetition code inside each chip (lineage authority, the code's schedule) and the loom's authority across; without it ACE runs uncorrected and every qubit is read on its own chip. 3-qubit chains, 256 shots × K = 4 per setting, exact reference 128 shots; Layer 2 dd, L = 3, the §8 model; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ (range of E in brackets):
+`nighthawk_qrack.py ghz stack --engine loom --loom-chip-backend ace --loom-chips nighthawk61r2 nighthawk61r2 --order code-echo` (README §3.6, METHODOLOGY §6.8): two copies of `nighthawk61r2`, each on its stored two-patch ACE preset (the cloverleaf), side by side as a 122-qubit field, joined by `nighthawk_cloverfield.py`'s ghost loom on the 7 rows whose facing border pair are lattice neighbours (rows 1–5, 7, 8; row 6 of the second chip starts at the broken qubit 62). Each chip holds a ghost of each partner it is linked to on a free ACE site coupled to the anchor (simulator widths with ghosts 42 / 34 and 35 / 41, against 35 / 34 without). Two seams in one field: ACE's inside each chip and the loom's between them. Layer S's code is both decoders, ACE's boundary repetition code inside each chip (lineage authority, the code's schedule) and the loom's authority across; without it ACE runs uncorrected and every qubit is read on its own chip. 3-qubit chains, 256 shots × K = 4 per setting, exact reference 128 shots; Layer 2 dd, L = 3, the §8 model; container CPU, PyQrack 2.29.5 / Qrack 10.13.2. Mean F_GHZ (range of E in brackets):
 
 | Units | Pass 1 | C (code) | E (code + dd), gates | E (code + dd), inside ZZ dropped | Exact, E |
 |---|---|---|---|---|---|
@@ -1029,7 +1030,7 @@ With the code first (`--order code-echo`, §10.9), `nighthawk61r2`, the same set
 
 ### 10.14 The loom as a hard cut, and what the ghost band does (E31)
 
-`nighthawk_ghz.py stack --engine loom` now models the loom as what it is between independent chip processes, a hard cut (`--loom-read cut`, the default): each chip an independent simulator with no copy of any qubit of the other, a link CZ reaching each side only as the mean-field phase π P(1) of the other (the cloverfield's `--loom mean`), every qubit read on its own chip. The ghost loom of §10.12–10.13 stays available as `--loom-read ghost`. `--order code-echo`, 3-qubit chains, 256 shots × K = 4 per setting, exact reference 128 shots (5-chains: 128 × 2, exact 64); Layer 2 dd, L = 3, the §8 model; container CPU, PyQrack 2.29.5 / Qrack 10.13.2.
+`nighthawk_qrack.py ghz stack --engine loom` now models the loom as what it is between independent chip processes, a hard cut (`--loom-read cut`, the default): each chip an independent simulator with no copy of any qubit of the other, a link CZ reaching each side only as the mean-field phase π P(1) of the other (the cloverfield's `--loom mean`), every qubit read on its own chip. The ghost loom of §10.12–10.13 stays available as `--loom-read ghost`. `--order code-echo`, 3-qubit chains, 256 shots × K = 4 per setting, exact reference 128 shots (5-chains: 128 × 2, exact 64); Layer 2 dd, L = 3, the §8 model; container CPU, PyQrack 2.29.5 / Qrack 10.13.2.
 
 | Ghost loom, 5-qubit chains, two exact chips (`rect:1-8,2-5` + `rect:1-8,6-9`) | Units | Class | Pass 1 | C ("code") | E | Exact |
 |---|---|---|---|---|---|---|
@@ -1065,7 +1066,7 @@ With the code first (`--order code-echo`, §10.9), `nighthawk61r2`, the same set
 
 ### 10.15 QrackBridge in place of the loom (E32)
 
-`nighthawk_ghz.py stack --engine bridge` (README §3.6, METHODOLOGY §6.8) joins the same two exact chips as §10.14 (`rect:1-8,2-5` + `rect:1-8,6-9`, `nighthawk61r2`'s 61 qubits, 7 links) with PyQrack's `QrackBridge` (Claude and Dan Strano; `qrack_bridge.py` of PyQrack 2.30.2, loaded onto PyQrack 2.29.5 / Qrack 10.13.2) instead of the loom: one patch per chip, a gate across the cut teleported through a pair of bond qubits, the cut recompressed to at most `max_bonds` bond qubits (greedy truncation, eager). Each circuit's bridge holds its units' qubits (widest: 30, 15 per patch). `--order code-echo`, 3-qubit chains, 256 shots × K = 4 per setting, exact reference 128 shots; Layer 2 dd, L = 3, the §8 model; container CPU. Every unit across the bridge is class bridge (no code; C reruns it as the control). Mean F_GHZ:
+`nighthawk_qrack.py ghz stack --engine bridge` (README §3.6, METHODOLOGY §6.8) joins the same two exact chips as §10.14 (`rect:1-8,2-5` + `rect:1-8,6-9`, `nighthawk61r2`'s 61 qubits, 7 links) with PyQrack's `QrackBridge` (Claude and Dan Strano; `qrack_bridge.py` of PyQrack 2.30.2, loaded onto PyQrack 2.29.5 / Qrack 10.13.2) instead of the loom: one patch per chip, a gate across the cut teleported through a pair of bond qubits, the cut recompressed to at most `max_bonds` bond qubits (greedy truncation, eager). Each circuit's bridge holds its units' qubits (widest: 30, 15 per patch). `--order code-echo`, 3-qubit chains, 256 shots × K = 4 per setting, exact reference 128 shots; Layer 2 dd, L = 3, the §8 model; container CPU. Every unit across the bridge is class bridge (no code; C reruns it as the control). Mean F_GHZ:
 
 | `max_bonds` | Off the seam (69): pass 1 / E | Across the bridge (13): pass 1 | C | E | Exact | Peak bonds per cut | Truncating circuits (pass 1) | `fidelity_estimate`, truncating circuits |
 |---|---|---|---|---|---|---|---|---|
@@ -1095,7 +1096,7 @@ With the code first (`--order code-echo`, §10.9), `nighthawk61r2`, the same set
 
 ### 10.16 A closed box: six faces on a QrackBridge ring (E33)
 
-`nighthawk_ghz.py stack --engine bridge --box 5 5` (README §3.6, METHODOLOGY §6.8): the 98 lattice points on the surface of a 5 × 5 × 5 block, 192 couplers at unit distance, six circuits (base 25, front 12, right 12, lid 25, back 12, left 12 qubits; base and lid whole, the walls sharing the vertical edges round the box), each a QrackBridge patch, the six patches closed into a ring (`wrap=True`) in the order base → front → right → lid → back → left → base. Opposite faces sit three apart on the ring and share no edge, so of the 12 box edges six are a ring cut (base–front, front–right, right–lid, lid–back, back–left, left–base, the last one the ring's wrap cut) and six are relayed through the face between (base–right via front, front–lid via right, lid–left via back, base–back via left, front–left via base, right–back via lid), one bond on each of two cuts. 3-qubit chains along straight lines in x, y and z: 144 units in 18 circuits, 100 inside a face, 22 across a direct edge, 22 across a relayed edge (every one of the 44 cross-face couplers in one unit). Bipartite under x + y + z. `--order code-echo`, 256 shots × K = 4 per setting, exact reference 128 shots on one 98-qubit `QrackSimulator`; Layer 2 dd, L = 3, the §8 model; greedy truncation, eager; container CPU, `qrack_bridge.py` of PyQrack 2.30.2 on PyQrack 2.29.5 / Qrack 10.13.2. Each circuit's bridge holds its units' qubits, 9 per patch at most (widest bridge 54). Mean F_GHZ, pass 1 / C / E (exact E):
+`nighthawk_qrack.py ghz stack --engine bridge --box 5 5` (README §3.6, METHODOLOGY §6.8): the 98 lattice points on the surface of a 5 × 5 × 5 block, 192 couplers at unit distance, six circuits (base 25, front 12, right 12, lid 25, back 12, left 12 qubits; base and lid whole, the walls sharing the vertical edges round the box), each a QrackBridge patch, the six patches closed into a ring (`wrap=True`) in the order base → front → right → lid → back → left → base. Opposite faces sit three apart on the ring and share no edge, so of the 12 box edges six are a ring cut (base–front, front–right, right–lid, lid–back, back–left, left–base, the last one the ring's wrap cut) and six are relayed through the face between (base–right via front, front–lid via right, lid–left via back, base–back via left, front–left via base, right–back via lid), one bond on each of two cuts. 3-qubit chains along straight lines in x, y and z: 144 units in 18 circuits, 100 inside a face, 22 across a direct edge, 22 across a relayed edge (every one of the 44 cross-face couplers in one unit). Bipartite under x + y + z. `--order code-echo`, 256 shots × K = 4 per setting, exact reference 128 shots on one 98-qubit `QrackSimulator`; Layer 2 dd, L = 3, the §8 model; greedy truncation, eager; container CPU, `qrack_bridge.py` of PyQrack 2.30.2 on PyQrack 2.29.5 / Qrack 10.13.2. Each circuit's bridge holds its units' qubits, 9 per patch at most (widest bridge 54). Mean F_GHZ, pass 1 / C / E (exact E):
 
 | `max_bonds`, inside ZZ | Inside a face (100) | Direct edge (22) | Relayed edge (22) | E range across edges | Peak bonds per cut | Truncating circuits (pass 1 / E of 648) | `fidelity_estimate` min (E) | Seconds, pass 1 / C / E |
 |---|---|---|---|---|---|---|---|---|
@@ -1147,14 +1148,14 @@ The demand on a cut is the number of units of one circuit crossing it. The z-cha
 - **The box closes, and at capacity every edge is exact.** With `max_bonds` 6 (the peak demand is 4 bond qubits per cut, 5 while a drift coupling crosses) all 44 units across a box edge stay at the exact value through the three layers, 1.000 and 1.001 in E, the 22 relayed through a third face as the 22 on a direct cut; the bridge truncates nothing. Relaying costs bonds, one on each cut it passes, and no fidelity while they are there.
 - **Below capacity the inner cuts ration whole units, as between two chips.** At the three demand-4 inner cuts the mean is the §10.15 budget, 0.754 / 0.756 / 0.754 against 0.750 at `max_bonds` 2 and 0.63 against 0.625 at 1: per circuit `max_bonds` units keep their GHZ at 1.00 and the rest drop to the separable ½. Which keep it is the greedy truncation's choice between equal Schmidt values: here the relayed units at right|lid and lid|back (front–lid and lid–left stay at 1.00, right–lid and lid–back drop to 0.51), the direct one at base|front (base–front 0.97, base–right via front 0.53). Units alone or in pairs on their cuts keep 1.00 at 2 and 0.75–0.84 at 1.
 - **The ring's wrap cut is below the budget.** left|base: 0.665 / 0.686 at 2 (budget 0.750), 0.607 at 1 (0.625). QrackBridge truncates the wrap cut by a local SVD of its two patches, which on a ring is not the projection on the kept Schmidt vectors (a periodic MPS has no canonical form; the bridge's notes say its truncation there is locally optimal only and its `fidelity_estimate` an estimate). Within capacity it should cost nothing and it does: the two front–left chains through the wrap keep 1.00 in pass 1 and fall to 0.67 in E at `max_bonds` 2, when the drift's CX · Rz · CX cross the wrap again. Dropping the inside ZZ keeps those gates off the bridge and the chains at 1.00. The repro shows the same at 1 (the ring carries neither chain where the open chain carries one) and at 2 (`fidelity_estimate` 0.5 against 1.0).
-- **At 0 and 1 the ring can zero the state.** With the inside ZZ as gates, pass E stopped at `max_bonds` 1 and 0: a truncation of the wrap cut and of an inner cut kept opposite branches of tied GHZ units, the contracted state was zero, its renormalisation divided 0 / 0 and the NaN state broke the next SVD. Which branch a tie keeps follows rounding, so the same circuit vanishes in some runs and not in others. `nighthawk_ghz.py` now raises numpy's divide and invalid errors inside every bridge circuit and stops with the circuit named, so a NaN state is never sampled. With `--inside-zz stabilizer` no bridged gate runs in E and both capacities complete.
+- **At 0 and 1 the ring can zero the state.** With the inside ZZ as gates, pass E stopped at `max_bonds` 1 and 0: a truncation of the wrap cut and of an inner cut kept opposite branches of tied GHZ units, the contracted state was zero, its renormalisation divided 0 / 0 and the NaN state broke the next SVD. Which branch a tie keeps follows rounding, so the same circuit vanishes in some runs and not in others. `nighthawk_qrack.py ghz` now raises numpy's divide and invalid errors inside every bridge circuit and stops with the circuit named, so a NaN state is never sampled. With `--inside-zz stabilizer` no bridged gate runs in E and both capacities complete.
 - **At 0 the ring is the hard cut.** Every unit across an edge at 0.51 in every pass and on every edge, relayed or not, as the two-chip bridge at 0 (0.511) and the loom's hard cut (0.50).
 - **The echo and seam protection.** E equals pass 1 wherever the ring's wrap is not involved: inside the faces 1.000 in every run, across the edges within 0.01 of pass 1 at 6 and at the inner cuts. Dropping the inside ZZ saves the bridged gates in E (194 s against 819 s at 6, 138 s against 473 s at 2).
 
 
 ### 10.17 Shor's code across QrackBridge (E34)
 
-`nighthawk_ghz.py shor` (README §3.6, METHODOLOGY §6.8) puts Shor's [[m², 1, m]] code across QrackBridge in place of a GHZ chain, encoded as `nighthawk_qrack.py shor9` encodes it (§10.3, E20). Every m × m placement whose encoder CXs are couplers runs in its own circuit, with all four logical states, and raw and decoded success are measured against an exact `QrackSimulator` of the unit. There are two geometries:
+`nighthawk_qrack.py ghz shor` (README §3.6, METHODOLOGY §6.8) puts Shor's [[m², 1, m]] code across QrackBridge in place of a GHZ chain, encoded as `nighthawk_qrack.py shor9` encodes it (§10.3, E20). Every m × m placement whose encoder CXs are couplers runs in its own circuit, with all four logical states, and raw and decoded success are measured against an exact `QrackSimulator` of the unit. There are two geometries:
 
 - Nighthawk's 117 sites as two exact chips, `rect:0-11,0-5` + `rect:0-11,6-9` (70 + 47 qubits, 11 links on rows 0–4 and 6–11).
 - The 5 × 5 × 5 box of §10.16 (six patches on a ring), where a unit bends over the box edge it crosses.
@@ -1232,7 +1233,7 @@ The paper is N. M. Sundaresan et al. (IBM), *Meter-scale quantum interconnects b
 - distant CZ, randomized-benchmarked: mean 94.75 %, best 96.42 %;
 - Bell pairs, GHZ-4 and GHZ-6 across the modules, raw and readout-mitigated (Table 1, Extended Data Table 3).
 
-`nighthawk_ghz.py dual` (README §3.6, METHODOLOGY §6.8) builds that setup:
+`nighthawk_qrack.py ghz dual` (README §3.6, METHODOLOGY §6.8) builds that setup:
 
 - the two modules are the two patches of a QrackBridge;
 - the cable is a state transfer, a SWAP across the bridge;
@@ -1306,7 +1307,7 @@ Bond qubits per cut, at their peak: 3 for one distant CZ (the SWAP's ship-and-re
 
 ### 10.19 Layer 3, Shor order finding, across the configurations (E36)
 
-The formal proof's Layer 3 is Shor order finding for N = 15, a = 7, with 4 counting and 4 work qubits, scored by the per-shot factoring success (`shrs_nighthawk_stealth.py`, `Shor`). `nighthawk_ghz.py shoralg` (README §3.6, METHODOLOGY §6.8) runs it as gates on this round's engines:
+The formal proof's Layer 3 is Shor order finding for N = 15, a = 7, with 4 counting and 4 work qubits, scored by the per-shot factoring success (`shrs_nighthawk_stealth.py`, `Shor`). `nighthawk_qrack.py ghz shoralg` (README §3.6, METHODOLOGY §6.8) runs it as gates on this round's engines:
 
 - the two exact chips joined by QrackBridge;
 - the 5 × 5 × 5 box, counting register on the base and work register on a wall: front (a direct ring cut), right (relayed through front) or left (the ring's wrap cut);
@@ -1324,9 +1325,9 @@ Five layouts place the cut against the algorithm:
 | `countsplit` | through the counting register (the inverse QFT crosses) | 12 / 60 |
 | `worksplit` | through the work register (the multiplications cross) | 46 / 1866 |
 
-On the bridge, every circuit runs at `max_bonds` 0–5 with 4 realisations (seeds). P(y) comes from the bridge's ket where it is at most 22 qubits wide, else from 4096 shots, whose expected TVD floor is 0.006–0.045 by case. Run times on 2 cores: 11 s (N 15) and 1203 s (N 21) on the chips, 742 s on the box, 179 s (N 15) and 324 s (N 21) on the dual.
+On the bridge, every circuit runs at `max_bonds` 0–5, 4 times. P(y) comes from the bridge's ket where it is at most 22 qubits wide, else from 4096 shots, whose expected TVD floor is 0.006–0.045 by case. Run times on 2 cores: 11 s (N 15) and 1203 s (N 21) on the chips, 742 s on the box, 179 s (N 15) and 324 s (N 21) on the dual.
 
-Cells are success (or the order found where r is odd, which gives no factor), the range over the 4 realisations where it exceeds 0.02, and in brackets the TVD to the ideal distribution.
+Cells are success (or the order found where r is odd, which gives no factor), the range over the 4 runs where it exceeds 0.02, and in brackets the TVD to the ideal distribution.
 
 **Two chips, N = 21, a = 2 (r = 6, t = 10):** ideal success 0.322, uniform guess 0.051; the rule needs 4 bonds for the split layouts.
 
@@ -1383,17 +1384,75 @@ N = 21, a = 2, split on the dual: 20 distant CNOTs and 24,544 physical CX (6,298
 - **Power-of-two orders need no bond at all, so the paper's N = 15 is blind to the cut.** For r = 2^k the work register's record of x mod r is x's own low bits. A truncation that keeps any of its branches, as the hard cut does, is then a measurement of the work register, which Shor's algorithm tolerates at any point. Through the inverse QFT the counting register stays a product state.
   - N = 15, a = 7 (the paper's case at t = 4 and t = 8) and N = 21, a = 8 give the exact distribution at `max_bonds` 0 in every layout, on the box's relays and its wrap cut, and on the dual's hard cut. That includes the layouts where 1866 CXs cross the cut.
   - A factoring success of ½ at N = 15 therefore certifies nothing about the link between the circuits: two circuits with no quantum channel score it too. Only an order that is not a power of two (here N = 21, a = 2 or 4) makes the link carry entanglement.
-- **Below capacity the success is not a measure of the run.** Under the bond limit the truncation chooses among equal Schmidt values, so the output depends on the seed. Two examples:
-  - split at 3 bonds ranges 0.18–0.33 over 4 realisations;
-  - one relayed box realisation found the order with 0.84 against the ideal 0.665, from a distribution 0.38 away in TVD.
+- **Below capacity the success is not a measure of the run.** Under the bond limit the truncation chooses among equal Schmidt values (an r = 6 or r = 3 state has r equal ones across the cut). Which ones it keeps is decided by Qrack's single-precision rounding, so it changes from run to run even with the same seed: three runs of one circuit at 3 bonds gave 0.08, 0.18 and 0.35 (§10.20). Two examples from the 4 runs per circuit:
+  - split at 3 bonds ranges 0.18–0.33 over 4 runs;
+  - one relayed box run found the order with 0.84 against the ideal 0.665, from a distribution 0.38 away in TVD.
 
   Success above the ideal, or near it, can come from a wrong distribution. The TVD to the ideal distribution, or the classical fidelity, is the measure that only the exact output passes. At `max_bonds` 0 an r = 6 run is the uniform guess (0.051–0.064, TVD 0.94).
-- **The box's ring adds nothing to the rule.** The direct cut, a relay through a third face and the wrap cut all reach the exact output at the same capacity (4 / 3). Below it they differ, by realisation, as two chips do. Unlike the GHZ drift gates of §10.16, Layer 3 never zeroed the ring's state.
+- **The box's ring adds nothing to the rule.** The direct cut, a relay through a third face and the wrap cut all reach the exact output at the same capacity (4 / 3). Below it they differ from run to run, as two chips do. Unlike the GHZ drift gates of §10.16, Layer 3 never zeroed the ring's state.
 - **On the dual R1 the cable is cheaper than the lattice.**
   - With the benchmarked distant CZ, the paper's Layer 3 (t = 4) keeps 0.414 of the ideal 0.500 split across the modules, but 0.375 on one module alone. One module puts both registers on one line and costs more SWAPs (374 physical CX against 338).
   - The hard cut scores 0.500 again: r = 4. So on IBM's dual R1 this benchmark cannot tell the cable from no cable.
   - At t = 8 the extra QFT routing (~650 CX) drops the success to 0.19–0.24 (uniform 0.086).
   - N = 21's 24,544 physical CX at 0.355 % per local CZ leave exactly the uniform guess (0.050).
+
+### 10.20 The horizontal QrackBridge: patch servers and a glue server (E37)
+
+`nighthawk_qrack.py`'s `HBridge` (README §3.3.3, METHODOLOGY §6.8) runs QrackBridge's algorithm split by workload over three kinds of process:
+
+- **patch servers:** each its own PyQrack instance, holding the patch simulators;
+- **a glue server:** no Qrack, doing the recompression sweeps, the wrap cut, the sampling and the contraction;
+- **the coordinator:** the bookkeeping.
+
+Kets move through shared memory. `bridgebench` runs random circuits on it and on PyQrack's QrackBridge with the same seed: per layer, U3 on every qubit and CX on a random matching, a share of the CXs between neighbouring patches. All runs are on the container's 2 CPU cores, with patch servers `cpu,cpu` unless noted.
+
+**Agreement.** On every circuit below, and the 5 circuits of selftest [14], the two engines match:
+
+- state overlap ≥ 0.9999997;
+- identical shots, fidelity estimate and truncation count;
+- with truncation (up to 16 per circuit), on a ring, with lazy bonds, and with more patches than servers.
+
+At full capacity both equal QrackSimulator (overlap 0.9999997).
+
+| Case | Patches / servers | Truncations | Horizontal | Local | Ratio |
+|---|---|---|---|---|---|
+| 12 qubits, depth 6, `max_bonds` 2 | 2 / 2 | 0, 7 | 0.21 s | 0.03 s | 0.16× |
+| 12 qubits, depth 6, `max_bonds` 2, servers pinned to one core each | 3 / 2 | — | 0.08 s | 0.04 s | 0.49× |
+| 24 qubits, ring, depth 8, cross 0.3, `max_bonds` 2 | 4 / 2 | 16, 10 | 1.19 s | 1.06 s | 0.89× |
+| 24 qubits, depth 6, cross 0.3, `max_bonds` 3, lazy 2 | 6 / 3 | 1 | 0.13 s | 0.23 s | 1.7× |
+| 36 qubits (2 × 18), depth 8, cross 0.05, `max_bonds` 4, 256 shots, glue 1 thread | 2 / 2 | 4, 5 | 77.9 s | 78.1 s | 1.00× |
+| the same, glue 2 threads | 2 / 2 | 4, 5 | 78.5 s | 76.4 s | 0.97× |
+| the same, glue 2 threads, `glue_fast` | 2 / 2 | 4, 5 | 69.0 s | 69.6 s | 1.01× |
+
+Where the time goes at 36 qubits (2 circuits, glue 2 threads, `glue_fast`; the coordinator waited 68.7 of the 69.0 s):
+
+| Workload | Seconds | Of which |
+|---|---|---|
+| patch server 0 | 29.1 busy, in parallel with server 1 | gates 18.3 (bond allocation: Qrack defers gates, so the patch ket's growth by each bond qubit lands here), ket out 9.6, ket in 1.1; 1.22 GB through shared memory |
+| patch server 1 | 29.4 busy | gates 18.5, ket out 9.8, ket in 1.0; 1.22 GB |
+| glue server | 38.5 busy | sampling 23.7 (31.2 with QrackBridge's einsum), sweeps 14.8 (17 calls); 1.59 GB read |
+| local QrackBridge, one circuit, cProfile | 41.6 | bond allocation 11.4, sampling 17.6, sweeps 12.5, ket out 4.7 |
+
+Layer 3 on the bridge engines (`shoralg --N 21 --a 2`, split and direct, `max_bonds` 3 and 4, 2 runs each, 1 job): local 35.0 s, horizontal 45.9 s.
+
+| Server (side) | Gates | Ket out | Ket in |
+|---|---|---|---|
+| patch 0 (counting register) | 1.0 s | 9.2 s | 3.8 s |
+| patch 1 (work register) | 12.0 s | 8.0 s | 3.2 s |
+| glue | sweeps 10.1 s, contraction 0.5 s | — | — |
+
+At capacity both engines give 0.322 on every run. Below it they differ, as runs of one engine do: three runs of one circuit (N 21, a 2, t 8, split, `max_bonds` 3, same seed) gave 0.084, 0.183 and 0.347.
+
+- **Same algorithm, same numbers.** Splitting the bridge over processes changes no result: every gate is local to a patch, and the glue repeats QrackBridge's arithmetic and RNG use. The only differences are the ties §10.19 describes, which single-precision rounding breaks differently on every run of either engine.
+- **On 2 cores the split buys no time; the profile shows why.**
+  - Qrack already spreads one patch's work over both cores, so two patch servers only share them: the 36-qubit wall time equals the local one (0.97–1.01×).
+  - Small circuits are slower: the round trips to the servers cost more than the gates (0.16× at 12 qubits).
+  - The patch servers do run concurrently (29 s each, against the local engine's sequential bond allocation and ket export).
+  - The glue then runs while both wait: 56 % of the wall time at 36 qubits, mostly the readout's sequential sampling (34 %) and the sweeps (21 %). Faster patch servers alone can at most remove the other 44 %.
+- **Each workload is now separately visible and tunable.**
+  - Threading the glue's readout as one BLAS product (`glue_fast`) cut sampling by 24 %, shots still identical, which no setting of the patches could do.
+  - Layer 3's work-register side does 12× the gate work of its counting side, so the side that needs a GPU is known (`devices=cpu,gpu:0`).
+  - Ket traffic (about a third of a patch server's time at 18 qubits) is the cost of every recompression, whatever the engine.
 
 ---
 
@@ -1574,7 +1633,7 @@ Our Nighthawk two-patch registers, 3 seam qubits each (release prefixes; `nn_qab
 | `fxeb` ladder, n = 32 | EPYC (48 GiB reference) |
 | a noise knob ACE's seam loss follows (E23): ACE's own thresholds (`_epsilon`, `_rot_epsilon`) | not tried: the gate-level amplifiers (CX, ZZ-echo and global folding) do not scale it; the boundary repetition code is not a noise level but a correction (§10.7) |
 | Layer 2 at the paper's K = 32 (E22); Layer 1b and the OTOC on ACE | not run here: K = 4; 1b and OTOC only in the numpy reference |
-| ACE's lineage authority after a seam-to-seam CX (E24, E25) | the crossbar pair becomes the sole authority and a partner stays there when the other qubit couples into a patch; `nighthawk_ghz.py` schedules around it (`--code-schedule`) or moves the partner along (`--code-authority colocated`). To report upstream: the co-located step in `_update_lineage`, with `nighthawk61r2` [48, 40, 56] (0.463 → 1.003) |
+| ACE's lineage authority after a seam-to-seam CX (E24, E25) | the crossbar pair becomes the sole authority and a partner stays there when the other qubit couples into a patch; `nighthawk_qrack.py ghz` schedules around it (`--code-schedule`) or moves the partner along (`--code-authority colocated`). To report upstream: the co-located step in `_update_lineage`, with `nighthawk61r2` [48, 40, 56] (0.463 → 1.003) |
 | GHZ across two ACE simulators (E24) | no coherence by construction (replicas and classical shadows only): a chip-wide GHZ on a register of two or more patches is not correctable on ACE |
 | GHZ chip-wide on `nighthawk61r2` (E21) | stabilizer patches leave the tableau in ACE's sampler on PyQrack 2.29.5 / Qrack 10.13.2: test on the EPYC build |
 | Hamming ladder n = 45–57 and `nighthawk61r2` (E18) | EPYC: README §7 recipe; 57 needs 64 GiB patches, 61 RAM + swap (≈ 385 GiB) |

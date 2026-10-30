@@ -2,7 +2,7 @@
 """
 nighthawk_3dgraph.py -- interactive 3D views, in Python (matplotlib, no browser), of the telemetry and
 measurements of every shape the nighthawk tools write: the Nighthawk lattice of nighthawk_qrack.py's runs and
-shor9 registers, nighthawk_ghz.py's registers (ACE patches, two chips joined by the loom or QrackBridge, the box
+shor9 registers, nighthawk_qrack.py ghz's registers (ACE patches, two chips joined by the loom or QrackBridge, the box
 of six faces on a ring), Shor's code across QrackBridge, and the dual Nighthawk R1 of arXiv:2610.29986.
 
 Dark mode by default (--theme light, or auto to follow the desktop where it can tell; T switches at any time).
@@ -15,19 +15,19 @@ Shapes (one scene per register or record family; each scene has data sets and me
                        against the prepared string, P(1) and its bias for the other families
   shor9 register       nighthawk_qrack.py shor9 --register: each unit's square on the lattice, by ACE patch;
                        logical Z, X, the weaker of the two, the Z-basis impossible share
-  GHZ register         nighthawk_ghz.py tiles / stack / chip: every site's F_GHZ (the engine's read: ACE, loom or
+  GHZ register         nighthawk_qrack.py ghz tiles / stack / chip: every site's F_GHZ (the engine's read: ACE, loom or
                        QrackBridge), the exact reference, their difference, coherence C, population, lowest F,
                        units through the site; chip-wide states' agreement with the majority. Coupler telemetry:
                        each coupler's break rate. Loom and bridge chips sit apart, the box is folded into a cube
                        with the columns standing out of its faces; QrackBridge passes (peak bonds, truncations,
                        fidelity estimates) in the telemetry panel
-  Shor across bridge   nighthawk_ghz.py shor: per code size and max_bonds, decoded and raw logical Z and X, bonds
+  Shor across bridge   nighthawk_qrack.py ghz shor: per code size and max_bonds, decoded and raw logical Z and X, bonds
                        kept for Z and X, peak bonds, impossible share; the encoder CXs of a picked unit
-  dual Nighthawk R1    nighthawk_ghz.py dualmap / dual: both 12 x 10 modules, the L-qubits and the four cables
+  dual Nighthawk R1    nighthawk_qrack.py ghz dualmap / dual: both 12 x 10 modules, the L-qubits and the four cables
                        (arcs labelled with their distant-CZ fidelity); per model the lowest / mean F_GHZ of the
                        3-qubit chains through each site and their peak bonds; every paper state per model with
                        IBM's raw and mitigated values
-  Shor algorithm       nighthawk_ghz.py shoralg (Layer 3): per geometry a landscape, max_bonds (or the dual's model)
+  Shor algorithm       nighthawk_qrack.py ghz shoralg (Layer 3): per geometry a landscape, max_bonds (or the dual's model)
                        against layout and placement, one data set per (N, a, t): factoring success, order found,
                        TVD to the ideal distribution, peak bonds, truncations, CX across the cut
 
@@ -308,7 +308,7 @@ def map_geometry(sc, mp):
     return sc
 
 
-# ================================================================== GHZ registers (nighthawk_ghz.py)
+# ================================================================== GHZ registers (nighthawk_qrack.py ghz)
 def ghz_scenes(store, files):
     out = []
     regs = sorted({r["register"] for r in store.ghz if r.get("register")})
@@ -477,7 +477,7 @@ def shor9_scenes(store):
     return out
 
 
-# ================================================================== Shor's code across QrackBridge (nighthawk_ghz.py shor)
+# ================================================================== Shor's code across QrackBridge (nighthawk_qrack.py ghz shor)
 def shor_bridge_scenes(store, files):
     if not store.shor_bridge:
         return []
@@ -549,7 +549,7 @@ def shor_bridge_dataset(m, mb, tr, qv, rs):
     return ds
 
 
-# ================================================================== dual Nighthawk R1 (nighthawk_ghz.py dualmap / dual)
+# ================================================================== dual Nighthawk R1 (nighthawk_qrack.py ghz dualmap / dual)
 def dual_scenes(store):
     if not store.dual_layout:
         return []
@@ -772,7 +772,7 @@ def _fill_bits(ds, store, cfg, fam, K, n, d):
     ds.info += [("points", str(len(ks))), ("register size", str(n)), ("depth", str(d))]
 
 
-# ================================================================== Layer 3: Shor order finding (nighthawk_ghz.py shoralg)
+# ================================================================== Layer 3: Shor order finding (nighthawk_qrack.py ghz shoralg)
 def shor_alg_scenes(store):
     """One landscape per geometry: bridge capacity (or the dual's model) against layout and placement, one data set
     per (N, a, t), newest run of each."""
@@ -1494,7 +1494,7 @@ def make_args():
     ap.add_argument("--out", action="append", default=[], help="record file(s); default every *.jsonl here")
     ap.add_argument("--shor", action="append", default=[], help="nighthawk_qrack.py shor9 --out file(s)")
     ap.add_argument("--ghz", action="append", default=[],
-                    help="nighthawk_ghz.py --out file(s): tiles, stack, chip, shor, dual, dualmap")
+                    help="nighthawk_qrack.py ghz --out file(s): tiles, stack, chip, shor, dual, dualmap")
     ap.add_argument("--repo", default=None, help="rcs-nighthawk clone (the lattice of the run records)")
     ap.add_argument("--shots-dir", dest="shots_dir", default=None, help="as given to run --shots-dir")
     ap.add_argument("--cfg", action="append", default=None, help="only these run configuration tags")
