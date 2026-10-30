@@ -27,6 +27,9 @@ Shapes (one scene per register or record family; each scene has data sets and me
                        (arcs labelled with their distant-CZ fidelity); per model the lowest / mean F_GHZ of the
                        3-qubit chains through each site and their peak bonds; every paper state per model with
                        IBM's raw and mitigated values
+  Shor algorithm       nighthawk_ghz.py shoralg (Layer 3): per geometry a landscape, max_bonds (or the dual's model)
+                       against layout and placement, one data set per (N, a, t): factoring success, order found,
+                       TVD to the ideal distribution, peak bonds, truncations, CX across the cut
 
 Mouse: drag rotates, scroll zooms, a click on a column picks the site (its units are drawn and listed).
 Keys:  up / down shape · left / right data set · m / M measure · c columns or dots · v values · n names
@@ -769,11 +772,73 @@ def _fill_bits(ds, store, cfg, fam, K, n, d):
     ds.info += [("points", str(len(ks))), ("register size", str(n)), ("depth", str(d))]
 
 
+# ================================================================== Layer 3: Shor order finding (nighthawk_ghz.py shoralg)
+def shor_alg_scenes(store):
+    """One landscape per geometry: bridge capacity (or the dual's model) against layout and placement, one data set
+    per (N, a, t), newest run of each."""
+    rs = getattr(store, "shor_alg", None) or []
+    rs = [r for r in rs if r.get("engine") in ("bridge", "dual")]
+    if not rs:
+        return []
+    newest = {}
+    for r in rs:
+        k = (r.get("geometry"), r["N"], r["a"], r["t"])
+        newest[k] = max(newest.get(k, ""), r.get("when", ""))
+    rs = [r for r in rs if r.get("when") == newest[(r.get("geometry"), r["N"], r["a"], r["t"])]]
+    out = []
+    for geo in sorted({r.get("geometry") for r in rs}):
+        sub = [r for r in rs if r.get("geometry") == geo]
+        dual = sub[0]["engine"] == "dual"
+        sc = Scene("Shor algorithm", geo, kind="landscape")
+        sc.xs = ([m for m in G.DUAL_MODELS if any(r.get("model") == m for r in sub)] if dual
+                 else sorted({int(r["max_bonds"]) for r in sub}))
+        rows = sorted({(r["layout"], G.sha_place(r)) for r in sub}, key=lambda k: (G.SHA_LAYOUTS.index(k[0]), k[1]))
+        sc.ys = [f"{lay} · {pl}" if pl and lay != "inside" else lay for lay, pl in rows]
+        sc.xname, sc.yname = ("model" if dual else "max_bonds"), "layout"
+        sc.view = (30, -130)
+        for key in sorted({(r["N"], r["a"], r["t"]) for r in sub}):
+            cs = [r for r in sub if (r["N"], r["a"], r["t"]) == key]
+            r0 = cs[0]
+            ds = Dataset(f"N {key[0]}, a {key[1]} (order {r0['r']}), {key[2]} counting + {r0['n_work']} work qubits",
+                         short=f"N{key[0]} a{key[1]} t{key[2]}")
+            cell = {}
+            for r in cs:
+                i = sc.xs.index(r["model"] if dual else int(r["max_bonds"]))
+                j = rows.index((r["layout"], G.sha_place(r)))
+                cell[(i, j)] = r
+            for f_, name, lo, hi in (("success", "per-shot factoring success", 0.0, 1.0),
+                                     ("order", "order found", 0.0, 1.0), ("tvd", "TVD to the ideal", 0.0, 1.0),
+                                     ("peak_bonds", "peak bonds", 0, None), ("truncations", "truncations", 0, None),
+                                     ("cross", "CX across the cut", 0, None),
+                                     ("fidelity_estimate", "bridge fidelity estimate", 0.0, 1.0)):
+                vals = {c: float(r[f_]) for c, r in cell.items() if isinstance(r.get(f_), (int, float))}
+                if vals:
+                    ds.measures[name] = Measure(name, vals, lo, hi, fmt="{:.0f}" if f_ in ("peak_bonds", "truncations",
+                                                                                            "cross") else "{:.3f}")
+            for c, r in cell.items():
+                ds.cells[c] = (f"{r['layout']} · {G.sha_place(r)} · " + (r.get("model") or f"max_bonds {r.get('max_bonds')}")
+                               + (f": success {r['success']:.3f}, order {r['order']:.3f}, TVD {r['tvd']:.3f}"
+                                  if "success" in r else ": vanished")
+                               + f"; {r.get('cx')} CX ({r.get('cross')} across), peak bonds {r.get('peak_bonds')}")
+            ds.info += [("ideal circuit", f"success {r0['exact']['success']:.3f}, order {r0['exact']['order']:.3f}"),
+                        ("uniform guess", f"success {r0['uniform']['success']:.3f}, order {r0['uniform']['order']:.3f}"),
+                        ("bonds the rule needs", str(next((r.get("bonds_needed") for r in cs if r["layout"] == "split"),
+                                                          "-"))),
+                        ("synthesis", " ".join(r0.get("synth") or [])), ("qubits", str(r0.get("qubits"))),
+                        ("run", r0.get("when", "")), ("qrack", r0.get("qrack", "?"))]
+            if dual:
+                ds.info.append(("dual", f"link {r0.get('link')}, local CZ error {r0.get('r_cz')}, "
+                                        f"{max(r.get('trajectories', 1) for r in cs)} trajectories"))
+            sc.datasets.append(ds)
+        out.append(sc)
+    return out
+
+
 # ================================================================== all scenes
 def build_scenes(store, files):
     sc = []
     for f in (lambda: ghz_scenes(store, files), lambda: shor_bridge_scenes(store, files), lambda: dual_scenes(store),
-              lambda: shor9_scenes(store), lambda: run_scenes(store)):
+              lambda: shor9_scenes(store), lambda: shor_alg_scenes(store), lambda: run_scenes(store)):
         try:
             sc += f()
         except Exception as err:            # one broken family must not take the others down
@@ -1235,7 +1300,7 @@ class Viewer:
                          pickradius=8, depthshade=False)
         self._pickmap.append((art, keys))
         ax.set_xticks(range(len(sc.xs)), [str(x) for x in sc.xs])
-        ax.set_yticks(range(len(sc.ys)), [str(y) for y in sc.ys])
+        ax.set_yticks(range(len(sc.ys)), [textwrap.shorten(str(y), 30, placeholder="…") for y in sc.ys])
         ax.set_xlabel(sc.xname, color=T["text2"])
         ax.set_ylabel(sc.yname, color=T["text2"])
         ax.set_zlabel(m.name, color=T["text2"])

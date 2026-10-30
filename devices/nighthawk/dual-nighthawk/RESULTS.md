@@ -1,6 +1,6 @@
 # Results: `rcs/nighthawk`
 
-Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E35 in its §9); usage is in the [README](README.md). State as of 29 October 2026.
+Every measured number of the experiments, grouped by experiment. The procedure behind each is in [METHODOLOGY.md](METHODOLOGY.md) (experiment IDs E1–E36 in its §9); usage is in the [README](README.md). State as of 29 October 2026.
 
 ## Index
 
@@ -34,6 +34,7 @@ Every measured number of the experiments, grouped by experiment. The procedure b
 | [10.16](#1016-a-closed-box-six-faces-on-a-qrackbridge-ring-e33) | E33: a closed 5 × 5 × 5 box, base, four walls and lid as six QrackBridge patches on a ring, `max_bonds` 6 → 0 | every box edge carries GHZ chains: exact at capacity, relayed through a third face or not; below it the inner cuts ration whole units as two chips do (0.75 / 0.63 at 2 / 1 against budgets 0.750 / 0.625), the ring's wrap cut falls short (0.67 / 0.61) and at 0–1 with bridged drift gates the ring zeroed the state |
 | [10.17](#1017-shors-code-across-qrackbridge-e34) | E34: Shor's [[m², 1, m]] code instead of GHZ across QrackBridge, Shor-9 on two chips and the box, Shor-16 and -25 across the chips, `max_bonds` 6 → 0 | a cut between the code's blocks needs one bond (for \|±_L⟩), a cut through them one per block it splits (for \|0/1_L⟩); short of that the bridge drops whole blocks and the decoder repairs them as a majority vote predicts (Shor-9 at 1 bond 0.745 against 0.750, Shor-16 at 2 / 1 0.874 / 0.688 against 0.875 / 0.688); at 0 it gives E20's ACE-seam pattern on the side that needs coherence |
 | [10.18](#1018-ibms-two-module-nighthawk-r1-on-the-bridge-e35) | E35: IBM's two Nighthawk R1 modules and four L-couplers (arXiv:2610.29986) on QrackBridge, its Bell and GHZ states under four models against its Table 1 | the hard cut caps every state at 0.50; the benchmarked distant CZ predicts the readout-mitigated Bell 115–233 and GHZ-4/6 to 1.5–3 points (0.954 / 0.944 / 0.938 against 0.939 / 0.917 / 0.909); Bell 117–231 and the simultaneous pairs fall outside the gate model |
+| [10.19](#1019-layer-3-shor-order-finding-across-the-configurations-e36) | E36: Layer 3, the paper's Shor order finding (N 15, a 7) and N 21 at orders 2, 3, 6, as gates across QrackBridge (two chips, the box), and on the dual Nighthawk R1 | a cut between the registers needs ⌈log₂ r⌉ + 1 bonds (4 for r = 6, 3 for r = 3; exact from there on the chips and at every box placement); a power-of-two order needs none: the paper's N = 15 gives its ideal ½ through a hard cut, so it cannot show a link; on the dual R1 with the benchmarked distant CZ 0.414 against ½ (t 4), N 21 at the uniform guess |
 | [11](#11-cloverfield-e13) | E13: cloverfield | ghost link 1.000 / 0.989 / 0.656 vs mean-field 0.773 / 0.773 / 0.067 |
 | [12](#12-qracks-opencl-engine-and-vram-oversubscription-e14-e15) | E14, E15: OpenCL and GTT | three defects, fixed; GTT ceiling lifted |
 | [13](#13-tool-validation) | tool validation | GPU = CPU; layoutsearch matches the exact engine |
@@ -1302,6 +1303,97 @@ Bond qubits per cut, at their peak: 3 for one distant CZ (the SWAP's ship-and-re
   - Bell 117–231 is 0.870 mitigated against 0.956 predicted, though its link is as good as 115–233's. The paper ties its numbers to Q231, the worst-readout qubit of the ring; mitigation evidently does not remove all of it.
   - Firing both pairs together drops 115–233 by 0.064 (0.876 against 0.939). The gate model has no crosstalk and predicts no change.
 - **How the bridge would scale.** One distant CZ peaks at 3 bond qubits on QrackBridge: two for the transfer's SWAP, one for the entanglement left behind. A Bell pair per link uses one bond each, so the four L-couplers between two modules match a bridge of `max_bonds` 4. That is also the peak demand our 3-chain tilings put on a cut (§10.15–10.16), and enough for one Shor-9 unit cut through its blocks (3 bonds) or four cut between them (1 each, §10.17).
+
+### 10.19 Layer 3, Shor order finding, across the configurations (E36)
+
+The formal proof's Layer 3 is Shor order finding for N = 15, a = 7, with 4 counting and 4 work qubits, scored by the per-shot factoring success (`shrs_nighthawk_stealth.py`, `Shor`). `nighthawk_ghz.py shoralg` (README §3.6, METHODOLOGY §6.8) runs it as gates on this round's engines:
+
+- the two exact chips joined by QrackBridge;
+- the 5 × 5 × 5 box, counting register on the base and work register on a wall: front (a direct ring cut), right (relayed through front) or left (the ring's wrap cut);
+- the dual Nighthawk R1, routed by SWAPs on each module's lattice, with the distant CNOTs through cable 242–245.
+
+It also widens the case. The textbook counting width t = 2n is run next to the paper's t = 4, and N = 21 covers three orders: a = 8 (r = 2), a = 4 (r = 3) and a = 2 (r = 6). Each controlled multiplication by a^(2^k) mod N is synthesised as the paper's unitary on every basis state (selftest [20]).
+
+Five layouts place the cut against the algorithm:
+
+| Layout | Where the cut runs | CX across the cut, N 15 t 4 / N 21 a 2 |
+|---|---|---|
+| `inside` | no cut: one circuit | 0 / 0 |
+| `split` | between the registers; each multiplication controlled through a fan-out ancilla on the work side | 4 / 20 |
+| `direct` | between the registers; every gate a counting qubit controls crosses | 32 / 984 |
+| `countsplit` | through the counting register (the inverse QFT crosses) | 12 / 60 |
+| `worksplit` | through the work register (the multiplications cross) | 46 / 1866 |
+
+On the bridge, every circuit runs at `max_bonds` 0–5 with 4 realisations (seeds). P(y) comes from the bridge's ket where it is at most 22 qubits wide, else from 4096 shots, whose expected TVD floor is 0.006–0.045 by case. Run times on 2 cores: 11 s (N 15) and 1203 s (N 21) on the chips, 742 s on the box, 179 s (N 15) and 324 s (N 21) on the dual.
+
+Cells are success (or the order found where r is odd, which gives no factor), the range over the 4 realisations where it exceeds 0.02, and in brackets the TVD to the ideal distribution.
+
+**Two chips, N = 21, a = 2 (r = 6, t = 10):** ideal success 0.322, uniform guess 0.051; the rule needs 4 bonds for the split layouts.
+
+| Layout | 0 | 1 | 2 | 3 | 4 | 5 | Peak bonds |
+|---|---|---|---|---|---|---|---|
+| inside | 0.328 [0.02] | 0.322 [0.02] | 0.326 [0.02] | 0.324 [0.02] | 0.318 [0.02] | 0.325 [0.02] | 0 |
+| split | 0.051 [0.94] | 0.003 [0.67] | 0.112 (0.03–0.20) [0.43] | 0.251 (0.18–0.33) [0.22] | **0.322 [0.00]** | 0.322 [0.00] | 5 |
+| direct | 0.054 [0.94] | 0.091 [0.86] | 0.076 (0.03–0.17) [0.63] | 0.255 (0.16–0.34) [0.30] | **0.322 [0.00]** | 0.322 [0.00] | 5 |
+| countsplit | 0.064 [0.94] | 0.060 (0.00–0.23) [0.55] | 0.147 (0.10–0.25) [0.37] | 0.230 (0.18–0.31) [0.25] | **0.318 [0.02]** | 0.328 [0.02] | 6 |
+| worksplit | 0.051 [0.94] | 0.052 [0.94] | 0.112 (0.09–0.14) [0.73] | **0.319 [0.03]** | 0.322 [0.02] | 0.318 [0.02] | 5 |
+
+**Two chips, N = 21, a = 4 (r = 3):** order found; ideal 0.665, uniform 0.299; the rule needs 3 bonds.
+
+| Layout | 0 | 1 | 2 | 3 | 4 | 5 | Peak bonds |
+|---|---|---|---|---|---|---|---|
+| inside | 0.663 [0.01] | 0.661 [0.01] | 0.667 [0.02] | 0.655 [0.02] | 0.665 [0.01] | 0.656 [0.02] | 0 |
+| split | 0.299 [0.96] | 0.022 [0.67] | 0.259 (0.17–0.31) [0.54] | **0.665 [0.00]** | 0.665 [0.00] | 0.665 [0.00] | 4 |
+| direct | 0.262 [0.90] | 0.284 [0.92] | 0.442 (0.41–0.51) [0.57] | **0.665 [0.00]** | 0.665 [0.00] | 0.665 [0.00] | 4 |
+| countsplit | 0.255 [0.97] | 0.147 (0.00–0.57) [0.59] | 0.394 (0.30–0.45) [0.43] | **0.662 [0.01]** | 0.664 [0.01] | 0.663 [0.02] | 6 |
+| worksplit | 0.292 [0.96] | 0.302 [0.96] | 0.515 [0.73] | **0.670 [0.02]** | 0.662 [0.02] | 0.666 [0.01] | 4 |
+
+**Power-of-two orders, every layout, every capacity:**
+
+| Case | Ideal | Uniform guess | Two chips, `max_bonds` 0–5, all five layouts | Box, 0–5, split and direct, all three placements |
+|---|---|---|---|---|
+| N 15, a 7 (r 4), t 4: the paper's | 0.500 | 0.125 | 0.500, TVD 0.00 | 0.494–0.507, TVD ≤ 0.01 (shots) |
+| N 15, a 7 (r 4), t 8 | 0.500 | 0.086 | 0.500, TVD 0.00 (inside: shots, ≤ 0.01) | 0.494–0.506, TVD ≤ 0.01 |
+| N 21, a 8 (r 2), t 10 | 0.500 | 0.134 | 0.494–0.507, TVD ≤ 0.01 | — |
+
+**The box, N = 21, split | direct at each placement:** success for a = 2 (need 4), order for a = 4 (need 3).
+
+| Placement | a 2, `max_bonds` 3 | a 2, 4 | a 4, 2 | a 4, 3 |
+|---|---|---|---|---|
+| base / front (direct) | 0.242 \| 0.153 [0.22 \| 0.36] | **0.319 \| 0.317** [0.02 \| 0.02] | 0.219 \| 0.460 [0.58 \| 0.41] | **0.664 \| 0.664** [0.01 \| 0.02] |
+| base / right (relayed through front) | 0.181 \| 0.273 [0.25 \| 0.33] | **0.326 \| 0.320** [0.02 \| 0.02] | 0.202 \| 0.517 [0.56 \| 0.38] | **0.664 \| 0.663** [0.02 \| 0.02] |
+| base / left (the wrap cut) | 0.267 \| 0.190 [0.22 \| 0.36] | **0.329 \| 0.321** [0.03 \| 0.02] | 0.221 \| 0.426 [0.53 \| 0.56] | **0.664 \| 0.670** [0.01 \| 0.01] |
+
+At `max_bonds` 0 every N = 21 a = 2 placement gives 0.00–0.06 against the uniform 0.051. No state vanished on the ring (0 of 576 box bridge circuits).
+
+**The dual Nighthawk R1, N = 15, a = 7, link 242–245, 400 trajectories:** ideal 0.500; uniform 0.125 (t 4) and 0.086 (t 8). Physical CX count = local CX + 3 × SWAPs.
+
+| t | Layout | Distant CNOTs | Physical CX | Hard cut | Ideal / exact | Constituent budget | Measured distant CZ | Classical fidelity (measured) |
+|---|---|---|---|---|---|---|---|---|
+| 4 | inside one module | 0 | 374 | 0.500 | 0.500 | 0.375 [0.17] | 0.375 [0.16] | 0.833 |
+| 4 | split | 4 | 338 | 0.500 | 0.500 | 0.417 [0.09] | **0.414** [0.09] | 0.908 |
+| 4 | direct | 32 | 327 | 0.500 | 0.500 | 0.441 [0.10] | 0.392 [0.12] | 0.882 |
+| 8 | inside one module | 0 | 742 | 0.500 | 0.500 | 0.191 [0.72] | 0.191 [0.72] | 0.277 |
+| 8 | split | 4 | 652 | 0.500 | 0.500 | 0.238 [0.61] | 0.222 [0.69] | 0.307 |
+| 8 | direct | 32 | 641 | 0.500 | 0.500 | 0.228 [0.68] | 0.217 [0.67] | 0.334 |
+
+N = 21, a = 2, split on the dual: 20 distant CNOTs and 24,544 physical CX (6,298 SWAPs). Exact 0.322; measured model 0.050 [0.94] over 24 trajectories, against the uniform guess's 0.051.
+
+- **The bonds a cut needs follow the order.** With the cut between the registers, the output is exact from ⌈log₂ r⌉ + 1 bond qubits per cut. That is the final state's Schmidt rank r across the cut, plus one for the counting bit in flight. The values are 4 for r = 6 and 3 for r = 3, on the chips and at every box placement, fan-out or direct, whatever the number of crossing CXs (20 or 984). The peak the bridge holds is one more again (5, 4). A cut through the work register reaches the exact output at 3 for both orders, one bond early for r = 6. A cut through the counting register needs the split value (4, 3) but peaks at 6.
+- **Power-of-two orders need no bond at all, so the paper's N = 15 is blind to the cut.** For r = 2^k the work register's record of x mod r is x's own low bits. A truncation that keeps any of its branches, as the hard cut does, is then a measurement of the work register, which Shor's algorithm tolerates at any point. Through the inverse QFT the counting register stays a product state.
+  - N = 15, a = 7 (the paper's case at t = 4 and t = 8) and N = 21, a = 8 give the exact distribution at `max_bonds` 0 in every layout, on the box's relays and its wrap cut, and on the dual's hard cut. That includes the layouts where 1866 CXs cross the cut.
+  - A factoring success of ½ at N = 15 therefore certifies nothing about the link between the circuits: two circuits with no quantum channel score it too. Only an order that is not a power of two (here N = 21, a = 2 or 4) makes the link carry entanglement.
+- **Below capacity the success is not a measure of the run.** Under the bond limit the truncation chooses among equal Schmidt values, so the output depends on the seed. Two examples:
+  - split at 3 bonds ranges 0.18–0.33 over 4 realisations;
+  - one relayed box realisation found the order with 0.84 against the ideal 0.665, from a distribution 0.38 away in TVD.
+
+  Success above the ideal, or near it, can come from a wrong distribution. The TVD to the ideal distribution, or the classical fidelity, is the measure that only the exact output passes. At `max_bonds` 0 an r = 6 run is the uniform guess (0.051–0.064, TVD 0.94).
+- **The box's ring adds nothing to the rule.** The direct cut, a relay through a third face and the wrap cut all reach the exact output at the same capacity (4 / 3). Below it they differ, by realisation, as two chips do. Unlike the GHZ drift gates of §10.16, Layer 3 never zeroed the ring's state.
+- **On the dual R1 the cable is cheaper than the lattice.**
+  - With the benchmarked distant CZ, the paper's Layer 3 (t = 4) keeps 0.414 of the ideal 0.500 split across the modules, but 0.375 on one module alone. One module puts both registers on one line and costs more SWAPs (374 physical CX against 338).
+  - The hard cut scores 0.500 again: r = 4. So on IBM's dual R1 this benchmark cannot tell the cable from no cable.
+  - At t = 8 the extra QFT routing (~650 CX) drops the success to 0.19–0.24 (uniform 0.086).
+  - N = 21's 24,544 physical CX at 0.355 % per local CZ leave exactly the uniform guess (0.050).
 
 ---
 

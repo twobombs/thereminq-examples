@@ -116,11 +116,20 @@ Commands
             tiled over each lattice plus every chain through a link, one panel per model (default hard cut, budget,
             measured), module B drawn rotated to face A, the L-qubits and cables between them.
   dualplot  dual's model-against-measurement plot from its records (--in).
+  shoralg   Layer 3, the paper's Shor order finding (N = 15, a = 7, 4 counting + 4 work qubits; also 2n counting
+            qubits and N = 21, every order), as gates (H, X, phase, CX; the controlled multiplications synthesised
+            exactly as the paper's U), across QrackBridge circuits (two chips, the box's faces with --box L H, two
+            bare circuits with --pair) at every --bonds capacity, or on the dual Nighthawk R1 (--dual: routed on
+            the module lattices, distant CNOTs through one cable, the dual's models). Layouts: inside one circuit,
+            the cut between the registers (fan-out ancilla, or direct), through the counting register, through
+            the work register. Per circuit the per-shot factoring success (the paper's rule), the order found, the
+            distance to the ideal distribution, bonds and truncations; shor_alg records.
   plot      the map of a records file (--in).
   selftest  Lemma 3, Lemma 4 and the witness against numpy; the readout gates, Theorem 1, Corollaries 2.1
             and 4.1, the outside-coupling identity, fold and the ZNE amplification on the exact simulator;
             the ZNE models on synthetic decays; Layer S's seam classes, plan, the code's schedule, the
-            co-located authority rule, --inside-zz stabilizer and the probe's target and chain rules.
+            co-located authority rule, --inside-zz stabilizer and the probe's target and chain rules; Layer 3's
+            multiplications, circuit, success rule, hard-cut rule and dual router.
 
 Per-unit hook (--layers): pre / after_cx / post inside a unit's preparation. fold:F[:all] adds F CX pairs
 after every seam CX (every CX); zzfold:K[:all[:phi]] K identities ZZ(phi) ZZ(-phi); gfold:K undoes and redoes
@@ -161,6 +170,10 @@ Examples
   python3 nighthawk_ghz.py shormap --in shor9_box5_mb1.jsonl --png shor9_box5_mb1.png
   python3 nighthawk_ghz.py dual  --models hardcut,ideal,exact,budget,measured --trajectories 20000 --jobs 2 \\
           --out dual_r1.jsonl --png dual_r1.png
+  python3 nighthawk_ghz.py shoralg --N 15 21 --bonds 0 1 2 3 4 5 --jobs 2 --out shoralg_chips.jsonl
+  python3 nighthawk_ghz.py shoralg --box 5 5 --layouts split,direct --bonds 0 1 2 3 4 5 --jobs 2 --out shoralg_box.jsonl
+  python3 nighthawk_ghz.py shoralg --dual --N 15 --models hardcut,ideal,exact,budget,measured --trajectories 400 \\
+          --jobs 2 --out shoralg_dual.jsonl
 
 Environment: no CUDA. CPU by default; --gpu runs ACE and the reference on the OpenCL device
 QRACK_OCL_DEFAULT_DEVICE names (--ocl-sync: QRACK_OCL_SYNC=1, Qrack >= 10.13.2).
@@ -3233,6 +3246,16 @@ class DualGates:
         self.s.h(self.q[q])
         self._dep1(q, self._r1(q))
 
+    def x(self, q):
+        self.s.x(self.q[q])
+        self._dep1(q, self._r1(q))
+
+    def u(self, q, th, ph, lm):
+        """A general rotation; with th = 0 a phase gate, which IBM runs as a virtual Z (a frame change): no error."""
+        self.s.u(self.q[q], th, ph, lm)
+        if th != 0.0:
+            self._dep1(q, self._r1(q))
+
     def ry(self, q, th):
         self.s.u(self.q[q], th, 0.0, 0.0)
         self._dep1(q, self._r1(q))
@@ -3693,6 +3716,757 @@ def dual_plot(rows, models, a):
     fig.savefig(a.png, facecolor=surf)
     plt.close(fig)
     print(f"  plot: {a.png}")
+
+
+# ================================================================== Layer 3: Shor order finding across the configurations
+
+# The paper's Layer 3 (shrs_nighthawk_stealth.py, class Shor): order finding for N = 15, a = 7 with 4 counting and 4
+# work qubits; the counting register starts in |+>^t, the work register in |1>, counting bit k controls the
+# multiplication by a^(2^k) mod N (on 0 < y < N; y = 0 and y >= N are left alone), then the inverse QFT and a
+# readout of the counting register; figure of merit the per-shot factoring success. Here the same circuit as gates
+# (H, X, phase, CX), so it runs on every engine of this script: QrackSimulator, QrackBridge over two chips or the
+# box's six faces, and the dual Nighthawk R1's two modules with their cables.
+
+SHA_LAYOUTS = ("inside", "split", "direct", "countsplit", "worksplit")
+SHA_LAYOUT_TEXT = dict(
+    inside="both registers on one circuit",
+    split="counting | work: the cut between the registers, each controlled multiplication through a fan-out "
+          "ancilla on the work side (two CXs across per multiplication)",
+    direct="counting | work, no fan-out: every gate the counting qubit controls crosses the cut",
+    countsplit="the cut through the counting register (low half | high half + work): the inverse QFT crosses it",
+    worksplit="the cut through the work register (counting + low work bits | high work bits): the multiplications "
+              "cross it")
+
+
+def sha_order(a, N):
+    x, r = a % N, 1
+    while x != 1:
+        x, r = x * a % N, r + 1
+    return r
+
+
+def sha_bases(N):
+    """For every multiplicative order r > 1 mod N, the smallest a with gcd(a, N) = 1 of that order (a = N - 1, of
+    order 2 and no use, left out)."""
+    seen = {}
+    for a in range(2, N - 1):
+        if math.gcd(a, N) == 1:
+            seen.setdefault(sha_order(a, N), a)
+    return [seen[r] for r in sorted(seen) if r > 1]
+
+
+def sha_convergents(y, Q, N):
+    """Denominators of the continued-fraction convergents of y / Q, up to N."""
+    out, (p, q), h, k = [], (y, Q), (0, 1), (1, 0)
+    while q:
+        c = p // q
+        p, q = q, p - c * q
+        h, k = (h[1], c * h[1] + h[0]), (k[1], c * k[1] + k[0])
+        if k[1] > N:
+            break
+        out.append(k[1])
+    return out
+
+
+def sha_factor(N, a, d):
+    """The factor pair from a candidate order d (d even, a^(d/2) not -1), else None."""
+    if d % 2 or pow(a, d, N) != 1:
+        return None
+    x = pow(a, d // 2, N)
+    if x in (1, N - 1):
+        return None
+    f = sorted((math.gcd(x - 1, N), math.gcd(x + 1, N)))
+    return tuple(f) if 1 < f[0] < N else None
+
+
+def sha_outcome(y, t, N, a, r):
+    """Per counting outcome y: (factoring success by the paper's rule: the denominator of y / 2^t limited to N gives
+    the factors, as shrs_nighthawk_stealth.py's Shor._factors_from; the order found: the first convergent
+    denominator d of y / 2^t with a^d = 1 mod N equals r)."""
+    from fractions import Fraction
+    if y == 0:
+        return False, False
+    d = Fraction(y, 1 << t).limit_denominator(N).denominator
+    ok = next((dd for dd in sha_convergents(y, 1 << t, N) if pow(a, dd, N) == 1), None)
+    return sha_factor(N, a, d) is not None, ok == r
+
+
+def sha_analytic(N, a, t):
+    """P(y) of the ideal circuit: the work register's r cosets of the counting values, each an arithmetic progression
+    of step r, through the inverse QFT."""
+    Q, r = 1 << t, sha_order(a, N)
+    y = np.arange(Q)
+    P = np.zeros(Q)
+    for s in range(r):
+        xs = np.arange(s, Q, r)
+        P += np.abs(np.exp(-2j * np.pi * np.outer(y, xs) / Q).sum(axis=1) / Q) ** 2
+    return P
+
+
+def sha_score(P, t, N, a, ideal=None):
+    """The measures of one output distribution P over the counting register."""
+    r = sha_order(a, N)
+    succ = order = 0.0
+    for y in np.nonzero(P > 1e-12)[0]:
+        s, o = sha_outcome(int(y), t, N, a, r)
+        succ += P[y] * s
+        order += P[y] * o
+    out = dict(success=float(succ), order=float(order), zero=float(P[0]))
+    if ideal is not None:
+        out.update(tvd=float(0.5 * np.abs(P - ideal).sum()),
+                   fidelity=float(np.sum(np.sqrt(np.clip(P, 0, None) * ideal)) ** 2),
+                   support=float(P[ideal > 1e-9].sum()))
+        nz = P.copy()
+        nz[0] = -1
+        out["argmax_ok"] = bool(sha_outcome(int(np.argmax(nz)), t, N, a, r)[0])
+    return out
+
+
+def sha_bonds_needed(r, layout):
+    """Bond qubits per cut the split layouts need for the exact output: none when r is a power of two (the work
+    register's record of x mod r is then x's own low bits, so a truncation that keeps any of its cosets, as a hard cut
+    does, changes nothing the counting register shows); otherwise the final state's Schmidt rank r across the cut,
+    ceil(log2 r) bond qubits, plus one for the counting bit in flight (the fan-out ancilla, or the controlled gate)."""
+    if layout == "inside":
+        return 0
+    if r & (r - 1) == 0:
+        return 0
+    if layout in ("split", "direct"):
+        return int(math.ceil(math.log2(r))) + 1
+    return None
+
+
+class ShaOps:
+    """The circuit as ops on logical qubits: (h, q), (x, q), (p, q, lambda) = diag(1, e^{i lambda}), (cx, c, t)."""
+
+    def __init__(self):
+        self.ops = []
+
+    def h(self, q):
+        self.ops.append(("h", q))
+
+    def x(self, q):
+        self.ops.append(("x", q))
+
+    def p(self, q, lam):
+        self.ops.append(("p", q, float(lam)))
+
+    def cx(self, c, t):
+        self.ops.append(("cx", c, t))
+
+    def ccx(self, a, b, t):
+        """Toffoli: 6 CX, 7 T / T^dagger, 2 H (exact)."""
+        T = math.pi / 4
+        self.h(t)
+        self.cx(b, t)
+        self.p(t, -T)
+        self.cx(a, t)
+        self.p(t, T)
+        self.cx(b, t)
+        self.p(t, -T)
+        self.cx(a, t)
+        self.p(b, T)
+        self.p(t, T)
+        self.h(t)
+        self.cx(a, b)
+        self.p(a, T)
+        self.p(b, -T)
+        self.cx(a, b)
+
+    def cswap(self, c, a, b):
+        self.cx(b, a)
+        self.ccx(c, a, b)
+        self.cx(b, a)
+
+    def cp(self, a, b, th):
+        self.p(a, th / 2)
+        self.cx(a, b)
+        self.p(b, -th / 2)
+        self.cx(a, b)
+        self.p(b, th / 2)
+
+    def mcx(self, ctl, t, anc):
+        """X on t when every (qubit, value) of ctl holds; k >= 3 controls through a V-chain of k - 2 clean ancillas."""
+        neg = [q for q, v in ctl if not v]
+        for q in neg:
+            self.x(q)
+        cs = [q for q, _ in ctl]
+        k = len(cs)
+        if k == 1:
+            self.cx(cs[0], t)
+        elif k == 2:
+            self.ccx(cs[0], cs[1], t)
+        else:
+            if len(anc) < k - 2:
+                raise ValueError(f"mcx: {k} controls need {k - 2} ancillas")
+            chain = [(cs[0], cs[1], anc[0])] + [(cs[i], anc[i - 2], anc[i - 1]) for i in range(2, k - 1)]
+            for a_, b_, t_ in chain:
+                self.ccx(a_, b_, t_)
+            self.ccx(cs[k - 1], anc[k - 3], t)
+            for a_, b_, t_ in reversed(chain):
+                self.ccx(a_, b_, t_)
+        for q in neg:
+            self.x(q)
+
+
+def sha_transpositions(perm):
+    """A permutation of 0..len-1 as transpositions in gate order (a cycle e0 -> e1 -> ... as swaps (e_i, e_i+1) from
+    the end of the cycle down)."""
+    seen, out = set(), []
+    for s0 in range(len(perm)):
+        if s0 in seen or perm[s0] == s0:
+            seen.add(s0)
+            continue
+        cyc, x = [], s0
+        while x not in seen:
+            seen.add(x)
+            cyc.append(x)
+            x = perm[x]
+        out += [(cyc[i], cyc[i + 1]) for i in range(len(cyc) - 2, -1, -1)]
+    return out
+
+
+def _sha_ctrans(o, ctrl, W, Z, x, y):
+    """Controlled transposition of basis states x and y of the work register W: CXs from one bit where they differ
+    onto the others (so the two then differ there only), an X on that bit controlled by ctrl and every other bit at
+    its value, the CXs undone."""
+    n = len(W)
+    D = [i for i in range(n) if (x >> i & 1) != (y >> i & 1)]
+    p_ = D[0]
+    for d in D[1:]:
+        o.cx(W[p_], W[d])
+    x2 = x if not (x >> p_ & 1) else y
+    o.mcx([(ctrl, 1)] + [(W[i], x2 >> i & 1) for i in range(n) if i != p_], W[p_], Z)
+    for d in reversed(D[1:]):
+        o.cx(W[p_], W[d])
+
+
+def sha_cmul(o, ctrl, W, Z, c, N, synth="auto"):
+    """Multiplication by c mod N of the work register W (little-endian) on 0 < y < N, controlled by ctrl; y = 0 and
+    y >= N unchanged, as the paper's U. generic: the permutation's transpositions, each one multi-controlled X
+    (needs len(W) - 2 clean ancillas Z). structured, for N = 2^n - 1 and c = +-2^k mod N: a cyclic rotation of the
+    bits by k (controlled SWAPs), for -2^k then every bit flipped (CXs from ctrl), and y = 0 / y = N swapped back
+    (one controlled transposition), so it is the same unitary. auto: structured where it applies. Returns the
+    synthesis used."""
+    n = len(W)
+    perm = [(c * y) % N if 0 < y < N else y for y in range(1 << n)]
+    if synth in ("auto", "structured") and N == (1 << n) - 1:
+        for k in range(n):
+            for sgn in (1, -1):
+                if (sgn * (1 << k)) % N == c % N:
+                    for a_, b_ in sha_transpositions([(i + k) % n for i in range(n)]):
+                        o.cswap(ctrl, W[a_], W[b_])
+                    if sgn < 0:
+                        for q in W:
+                            o.cx(ctrl, q)
+                        _sha_ctrans(o, ctrl, W, Z, 0, N)
+                    return "structured"
+        if synth == "structured":
+            raise SystemExit(f"shoralg --synth structured: {c} is not +-2^k mod {N}")
+    for x, y in sha_transpositions(perm):
+        _sha_ctrans(o, ctrl, W, Z, x, y)
+    return "generic"
+
+
+def sha_iqft(o, qs):
+    """The inverse QFT on qs (qs[j] = counting bit j): the swap-free QFT's gates reversed with negated phases; the
+    output's bit i is on qs[t - 1 - i] (no SWAPs: the readout is relabelled)."""
+    t = len(qs)
+    f = ShaOps()
+    for i in range(t):
+        f.h(qs[i])
+        for j in range(i + 1, t):
+            f.cp(qs[j], qs[i], math.pi / 2 ** (j - i))
+    for op in reversed(f.ops):
+        o.ops.append(("p", op[1], -op[2]) if op[0] == "p" else op)
+
+
+def sha_circuit(N, a, t, layout, synth="auto"):
+    """The logical circuit and its sides: counting qubits C (C_k controls a^(2^k)), work W (little-endian, starts at
+    |1>), the fan-out ancilla F (split, countsplit, worksplit), the multi-controlled-X ancillas Z (generic synthesis).
+    side[q] is 0 or 1: the circuit (chip, face, module) a qubit sits on. ybits[i] is the qubit holding bit i of the
+    outcome y."""
+    n = N.bit_length()
+    fan = layout in ("split", "countsplit", "worksplit")
+    C = list(range(t))
+    W = list(range(t, t + n))
+    q = t + n
+    F = q if fan else None
+    q += 1 if fan else 0
+    Z = list(range(q, q + max(0, n - 2)))
+    nq = q + len(Z)
+    side = {x: 0 for x in range(nq)}
+    if layout in ("split", "direct"):
+        side.update({x: 1 for x in range(t, nq)})
+    elif layout == "countsplit":
+        side.update({x: 1 for x in range(t // 2, nq)})
+    elif layout == "worksplit":
+        side.update({x: 1 for x in W[n // 2:] + ([F] if fan else []) + Z})
+    o = ShaOps()
+    for c in C:
+        o.h(c)
+    o.x(W[0])
+    synths = []
+    for k in range(t):
+        c = pow(a, 1 << k, N)
+        if c == 1:
+            continue                          # a^(2^k) = 1: the multiplication is the identity (repeated squaring)
+        if fan:
+            o.cx(C[k], F)
+        synths.append(sha_cmul(o, F if fan else C[k], W, Z, c, N, synth))
+        if fan:
+            o.cx(C[k], F)
+    sha_iqft(o, C)
+    return dict(ops=o.ops, nq=nq, side=side, C=C, W=W, F=F, Z=Z, ybits=[C[t - 1 - i] for i in range(t)],
+                synth=sorted(set(synths)), mults=len(synths))
+
+
+def sha_counts(ops, side):
+    cx = [op for op in ops if op[0] == "cx"]
+    return dict(ops=len(ops), cx=len(cx), cross=sum(1 for op in cx if side[op[1]] != side[op[2]]),
+                oneq=sum(1 for op in ops if op[0] in ("h", "x")))
+
+
+def sha_apply(g, ops):
+    """ops on a gate object with h, x, u, cx (Gates, BridgeGates, DualGates, or a QrackSimulator adapter)."""
+    for op in ops:
+        k = op[0]
+        if k == "h":
+            g.h(op[1])
+        elif k == "x":
+            g.x(op[1])
+        elif k == "p":
+            g.u(op[1], 0.0, 0.0, op[2])
+        elif k == "cx":
+            g.cx(op[1], op[2])
+        elif k == "dcx":
+            g.dcx(op[1], op[2])
+        else:
+            raise ValueError(f"shoralg: op {k}")
+
+
+class _SimGates:
+    def __init__(self, sim, idx):
+        self.s, self.q = sim, idx
+
+    def h(self, q):
+        self.s.h(self.q[q])
+
+    def x(self, q):
+        self.s.x(self.q[q])
+
+    def u(self, q, th, ph, lm):
+        self.s.u(self.q[q], th, ph, lm)
+
+    def cx(self, c, t):
+        self.s.mcx([self.q[c]], self.q[t])
+
+
+def sha_marginal(v, ybits_idx, t):
+    """P(y) from a ket (bit q of the basis index = simulator qubit q)."""
+    p = np.abs(np.asarray(v, dtype=complex)) ** 2
+    p /= p.sum()
+    i = np.arange(p.size, dtype=np.int64)
+    y = np.zeros(p.size, dtype=np.int64)
+    for b, q in enumerate(ybits_idx):
+        y |= ((i >> q) & 1) << b
+    return np.bincount(y, weights=p, minlength=1 << t)
+
+
+def sha_dual_lines(link):
+    """The two module lines the dual router uses: from the link's lattice qubit on each module along row 11 to
+    column 0, then row 10 left to right, row 9 right to left, ...: each step a coupler."""
+    def snake(start, base):
+        r0, c0 = (start - base) // 10, (start - base) % 10
+        path = [base + 10 * r0 + c for c in range(c0, -1, -1)]
+        for i, r in enumerate(range(r0 - 1, -1, -1)):
+            path += [base + 10 * r + c for c in (range(10) if i % 2 == 0 else range(9, -1, -1))]
+        return path
+    L = DUAL_LINKS[[x["name"] for x in DUAL_LINKS].index(link)]
+    return snake(L["a"], 0), snake(L["b"], 120), L
+
+
+def sha_dual_route(circ, link="242-245"):
+    """The logical circuit compiled onto the dual Nighthawk R1: side 0 on module A, side 1 on module B, each side's
+    qubits on its line (sha_dual_lines) in order, F (if any) first on the work side. A CX between two qubits of one
+    module moves its control along the line by SWAPs (3 CXs each) until the two are neighbours; a CX across moves
+    both to the link's ends and runs as the paper's distant CNOT (dcx). Returns (physical ops, ybits as physical
+    qubits, counts)."""
+    lines = sha_dual_lines(link)[:2]
+    order = {0: [], 1: []}
+    for q in ([circ["F"]] if circ["F"] is not None else []) + circ["C"] + circ["W"] + circ["Z"]:
+        order[circ["side"][q]].append(q)
+    if circ["F"] is not None:
+        s = circ["side"][circ["F"]]
+        order[s] = [circ["F"]] + [q for q in order[s] if q != circ["F"]]
+    pos, occ = {}, ({}, {})
+    for s in (0, 1):
+        if len(order[s]) > len(lines[s]):
+            raise SystemExit(f"shoralg --dual: {len(order[s])} qubits do not fit a module line")
+        for i, q in enumerate(order[s]):
+            pos[q] = (s, i)
+            occ[s][i] = q
+    out, n = [], dict(swaps=0, local_cx=0, distant=0)
+
+    def phys(q):
+        s, i = pos[q]
+        return lines[s][i]
+
+    def swap(s, i):                          # exchange line positions i and i + 1 of module s
+        a_, b_ = lines[s][i], lines[s][i + 1]
+        out.extend([("cx", a_, b_), ("cx", b_, a_), ("cx", a_, b_)])
+        n["swaps"] += 1
+        qa, qb = occ[s].pop(i, None), occ[s].pop(i + 1, None)
+        if qa is not None:
+            occ[s][i + 1], pos[qa] = qa, (s, i + 1)
+        if qb is not None:
+            occ[s][i], pos[qb] = qb, (s, i)
+
+    def bring(q, j):
+        s, i = pos[q]
+        while i > j:
+            swap(s, i - 1)
+            i -= 1
+        while i < j:
+            swap(s, i)
+            i += 1
+    for op in circ["ops"]:
+        if op[0] != "cx":
+            out.append((op[0], phys(op[1])) + tuple(op[2:]))
+            continue
+        c, t_ = op[1], op[2]
+        if pos[c][0] == pos[t_][0]:
+            while abs(pos[c][1] - pos[t_][1]) > 1:
+                bring(c, pos[c][1] + (1 if pos[t_][1] > pos[c][1] else -1))
+            out.append(("cx", phys(c), phys(t_)))
+            n["local_cx"] += 1
+        else:
+            bring(c, 0)
+            bring(t_, 0)
+            out.append(("dcx", phys(c), phys(t_)))
+            n["distant"] += 1
+    return out, [phys(q) for q in circ["ybits"]], n
+
+
+SHA_DUAL_MODELS = ("hardcut", "ideal", "exact", "budget", "measured")
+
+
+def _sha_dual_task(spec):
+    """Trajectories of one circuit on the dual R1 under one model: the mean P(y) over trajectories (from the ket),
+    the bridge's peak bonds."""
+    circ = sha_circuit(spec["N"], spec["a"], spec["t"], spec["layout"], spec.get("synth", "auto"))
+    ops, ybits, _ = sha_dual_route(circ, spec.get("link", "242-245"))
+    used = sorted({q for op in ops for q in (op[1:3] if op[0] in ("cx", "dcx") else op[1:2])} | set(ybits))
+    for op in ops:
+        if op[0] == "dcx":
+            L = DUAL_LINKS[_dual_link(op[1], op[2])]
+            used = sorted(set(used) | {L["la"], L["lb"]})
+    R1 = DualR1()
+    A = [q for q in used if R1.module[q] == 0]
+    B = [q for q in used if R1.module[q] == 1]
+    m = max(len(A), len(B))
+    one = not A or not B                     # nothing crosses (inside): one module, one simulator
+    if one:
+        A, B, m = A + B, [], len(A) + len(B)
+    idx = {q: i for i, q in enumerate(A)}
+    idx.update({q: m + i for i, q in enumerate(B)})
+    mo = DUAL_MODELS[spec["model"]]
+    rng = np.random.default_rng(spec["seed"])
+    P, peak = np.zeros(1 << spec["t"]), 0
+    T = int(spec["trajectories"]) if mo["noise"] != "none" else 1
+    for _ in range(T):
+        if mo["engine"] == "exact" or one:
+            from pyqrack import QrackSimulator
+            sim = QrackSimulator(m if one else 2 * m, is_gpu=False)
+        else:
+            sim = qrack_bridge(spec.get("qrack_bridge"))(2 * m, patches=2, truncation=spec.get("truncation", "greedy"),
+                                                       max_bonds=int(spec["max_bonds"] if mo["mb"] is None else mo["mb"]))
+        g = DualGates(sim, idx, mo["noise"], spec["r_cz"], spec["r_1q"], rng)
+        sha_apply(g, ops)
+        if mo["engine"] != "exact" and not one:
+            sim.flush()
+            peak = max(peak, int(sim.peak_bonds))
+        P += sha_marginal(sim.out_ket(), [idx[q] for q in ybits], spec["t"])
+    return P / T, dict(peak_bonds=peak, width=(m if one else 2 * m), trajectories=T)
+
+
+def _sha_register(spec):
+    if spec.get("box"):
+        return box_register(*spec["box"])
+    return loom_register(spec["repo"], spec["cf"], spec["chips"], spec["link_rows"], "exact", "bridge")
+
+
+def sha_place(R, circ, faces):
+    """Logical qubit -> field qubit: side s on chip (face) faces[s], in order of the chip's qubits."""
+    free = {c: [q for q in range(len(R.chip_of)) if R.chip_of[q] == c] for c in set(faces)}
+    phys = {}
+    for q in range(circ["nq"]):
+        c = faces[circ["side"][q]]
+        if not free[c]:
+            raise SystemExit(f"shoralg: chip {R.specs[c]['name']} has too few qubits for this layout")
+        phys[q] = free[c].pop(0)
+    return phys
+
+
+def _sha_task(spec):
+    """One circuit: exact (QrackSimulator over the logical qubits) or on QrackBridge over the chips or the box's faces
+    (one patch per chip, a ring on the box). P(y) from the ket when the bridge is at most spec['ket_max'] qubits
+    wide, else from spec['shots'] shots. A bridge whose truncation zeroes the state (possible on the ring) returns
+    P None with 'vanished'."""
+    circ = sha_circuit(spec["N"], spec["a"], spec["t"], spec["layout"], spec.get("synth", "auto"))
+    t = spec["t"]
+    if spec["engine"] == "exact":
+        from pyqrack import QrackSimulator
+        sim = QrackSimulator(circ["nq"], is_gpu=False)
+        sha_apply(_SimGates(sim, list(range(circ["nq"]))), circ["ops"])
+        return sha_marginal(sim.out_ket(), circ["ybits"], t), dict(readout="ket", width=circ["nq"])
+    QB = qrack_bridge(spec.get("qrack_bridge"))
+    if spec.get("pair"):                        # two bare circuits, one patch each (no chip geometry)
+        per = [[q for q in range(circ["nq"]) if circ["side"][q] == s_] for s_ in (0, 1)]
+        if spec["layout"] == "inside":
+            per = [per[0] + per[1], []]
+        m = max(1, max(len(v) for v in per))
+        phys = {q: s_ * m + i for s_ in (0, 1) for i, q in enumerate(per[s_])}
+        width, P_, idx = 2 * m, 2, {q: q for q in phys.values()}
+    else:
+        R = _sha_register(spec)
+        faces = [[sp["name"] for sp in R.specs].index(f) for f in spec["faces"]]
+        phys = sha_place(R, circ, faces)
+        width, P_, idx = _bridge_layout(R, [dict(qubits=list(phys.values()))])
+    br = QB(width, max_bonds=int(spec["max_bonds"]), patches=P_, truncation=spec.get("truncation", "greedy"),
+            lazy_bonds=int(spec.get("lazy_bonds", 0)), wrap=bool(spec.get("box")),
+            seed=[int(spec.get("realisation", 0)), int(spec["N"]), int(spec["a"]), int(spec["max_bonds"]), int(t),
+                  zlib_key(spec["layout"] + "/" + "/".join(spec.get("faces") or []))])
+    lidx = {q: idx[phys[q]] for q in phys}
+    stats = lambda: dict(fidelity=float(br.fidelity_estimate), truncations=int(br.truncations),  # noqa: E731
+                         peak_bonds=int(br.peak_bonds), width=int(width))
+    try:
+        with np.errstate(divide="raise", invalid="raise"):
+            sha_apply(BridgeGates(br, lidx), circ["ops"])
+            br.flush()
+            kept = [int(x) for x in br.bond]
+            if width <= int(spec.get("ket_max", 22)):
+                P = sha_marginal(br.out_ket(), [lidx[q] for q in circ["ybits"]], t)
+                return P, dict(stats(), readout="ket", bonds=kept)
+            w = br.measure_shots([lidx[q] for q in circ["ybits"]], int(spec["shots"]))
+    except (np.linalg.LinAlgError, FloatingPointError) as err:
+        return None, dict(stats(), vanished=str(err))
+    P = np.bincount(np.array([int(x) for x in w], dtype=np.int64), minlength=1 << t) / float(spec["shots"])
+    return P, dict(stats(), readout="shots", bonds=kept)
+
+
+def sha_cases(a):
+    """[(N, a, t)] from --N, --a and --counting (default: the paper's N = 15, a = 7, t = 4, and t = 2n)."""
+    out = []
+    for N in a.N:
+        n = N.bit_length()
+        for b in (a.a or ([7] if N == 15 else sha_bases(N))):
+            if math.gcd(b, N) != 1:
+                raise SystemExit(f"shoralg: gcd({b}, {N}) != 1 (a classical factor; nothing to find)")
+            for t in (a.counting or ([4, 2 * n] if N == 15 else [2 * n])):
+                out.append((N, b, int(t)))
+    return out
+
+
+def cmd_shoralg(a):
+    """Layer 3 across the configurations: every (N, a, t), layout and bridge capacity (or dual model) as its own
+    circuit; per circuit the counting register's distribution, the per-shot factoring success, the order found, the
+    distance to the ideal distribution, the bridge's bonds and truncations."""
+    cases = sha_cases(a)
+    layouts = [x for x in a.layouts.split(",") if x]
+    for lay in layouts:
+        if lay not in SHA_LAYOUTS:
+            raise SystemExit(f"shoralg --layouts: {lay} (one of {', '.join(SHA_LAYOUTS)})")
+    when = time.strftime("%Y-%m-%dT%H:%M:%S")
+    calls, labels, keys = [], [], []
+    if a.dual:
+        models = [m for m in a.models.split(",") if m]
+        layouts = [x for x in layouts if x in ("inside", "split", "direct")]
+        geo = dict(name="dual Nighthawk R1", link=a.link)
+        for (N, b, t) in cases:
+            for lay in layouts:
+                for mo in models:
+                    if mo not in SHA_DUAL_MODELS:
+                        raise SystemExit(f"shoralg --models: {mo}")
+                    calls.append((_sha_dual_task, (dict(N=N, a=b, t=t, layout=lay, synth=a.synth, model=mo,
+                                                        trajectories=a.trajectories, seed=[a.seed, N, b, t],
+                                                        r_cz=a.local_cz_error, r_1q=a.lattice_1q_error,
+                                                        max_bonds=max(a.bonds or [a.bridge_max_bonds]),
+                                                        link=a.link, qrack_bridge=a.qrack_bridge),)))
+                    labels.append(f"dual N {N} a {b} t {t} {lay} {mo}")
+                    keys.append((N, b, t, lay, "dual", mo, None))
+        R = None
+    elif a.pair:
+        R, geo = None, dict(name="two circuits")
+        base = dict(pair=True, truncation=a.bridge_truncation, lazy_bonds=a.bridge_lazy, qrack_bridge=a.qrack_bridge,
+                    shots=a.shots, ket_max=a.ket_max, synth=a.synth)
+        for (N, b, t) in cases:
+            for lay in layouts:
+                if not a.no_exact:
+                    calls.append((_sha_task, (dict(base, N=N, a=b, t=t, layout=lay, engine="exact"),)))
+                    labels.append(f"exact N {N} a {b} t {t} {lay}")
+                    keys.append((N, b, t, lay, "exact", None, None))
+                for mb in (a.bonds or [a.bridge_max_bonds]):
+                    for rl in range(max(1, a.repeats)):
+                        calls.append((_sha_task, (dict(base, N=N, a=b, t=t, layout=lay, engine="bridge", max_bonds=mb,
+                                                       realisation=rl),)))
+                        labels.append(f"bridge N {N} a {b} t {t} {lay} max_bonds {mb} realisation {rl + 1}")
+                        keys.append((N, b, t, lay, "bridge", "A/B" if lay != "inside" else "A", mb))
+    else:
+        if a.box:
+            R = box_register(*a.box)
+            a.loom_chips, a.loom_link_rows = list(BOX_FACES), []
+            pairs = [p.split("/") for p in (a.faces or ["base/front", "base/right", "base/left"])]
+        else:
+            a.loom_chips = a.loom_chips or list(LOOM_DEFAULT["chips"])
+            R = loom_register(a.repo, a.cloverfield, a.loom_chips, a.loom_link_rows, "exact", "bridge")
+            a.loom_link_rows = list(R.link_rows)
+            pairs = [p.split("/") for p in (a.faces or [f"{a.loom_chips[0]}/{a.loom_chips[1]}"])]
+        names = [sp["name"] for sp in R.specs]
+        for p in pairs:
+            if len(p) != 2 or any(x not in names for x in p):
+                raise SystemExit(f"shoralg --faces: {'/'.join(p)} (chips / faces: {', '.join(names)})")
+        geo = dict(name=R.name)
+        base = dict(repo=a.repo, cf=a.cloverfield, chips=list(a.loom_chips), link_rows=list(a.loom_link_rows or ()),
+                    box=([R.L, R.H] if isinstance(R, BoxRegister) else None), truncation=a.bridge_truncation,
+                    lazy_bonds=a.bridge_lazy, qrack_bridge=a.qrack_bridge, shots=a.shots, ket_max=a.ket_max,
+                    synth=a.synth)
+        bonds = a.bonds or [a.bridge_max_bonds]
+        for (N, b, t) in cases:
+            for lay in layouts:
+                if not a.no_exact:
+                    calls.append((_sha_task, (dict(base, N=N, a=b, t=t, layout=lay, engine="exact"),)))
+                    labels.append(f"exact N {N} a {b} t {t} {lay}")
+                    keys.append((N, b, t, lay, "exact", None, None))
+                for pr in (pairs if lay != "inside" else pairs[:1]):
+                    for mb in bonds:
+                        for rl in range(max(1, a.repeats)):
+                            calls.append((_sha_task, (dict(base, N=N, a=b, t=t, layout=lay, engine="bridge",
+                                                           max_bonds=mb, realisation=rl,
+                                                           faces=list(pr) if lay != "inside" else [pr[0], pr[0]]),)))
+                            labels.append(f"bridge N {N} a {b} t {t} {lay} {'/'.join(pr)} max_bonds {mb} "
+                                          f"realisation {rl + 1}")
+                            keys.append((N, b, t, lay, "bridge", "/".join(pr) if lay != "inside" else pr[0], mb))
+    print(f"Layer 3 (Shor order finding) across {geo['name']}: " + ", ".join(
+        f"N {N} a {b} (r {sha_order(b, N)}) t {t}" for N, b, t in cases) + f"; layouts {', '.join(layouts)}; "
+        + (f"models {a.models}, {a.trajectories} trajectories, link {a.link}" if a.dual else
+           f"max_bonds {', '.join(str(x) for x in (a.bonds or [a.bridge_max_bonds]))} ({a.bridge_truncation})")
+        + f"; synthesis {a.synth}; {len(calls)} circuits; {nq.qrack_versions()}", flush=True)
+    pool, workers = nq.shor_pool(a.jobs, len(calls))
+    t0 = time.time()
+    try:
+        res = nq.shor_pool_map(pool, calls, labels, float(a.progress or 0), what="ghz shoralg")
+    finally:
+        if pool is not None:
+            pool.shutdown()
+    secs = time.time() - t0
+    grouped = {}
+    for k, (P, info) in zip(keys, res):
+        grouped.setdefault(k, []).append((P, info))
+    recs = []
+    for (N, b, t, lay, eng, where, mb), runs in grouped.items():
+        Ps = [P for P, _ in runs if P is not None]
+        P = np.mean(Ps, axis=0) if Ps else None
+        info = dict(runs[0][1])
+        if len(runs) > 1:
+            ideal_ = sha_analytic(N, b, t)
+            sc_ = [sha_score(x, t, N, b, ideal_) for x in Ps]
+            info.update(realisations=len(runs), vanished=sum(1 for x, _ in runs if x is None),
+                        success_runs=[round(x["success"], 4) for x in sc_], order_runs=[round(x["order"], 4) for x in sc_],
+                        tvd_runs=[round(x["tvd"], 4) for x in sc_],
+                        peak_bonds=max(i_.get("peak_bonds", 0) for _, i_ in runs),
+                        truncations=max(i_.get("truncations", 0) for _, i_ in runs),
+                        fidelity=min(i_.get("fidelity", 1.0) for _, i_ in runs))
+        r = sha_order(b, N)
+        circ = sha_circuit(N, b, t, lay, a.synth)
+        ideal = sha_analytic(N, b, t)
+        rec = dict(test="shor_alg", when=when, geometry=geo["name"], engine=eng, N=N, a=b, r=r, t=t,
+                   n_work=N.bit_length(), qubits=circ["nq"], layout=lay, synth=circ["synth"], mults=circ["mults"],
+                   **sha_counts(circ["ops"], circ["side"]), bonds_needed=sha_bonds_needed(r, lay),
+                   exact=sha_score(ideal, t, N, b, ideal),
+                   uniform=sha_score(np.full(1 << t, 1.0 / (1 << t)), t, N, b, ideal),
+                   qrack=nq.qrack_versions())
+        if eng == "dual":
+            _, _, rn = sha_dual_route(circ, a.link)
+            rec.update(model=where, link=a.link, route=rn, r_cz=a.local_cz_error, r_1q=a.lattice_1q_error,
+                       max_bonds=(DUAL_MODELS[where]["mb"] if DUAL_MODELS[where]["mb"] is not None else
+                                  max(a.bonds or [a.bridge_max_bonds])) if DUAL_MODELS[where]["engine"] != "exact"
+                       else None)
+        elif eng == "bridge":
+            f = where.split("/")
+            rec.update(faces=f, max_bonds=mb, truncation=a.bridge_truncation, lazy_bonds=a.bridge_lazy,
+                       **({"loom": R.map["loom"]} if R is not None else {}))
+            if isinstance(R, BoxRegister) and len(f) == 2:
+                cuts = R.ring_cuts(BOX_FACES.index(f[0]), BOX_FACES.index(f[1]))
+                rec.update(cuts=cuts, hops=len(cuts), wrap=(len(BOX_FACES) - 1) in cuts)
+        rec.update({("fidelity_estimate" if k == "fidelity" else k): v for k, v in info.items()})
+        if P is not None:
+            rec.update(sha_score(P, t, N, b, ideal))
+            rec["dist"] = {str(y): round(float(P[y]), 6) for y in np.nonzero(P > 1e-6)[0]}
+            if info.get("readout") == "shots":
+                rec["tvd_floor"] = float(0.5 * np.sum(np.sqrt(2 * ideal * (1 - ideal) / (math.pi * a.shots))))
+        recs.append(rec)
+    report_shoralg(recs)
+    print(f"seconds: {secs:.1f}")
+    if a.out:
+        with open(a.out, "a") as fh:
+            if R is not None:
+                fh.write(json.dumps(dict(test="shor_alg_map", register=R.name, when=when, **R.map)) + "\n")
+            for r_ in recs:
+                fh.write(json.dumps(r_) + "\n")
+        print(f"  appended {len(recs)} records to {a.out}")
+    return recs
+
+
+def report_shoralg(recs):
+    """Per (geometry, N, a, t): the ideal circuit's and a uniform guess's success; per layout and placement, the
+    success (and the distance to the ideal distribution) at every bridge capacity or model, the bonds the layout needs
+    by the rule and the peak the bridge held."""
+    groups = collections.defaultdict(list)
+    for r in recs:
+        groups[(r["geometry"], r["N"], r["a"], r["t"])].append(r)
+    for (geo, N, b, t), rs in sorted(groups.items()):
+        r0 = rs[0]
+        key = "success" if r0["exact"]["success"] > 0 else "order"
+        print(f"\n{geo}: N {N}, a {b}, order r {r0['r']}, {t} counting + {r0['n_work']} work qubits; ideal: success "
+              f"{r0['exact']['success']:.3f}, order found {r0['exact']['order']:.3f}; uniform guess: success "
+              f"{r0['uniform']['success']:.3f}, order {r0['uniform']['order']:.3f}"
+              + ("" if key == "success" else "; odd r gives no factor: cells show the order found"))
+        cols = sorted({(r.get("model") or "", -1 if r.get("max_bonds") is None else r["max_bonds"]) for r in rs
+                       if r["engine"] != "exact"}, key=lambda c: (SHA_DUAL_MODELS.index(c[0]) if c[0] else 0, c[1]))
+        head = [c[0] if c[0] else f"mb {c[1]}" for c in cols]
+        print(f"  {'layout':<11}{'placement':<22}{'CX':>6}{'cross':>6}{'need':>5}" + "".join(f"{h:>15}" for h in head)
+              + f"{'peak':>6}{'exact':>7}")
+        rows = collections.defaultdict(dict)
+        for r in rs:
+            if r["engine"] == "exact":
+                rows[(r["layout"], "")]["exact"] = r
+                continue
+            pl = f"link {r.get('link')}" if r["engine"] == "dual" else " / ".join(r.get("faces") or [])
+            if r.get("hops"):
+                pl += " (" + ("relayed" if r["hops"] > 1 else "direct") + (", wrap" if r.get("wrap") else "") + ")"
+            rows[(r["layout"], pl)][(r.get("model") or "", -1 if r.get("max_bonds") is None else r["max_bonds"])] = r
+        for (lay, pl), cell in sorted(rows.items(), key=lambda kv: (SHA_LAYOUTS.index(kv[0][0]), kv[0][1])):
+            if not pl:
+                continue
+            any_ = next(iter(v for k, v in cell.items() if k != "exact"))
+            ex = rows.get((lay, ""), {}).get("exact")
+            line = (f"  {lay:<11}{pl[:21]:<22}{any_['cx']:>6}{any_['cross']:>6}"
+                    + f"{'-' if any_['bonds_needed'] is None else any_['bonds_needed']:>5}")
+            for c in cols:
+                r = cell.get(c)
+                if r is None:
+                    line += f"{'':>15}"
+                elif "success" not in r:
+                    line += f"{'vanished':>15}"
+                else:
+                    line += f"{r[key]:>7.3f} ({r['tvd']:.2f})"
+            line += f"{max((r.get('peak_bonds') or 0) for k, r in cell.items() if k != 'exact'):>6}"
+            line += f"{ex['tvd']:>7.0e}" if ex and "tvd" in ex else f"{'':>7}"
+            print(line)
+    print("\n  cells: per-shot factoring success (the paper's rule; the order found where r is odd) and, in brackets, the "
+          "total variation distance to the ideal distribution (shots: above the floor tvd_floor in the records); need: bond qubits per cut the rule says the exact output takes; exact: the "
+          "QrackSimulator run's distance to the analytic distribution")
 
 
 # ================================================================== sweep, probe, stackmap
@@ -4935,6 +5709,62 @@ def cmd_selftest(a):
         check("measured-link noise alone: Bell 111-237 at the link's distant-CZ fidelity 0.9642 (3000 trajectories, "
               "+- 0.012; a two-qubit depolarising channel of average error r leaves a Bell state at 1 - r)",
               abs(fm - DUAL_LINKS[0]["dcz"]) < 0.012, f"{fm:.4f}")
+    print("[20] shoralg: Layer 3 as gates; the controlled multiplications against the paper's U; the circuit against "
+          "the analytic distribution; the paper's success rule; the hard cut on QrackBridge for r = 4 and r = 6; the "
+          "dual router")
+    from fractions import Fraction
+    bad = 0
+    for N, c, synth in ((15, 7, "structured"), (15, 13, "structured"), (15, 2, "structured"), (15, 7, "generic"),
+                        (21, 2, "generic"), (21, 4, "generic")):
+        n = N.bit_length()
+        o = ShaOps()
+        sha_cmul(o, 0, list(range(1, n + 1)), list(range(n + 1, 2 * n - 1)), c, N, synth)
+        for y in range(1 << n):
+            for cv in (0, 1):
+                sim = QrackSimulator(2 * n - 1, is_gpu=False)
+                for q in range(2 * n - 1):
+                    if ((y << 1) | cv) >> q & 1:
+                        sim.x(q)
+                sha_apply(_SimGates(sim, list(range(2 * n - 1))), o.ops)
+                v = sim.m_all()
+                want = ((c * y) % N if 0 < y < N else y) if cv else y
+                bad += int(((v >> 1) & ((1 << n) - 1)) != want or (v & 1) != cv or (v >> (n + 1)) != 0)
+    check("controlled multiplication = the paper's U (y -> c y mod N on 0 < y < N, else y; ancillas back to 0) on every "
+          "basis state: N 15 c 7, 13, 2 structured, 7 generic; N 21 c 2, 4 generic", bad == 0, f"{bad} wrong")
+    tv = {}
+    for N, b, t in ((15, 7, 4), (21, 2, 6)):
+        for lay in ("split", "direct"):
+            P, _ = _sha_task(dict(N=N, a=b, t=t, layout=lay, engine="exact"))
+            tv[(N, lay)] = 0.5 * np.abs(P - sha_analytic(N, b, t)).sum()
+    check("the gate circuit's counting distribution = the analytic one (N 15 a 7 t 4, N 21 a 2 t 6; split, direct)",
+          max(tv.values()) < 1e-5, f"worst TVD {max(tv.values()):.1e}")
+    paper = [y for y in range(16) if y and Fraction(y, 16).limit_denominator(15).denominator % 2 == 0
+             and pow(7, Fraction(y, 16).limit_denominator(15).denominator, 15) == 1
+             and sha_factor(15, 7, Fraction(y, 16).limit_denominator(15).denominator)]
+    sc = sha_score(sha_analytic(15, 7, 4), 4, 15, 7)
+    check("the paper's figure of merit: N 15 a 7 t 4 good bins 4 and 12, ideal per-shot success 1/2",
+          paper == [4, 12] and abs(sc["success"] - 0.5) < 1e-9, f"bins {paper}, success {sc['success']:.4f}")
+    try:
+        qrack_bridge(None)
+    except SystemExit as err:
+        print(f"  [skip] {err}")
+    else:
+        bx = dict(pair=True, engine="bridge", shots=1, ket_max=40)
+        got = {}
+        for N, b, t, mb in ((15, 7, 6, 0), (21, 2, 6, 0), (21, 2, 6, 4)):
+            P, _ = _sha_task(dict(bx, N=N, a=b, t=t, layout="split", max_bonds=mb))
+            got[(N, mb)] = 0.5 * np.abs(P - sha_analytic(N, b, t)).sum()
+        check("QrackBridge, counting | work on two circuits: r = 4 needs no bond (exact at max_bonds 0, the hard cut); "
+              "r = 6 needs ceil(log2 6) + 1 = 4 (far off at 0, exact at 4)",
+              got[(15, 0)] < 1e-6 and got[(21, 0)] > 0.5 and got[(21, 4)] < 1e-6,
+              f"TVD {got[(15, 0)]:.1e} / {got[(21, 0)]:.2f} / {got[(21, 4)]:.1e}")
+        dv = {}
+        for mo in ("exact", "ideal"):
+            P, _ = _sha_dual_task(dict(N=15, a=7, t=4, layout="split", model=mo, trajectories=1, seed=[0], r_cz=0.0,
+                                       r_1q=0.0, max_bonds=6))
+            dv[mo] = 0.5 * np.abs(P - sha_analytic(15, 7, 4)).sum()
+        check("dual router (module lines, SWAPs, the distant CNOT through 242-245), noiseless: N 15 a 7 t 4 exact on "
+              "QrackSimulator and on the bridge", max(dv.values()) < 1e-5, f"TVD {dv['exact']:.1e} / {dv['ideal']:.1e}")
     print("selftest " + ("passed" if ok else "FAILED"))
     if not ok:
         raise SystemExit(1)
@@ -5147,6 +5977,45 @@ def make_parser():
     du.add_argument("--out", default=None, help="append dual_r1 JSONL records")
     du.add_argument("--png", default=None, help="model against measurement, one row per state")
 
+    sa = sub.add_parser("shoralg", parents=[bridge_opts],
+                        help="Layer 3, the paper's Shor order finding (N = 15, a = 7), as gates across QrackBridge "
+                             "circuits (two chips, the box) or the dual Nighthawk R1")
+    sa.add_argument("--repo", default=None, help="rcs-nighthawk clone (the chips; default: auto-detect)")
+    sa.add_argument("--N", type=int, nargs="+", default=[15, 21], help="numbers to factor (default 15 21)")
+    sa.add_argument("--a", type=int, nargs="+", default=None,
+                    help="bases (default: 7 for N = 15, the paper's; else the smallest base of every order r > 1)")
+    sa.add_argument("--counting", type=int, nargs="+", default=None,
+                    help="counting qubits t (default: 4, the paper's, and 2n for N = 15; 2n otherwise)")
+    sa.add_argument("--layouts", default=",".join(SHA_LAYOUTS),
+                    help="comma list of " + ", ".join(f"{k} ({v})" for k, v in SHA_LAYOUT_TEXT.items()))
+    sa.add_argument("--bonds", type=int, nargs="+", default=None,
+                    help="max_bonds values to sweep (default: --bridge-max-bonds alone)")
+    sa.add_argument("--faces", nargs="+", default=None,
+                    help="side pairs A/B, counting side first (default: the two chips; with --box base/front "
+                         "(direct), base/right (relayed through front), base/left (the ring's wrap cut))")
+    sa.add_argument("--synth", choices=["auto", "generic", "structured"], default="auto",
+                    help="controlled modular multiplication: generic (the permutation's transpositions), structured "
+                         "(N = 2^n - 1, a^(2^k) = +-2^j: a bit rotation), auto (structured where it applies)")
+    sa.add_argument("--shots", type=int, default=4096, help="shots when the bridge is wider than --ket-max")
+    sa.add_argument("--repeats", type=int, default=1,
+                    help="bridge realisations per circuit (seeds): below capacity a greedy truncation picks among equal "
+                         "Schmidt values, so the outcome depends on the seed; P is their mean, success_runs each one")
+    sa.add_argument("--ket-max", dest="ket_max", type=int, default=22,
+                    help="bridges up to this many qubits are read from their ket (no shot noise)")
+    sa.add_argument("--no-exact", dest="no_exact", action="store_true", help="skip the QrackSimulator runs")
+    sa.add_argument("--dual", action="store_true", help="on the dual Nighthawk R1 (arXiv:2610.29986) instead")
+    sa.add_argument("--pair", action="store_true",
+                    help="on two bare QrackBridge circuits (one patch per side, no chip geometry, no release needed)")
+    sa.add_argument("--models", default="hardcut,ideal,budget,measured", help="--dual: as dual")
+    sa.add_argument("--trajectories", type=int, default=200, help="--dual: Pauli trajectories per noisy circuit")
+    sa.add_argument("--link", default="242-245", help="--dual: the L-coupler the distant CNOTs use")
+    sa.add_argument("--local-cz-error", dest="local_cz_error", type=float, default=0.00355)
+    sa.add_argument("--lattice-1q-error", dest="lattice_1q_error", type=float, default=0.0005)
+    sa.add_argument("--seed", type=int, default=7, help="--dual: trajectory seed")
+    sa.add_argument("--jobs", type=int, default=1, help="worker processes (0 = every core)")
+    sa.add_argument("--progress", type=float, default=30.0, help="seconds between heartbeats (0 = off)")
+    sa.add_argument("--out", default=None, help="append shor_alg JSONL records")
+
     m = sub.add_parser("stackmap", help="a stack run's three measurements as heatmaps on the chip layout")
     m.add_argument("--in", dest="inp", required=True, help="JSONL written by stack --out (its latest run is drawn)")
     m.add_argument("--register", default=None, help="which register (default: the latest stack run in the file)")
@@ -5167,10 +6036,10 @@ def main():
     a = make_parser().parse_args()
     if getattr(a, "ocl_sync", False):
         os.environ["QRACK_OCL_SYNC"] = "1"
-    if a.cmd in ("chip", "tiles", "stack", "sweep", "probe", "shor"):
+    if a.cmd in ("chip", "tiles", "stack", "sweep", "probe", "shor", "shoralg"):
         nq.ensure_isolated(a)
     dict(chip=cmd_chip, tiles=cmd_tiles, stack=cmd_stack, sweep=cmd_sweep, probe=cmd_probe, stackmap=cmd_stackmap,
-         shor=cmd_shor, shormap=cmd_shormap, dual=cmd_dual, dualmap=cmd_dualmap, dualplot=cmd_dualplot, plot=cmd_plot, selftest=cmd_selftest)[a.cmd](a)
+         shor=cmd_shor, shormap=cmd_shormap, shoralg=cmd_shoralg, dual=cmd_dual, dualmap=cmd_dualmap, dualplot=cmd_dualplot, plot=cmd_plot, selftest=cmd_selftest)[a.cmd](a)
 
 
 if __name__ == "__main__":
