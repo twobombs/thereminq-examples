@@ -6,7 +6,7 @@
 |---|---|
 | Script | `rcs/nighthawk/nighthawk_erepr.py` |
 | Builds on | `nighthawk_qrack.py`: `ExactEngine`, `AceEngine`, `two_patch_config`, `layout_row`, `ace_tiling` (v3), `placement_stats`, `u_angles`, `gate`, `find_repo` · `nighthawk_cloverfield.py`: `parse_chip`, `chip_layout`, `Field`, `ChipProc` workers, `Loom` (`ghost`, `mean`, `sample`), `worker_env_for` |
-| Data | `erepr/`: `reference.json` (§4), `exact.jsonl`, `ace.jsonl`, `loom.jsonl`, `loom_links.jsonl`, `knit.jsonl` (§5–6), `tiles.json` (the tiling cache), `run_all.sh` |
+| Data | `erepr/`: `reference.json` (§4), `exact.jsonl`, `ace.jsonl`, `loom.jsonl`, `loom_links.jsonl`, `knit.jsonl` (§5–6), `ds.json` (§4.5), `pairs*.json` (§6.3), `tiles.json` (the tiling cache), `run_all.sh` |
 | Target | Jafferis et al., *Traversable wormhole dynamics on a quantum processor*, Nature 612, 51 (2022) [[1]](#ref-1) |
 | Exchange | Kobrin, Schuster, Yao, Comment, arXiv:2302.07897 [[2]](#ref-2) · Jafferis et al., Reply, arXiv:2303.15423 [[3]](#ref-3) |
 | Circuit source | S. Davis, Caltech thesis ch. 14: Jordan–Wigner table, swaps, 9-qubit layout [[4]](#ref-4) |
@@ -42,6 +42,11 @@ The experiment's claim is a traversable wormhole: a message inserted into one si
 | The ghost loom carries the wormhole exactly when every side qubit has a ghost | 4 links: 0.2410 at t = 2.8, drift 0, 4 round trips | 6.1 |
 | One link fewer and the peak is gone; the mean-field loom closes it at any link count | 3 / 2 / 1 links: 0.023 / 0.041 / 0.041; mean field ≤ 0.0065 | 6.1 |
 | The peak scales with the TFD entanglement kept across the cut; the t = 0 signal does not | knit: 0.006 → 0.241 bits as 0 → 3.21 bits are kept; 0.128 at t = 0 throughout | 6.2 |
+| In the dS limit (β → 0, the double-scaled SYK state) the sign asymmetry vanishes; no β favours μ > 0 | peak ratio I(+12)/I(−12) 0.59–0.68 at β = 4, 1.005–1.030 at β = 0; teleportation works both ways (SYK F_avg 0.715–0.720) | 4.5 |
+| With the coupling dressed by the constraint H_L = H_R, the traversal time and the sign preference both vanish; the sign of μ is the direction of relative time | I_PT depends on t₁ − t₀ alone; I(−μ, τ) = I(+μ, −τ) to 10⁻¹⁵; peak ratio 1.000 at every β | 4.5 |
+| An AdS side joined to a dS side with one Hamiltonian is the TFD at the mean temperature | β_L = 4, β_R = 0 equals β = 2 to 4 × 10⁻¹⁶ | 4.5 |
+| Thermal mode pairs split across two chips match the single register, and a chip is the side register plus log₂(keep) qubits | max \|d\| ≤ 1.1 × 10⁻⁶ with every branch; 6 pairs on 16–20 qubits per chip against 24 | 6.3 |
+| Independent scramblers hide the pairs without touching the cut entropy; a mirrored scrambler (U* ⊗ U) undoes itself as the pairs get hotter | return ≤ 0.0004 against 0.003 → 0.9998 for r = 0.3 → 3 | 6.3 |
 | On two ACE patches no placement keeps the peak, and the coupler-weighted tiling loses everything | `tiling` 960 exact CZs, I_PT 0; `lr` ≤ 0.002; `seam-r` 0.013 at t = 2.8 | 5.2 |
 
 ---
@@ -67,6 +72,9 @@ python3 nighthawk_erepr.py aceprobe                              # Bell pairs ac
 | `run --backend ace` | `nq.AceEngine` on the 16-site register; `--placement grid tiling lr seam-r`; `--reps` |
 | `run --backend loom` | cloverfield: one `ChipProc` worker per chip, the `Loom` weaving every CZ; `--field wide narrow`, `--links K`, `--loom ghost mean sample` |
 | `run --backend knit` | the cut resolved exactly (TFD Schmidt sum × coupling branches), `--keep k` Schmidt components |
+| `run --beta b` | any backend with the TFD at inverse temperature b (default 4); 0 is the dS limit |
+| `pairs` | thermal mode pairs across an exact cut (§6.3): `--modes`, `--mode-qubits`, `--r` or `--horizon T`, `--keep`, `--ghost none independent mirror`, `--depth`; no release data needed |
+| `ds` | the dS limit (§4.5): β sweep, both signs, Model 1 and SYK N = 10, sign verdict per β; `--dress` adds the constraint-dressed coupling scanned over τ = t₁ − t₀; `--qrack` repeats Model 1 through `knit` |
 | `table`, `aceprobe`, `selftest` | tables of JSONL runs; Bell pairs per site class; checks of §3.4 |
 
 `nighthawk_erepr.py` carries `QRACK_LIB_PATH = "/usr/local/lib/qrack/libqrack_pinvoke.so"` and points `NIGHTHAWK_TILE_CACHE` at `erepr/tiles.json` unless it is set.
@@ -164,6 +172,7 @@ Idle sites fill the remaining places, so every placement uses all four seam site
 | Wide field, ghost loom (every side qubit a link anchor: chip A holds a replica of the whole state) | 0.24103, ghost drift 4 × 10⁻⁸, product view 0 |
 | Wide field, mean-field loom | 0.00109 |
 | Knit (2048 branches) | 0.24107 |
+| Pairs: 2 mode pairs (r = 0.6, 0.9), depth 3, all 16 branches, independent and mirror scramblers vs the single register | max \|d\| 5.7 × 10⁻⁷ and 2.7 × 10⁻⁷; return 0.0046 and 0.3770 |
 
 Across the full grids: exact `wide` and `narrow` match the reference to 2.6 × 10⁻⁷ at all 124 points (31 times × 2 signs × 2 fields); the knit with 16 components to 7 × 10⁻⁸, the 4-link ghost loom to 3.7 × 10⁻⁵.
 
@@ -245,6 +254,82 @@ Checks: I_PT = 0 at μ = 0 (no signalling); readout τ_k² = 1 to 4.4 × 10⁻¹
 | Model 1 + H₁ | 0.226 at 2.70 (0.225 at t = 2.8) | 0.139 (0.097 at t = 2.8) |
 
 The ideal trained wormhole beats the classical teleportation bound by 0.011. The experiment's evidence is the μ-asymmetry of I_PT; F_avg states what that asymmetry amounts to as a channel.
+
+### 4.5 The de Sitter limit (`ds`)
+
+The AdS wrapper: the protocol, V and both Hamiltonians are unchanged, and only the TFD temperature moves. β → 0 is the state of the double-scaled SYK proposal for dS holography [[7]](#ref-7): two SYK systems at infinite temperature joined by H_L = H_R, which every TFD here meets to 7 × 10⁻¹⁷. In AdS the wormhole opens for negative injected energy (μ < 0). In dS a positive-energy shockwave gives a time advance that brings the two poles into causal contact [[8]](#ref-8), so a dS wormhole would favour μ > 0.
+
+| Rule | Value |
+|---|---|
+| Grid | β ∈ {4, 2, 1, 0.5, 0.25, 0}, 0 ≤ t ≤ 10 at dt = 0.1, symmetric t₀ = t₁, μ = ±12 |
+| Ratio | peak I(+12) / peak I(−12) over t |
+| Sign | AdS if the ratio is below 0.9, dS if above 1/0.9 = 1.11, blind between |
+| Models | Model 1 (trained pair ψ¹ψ²), SYK N = 10, J = 1.25, pair (1,2), seeds 0–2 |
+
+| β | L\|R entanglement, Model 1 / SYK (bits) | Model 1: peak I(−12) / I(+12), ratio | SYK ratio, 3 seeds | Sign, Model 1 / SYK |
+|---|---|---|---|---|
+| 4 | 3.21 / 4.06–4.20 | 0.241 / 0.154, 0.637 | 0.590–0.678 | AdS / AdS |
+| 2 | 3.80 / 4.70–4.73 | 0.268 / 0.248, 0.926 | 0.763–0.806 | blind / AdS |
+| 1 | 3.95 / 4.92–4.93 | 0.269 / 0.278, 1.035 | 0.872–0.895 | blind / AdS |
+| 0.5 | 3.99 / 4.98 | 0.277 / 0.285, 1.029 | 0.932–0.952 | blind / blind |
+| 0.25 | 3.997 / 4.995 | 0.280 / 0.287, 1.025 | 0.968–0.990 | blind / blind |
+| 0 | 4.00 / 5.00 | 0.281 / 0.287, 1.020 | 1.005–1.030 | blind / blind |
+
+| Finding | Numbers |
+|---|---|
+| No temperature gives the dS sign | largest ratio 1.035 (Model 1, β = 1), threshold 1.11 |
+| The sign asymmetry fades into a channel that works both ways | max over t of \|I(−12) − I(+12)\|: Model 1 0.150 → 0.055, SYK 0.117–0.122 → 0.008–0.013 from β = 4 to 0 |
+| Teleportation gets stronger as the asymmetry goes | SYK peak I(−12) 0.27–0.30 bits at β = 4, I(±12) 0.36–0.38 at β = 0; best F_avg 0.715–0.720 for both signs at β = 0, against 2/3 |
+| The training time is a β = 4 feature | Model 1's peak moves from t = 2.80 to 8.2–8.7 for β ≤ 1 |
+| A fixed-time read keeps a sign the peaks lose | Model 1 at t = 2.8, β = 0: I(−12) 0.247, I(+12) 0.192 |
+| Residual lean at β = 0 | all four models have ratio 1.005–1.030, toward μ > 0; below the threshold, and not separable from finite size at N ≤ 10 |
+
+Reading: at high temperature the circuit teleports by operator spreading under generic scrambling (peaked-size teleportation [[9]](#ref-9)), which needs no gravity and no sign. The wrapper therefore lands in a regime that cannot pick a dS sign. A dS test of the sign needs a coupling or a Hamiltonian derived for a dS horizon, not a temperature.
+
+`--qrack` runs Model 1 through `knit` (§6.2, all 16 Schmidt components, 2048 branches) on `nq.ExactEngine` at t = 2.8:
+
+| β | L\|R (bits) | I(−12) knit / reference | I(+12) knit / reference | max \|d\| |
+|---|---|---|---|---|
+| 4 | 3.210 | 0.24107 / 0.24107 | 0.10021 / 0.10021 | 5.6 × 10⁻⁸ |
+| 2 | 3.802 | 0.26486 / 0.26486 | 0.16103 / 0.16103 | 5.4 × 10⁻⁸ |
+| 1 | 3.953 | 0.26035 / 0.26035 | 0.18100 / 0.18100 | 3.2 × 10⁻⁸ |
+| 0.5 | 3.989 | 0.25449 / 0.25449 | 0.18753 / 0.18753 | 7.6 × 10⁻⁸ |
+| 0.25 | 3.997 | 0.25085 / 0.25085 | 0.19002 / 0.19001 | 5.0 × 10⁻⁶ |
+| 0 | 4.000 | 0.24683 / 0.24683 | 0.19202 / 0.19202 | 3.1 × 10⁻⁸ |
+
+**Constraint-dressed coupling (`--dress`).** V does not commute with H_L − H_R (max element of the commutator 0.009–0.012), so under the constraint of [[7]](#ref-7) it is not a physical operator. V_d keeps only the blocks of V that conserve E_L − E_R, which is V averaged over the relative time generated by H_L − H_R; [V_d, H_L − H_R] = 0 to 2 × 10⁻¹⁷. The dressing is this file's construction, not a protocol of [7]. Since V_d and the TFD are both invariant, I_PT depends on τ = t₁ − t₀ alone, and the scan is over τ (−10 ≤ τ ≤ 10, dt = 0.1).
+
+| Check | Model 1 | SYK N = 10, 3 seeds |
+|---|---|---|
+| Coupling loop of `TwoSided.run` vs e^{iμV} of `V_matrix` | 9.9 × 10⁻¹⁶ | 2.3 × 10⁻¹⁶ |
+| Share of \|V\|² that V_d keeps | 16.1 % | 4.3–5.0 % |
+| Spread of I_PT along t₀ = t₁ (boost invariance) | ≤ 6.7 × 10⁻¹⁶ | ≤ 8.9 × 10⁻¹⁶ |
+| max over τ of \|I(−12, τ) − I(+12, −τ)\| | ≤ 6.7 × 10⁻¹⁶ | ≤ 1.1 × 10⁻¹⁵ |
+
+| β | Model 1: peak I, at τ for μ = −12 / +12 | Model 1: I at τ = 0 | SYK: peak I, at τ for μ = −12 / +12 | SYK: max \|I(−12) − I(+12)\| over τ |
+|---|---|---|---|---|
+| 4 | 0.170, +0.4 / −0.4 | 0.168 | 0.236–0.255, +0.4 / −0.4 | 0.070–0.075 |
+| 2 | 0.251, +0.2 / −0.2 | 0.250 | 0.363–0.372, +0.2 / −0.2 | 0.055–0.059 |
+| 1 | 0.276, +0.1 / −0.1 | 0.276 | 0.418–0.428, +0.1 / −0.1 | 0.032–0.035 |
+| 0.5 | 0.283, 0 / 0 | 0.283 | 0.434–0.444, 0 to +0.1 / 0 to −0.1 | 0.017–0.019 |
+| 0 | 0.285, 0 / 0 | 0.285 | 0.440–0.449, 0 / 0 | 0.001–0.002 |
+
+| Finding | Numbers |
+|---|---|
+| The coupling sign is the direction of relative time | I(−μ, τ) = I(+μ, −τ) to 10⁻¹⁵, every model and β |
+| No traversal time is left | the symmetric protocol is flat in t; the peak sits at τ ≈ ±β/10 (grid 0.1) and at τ = 0 for β = 0 |
+| The peaks of the two signs are equal at every β, and the curves coincide at β = 0 | ratio 1.000 throughout; max difference over τ 0.042–0.075 at β = 4, ≤ 0.002 at β = 0 |
+| The channel is stronger than with V in the dS limit | SYK I_PT 0.440–0.449 bits at β = 0 against 0.36–0.38 with V |
+
+Reading: once the coupling obeys the constraint, the wormhole's two marks (a traversal time and a preferred sign) are both gone, and what remains is transfer between operators at nearly equal proper time, with the sign of μ equivalent to swapping which side is later. The dressed coupling is not compiled to a circuit: it is a dense 2^(N/2) × 2^(N/2) block projection, numpy reference only.
+
+**AdS on one side, dS on the other.** With the same Hamiltonian on both sides, (e^{−β_L H_L/4} ⊗ e^{−β_R H_R/4})\|I⟩ is the TFD at the mean of β_L and β_R, because H_L\|I⟩ = H_R\|I⟩. For β_L = 4, β_R = 0 the overlap with the β = 2 TFD is 1 to 4 × 10⁻¹⁶, so this hybrid is the β = 2 row above: Model 1 peak 0.268 / 0.248 (blind), SYK peak I(−12) 0.351–0.365 with ratio 0.763–0.806 (AdS sign). A junction that is not a mean temperature needs different Hamiltonians on the two sides, where H_L\|I⟩ ≠ H_R\|I⟩; that is not built here.
+
+```bash
+python3 nighthawk_erepr.py ds --dress --qrack --out erepr/ds.json         # ≈ 400 s on 2 vCPU
+python3 nighthawk_erepr.py run --backend knit --beta 0 --out erepr/knit_ds.jsonl
+python3 nighthawk_erepr.py run --backend exact --field wide --beta 0 --out erepr/exact_ds.jsonl
+```
 
 ---
 
@@ -340,6 +425,71 @@ The cut resolved exactly, as a benchmark for what a loom would have to carry: ch
 | Cost of an exact cut | Schmidt rank × 2^links = 16 × 128 branches, chips of 17 and 15 qubits, against 12 for the field register; the ghost loom pays instead with replicas, and is exact only when every side qubit has one |
 | keep = 1 | the top Schmidt value is doubly degenerate (ψ⁸); keep 1 drops one of the pair |
 
+### 6.3 Mode pairs across the cut (`pairs`)
+
+The knit applied to a state that is Schmidt-diagonal by construction: M pairs of bosonic modes, one mode of each pair per side (G and M; ghost and matter in the Strano model's pair picture). No release data is needed.
+
+| Item | Value |
+|---|---|
+| Pair k | two-mode squeezed state cut at 2ⁿ quanta, Σ_m c_m \|m⟩_G \|m⟩_M with c_m ∝ tanhᵐ(r_k); each side alone is thermal at T/ω = −1 / ln tanh² r_k |
+| Registers | n qubits per mode, nM per side; mode k on bits [nk, nk + n) |
+| Chip | one `nq.ExactEngine` per side: nM qubits and an index register of log₂(keep) qubits, holding Σ_j \|j⟩ ⊗ U\|b_j⟩ for the `keep` heaviest branches b_j; branch weights are applied afterwards, as in §6.2 |
+| Scramblers (`--ghost`) | `none`; `independent`: each side its own circuit; `mirror`: G runs the complex conjugate of M's circuit, U* ⊗ U. Circuits: `--depth` layers of Haar single-qubit gates and CZs on alternating bonds of a line |
+| return | \|⟨Ψ₀\|Ψ⟩\|², the weight of the scrambled state on the pair state it started from |
+| pair I | mutual information between G qubit q and M qubit q, mean and max over q (bits) |
+| Reference | the same state and circuits on one register of 2nM qubits, when 2nM ≤ `--single-max` (22) |
+| `--horizon T` | one temperature across modes of energy E_k = k + 1: tanh² r_k = e^(−E_k/T) |
+
+Three pairs, n = 2, r = 0.6 (T/ω = 0.804), depth 4, all 64 branches (chips and single register both 12 qubits):
+
+| Scrambler | return | pair I mean / max | Cut entropy (bits) | max \|d\| vs single register |
+|---|---|---|---|---|
+| none | 1.0000 | 1.158 / 1.534 | 3.474 | 4.6 × 10⁻⁷ |
+| independent | 0.0002 | 0.068 / 0.192 | 3.474 | 1.6 × 10⁻⁷ |
+| mirror | 0.0977 | 0.469 / 0.820 | 3.474 | 3.7 × 10⁻⁷ |
+
+Squeezing sweep, same register, all branches:
+
+| r | T/ω | Cut entropy (bits) | independent: return, pair I mean | mirror: return, pair I mean |
+|---|---|---|---|---|
+| 0.3 | 0.405 | 1.371 | 0.0000, 0.040 | 0.0033, 0.101 |
+| 0.6 | 0.804 | 3.474 | 0.0002, 0.068 | 0.0977, 0.469 |
+| 1.0 | 1.836 | 5.287 | 0.0003, 0.057 | 0.5746, 1.283 |
+| 2.0 | 13.65 | 5.986 | 0.0004, 0.047 | 0.9894, 1.970 |
+| 3.0 | 100.9 | 6.000 | 0.0004, 0.047 | 0.9998, 1.999 |
+
+Truncation, four pairs at one temperature (`--modes 4 --horizon 1`; single register 16 qubits):
+
+| keep | Chip qubits | Weight kept | Cut entropy (bits) | max \|d\| of pair correlators vs single register: none / independent / mirror |
+|---|---|---|---|---|
+| 256 (all) | 16 | 1.000000 | 2.459 | 4.8 × 10⁻⁷ / 1.1 × 10⁻⁶ / 5.2 × 10⁻⁷ |
+| 64 | 14 | 0.999823 | 2.456 | 5.4 × 10⁻³ / 1.1 × 10⁻³ / 4.5 × 10⁻³ |
+| 16 | 12 | 0.984453 | 2.307 | 9.9 × 10⁻² / 1.8 × 10⁻² / 7.2 × 10⁻² |
+
+Six pairs, r = 0.3 (`--modes 6 --r 0.3 --keep 16 64 256`); the single register is 24 qubits and was not run:
+
+| keep | Chip qubits | Weight kept | Cut entropy (bits) | Seconds per chip pair (2 vCPU) |
+|---|---|---|---|---|
+| 16 | 16 | 0.924815 | 2.099 | 0.10–0.27 |
+| 64 | 18 | 0.988520 | 2.607 | 0.36–0.37 |
+| 256 | 20 | 0.999493 | 2.734 | 1.48–1.51 |
+
+| Finding | Numbers |
+|---|---|
+| With every branch kept the two chips reproduce the single register | max \|d\| ≤ 1.1 × 10⁻⁶ over every case above (Qrack single precision) |
+| Scrambled, not lost | independent scramblers: return ≤ 0.0004 and pair I 0.04–0.07 bits (1.158 unscrambled at r = 0.6), with the cut entropy unchanged |
+| The mirror scrambler undoes itself as the pairs get hotter | return 0.003 → 0.098 → 0.575 → 0.989 → 0.9998 for r = 0.3 → 3; pair I → 2 bits. U* ⊗ U leaves Σ_b \|b⟩\|b⟩ invariant, the statement H_L = H_R of §4.5 in circuit form |
+| A chip is the side register plus log₂(keep) qubits | 6 pairs: 16–20 qubits per chip against 24, carrying 92.5–99.95 % of the weight |
+| Truncation error tracks the weight dropped | correlators off by 10⁻³–10⁻² at 0.02 % dropped, 10⁻²–10⁻¹ at 1.6 % |
+| With every branch kept a chip is as wide as the single register | the index register then has nM qubits; the saving comes from truncation, so it is largest at low squeezing |
+
+```bash
+python3 nighthawk_erepr.py pairs --out erepr/pairs.json
+python3 nighthawk_erepr.py pairs --r 2.0 --keep 0 --ghost independent mirror --out erepr/pairs_r2.0.json
+python3 nighthawk_erepr.py pairs --modes 4 --horizon 1.0 --keep 0 64 16 --out erepr/pairs_horizon.json
+python3 nighthawk_erepr.py pairs --modes 6 --r 0.3 --keep 16 64 256 --out erepr/pairs_6.json
+```
+
 ---
 
 ## 7. Claims ledger
@@ -375,6 +525,12 @@ The cut resolved exactly, as a benchmark for what a loom would have to carry: ch
 | ACE draws random outcomes | 8 repetitions per point, mean ± sd |
 | SYK normalisation | {ψ, ψ} = δ with variance 3! J²/N³ does not reproduce the Comment's r_l ~ 0.75 level; the Comment reports it could not reproduce [1]'s SYK dynamics exactly either |
 | χ thresholds | the Reply's "as good as Model 1" threshold is not stated; §4.3 uses min(χ₁, χ₂) of Model 1 |
+| dS is a temperature and a constraint here, not a geometry | §4.5 moves β and, with `--dress`, projects V onto the constraint H_L = H_R; H_L and H_R are the AdS protocol's, and no coupling derived from a dS horizon is in the script |
+| `pairs` is logical, not routed | the chips are `nq.ExactEngine` registers with all-to-all index controls; no lattice placement, links or loom |
+| `pairs` prepares the cut squeezed state directly | c_m ∝ tanhᵐ r renormalised over 2ⁿ levels; it is not the truncated-generator evolution, which differs near the top level |
+| The dressed coupling is reference only | V_d is a dense block projection, not a sum of ZZ rotations; `run` and the Qrack backends use V |
+| Size winding in the dS limit | χ and r̄ are normalised by 1 − W and are undefined at β = 0; `ds.json` stores them, §4.5 does not use them |
+| System size | N ≤ 10 Majoranas per side; the β = 0 lean toward μ > 0 (ratio ≤ 1.030) is within finite-size reach |
 
 ---
 
@@ -391,3 +547,9 @@ The cut resolved exactly, as a benchmark for what a loom would have to carry: ch
 <a id="ref-5"></a>[5] J. Maldacena, L. Susskind, *Cool horizons for entangled black holes*, [arXiv:1306.0533](https://arxiv.org/abs/1306.0533) · P. Gao, D. L. Jafferis, A. C. Wall, *Traversable wormholes via a double trace deformation*, [arXiv:1608.05687](https://arxiv.org/abs/1608.05687)
 
 <a id="ref-6"></a>[6] [README.md](README.md) (nighthawk_qrack, cloverfield §3.5), [METHODOLOGY.md](METHODOLOGY.md), [RESULTS.md](RESULTS.md)
+
+<a id="ref-7"></a>[7] V. Narovlansky, H. Verlinde, *Double-scaled SYK and de Sitter holography*, JHEP 2025(5), 32. [doi:10.1007/JHEP05(2025)032](https://doi.org/10.1007/JHEP05(2025)032)
+
+<a id="ref-8"></a>[8] L. Aalsma, G. Shiu, *Chaos and complementarity in de Sitter space*, JHEP 2020(5), 152. [arXiv:2002.01326](https://arxiv.org/abs/2002.01326)
+
+<a id="ref-9"></a>[9] T. Schuster, B. Kobrin, P. Gao et al., *Many-body quantum teleportation via operator spreading in the traversable wormhole protocol*, Phys. Rev. X (2022). [arXiv:2102.00010](https://arxiv.org/abs/2102.00010)

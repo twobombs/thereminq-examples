@@ -39,9 +39,19 @@ Subcommands
                               chips), the Loom weaving every CZ: --loom ghost | mean | sample
             --backend knit    the cut resolved exactly: TFD Schmidt sum x 2^7 coupling branches, each
                               chip one nq.ExactEngine with a local branch register
+            --beta b          TFD inverse temperature (default 4); 0 is the dS limit
+  ds        the dS limit through the AdS wrapper: same protocol, beta -> 0 (two SYK at infinite
+            temperature joined by H_L = H_R, the double-scaled SYK proposal for dS holography); peak I_PT
+            for both coupling signs, which sign wins (AdS mu < 0, dS mu > 0, or blind), L|R entanglement,
+            size winding; --dress adds V projected onto the constraint (the blocks that conserve
+            E_L - E_R), scanned over tau = t1 - t0; --qrack repeats Model 1 through knit on nq.ExactEngine
+  pairs     M two-mode squeezed pairs (thermal on each side) split across an exact cut: each side one
+            nq.ExactEngine with an index register of log2(keep) qubits, each running its own scrambler
+            (--ghost none | independent | mirror), checked against the single register; --r per mode or
+            --horizon T for one temperature across modes; no release data needed
   table     JSONL files side by side (mean +- sd over repetitions)
   aceprobe  Bell pairs across the two-patch register's site classes
-  selftest  algebra, gates, routing, engines, ghost loom on the wide field, knit, against the reference
+  selftest  algebra, gates, routing, engines, ghost loom on the wide field, knit, pairs, against the reference
 
 Release data (layout.json, rcs/layout.py) as for nighthawk_qrack: --repo, $NIGHTHAWK_REPO, or an
 rcs-nighthawk clone next to this script.
@@ -49,6 +59,10 @@ rcs-nighthawk clone next to this script.
 Examples
   python3 nighthawk_erepr.py selftest
   python3 nighthawk_erepr.py derive --out erepr/reference.json
+  python3 nighthawk_erepr.py ds --dress --qrack --out erepr/ds.json
+  python3 nighthawk_erepr.py run --backend knit --beta 0 --out erepr/knit_ds.jsonl
+  python3 nighthawk_erepr.py pairs --out erepr/pairs.json
+  python3 nighthawk_erepr.py pairs --modes 6 --r 0.3 --keep 16 64 256 --out erepr/pairs_6.json
   python3 nighthawk_erepr.py plan --field narrow
   python3 nighthawk_erepr.py run --backend ace --placement grid tiling lr seam-r --reps 8 --out erepr/ace.jsonl
   python3 nighthawk_erepr.py run --backend loom --field narrow --loom ghost mean --out erepr/loom.jsonl
@@ -211,8 +225,8 @@ def apQ(M, psi):
 class TwoSided:
     """|TFD> (x) |Phi+>_PQ as a tensor psi[l, r, p, q]; psi_L^j = g_j (x) 1, psi_R^j = Par_L (x) g_j."""
 
-    def __init__(self, side, beta=BETA, n_used=7, qN=QN):
-        self.s, self.qN, self.used = side, qN, n_used
+    def __init__(self, side, beta=BETA, n_used=7, qN=QN, dress=False):
+        self.s, self.qN, self.used, self.dress = side, qN, n_used, dress
         d = side.d
         self.A = [gj @ side.par for gj in side.g]
         K = sum(1j * np.kron(self.A[j], side.g[j]) for j in range(side.n))
@@ -224,6 +238,36 @@ class TwoSided:
         tfd = M @ ew[:, 0].reshape(d, d)
         self.tfd = tfd / np.linalg.norm(tfd)
 
+    def V_matrix(self):
+        """V = (i / qN) sum_j psi_L^j psi_R^j on the (l, r) index, the generator of the coupling loop in run."""
+        return (1j / self.qN) * sum(np.kron(self.A[j], self.s.g[j]) for j in range(self.used))
+
+    def dressing(self):
+        """V_d: V with only the blocks that conserve E_L - E_R, which is V averaged over the relative time generated
+        by H_L - H_R. It commutes with H_L - H_R, the form the constraint H_L = H_R allows. Cached on the side."""
+        s = self.s
+        cache = s.__dict__.setdefault("_dress", {})
+        key = (self.used, self.qN)
+        if key not in cache:
+            V = self.V_matrix()
+            W = np.kron(s.w, s.w)
+            dl = np.subtract.outer(s.e, s.e).ravel()                         # E_L - E_R of each (l, r) eigenpair
+            keep = np.abs(np.subtract.outer(dl, dl)) < 1e-9 * max(1.0, float(np.ptp(s.e)))
+            Vt = W.conj().T @ V @ W
+            Vd = W @ (Vt * keep) @ W.conj().T
+            Vd = (Vd + Vd.conj().T) / 2
+            D = np.kron(s.h, np.eye(s.d)) - np.kron(np.eye(s.d), s.h)
+            ev, ew = np.linalg.eigh(Vd)
+            cache[key] = dict(ev=ev, ew=ew, U={}, kept=float(np.linalg.norm(Vt * keep) ** 2 / np.linalg.norm(Vt) ** 2),
+                              comm_V=float(np.abs(V @ D - D @ V).max()), comm_Vd=float(np.abs(Vd @ D - D @ Vd).max()))
+        return cache[key]
+
+    def dressed_U(self, mu):
+        c = self.dressing()
+        if mu not in c["U"]:
+            c["U"][mu] = (c["ew"] * np.exp(1j * mu * c["ev"])) @ c["ew"].conj().T
+        return c["U"][mu]
+
     def run(self, mu, t0, t1, pair=(1, 2)):
         s, (a_, b_) = self.s, pair
         psi = np.einsum("lr,pq->lrpq", self.tfd, I2 / SQ2)
@@ -233,11 +277,14 @@ class TwoSided:
         for Pq, M in ((PX, Xt), (PY, Yt), (PZ, -1j * Xt @ Yt)):
             new += apL(M, apQ(Pq, psi))
         psi = apL(s.U(t0), 0.5 * new)
-        th = mu / (2 * self.qN)
-        for j in range(self.used):
-            psi = math.cos(th) * psi - 2 * math.sin(th) * apL(self.A[j], apR(s.g[j], psi))
-        psi = apR(s.U(t1), psi)
         d = s.d
+        if self.dress:
+            psi = (self.dressed_U(mu) @ psi.reshape(d * d, 4)).reshape(d, d, 2, 2)
+        else:
+            th = mu / (2 * self.qN)
+            for j in range(self.used):
+                psi = math.cos(th) * psi - 2 * math.sin(th) * apL(self.A[j], apR(s.g[j], psi))
+        psi = apR(s.U(t1), psi)
         tau = [(np.eye(d), np.eye(d)), (s.par, SQ2 * s.g[a_ - 1]), (s.par, SQ2 * s.g[b_ - 1]),
                (np.eye(d), -2j * s.g[a_ - 1] @ s.g[b_ - 1])]
         self.tau_err = max(float(np.abs(np.kron(L_ @ L_, R_ @ R_) - np.eye(d * d)).max()) for L_, R_ in tau)
@@ -431,6 +478,124 @@ def cmd_derive(a):
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(json.dumps(out, indent=1, default=lambda x: x.tolist() if hasattr(x, "tolist") else str(x)))
+        print(f"wrote {a.out} ({out['seconds']} s)")
+
+
+# ================================================================== de Sitter limit (ds)
+# The AdS wrapper: the protocol is unchanged and only the TFD temperature moves. beta -> 0 is the state of the
+# double-scaled SYK proposal for dS holography (Narovlansky, Verlinde: two SYK at infinite temperature joined by
+# H_L = H_R, which every TFD here satisfies, see HL_minus_HR). In AdS the wormhole opens for negative injected
+# energy (mu < 0); in dS a positive-energy shockwave gives a time advance between the poles (Aalsma, Shiu), so
+# a dS wormhole would favour mu > 0. ds asks which sign the protocol favours as beta -> 0.
+DS_BETAS = [4.0, 2.0, 1.0, 0.5, 0.25, 0.0]
+DS_RATIO = 0.9
+
+
+def ds_verdict(neg, pos):
+    """the sign carrying the larger I_PT peak: AdS (mu < 0), dS (mu > 0), or blind (within DS_RATIO)"""
+    if pos < DS_RATIO * neg:
+        return "AdS"
+    if neg < DS_RATIO * pos:
+        return "dS"
+    return "blind"
+
+
+def ds_checks(side, n_used, bl=4.0, br=0.0):
+    """(1) the coupling loop of TwoSided.run is e^{i mu V} of V_matrix; (2) V does not commute with H_L - H_R, V_d
+    does, and the share of V's squared norm that V_d keeps; (3) a hybrid TFD with the AdS temperature on L and the
+    dS one on R, (e^{-bl H_L / 4} (x) e^{-br H_R / 4}) |I>, is the TFD at the mean temperature (H_L |I> = H_R |I>)."""
+    tw = TwoSided(side, beta=0.0, n_used=n_used)
+    d, c = side.d, tw.dressing()
+    ev, ew = np.linalg.eigh(tw.V_matrix())
+    psi = np.einsum("lr,pq->lrpq", tw.tfd, I2 / SQ2)
+    th, loop = MU / (2 * tw.qN), psi
+    for j in range(n_used):
+        loop = math.cos(th) * loop - 2 * math.sin(th) * apL(tw.A[j], apR(side.g[j], loop))
+    dense = ((ew * np.exp(1j * MU * ev)) @ ew.conj().T @ psi.reshape(d * d, 4)).reshape(d, d, 2, 2)
+    f = lambda b: (side.w * np.exp(-b * (side.e - side.e.min()) / 4)) @ side.w.conj().T
+    hyb = f(bl) @ tw.tfd @ f(br).T
+    mean = TwoSided(side, beta=(bl + br) / 2, n_used=n_used).tfd
+    return dict(loop_vs_expV=float(np.abs(loop - dense).max()), comm_V=c["comm_V"], comm_Vd=c["comm_Vd"],
+                V_kept=c["kept"], hybrid=(bl, br), hybrid_vs_mean=float(1 - abs(np.vdot(hyb / np.linalg.norm(hyb), mean))))
+
+
+def ds_row(model, seed, side, n_used, beta, ts, mu, dress=False):
+    """V: the symmetric protocol, t0 = t1 = t. dressed: V_d commutes with H_L - H_R and the TFD is invariant under it,
+    so I_PT depends on tau = t1 - t0 alone (boost: the spread of I_PT along t0 = t1); the scan is over tau, with
+    t0 = 0 for tau >= 0 and t1 = 0 for tau < 0. mirror: max |I(-mu, tau) - I(+mu, -tau)|."""
+    tw = TwoSided(side, beta=beta, n_used=n_used, dress=dress)
+    extra = {}
+    if dress:
+        ts = np.concatenate([-ts[:0:-1], ts])
+        run = lambda m, x: tw.run(m, 0.0, x) if x >= 0 else tw.run(m, -x, 0.0)
+    else:
+        run = lambda m, x: tw.run(m, x, x)
+    k28 = int(np.argmin(np.abs(ts - T_WIND)))
+    rn = [run(-mu, t) for t in ts]
+    rp = [run(mu, t) for t in ts]
+    In, Ip = np.array([r["I"] for r in rn]), np.array([r["I"] for r in rp])
+    if dress:
+        sym = [tw.run(-mu, t, t)["I"] for t in (0.0, 0.7, T_WIND, 6.3)]
+        extra = dict(boost=float(np.ptp(sym)), mirror=float(np.abs(In - Ip[::-1]).max()), I_tau0=float(In[len(ts) // 2]))
+    p = np.linalg.svd(tw.tfd, compute_uv=False) ** 2
+    p = p[p > 1e-14]
+    w = winding_side(side, 1, beta=beta)
+    pn, pp = peak(ts, In), peak(ts, Ip)
+    return dict(model=model, seed=seed, beta=beta, coupling="dressed" if dress else "V", **extra,
+                S_LR=float(-np.sum(p * np.log2(p))), HL_minus_HR=tw.hlhr_err,
+                peak_neg=pn, peak_pos=pp, I28=(float(In[k28]), float(Ip[k28])),
+                Fpeak_neg=peak(ts, [r["Favg"] for r in rn]), Fpeak_pos=peak(ts, [r["Favg"] for r in rp]),
+                ratio=pp[1] / pn[1] if pn[1] > 0 else float("nan"), max_diff=float(np.abs(In - Ip).max()),
+                verdict=ds_verdict(pn[1], pp[1]), chi1=w["chi"], rbar1=w["rbar"])
+
+
+def cmd_ds(a):
+    ts = np.round(np.arange(0, a.tmax + 1e-9, a.dt), 6)
+    models = []
+    if "model1" in a.models:
+        models.append(("model1", None, Side(8, MODEL1), 7))
+    if "syk" in a.models:
+        models += [("syk10", s, Side(10, syk_terms(10, 1.25, s)), 10) for s in range(a.syk_seeds)]
+    out = dict(inputs=dict(betas=a.betas, mu=a.mu, tmax=a.tmax, dt=a.dt, ratio=DS_RATIO, q=Q_BODY, N_V=N_V), rows=[])
+    tic = time.time()
+    out["checks"] = []
+    for model, seed, side, nu in models:
+        c = dict(model=model, seed=seed, **ds_checks(side, nu))
+        out["checks"].append(c)
+        print(f"{model} {seed}: loop vs e^(i mu V) {c['loop_vs_expV']:.1e}; |[V, H_L - H_R]| {c['comm_V']:.2e}, dressed "
+              f"{c['comm_Vd']:.1e}, V_d keeps {100 * c['V_kept']:.1f} % of |V|^2; hybrid TFD beta_L {c['hybrid'][0]:g}, "
+              f"beta_R {c['hybrid'][1]:g} vs TFD at the mean: 1 - overlap {c['hybrid_vs_mean']:.1e}")
+    print(f"model    seed coupling beta   S_LR   peak I(-{a.mu:g}) @t   peak I(+{a.mu:g}) @t   +/-     max|dI|  sign")
+    for (model, seed, side, nu), dress in itertools.product(models, [False, True] if a.dress else [False]):
+        for beta in a.betas:
+            r = ds_row(model, seed, side, nu, beta, ts, a.mu, dress)
+            out["rows"].append(r)
+            print(f"{model:8s} {str(seed):4s} {r['coupling']:8s} {beta:5.2f}  {r['S_LR']:.3f}  {r['peak_neg'][1]:.4f} "
+                  f"{r['peak_neg'][0]:5.2f}     {r['peak_pos'][1]:.4f} {r['peak_pos'][0]:5.2f}     {r['ratio']:.3f}   "
+                  f"{r['max_diff']:.4f}   {r['verdict']:5s}"
+                  + (f"  I(tau=0) {r['I_tau0']:.4f}, boost {r['boost']:.1e}, mirror {r['mirror']:.1e}" if dress else ""),
+                  flush=True)
+    if a.dress:
+        print("dressed rows: @t is tau = t1 - t0; boost = spread of I_PT along t0 = t1; mirror = max |I(-mu, tau) - I(+mu, -tau)|")
+    if a.qrack:
+        enc = Encoding("split")
+        side = Side(8, MODEL1)
+        out["qrack"] = []
+        print("knit on nq.ExactEngine (Model 1, t = 2.8, all 16 Schmidt components) against the reference")
+        for beta in a.betas:
+            prep = TFDPrep(enc, beta)
+            ref = TwoSided(side, beta=beta)
+            for mu in (-a.mu, a.mu):
+                k = run_knit(enc, prep, mu, T_WIND, T_WIND, a, 16)
+                e = ref.run(mu, T_WIND, T_WIND)["I"]
+                out["qrack"].append(dict(beta=beta, mu=mu, knit=k["I"], reference=e, entanglement=k["entanglement_kept"],
+                                         branches=k["branches"]))
+                print(f"  beta {beta:5.2f} mu {mu:+6.1f}: knit {k['I']:.5f}, reference {e:.5f}, |d| {abs(k['I'] - e):.1e}, "
+                      f"L|R {k['entanglement_kept']:.3f} bits, {k['branches']} branches", flush=True)
+    out["seconds"] = round(time.time() - tic, 1)
+    if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.out).write_text(json.dumps(out, indent=1, default=float))
         print(f"wrote {a.out} ({out['seconds']} s)")
 
 
@@ -1231,6 +1396,173 @@ def run_knit(enc, prep, mu, t0, t1, a, keep):
     return r
 
 
+# ================================================================== pairs: mode pairs across an exact cut
+# M pairs of bosonic modes, one mode of each pair per side (G and M; in the Strano model, ghost and matter), each
+# mode n qubits (2^n Fock levels). Pair k is the two-mode squeezed state cut at 2^n quanta,
+#   sum_m c_m |m>_G |m>_M,  c_m ~ tanh^m(r_k):  each side alone is thermal at T / w = -1 / ln tanh^2 r_k.
+# The state is Schmidt-diagonal, so the cut is resolved as in knit: each side is one nq.ExactEngine holding its
+# n M qubits and an index register of log2(keep) qubits (the keep heaviest branches), against 2 n M qubits for the
+# single register. Each side then runs its own scrambler; nothing crosses the cut after the pairs are made.
+def pair_weights(n, rs):
+    """branch amplitudes w_b, b = sum_k m_k 2^(n k): mode k on bits [n k, n k + n) of each side's register"""
+    w = np.ones(1)
+    for r in rs:
+        c = math.tanh(r) ** np.arange(2 ** n)
+        w = np.kron(c / np.linalg.norm(c), w)
+    return w
+
+
+def pair_circuit(nq_, depth, seed):
+    """scrambler on one side: `depth` layers of Haar single-qubit gates and CZs on alternating bonds of a line"""
+    rng = np.random.default_rng([seed, nq_, depth])
+    ops = []
+    for layer in range(depth):
+        for q in range(nq_):
+            Q, R = np.linalg.qr(rng.normal(size=(2, 2)) + 1j * rng.normal(size=(2, 2)))
+            ops.append(("u", q, Q * (np.diag(R) / np.abs(np.diag(R)))))
+        ops += [("cz", q, q + 1) for q in range(layer % 2, nq_ - 1, 2)]
+    return ops
+
+
+def pair_sides(nq_, depth, seed, ghost):
+    """(G ops, M ops). mirror: G runs the complex conjugate of M's circuit (U* (x) U, the clock of the other side
+    reversed), which leaves sum_b |b>|b> invariant; independent: a second scrambler; none: no circuit."""
+    if ghost == "none":
+        return [], []
+    opsM = pair_circuit(nq_, depth, seed)
+    if ghost == "mirror":
+        return [(o[0], o[1], o[2].conj()) if o[0] == "u" else o for o in opsM], opsM
+    return pair_circuit(nq_, depth, seed + 1), opsM
+
+
+def pair_run(eng, ops):
+    for o in ops:
+        eng.g1(o[1], o[2]) if o[0] == "u" else eng.cz(o[1], o[2])
+
+
+def pair_chip(ops, nq_, branches, cpu=True):
+    """one side: sum_j |j>_index (x) U |b_j>, unweighted, on nq.ExactEngine; returns kets[j, side basis state].
+    All branches share one run, so their relative phases are kept (as in run_knit)."""
+    K = len(branches)
+    kb = K.bit_length() - 1
+    eng = nq.ExactEngine(nq_ + kb, cpu)
+    idx = [nq_ + i for i in range(kb)]
+    for q in idx:
+        eng.g1(q, H_M)
+    if list(branches) == list(range(K)):
+        for i in range(kb):
+            eng.sim.mcx([idx[i]], i)
+    else:
+        for j, b in enumerate(branches):
+            zeros = [idx[i] for i in range(kb) if not (j >> i) & 1]
+            for q in zeros:
+                eng.sim.x(q)
+            for q in range(nq_):
+                if (int(b) >> q) & 1:
+                    eng.sim.mcx(idx, q)
+            for q in zeros:
+                eng.sim.x(q)
+    pair_run(eng, ops)
+    return np.array(eng.sim.out_ket(), dtype=complex).reshape(K, 2 ** nq_) * math.sqrt(K)
+
+
+def pair_single(w, nq_, opsG, opsM, cpu=True):
+    """the same state and circuits on one register (G on qubits [0, nq_), M above); returns psi[m, g]"""
+    eng = nq.ExactEngine(2 * nq_, cpu)
+    psi = np.zeros(4 ** nq_, dtype=complex)
+    b = np.arange(2 ** nq_)
+    psi[b + (b << nq_)] = w
+    eng.sim.in_ket(nq.flat(psi))
+    pair_run(eng, opsG + [(o[0], o[1] + nq_, o[2] + nq_ if o[0] == "cz" else o[2]) for o in opsM])
+    return np.array(eng.sim.out_ket(), dtype=complex).reshape(2 ** nq_, 2 ** nq_)
+
+
+def ap_q(X, q, P):
+    """Pauli P on bit q of the second index of X[j, s]"""
+    Y = X.reshape(X.shape[0], -1, 2, 2 ** q)
+    return np.einsum("ab,jhbl->jhal", P, Y).reshape(X.shape)
+
+
+def pair_tm_knit(w, KG, KM, q):
+    """<sigma_a on G qubit q, sigma_b on M qubit q> from the two chips: double sum over branch pairs"""
+    A = [KG.conj() @ ap_q(KG, q, P).T for P in PAULI]
+    B = [KM.conj() @ ap_q(KM, q, P).T for P in PAULI]
+    ww = np.outer(w.conj(), w)
+    return np.array([[np.real(np.sum(ww * A[i] * B[j])) for j in range(4)] for i in range(4)])
+
+
+def pair_tm_single(psi, q):
+    G = [ap_q(psi, q, P) for P in PAULI]
+    return np.array([[np.real(np.vdot(psi, ap_q(G[i].T, q, PAULI[j]).T)) for j in range(4)] for i in range(4)])
+
+
+def pair_case(n, rs, depth, seed, ghost, keep, single=True, cpu=True):
+    """one (scrambler, keep) case: the cut on two chips, and against the single register when it is run.
+    return: |<Psi_0|Psi>|^2, the weight of the scrambled state on the pair state it started from (same keep).
+    pair_I: mutual information (bits) between G qubit q and M qubit q, over q."""
+    nq_ = n * len(rs)
+    w_full = pair_weights(n, rs)
+    full = keep >= len(w_full)
+    br = np.arange(len(w_full)) if full else np.sort(np.argsort(-w_full, kind="stable")[:keep])
+    w = w_full[br] / np.linalg.norm(w_full[br])
+    p = w ** 2
+    opsG, opsM = pair_sides(nq_, depth, seed, ghost)
+    tic = time.time()
+    KG, KM = pair_chip(opsG, nq_, br, cpu), pair_chip(opsM, nq_, br, cpu)
+    sec = time.time() - tic
+    Tk = [pair_tm_knit(w, KG, KM, q) for q in range(nq_)]
+    Ik = [metrics(T)["I"] for T in Tk]
+    ret = abs(np.sum(np.outer(w, w) * KG[:, br].T * KM[:, br].T)) ** 2
+    out = dict(ghost=ghost, keep=len(br), chip_qubits=nq_ + len(br).bit_length() - 1, single_qubits=2 * nq_,
+               weight_kept=float(np.sum(w_full[br] ** 2)), S_cut=float(-np.sum(p[p > 1e-300] * np.log2(p[p > 1e-300]))),
+               ret=float(ret), pair_I_mean=float(np.mean(Ik)), pair_I_max=float(np.max(Ik)), seconds=round(sec, 2),
+               norm_err=float(max(abs(T[0, 0] - 1) for T in Tk)))
+    if single:
+        tic = time.time()
+        psi = pair_single(w_full, nq_, opsG, opsM, cpu)
+        out["single_seconds"] = round(time.time() - tic, 2)
+        Ts = [pair_tm_single(psi, q) for q in range(nq_)]
+        b = np.arange(2 ** nq_)
+        out.update(d_corr=float(max(np.abs(Tk[q] - Ts[q]).max() for q in range(nq_))),
+                   d_ret=float(abs(ret - abs(np.sum(w_full * psi[b, b])) ** 2)),
+                   single_pair_I_mean=float(np.mean([metrics(T)["I"] for T in Ts])))
+    return out
+
+
+def cmd_pairs(a):
+    rs = list(a.r) if len(a.r) > 1 else list(a.r) * a.modes
+    if a.horizon is not None:
+        rs = [math.atanh(math.exp(-(k + 1) / (2 * a.horizon))) for k in range(a.modes)]      # tanh^2 r_k = e^(-E_k / T)
+    if len(rs) != a.modes:
+        sys.exit(f"--r needs 1 or {a.modes} values")
+    nq_ = a.mode_qubits * a.modes
+    single = not a.no_single and 2 * nq_ <= a.single_max
+    c = [math.tanh(r) ** np.arange(2 ** a.mode_qubits) for r in rs]
+    occ = [float(np.sum(np.arange(len(x)) * x ** 2) / np.sum(x ** 2)) for x in c]
+    print(f"{a.modes} mode pairs, {a.mode_qubits} qubits per mode ({2 ** a.mode_qubits} Fock levels); side register "
+          f"{nq_} qubits, single register {2 * nq_}" + ("" if single else " (not run)"))
+    print("  mode   r       T/w      <N> (cut)")
+    for k, r in enumerate(rs):
+        print(f"  {k:4d}   {r:.4f}  {-1 / math.log(math.tanh(r) ** 2):7.4f}  {occ[k]:.4f}")
+    out = dict(inputs=dict(modes=a.modes, mode_qubits=a.mode_qubits, r=rs, depth=a.depth, seed=a.seed, horizon=a.horizon),
+               rows=[])
+    print("  scrambler    keep  chip qubits  weight kept  S_cut (bits)  return   pair I mean / max   s"
+          + ("       max |d| vs single (correlators, return)" if single else ""))
+    for ghost, keep in itertools.product(a.ghost, a.keep):
+        keep = 2 ** nq_ if keep <= 0 else min(keep, 2 ** nq_)
+        if keep & (keep - 1):
+            sys.exit("--keep needs powers of two (0 = all branches)")
+        r = pair_case(a.mode_qubits, rs, a.depth, a.seed, ghost, keep, single, a.cpu)
+        out["rows"].append(r)
+        print(f"  {ghost:11s} {r['keep']:5d}  {r['chip_qubits']:5d}        {r['weight_kept']:.6f}     {r['S_cut']:.4f}"
+              f"        {r['ret']:.4f}   {r['pair_I_mean']:.4f} / {r['pair_I_max']:.4f}     {r['seconds']:5.2f}"
+              + (f"   {r['d_corr']:.1e}, {r['d_ret']:.1e}" if single else ""), flush=True)
+    if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.out).write_text(json.dumps(out, indent=1, default=float))
+        print(f"wrote {a.out}")
+
+
 # ================================================================== commands
 def times(a):
     return [round(x, 6) for x in np.arange(a.tmin, a.tmax + 1e-9, a.dt)]
@@ -1263,13 +1595,13 @@ def cmd_plan(a):
 def cmd_run(a):
     repo = repo_of(a) if a.backend in ("exact", "ace", "loom") else None
     enc = Encoding("split")
-    prep = TFDPrep(enc)
+    prep = TFDPrep(enc, a.beta)
     done = set()
     if a.out and os.path.exists(a.out):
         for line in open(a.out):
             r = json.loads(line)
             done.add((r["backend"], r.get("field"), r.get("variant"), str(r.get("links")), r["mu"], r["t0"], r["t1"],
-                      r.get("rep", 0)))
+                      r.get("rep", 0), r.get("beta", BETA)))
     fh = None
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
@@ -1296,7 +1628,8 @@ def cmd_run(a):
             for mu in a.mu:
                 for t in times(a):
                     t0, t1 = (a.t0, t) if a.t0 is not None else (t, t)
-                    key = (a.backend, fname, var, str(a.links if a.backend in ("exact", "loom") else None), mu, t0, t1, rep)
+                    key = (a.backend, fname, var, str(a.links if a.backend in ("exact", "loom") else None), mu, t0, t1, rep,
+                           a.beta)
                     if key in done:
                         continue
                     tic = time.time()
@@ -1310,7 +1643,7 @@ def cmd_run(a):
                         r = run_loom(enc, prep, mu, t0, t1, a, field, var, repo, chips)
                     else:
                         r = run_knit(enc, prep, mu, t0, t1, a, int(var[4:]))
-                    rec = dict(backend=a.backend, field=fname, variant=var, mu=mu, t0=t0, t1=t1, rep=rep,
+                    rec = dict(backend=a.backend, field=fname, variant=var, mu=mu, t0=t0, t1=t1, rep=rep, beta=a.beta,
                                protocol="fixed_t0" if a.t0 is not None else "symmetric",
                                links=a.links if a.backend in ("exact", "loom") else None,
                                seconds=round(time.time() - tic, 2), **r)
@@ -1331,6 +1664,8 @@ def cmd_table(a):
     groups = {}
     for r in recs:
         mode = "sym" if r.get("protocol", "symmetric") == "symmetric" else f"t0={r['t0']}"
+        if r.get("beta", BETA) != BETA:
+            mode += f",b={r['beta']:g}"
         groups.setdefault((r["backend"], str(r.get("field")), str(r.get("variant")), str(r.get("links")), mode), []).append(r)
     print("backend  field   variant  links t0     reps  I(-12)@2.8        I(+12)@2.8        peak I(-12) @t   "
           "peak I(+12) @t   best F(-12)  extra")
@@ -1434,6 +1769,10 @@ def cmd_selftest(a):
     check("wide field, mean-field loom", r["I"] < 0.01, f"I_PT {r['I']:.5f}")
     k = run_knit(enc, prep, -MU, T_WIND, T_WIND, a, 16)
     check("knit (exact cut)", abs(k["I"] - ref[-MU]) < 1e-4, f"I_PT {k['I']:.5f}, {k['branches']} branches")
+    for ghost in ("independent", "mirror"):
+        pr = pair_case(2, [0.6, 0.9], 3, 1, ghost, 16)
+        check(f"pairs (2 mode pairs, {ghost} scramblers, all 16 branches) vs the single register",
+              pr["d_corr"] < 1e-5 and pr["d_ret"] < 1e-5, f"max |d| {pr['d_corr']:.1e}, return {pr['ret']:.4f}")
     print("selftest", "PASSED" if ok else "FAILED")
     if not ok:
         sys.exit(1)
@@ -1462,7 +1801,33 @@ def main():
     r.add_argument("--tmax", type=float, default=6.0)
     r.add_argument("--dt", type=float, default=0.4)
     r.add_argument("--t0", type=float, default=None)
+    r.add_argument("--beta", type=float, default=BETA, help="TFD inverse temperature; 0 is the dS limit (see ds)")
     r.add_argument("--out", default=None)
+    e = sub.add_parser("ds")
+    e.add_argument("--betas", type=float, nargs="+", default=DS_BETAS)
+    e.add_argument("--models", nargs="+", choices=["model1", "syk"], default=["model1", "syk"])
+    e.add_argument("--syk-seeds", type=int, default=3)
+    e.add_argument("--mu", type=float, default=MU)
+    e.add_argument("--tmax", type=float, default=10.0)
+    e.add_argument("--dt", type=float, default=0.1)
+    e.add_argument("--dress", action="store_true",
+                   help="also run with V dressed by the constraint H_L = H_R (numpy reference only)")
+    e.add_argument("--qrack", action="store_true", help="also run Model 1 through knit on nq.ExactEngine at t = 2.8")
+    e.add_argument("--out", default=None)
+    g = sub.add_parser("pairs")
+    g.add_argument("--modes", type=int, default=3)
+    g.add_argument("--mode-qubits", type=int, default=2, help="qubits per mode: 2^n Fock levels")
+    g.add_argument("--r", type=float, nargs="+", default=[0.6], help="squeezing r = kappa t: one value, or one per mode")
+    g.add_argument("--horizon", type=float, default=None,
+                   help="T: one temperature across modes of energy E_k = k + 1, tanh^2 r_k = exp(-E_k / T)")
+    g.add_argument("--keep", type=int, nargs="+", default=[0, 16, 4], help="branches kept (powers of two; 0 = all)")
+    g.add_argument("--ghost", nargs="+", choices=["none", "independent", "mirror"], default=["none", "independent", "mirror"])
+    g.add_argument("--depth", type=int, default=4)
+    g.add_argument("--seed", type=int, default=1)
+    g.add_argument("--single-max", type=int, default=22, help="widest single register run as the reference (qubits)")
+    g.add_argument("--no-single", action="store_true")
+    g.add_argument("--cpu", action=argparse.BooleanOptionalAction, default=True)
+    g.add_argument("--out", default=None)
     t = sub.add_parser("table")
     t.add_argument("files", nargs="+")
     q = sub.add_parser("aceprobe")
@@ -1471,7 +1836,7 @@ def main():
     s = sub.add_parser("selftest")
     s.add_argument("--repo", default=None)
     a = ap.parse_args()
-    dict(derive=cmd_derive, plan=cmd_plan, run=cmd_run, table=cmd_table, aceprobe=cmd_aceprobe,
+    dict(derive=cmd_derive, plan=cmd_plan, run=cmd_run, ds=cmd_ds, pairs=cmd_pairs, table=cmd_table, aceprobe=cmd_aceprobe,
          selftest=cmd_selftest)[a.cmd](a)
 
 
