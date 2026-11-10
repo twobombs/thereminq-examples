@@ -69,3 +69,4 @@ python3 sdrp_zne_batch.py --series 10,14,22 --circuits 100 --depth 12 --shots 10
 * <a id="ref-3"></a>**[3]** D. Strano, B. Bollay, A. Blaauw, N. Shammah, W. J. Zeng, and A. Mari, "Exact and approximate simulation of large quantum circuits on a single GPU," *Proceedings of the IEEE International Conference on Quantum Computing and Engineering (QCE)*, pp. 949–958 (2023), [arXiv:2304.14969](https://arxiv.org/abs/2304.14969).
 * <a id="ref-4"></a>**[4]** S. Boixo, S. V. Isakov, V. N. Smelyanskiy *et al.*, "Characterizing Quantum Supremacy in Near-Term Devices," *Nature Physics* **14**, 595–600 (2018), [arXiv:1608.00263](https://arxiv.org/abs/1608.00263).
 * <a id="ref-5"></a>**[5]** F. Arute *et al.*, "Quantum supremacy using a programmable superconducting processor," *Nature* **574**, 505–510 (2019), [arXiv:1910.11333](https://arxiv.org/abs/1910.11333).
+
