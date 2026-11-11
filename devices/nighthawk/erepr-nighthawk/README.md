@@ -6,7 +6,7 @@
 |---|---|
 | Script | `rcs/nighthawk/nighthawk_erepr.py` |
 | Builds on | `nighthawk_qrack.py`: `ExactEngine`, `AceEngine`, `two_patch_config`, `layout_row`, `ace_tiling` (v3), `placement_stats`, `u_angles`, `gate`, `find_repo` · `nighthawk_cloverfield.py`: `parse_chip`, `chip_layout`, `Field`, `ChipProc` workers, `Loom` (`ghost`, `mean`, `sample`), `worker_env_for` |
-| Data | `erepr/`: `reference.json` (§4), `exact.jsonl`, `ace.jsonl`, `loom.jsonl`, `loom_links.jsonl`, `knit.jsonl` (§5–6), `ds.json` (§4.5), `pairs*.json` (§6.3), `tiles.json` (the tiling cache), `run_all.sh` |
+| Data | `erepr/`: `reference.json` (§4), `exact.jsonl`, `ace.jsonl`, `loom.jsonl`, `loom_links.jsonl`, `knit.jsonl` (§5–6), `ds.json` (§4.5), `pairs*.json` (§6.3), `pairs_route*.json` and `qasm/` (§6.4), `tiles.json` (the tiling cache), `run_all.sh` |
 | Target | Jafferis et al., *Traversable wormhole dynamics on a quantum processor*, Nature 612, 51 (2022) [[1]](#ref-1) |
 | Exchange | Kobrin, Schuster, Yao, Comment, arXiv:2302.07897 [[2]](#ref-2) · Jafferis et al., Reply, arXiv:2303.15423 [[3]](#ref-3) |
 | Circuit source | S. Davis, Caltech thesis ch. 14: Jordan–Wigner table, swaps, 9-qubit layout [[4]](#ref-4) |
@@ -46,6 +46,7 @@ The experiment's claim is a traversable wormhole: a message inserted into one si
 | With the coupling dressed by the constraint H_L = H_R, the traversal time and the sign preference both vanish; the sign of μ is the direction of relative time | I_PT depends on t₁ − t₀ alone; I(−μ, τ) = I(+μ, −τ) to 10⁻¹⁵; peak ratio 1.000 at every β | 4.5 |
 | An AdS side joined to a dS side with one Hamiltonian is the TFD at the mean temperature | β_L = 4, β_R = 0 equals β = 2 to 4 × 10⁻¹⁶ | 4.5 |
 | Thermal mode pairs split across two chips match the single register, and a chip is the side register plus log₂(keep) qubits | max \|d\| ≤ 1.1 × 10⁻⁶ with every branch; 6 pairs on 16–20 qubits per chip against 24 | 6.3 |
+| The pair chips route onto rectangles of the Nighthawk lattice without changing the result; the default layout needs no SWAPs | 2 × 6 sites and 16 CZs per chip; max \|d\| ≤ 2.4 × 10⁻⁶ over every routed 64-branch case | 6.4 |
 | Independent scramblers hide the pairs without touching the cut entropy; a mirrored scrambler (U* ⊗ U) undoes itself as the pairs get hotter | return ≤ 0.0004 against 0.003 → 0.9998 for r = 0.3 → 3 | 6.3 |
 | On two ACE patches no placement keeps the peak, and the coupler-weighted tiling loses everything | `tiling` 960 exact CZs, I_PT 0; `lr` ≤ 0.002; `seam-r` 0.013 at t = 2.8 | 5.2 |
 
@@ -74,6 +75,7 @@ python3 nighthawk_erepr.py aceprobe                              # Bell pairs ac
 | `run --backend knit` | the cut resolved exactly (TFD Schmidt sum × coupling branches), `--keep k` Schmidt components |
 | `run --beta b` | any backend with the TFD at inverse temperature b (default 4); 0 is the dS limit |
 | `pairs` | thermal mode pairs across an exact cut (§6.3): `--modes`, `--mode-qubits`, `--r` or `--horizon T`, `--keep`, `--ghost none independent mirror`, `--depth`; no release data needed |
+| `pairs --route` | both chips on rectangles of the lattice through `Router` (§6.4): `--chips`, `--lattice release grid auto`, `--broken`, `--index-bits`, `--qasm DIR` |
 | `ds` | the dS limit (§4.5): β sweep, both signs, Model 1 and SYK N = 10, sign verdict per β; `--dress` adds the constraint-dressed coupling scanned over τ = t₁ − t₀; `--qrack` repeats Model 1 through `knit` |
 | `table`, `aceprobe`, `selftest` | tables of JSONL runs; Bell pairs per site class; checks of §3.4 |
 
@@ -173,6 +175,7 @@ Idle sites fill the remaining places, so every placement uses all four seam site
 | Wide field, mean-field loom | 0.00109 |
 | Knit (2048 branches) | 0.24107 |
 | Pairs: 2 mode pairs (r = 0.6, 0.9), depth 3, all 16 branches, independent and mirror scramblers vs the single register | max \|d\| 5.7 × 10⁻⁷ and 2.7 × 10⁻⁷; return 0.0046 and 0.3770 |
+| Pairs routed: the same pairs on 3 × 3 rectangles of the ideal lattice, one site broken, mirror scrambler vs the single register | max \|d\| 1.7 × 10⁻⁶; CZ 63 / 21, SWAPs 18 / 4 |
 
 Across the full grids: exact `wide` and `narrow` match the reference to 2.6 × 10⁻⁷ at all 124 points (31 times × 2 signs × 2 fields); the knit with 16 components to 7 × 10⁻⁸, the 4-link ghost loom to 3.7 × 10⁻⁵.
 
@@ -490,6 +493,50 @@ python3 nighthawk_erepr.py pairs --modes 4 --horizon 1.0 --keep 0 64 16 --out er
 python3 nighthawk_erepr.py pairs --modes 6 --r 0.3 --keep 16 64 256 --out erepr/pairs_6.json
 ```
 
+### 6.4 Pairs on the Nighthawk lattice (`pairs --route`)
+
+Each chip of §6.3 placed on a rectangle of the 12 × 10 lattice and routed with the `Router` of §3.2, so the circuit is single-qubit gates and CZs on couplers only.
+
+| Item | Value |
+|---|---|
+| Chips (`--chips`) | two `rect:r0-r1,c0-c1` tokens, G then M; default two stacked rectangles, min(nM, 10) wide |
+| Lattice (`--lattice`) | `release`: the release's sites and couplers for the rectangle, broken sites dropped; `grid`: the ideal square lattice, `--broken r,c` to leave sites out; `auto`: `release` when the release is found |
+| Placement | side qubit q on the q-th site of a boustrophedon from the chip's top row (line neighbours are couplers wherever the lattice is unbroken); each index bit on the free site nearest its partner side qubit |
+| Branch set (`--index-bits b`) | the lowest 2ᵇ Fock levels of every mode: index bit i of mode k is copied to side bit i of mode k by one CX; b = n is every branch. The lookup of `--keep` (multi-controlled X) is not routed |
+| Circuit | H on the index register, one CX per index bit, the scrambler; a gate between non-neighbours walks its first qubit along a shortest path with SWAPs and back |
+| `--qasm DIR` | `pairs_<scrambler>_b<bits>_<G or M>.qasm` in the release's gate set (rz, rx, cz), with the site table (lattice position, physical index, role) as comments; each file is read back through `nq.qasm_ops` and run again |
+
+Three pairs, n = 2, r = 0.6, depth 4, on the ideal lattice (all checks against the 12-qubit single register):
+
+| Chips | Index bits (branches) | Sites per chip | CZs per chip: none / scrambled | SWAPs per chip | Weight kept | max \|d\| vs single register |
+|---|---|---|---|---|---|---|
+| `rect:0-1,0-5`, `rect:2-3,0-5` (default) | 2 (64) | 12 | 6 / 16 | 0 | 1.000000 | ≤ 1.3 × 10⁻⁶ |
+| same | 1 (8) | 12 | 3 / 13 | 0 | 0.786845 | truncation: 0.09–0.53 |
+| `rect:0-2,0-3`, `rect:5-7,2-5` | 2 (64) | 12 | 42 / 52 | 12 | 1.000000 | ≤ 1.7 × 10⁻⁶ |
+| `rect:0-2,0-4`, `rect:3-5,0-4`, `--broken 0,2 4,1` | 2 (64) | 14 | G 76, M 52 (scrambled) | G 20, M 12 | 1.000000 | ≤ 2.4 × 10⁻⁶ |
+
+Six pairs, r = 0.3, one index bit per mode (`--modes 6 --r 0.3 --route --index-bits 1`); the single register is 24 qubits and was not run:
+
+| Chips | Branches | Sites per chip | CZs per chip | SWAPs per chip | Weight kept | Cut entropy (bits) |
+|---|---|---|---|---|---|---|
+| `rect:0-1,0-9`, `rect:2-3,0-9` | 64 | 20 | 52 | 8 | 0.957858 | 2.375 |
+
+| Finding | Numbers |
+|---|---|
+| The default layout needs no SWAPs | side register on one row, each index bit on the site below its partner: 6 CX copies and 10 scrambler CZs per chip |
+| Routing does not change the result | every 64-branch case matches the single register to ≤ 2.4 × 10⁻⁶; weight on unused sites ≤ 2.3 × 10⁻⁶ |
+| The QASM files reproduce the routed run | 1 − overlap of the read-back state with the routed state ≤ 8.8 × 10⁻⁷ over the 12 default files |
+| A broken site costs SWAPs, not exactness | the boustrophedon breaks at the hole: 20 SWAPs on that chip against 12 |
+
+```bash
+python3 nighthawk_erepr.py pairs --route --index-bits 2 1 --qasm erepr/qasm --out erepr/pairs_route.json
+python3 nighthawk_erepr.py pairs --route --chips rect:0-2,0-3 rect:5-7,2-5 --out erepr/pairs_route_3x4.json
+python3 nighthawk_erepr.py pairs --route --lattice grid --chips rect:0-2,0-4 rect:3-5,0-4 --broken 0,2 4,1 \
+    --ghost independent mirror --out erepr/pairs_route_broken.json
+python3 nighthawk_erepr.py pairs --modes 6 --r 0.3 --route --index-bits 1 --ghost independent mirror \
+    --out erepr/pairs_route_6.json
+```
+
 ---
 
 ## 7. Claims ledger
@@ -526,7 +573,9 @@ python3 nighthawk_erepr.py pairs --modes 6 --r 0.3 --keep 16 64 256 --out erepr/
 | SYK normalisation | {ψ, ψ} = δ with variance 3! J²/N³ does not reproduce the Comment's r_l ~ 0.75 level; the Comment reports it could not reproduce [1]'s SYK dynamics exactly either |
 | χ thresholds | the Reply's "as good as Model 1" threshold is not stated; §4.3 uses min(χ₁, χ₂) of Model 1 |
 | dS is a temperature and a constraint here, not a geometry | §4.5 moves β and, with `--dress`, projects V onto the constraint H_L = H_R; H_L and H_R are the AdS protocol's, and no coupling derived from a dS horizon is in the script |
-| `pairs` is logical, not routed | the chips are `nq.ExactEngine` registers with all-to-all index controls; no lattice placement, links or loom |
+| `pairs --route` on the release lattice | run here on the ideal lattice only (`--lattice grid`, with and without `--broken`); the `release` branch builds its geometry with `cf.chip_layout` as the other backends do and was not run |
+| `pairs --keep` is logical, not routed | the top-`keep` lookup uses multi-controlled X on the whole index register; `--route` takes the product branch set of `--index-bits` |
+| Recombining the two chips | the branch sum uses each chip's state vector; on hardware the same matrix elements are Pauli expectation values on the index register, 4^(index bits) strings per chip, which is not implemented |
 | `pairs` prepares the cut squeezed state directly | c_m ∝ tanhᵐ r renormalised over 2ⁿ levels; it is not the truncated-generator evolution, which differs near the top level |
 | The dressed coupling is reference only | V_d is a dense block projection, not a sum of ZZ rotations; `run` and the Qrack backends use V |
 | Size winding in the dS limit | χ and r̄ are normalised by 1 − W and are undefined at β = 0; `ds.json` stores them, §4.5 does not use them |

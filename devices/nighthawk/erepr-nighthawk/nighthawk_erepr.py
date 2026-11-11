@@ -48,7 +48,12 @@ Subcommands
   pairs     M two-mode squeezed pairs (thermal on each side) split across an exact cut: each side one
             nq.ExactEngine with an index register of log2(keep) qubits, each running its own scrambler
             (--ghost none | independent | mirror), checked against the single register; --r per mode or
-            --horizon T for one temperature across modes; no release data needed
+            --horizon T for one temperature across modes; no release data needed.
+            --route puts each chip on a rectangle of the Nighthawk lattice (--chips, default two stacked
+            rectangles) through Router: --lattice release (the release's sites and couplers) or grid (the
+            ideal 12 x 10 square lattice, --broken r,c to leave sites out); --index-bits b keeps the lowest
+            2^b Fock levels of every mode (one CX per index bit); --qasm DIR writes both routed circuits
+            in the release's gate set (rz, rx, cz) and reads them back
   table     JSONL files side by side (mean +- sd over repetitions)
   aceprobe  Bell pairs across the two-patch register's site classes
   selftest  algebra, gates, routing, engines, ghost loom on the wide field, knit, pairs, against the reference
@@ -63,6 +68,7 @@ Examples
   python3 nighthawk_erepr.py run --backend knit --beta 0 --out erepr/knit_ds.jsonl
   python3 nighthawk_erepr.py pairs --out erepr/pairs.json
   python3 nighthawk_erepr.py pairs --modes 6 --r 0.3 --keep 16 64 256 --out erepr/pairs_6.json
+  python3 nighthawk_erepr.py pairs --route --index-bits 2 1 --qasm erepr/qasm --out erepr/pairs_route.json
   python3 nighthawk_erepr.py plan --field narrow
   python3 nighthawk_erepr.py run --backend ace --placement grid tiling lr seam-r --reps 8 --out erepr/ace.jsonl
   python3 nighthawk_erepr.py run --backend loom --field narrow --loom ghost mean --out erepr/loom.jsonl
@@ -955,6 +961,8 @@ class Router:
                 self.m(role_of[o[1]], o[2])
             elif o[0] == "cx":
                 self.two(role_of[o[1]], role_of[o[2]], self.cx_adj)
+            elif o[0] == "cz":
+                self.two(role_of[o[1]], role_of[o[2]], self.cz)
             elif o[0] == "zz":
                 th = o[3]
 
@@ -1440,18 +1448,19 @@ def pair_run(eng, ops):
         eng.g1(o[1], o[2]) if o[0] == "u" else eng.cz(o[1], o[2])
 
 
-def pair_chip(ops, nq_, branches, cpu=True):
+def pair_chip(ops, nq_, branches, cpu=True, partner=None):
     """one side: sum_j |j>_index (x) U |b_j>, unweighted, on nq.ExactEngine; returns kets[j, side basis state].
-    All branches share one run, so their relative phases are kept (as in run_knit)."""
+    All branches share one run, so their relative phases are kept (as in run_knit). partner: index bit i is
+    copied to side qubit partner[i] with one CX (a product branch set); otherwise the branches are looked up."""
     K = len(branches)
     kb = K.bit_length() - 1
     eng = nq.ExactEngine(nq_ + kb, cpu)
     idx = [nq_ + i for i in range(kb)]
     for q in idx:
         eng.g1(q, H_M)
-    if list(branches) == list(range(K)):
+    if partner is not None or list(branches) == list(range(K)):
         for i in range(kb):
-            eng.sim.mcx([idx[i]], i)
+            eng.sim.mcx([idx[i]], i if partner is None else partner[i])
     else:
         for j, b in enumerate(branches):
             zeros = [idx[i] for i in range(kb) if not (j >> i) & 1]
@@ -1464,6 +1473,127 @@ def pair_chip(ops, nq_, branches, cpu=True):
                 eng.sim.x(q)
     pair_run(eng, ops)
     return np.array(eng.sim.out_ket(), dtype=complex).reshape(K, 2 ** nq_) * math.sqrt(K)
+
+
+# ---- pairs on Nighthawk chips: each side one rectangle of the 12 x 10 lattice, routed with Router
+NH_ROWS, NH_COLS = 12, 10
+
+
+def pair_geometry(tok, lattice, repo=None, broken=()):
+    """chip register for 'rect:r0-r1,c0-c1'. release: the release's sites and couplers for that rectangle (broken
+    sites dropped); grid: the rectangle on the ideal square lattice, without the (row, col) sites in `broken`.
+    pos: (row, col) on the device."""
+    try:
+        rr, cc = tok[5:].split(",")
+        (r0, r1), (c0, c1) = (tuple(map(int, x.split("-"))) for x in (rr, cc))
+        assert tok.startswith("rect:") and 0 <= r0 <= r1 < NH_ROWS and 0 <= c0 <= c1 < NH_COLS
+    except (ValueError, AssertionError):
+        raise SystemExit(f"--chips {tok}: expected rect:r0-r1,c0-c1 inside the {NH_ROWS} x {NH_COLS} lattice")
+    if lattice == "release":
+        lay = cf.chip_layout(cf.parse_chip(tok, repo), repo)
+        n, edges, _, _ = single_geometry(lay)
+        pos, phys = [(r0 + r, c0 + c) for r, c in lay.pos], [int(x) for x in lay.l2p]
+    else:
+        pos = [(r, c) for r in range(r0, r1 + 1) for c in range(c0, c1 + 1) if (r, c) not in set(broken)]
+        at = {q: i for i, q in enumerate(pos)}
+        n, phys = len(pos), [r * NH_COLS + c for r, c in pos]
+        edges = sorted((i, at[q]) for i, (r, c) in enumerate(pos) for q in ((r, c + 1), (r + 1, c)) if q in at)
+    return dict(name=tok, lattice=lattice, n=n, edges=[tuple(e) for e in edges], pos=pos, phys=phys)
+
+
+def pair_auto_chips(nq_, kb):
+    """two stacked rectangles: the side register on a boustrophedon from the top row, the index register below"""
+    w = min(nq_, NH_COLS)
+    h = max(-(-(nq_ + kb) // w), 2 if kb and nq_ <= NH_COLS else 1)
+    if 2 * h > NH_ROWS:
+        raise SystemExit(f"two chips of {nq_} + {kb} qubits do not fit the lattice as stacked rectangles; pass --chips")
+    return [f"rect:0-{h - 1},0-{w - 1}", f"rect:{h}-{2 * h - 1},0-{w - 1}"]
+
+
+def pair_place(geo, nq_, partner):
+    """side qubit q on the q-th site of a boustrophedon over the chip (line neighbours are couplers wherever the
+    lattice is unbroken); index bit i on the free site nearest (in couplers) to its partner side qubit."""
+    pos, n = geo["pos"], geo["n"]
+    if n < nq_ + len(partner):
+        raise SystemExit(f"chip {geo['name']}: {n} sites, {nq_ + len(partner)} needed")
+    r0 = min(r for r, _ in pos)
+    order = sorted(range(n), key=lambda s: (pos[s][0], pos[s][1] if (pos[s][0] - r0) % 2 == 0 else -pos[s][1]))
+    side, free, idx = order[:nq_], set(order[nq_:]), []
+    adj = {s: [] for s in range(n)}
+    for u, v in geo["edges"]:
+        adj[u].append(v)
+        adj[v].append(u)
+    for p_ in partner:
+        seen, dq, hit = {side[p_]}, deque([side[p_]]), None
+        while dq:
+            x = dq.popleft()
+            if x in free:
+                hit = x
+                break
+            for y in sorted(adj[x]):
+                if y not in seen:
+                    seen.add(y)
+                    dq.append(y)
+        if hit is None:
+            raise SystemExit(f"chip {geo['name']}: no free site reachable from side qubit {p_}")
+        free.discard(hit)
+        idx.append(hit)
+    return side, idx
+
+
+def pair_routed_ops(ops, nq_, partner, geo, place):
+    """H on the index register, one CX per index bit, then the scrambler, on the chip's couplers (rz, rx, cz)"""
+    side, idx = place
+    role = {**{q: side[q] for q in range(nq_)}, **{nq_ + i: s for i, s in enumerate(idx)}}
+    logical = ([("u", nq_ + i, H_M) for i in range(len(idx))] + [("cx", nq_ + i, p_) for i, p_ in enumerate(partner)]
+               + list(ops))
+    r = Router(geo["n"], geo["edges"], [0] * geo["n"], []).route(logical, role)
+    rops = fuse(r.ops, geo["n"])
+    return rops, dict(cz=r.stats["cz_chip"], swaps=r.stats["swaps"], one_qubit=sum(o[0] == "m" for o in rops))
+
+
+def pair_extract(ket, nq_, geo, place):
+    """kets[j, side basis state] from the chip's state vector, and the weight on unused sites not in |0>"""
+    side, idx = place
+    n = geo["n"]
+    rest = [s for s in range(n) if s not in set(side) | set(idx)]
+    T = np.asarray(ket).reshape([2] * n).transpose([n - 1 - s for s in idx[::-1] + side[::-1] + rest])
+    T = T.reshape(2 ** len(idx), 2 ** nq_, -1)[:, :, 0]
+    return T * math.sqrt(2 ** len(idx)), float(abs(1 - np.sum(np.abs(T) ** 2)))
+
+
+def pair_chip_routed(rops, nq_, geo, place, cpu=True):
+    eng = nq.ExactEngine(geo["n"], cpu)
+    for o in rops:
+        eng.g1(o[1], o[2]) if o[0] == "m" else eng.cz(o[1], o[2])
+    return np.array(eng.sim.out_ket(), dtype=complex)
+
+
+def pair_qasm(rops, geo, place, nq_, n_mode, partner, title):
+    """the routed chip circuit in the release's gate set (rz, rx, cz), with the site table as comments"""
+    side, idx = place
+    role = {**{s: f"side qubit {q} (mode {q // n_mode}, bit {q % n_mode})" for q, s in enumerate(side)},
+            **{s: f"index bit {i} -> side qubit {partner[i]}" for i, s in enumerate(idx)}}
+    L = ["OPENQASM 3.0;", 'include "stdgates.inc";', f"// {title}",
+         f"// chip {geo['name']}, {geo['lattice']} lattice, {geo['n']} sites, every site starts in |0>",
+         "// q[i]: (row, col), physical index, role"]
+    L += [f"// q[{s}]: {geo['pos'][s]}, {geo['phys'][s]}, {role.get(s, 'unused')}" for s in range(geo["n"])]
+    L.append(f"qubit[{geo['n']}] q;")
+    for o in rops:
+        if o[0] == "cz":
+            L.append(f"cz q[{o[1]}], q[{o[2]}];")
+        else:
+            phi, th, lam = zxz(o[2])
+            L += [f"rz({phi!r}) q[{o[1]}];", f"rx({th!r}) q[{o[1]}];", f"rz({lam!r}) q[{o[1]}];"]
+    return "\n".join(L) + "\n"
+
+
+def pair_qasm_ket(text, n, cpu=True):
+    """state vector of a pair_qasm file, read back with nighthawk_qrack's release parser"""
+    eng = nq.ExactEngine(n, cpu)
+    for g in nq.qasm_ops(text):
+        eng.cz(g[1], g[2]) if g[0] == "cz" else eng.g1(g[1], (nq.rz if g[0] == "rz" else nq.rx)(g[2]))
+    return np.array(eng.sim.out_ket(), dtype=complex)
 
 
 def pair_single(w, nq_, opsG, opsM, cpu=True):
@@ -1496,26 +1626,62 @@ def pair_tm_single(psi, q):
     return np.array([[np.real(np.vdot(psi, ap_q(G[i].T, q, PAULI[j]).T)) for j in range(4)] for i in range(4)])
 
 
-def pair_case(n, rs, depth, seed, ghost, keep, single=True, cpu=True):
-    """one (scrambler, keep) case: the cut on two chips, and against the single register when it is run.
-    return: |<Psi_0|Psi>|^2, the weight of the scrambled state on the pair state it started from (same keep).
+def pair_case(n, rs, depth, seed, ghost, keep, single=True, cpu=True, index_bits=None, geos=None, qasm=None):
+    """one case: the cut on two chips, and against the single register when it is run.
+    Branch set: the `keep` heaviest branches (looked up), or with index_bits = b the product set of the lowest 2^b
+    Fock levels of every mode (index bit -> side qubit by one CX each; b = n is every branch).
+    geos = (G chip, M chip) from pair_geometry: both chips routed onto their lattice rectangles (needs index_bits);
+    qasm: folder for the two routed circuits, which are read back and compared with the routed run.
+    return: |<Psi_0|Psi>|^2, the weight of the scrambled state on the pair state it started from (same branches).
     pair_I: mutual information (bits) between G qubit q and M qubit q, over q."""
     nq_ = n * len(rs)
     w_full = pair_weights(n, rs)
-    full = keep >= len(w_full)
-    br = np.arange(len(w_full)) if full else np.sort(np.argsort(-w_full, kind="stable")[:keep])
+    partner = None
+    if index_bits is not None:
+        partner = [n * k + i for k in range(len(rs)) for i in range(index_bits)]
+        j = np.arange(2 ** len(partner))
+        br = np.zeros_like(j)
+        for i, p_ in enumerate(partner):
+            br |= ((j >> i) & 1) << p_
+    elif keep >= len(w_full):
+        br = np.arange(len(w_full))
+    else:
+        br = np.sort(np.argsort(-w_full, kind="stable")[:keep])
     w = w_full[br] / np.linalg.norm(w_full[br])
     p = w ** 2
     opsG, opsM = pair_sides(nq_, depth, seed, ghost)
+    out = dict(ghost=ghost, keep=len(br), index_bits=index_bits, chip_qubits=nq_ + len(br).bit_length() - 1,
+               single_qubits=2 * nq_, weight_kept=float(np.sum(w_full[br] ** 2)),
+               S_cut=float(-np.sum(p[p > 1e-300] * np.log2(p[p > 1e-300]))))
     tic = time.time()
-    KG, KM = pair_chip(opsG, nq_, br, cpu), pair_chip(opsM, nq_, br, cpu)
-    sec = time.time() - tic
+    if geos is None:
+        KG, KM = pair_chip(opsG, nq_, br, cpu, partner), pair_chip(opsM, nq_, br, cpu, partner)
+    else:
+        kets, route = [], {}
+        for tag, ops, geo in (("G", opsG, geos[0]), ("M", opsM, geos[1])):
+            place = pair_place(geo, nq_, partner)
+            rops, st = pair_routed_ops(ops, nq_, partner, geo, place)
+            ket = pair_chip_routed(rops, nq_, geo, place, cpu)
+            K_, leak = pair_extract(ket, nq_, geo, place)
+            kets.append(K_)
+            st.update(chip=geo["name"], lattice=geo["lattice"], sites=geo["n"], leak=leak,
+                      side_sites=[geo["phys"][x] for x in place[0]], index_sites=[geo["phys"][x] for x in place[1]])
+            if qasm:
+                text = pair_qasm(rops, geo, place, nq_, n, partner,
+                                 f"pairs: {len(rs)} mode pairs, {n} qubits per mode, side {tag}, scrambler {ghost}, "
+                                 f"depth {depth}, seed {seed}, index bits {index_bits}")
+                f = Path(qasm) / f"pairs_{ghost}_b{index_bits}_{tag}.qasm"
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(text)
+                st.update(qasm=str(f), qasm_check=float(abs(1 - abs(np.vdot(pair_qasm_ket(text, geo["n"], cpu), ket)))))
+            route[tag] = st
+        KG, KM = kets
+        out.update(route=route, chip_qubits=max(geos[0]["n"], geos[1]["n"]))
+    out["seconds"] = round(time.time() - tic, 2)
     Tk = [pair_tm_knit(w, KG, KM, q) for q in range(nq_)]
     Ik = [metrics(T)["I"] for T in Tk]
     ret = abs(np.sum(np.outer(w, w) * KG[:, br].T * KM[:, br].T)) ** 2
-    out = dict(ghost=ghost, keep=len(br), chip_qubits=nq_ + len(br).bit_length() - 1, single_qubits=2 * nq_,
-               weight_kept=float(np.sum(w_full[br] ** 2)), S_cut=float(-np.sum(p[p > 1e-300] * np.log2(p[p > 1e-300]))),
-               ret=float(ret), pair_I_mean=float(np.mean(Ik)), pair_I_max=float(np.max(Ik)), seconds=round(sec, 2),
+    out.update(ret=float(ret), pair_I_mean=float(np.mean(Ik)), pair_I_max=float(np.max(Ik)),
                norm_err=float(max(abs(T[0, 0] - 1) for T in Tk)))
     if single:
         tic = time.time()
@@ -1546,17 +1712,58 @@ def cmd_pairs(a):
         print(f"  {k:4d}   {r:.4f}  {-1 / math.log(math.tanh(r) ** 2):7.4f}  {occ[k]:.4f}")
     out = dict(inputs=dict(modes=a.modes, mode_qubits=a.mode_qubits, r=rs, depth=a.depth, seed=a.seed, horizon=a.horizon),
                rows=[])
-    print("  scrambler    keep  chip qubits  weight kept  S_cut (bits)  return   pair I mean / max   s"
-          + ("       max |d| vs single (correlators, return)" if single else ""))
-    for ghost, keep in itertools.product(a.ghost, a.keep):
-        keep = 2 ** nq_ if keep <= 0 else min(keep, 2 ** nq_)
-        if keep & (keep - 1):
-            sys.exit("--keep needs powers of two (0 = all branches)")
-        r = pair_case(a.mode_qubits, rs, a.depth, a.seed, ghost, keep, single, a.cpu)
-        out["rows"].append(r)
-        print(f"  {ghost:11s} {r['keep']:5d}  {r['chip_qubits']:5d}        {r['weight_kept']:.6f}     {r['S_cut']:.4f}"
-              f"        {r['ret']:.4f}   {r['pair_I_mean']:.4f} / {r['pair_I_max']:.4f}     {r['seconds']:5.2f}"
-              + (f"   {r['d_corr']:.1e}, {r['d_ret']:.1e}" if single else ""), flush=True)
+    if a.route or a.index_bits:
+        bits = a.index_bits or [a.mode_qubits]
+        if any(not 0 <= b_ <= a.mode_qubits for b_ in bits):
+            sys.exit(f"--index-bits: 0 to {a.mode_qubits}")
+        lattice, broken = None, [tuple(map(int, x.split(","))) for x in a.broken]
+        if a.route:
+            lattice = a.lattice
+            if lattice == "auto":
+                try:
+                    nq.find_repo(a.repo)
+                    lattice = "release"
+                except SystemExit:
+                    lattice = "grid"
+            repo = repo_of(a) if lattice == "release" else None
+            print(f"  routed onto the {'release' if lattice == 'release' else 'ideal square'} lattice "
+                  f"({NH_ROWS} x {NH_COLS}" + (")" if lattice == "release" else ", no broken sites)"))
+        out["inputs"].update(lattice=lattice, chips=a.chips, broken=broken)
+        print("  scrambler    bits  branches  weight kept  S_cut (bits)  return   pair I mean / max"
+              + ("   max |d| vs single" if single else "")
+              + ("   chips G | M: sites, CZ, SWAPs" + ("; QASM read back" if a.qasm else "") if a.route else ""))
+        for ghost, b_ in itertools.product(a.ghost, bits):
+            geos = None
+            if a.route:
+                toks = a.chips or pair_auto_chips(nq_, a.modes * b_)
+                if len(toks) != 2:
+                    sys.exit("--chips: two rectangles, G then M")
+                geos = [pair_geometry(t_, lattice, repo, broken) for t_ in toks]
+            r = pair_case(a.mode_qubits, rs, a.depth, a.seed, ghost, 0, single, a.cpu, b_, geos, a.qasm if a.route else None)
+            out["rows"].append(r)
+            line = (f"  {ghost:11s} {b_:4d}  {r['keep']:8d}  {r['weight_kept']:.6f}     {r['S_cut']:.4f}        {r['ret']:.4f}"
+                    f"   {r['pair_I_mean']:.4f} / {r['pair_I_max']:.4f}" + (f"     {r['d_corr']:.1e}" if single else ""))
+            if a.route:
+                line += "          " + " | ".join(f"{t_['chip']}: {t_['sites']}, {t_['cz']}, {t_['swaps']}"
+                                                   for t_ in r["route"].values())
+                if a.qasm:
+                    line += f"; {max(t_['qasm_check'] for t_ in r['route'].values()):.1e}"
+            print(line, flush=True)
+        if a.route:
+            print("  unused-site weight (should be 0): "
+                  f"{max(t_['leak'] for r in out['rows'] for t_ in r['route'].values()):.1e}")
+    else:
+        print("  scrambler    keep  chip qubits  weight kept  S_cut (bits)  return   pair I mean / max   s"
+              + ("       max |d| vs single (correlators, return)" if single else ""))
+        for ghost, keep in itertools.product(a.ghost, a.keep):
+            keep = 2 ** nq_ if keep <= 0 else min(keep, 2 ** nq_)
+            if keep & (keep - 1):
+                sys.exit("--keep needs powers of two (0 = all branches)")
+            r = pair_case(a.mode_qubits, rs, a.depth, a.seed, ghost, keep, single, a.cpu)
+            out["rows"].append(r)
+            print(f"  {ghost:11s} {r['keep']:5d}  {r['chip_qubits']:5d}        {r['weight_kept']:.6f}     {r['S_cut']:.4f}"
+                  f"        {r['ret']:.4f}   {r['pair_I_mean']:.4f} / {r['pair_I_max']:.4f}     {r['seconds']:5.2f}"
+                  + (f"   {r['d_corr']:.1e}, {r['d_ret']:.1e}" if single else ""), flush=True)
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(json.dumps(out, indent=1, default=float))
@@ -1773,6 +1980,12 @@ def cmd_selftest(a):
         pr = pair_case(2, [0.6, 0.9], 3, 1, ghost, 16)
         check(f"pairs (2 mode pairs, {ghost} scramblers, all 16 branches) vs the single register",
               pr["d_corr"] < 1e-5 and pr["d_ret"] < 1e-5, f"max |d| {pr['d_corr']:.1e}, return {pr['ret']:.4f}")
+    geos = [pair_geometry("rect:0-2,0-2", "grid", broken=[(0, 1)]), pair_geometry("rect:3-5,0-2", "grid")]
+    pr = pair_case(2, [0.6, 0.9], 3, 1, "mirror", 0, index_bits=2, geos=geos)
+    check("pairs routed (3 x 3 rectangles of the ideal lattice, one site broken) vs the single register",
+          pr["d_corr"] < 1e-4 and max(t_["leak"] for t_ in pr["route"].values()) < 1e-4,
+          f"max |d| {pr['d_corr']:.1e}, CZ {pr['route']['G']['cz']} / {pr['route']['M']['cz']}, "
+          f"SWAPs {pr['route']['G']['swaps']} / {pr['route']['M']['swaps']}")
     print("selftest", "PASSED" if ok else "FAILED")
     if not ok:
         sys.exit(1)
@@ -1821,6 +2034,17 @@ def main():
     g.add_argument("--horizon", type=float, default=None,
                    help="T: one temperature across modes of energy E_k = k + 1, tanh^2 r_k = exp(-E_k / T)")
     g.add_argument("--keep", type=int, nargs="+", default=[0, 16, 4], help="branches kept (powers of two; 0 = all)")
+    g.add_argument("--index-bits", type=int, nargs="+", default=None,
+                   help="instead of --keep: index bits per mode, the lowest 2^b Fock levels of every mode")
+    g.add_argument("--route", action="store_true",
+                   help="route both chips onto rectangles of the Nighthawk lattice (uses --index-bits; default all)")
+    g.add_argument("--chips", nargs="+", default=None, help="two rect:r0-r1,c0-c1 tokens, G then M (default: stacked)")
+    g.add_argument("--lattice", choices=["auto", "release", "grid"], default="auto",
+                   help="release: the release's sites and couplers; grid: the ideal 12 x 10 square lattice; "
+                        "auto: release when found")
+    g.add_argument("--broken", nargs="+", default=[], help="with --lattice grid: row,col sites to leave out")
+    g.add_argument("--repo", default=None)
+    g.add_argument("--qasm", default=None, help="with --route: folder for the routed circuits (rz, rx, cz)")
     g.add_argument("--ghost", nargs="+", choices=["none", "independent", "mirror"], default=["none", "independent", "mirror"])
     g.add_argument("--depth", type=int, default=4)
     g.add_argument("--seed", type=int, default=1)
