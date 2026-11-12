@@ -14543,7 +14543,7 @@ class Field:
     nighthawk_qrack's circuit generation (n, schedule, matchings, partitions, inputs)."""
 
     def __init__(self, repo, chip_specs, arrangement=None, links="all", link_rows=None, link_cols=None,
-                 ghost=None, cut_links=False):
+                 ghost=None, cut_links=False, topology="grid", hub=None, pairs=None, long_links=None):
         self.cut = bool(cut_links)            # links placed (same anchors, same tag base) but not in the circuit
         self.repo = find_repo(repo)
         L = json.loads((self.repo / "data/layout.json").read_text())
@@ -14581,13 +14581,23 @@ class Field:
         self.rooms = [GhostRoom(s, ghost) for s in chip_specs] if ghost else None
         self.ghost_sites = [[] for _ in chip_specs]       # (partner global, anchor local, ACE site or None)
         self.links, self.skipped = [], []
-        for c in range(k):
-            ci, cj = divmod(c, gc)
-            for dc, horiz in (((ci, cj + 1), True), ((ci + 1, cj), False)):
-                if dc[0] >= gr or dc[1] >= gc:
-                    continue
-                d = dc[0] * gc + dc[1]
-                self._link_pair(c, d, horiz, links, link_rows if horiz else link_cols, used)
+        self.topology, self.hub = topology or "grid", None
+        self.chip_pairs = self._chip_pairs(self.topology, hub, pairs)
+        self.long = set()                     # links between chips that are not grid neighbours
+        K_long = long_links if long_links is not None else (int(links) if str(links).isdigit() else 10)
+        far = []
+        for c, d in self.chip_pairs:                # grid neighbours first, long-range pairs on what is left
+            (ci, cj), (di, dj) = divmod(c, gc), divmod(d, gc)
+            if ci == di and abs(cj - dj) == 1:
+                lt, rt = (c, d) if cj < dj else (d, c)
+                self._link_pair(lt, rt, True, links, link_rows, used)
+            elif cj == dj and abs(ci - di) == 1:
+                tp, bt = (c, d) if ci < di else (d, c)
+                self._link_pair(tp, bt, False, links, link_cols, used)
+            else:
+                far.append((c, d))
+        for c, d in far:
+            self._link_far(c, d, int(K_long), used)
         if not self.cut:
             for (u, v, col) in self.links:
                 self.matchings[col].append((u, v))
@@ -14618,6 +14628,128 @@ class Field:
                 self.pos.append((ci * (self.R_dev + 1) + r, cj * (self.C_dev + 1) + cc))
         self.grid = (gr * (self.R_dev + 1), gc * (self.C_dev + 1))
         self.name = "cloverfield"
+
+    def _chip_pairs(self, topology, hub, extra):
+        """The chip pairs that get l-couplers, in placement order. grid: every pair of grid neighbours (row-major,
+        right then down: the original order, so grid fields keep their links and tags). ring: the chips in a cycle
+        by angle around the grid centre, each linked to the next. hub: one chip (--hub, default the chip nearest
+        the centre) linked to every other chip, no other pairs: a router chip. none: no pairs. extra: pairs added
+        to any of these (--pairs 0-5,2-3), e.g. long-range shortcuts across a grid."""
+        gr, gc = self.arr
+        k = gr * gc
+        at = [divmod(c, gc) for c in range(k)]
+        mid = ((gr - 1) / 2, (gc - 1) / 2)
+        out = []
+        if topology == "grid":
+            for c in range(k):
+                ci, cj = at[c]
+                if cj + 1 < gc:
+                    out.append((c, c + 1))
+                if ci + 1 < gr:
+                    out.append((c, c + gc))
+        elif topology == "ring":
+            order = sorted(range(k), key=lambda c: (math.atan2(at[c][0] - mid[0], at[c][1] - mid[1]) + 2 * math.pi
+                                                    + math.pi) % (2 * math.pi))
+            if k == 2:
+                out.append((order[0], order[1]))
+            elif k > 2:
+                out += [(order[i], order[(i + 1) % k]) for i in range(k)]
+        elif topology == "hub":
+            h = int(hub) if hub is not None else min(range(k), key=lambda c: ((at[c][0] - mid[0]) ** 2
+                                                                            + (at[c][1] - mid[1]) ** 2, c))
+            if not 0 <= h < k:
+                raise SystemExit(f"--hub {h}: the field has chips 0 .. {k - 1}")
+            self.hub = h
+            out += [(h, d) for d in range(k) if d != h]
+        elif topology != "none":
+            raise SystemExit(f"--topology {topology}: grid, ring, hub or none")
+        for x in extra or []:
+            c, d = (int(t) for t in x)
+            if c == d or not (0 <= c < k and 0 <= d < k):
+                raise SystemExit(f"--pairs {c}-{d}: two different chips of 0 .. {k - 1}")
+            if (c, d) not in out and (d, c) not in out:
+                out.append((c, d))
+        return out
+
+    def chip_hops(self):
+        """Hops between chips over the placed links (breadth first): a k x k list, None where unreachable."""
+        k = len(self.specs)
+        nb = [set() for _ in range(k)]
+        for u, v, _ in self.links:
+            a_, b_ = self.chip_of[u], self.chip_of[v]
+            nb[a_].add(b_)
+            nb[b_].add(a_)
+        out = []
+        for s in range(k):
+            dist = [None] * k
+            dist[s] = 0
+            todo = [s]
+            for x in todo:
+                for y in nb[x]:
+                    if dist[y] is None:
+                        dist[y] = dist[x] + 1
+                        todo.append(y)
+            out.append(dist)
+        return out
+
+    def _link_far(self, c, d, K, used):
+        """K l-couplers between chips that are not grid neighbours (a long-range link): on each chip the sites
+        nearest the other chip first (by projection on the line between the chip centres, the nearest border
+        first), paired in that order where a colour is free at both ends."""
+        gr, gc = self.arr
+        (ci, cj), (di, dj) = divmod(c, gc), divmod(d, gc)
+        dr, dcol = di - ci, dj - cj
+        A, B = self.cells[c], self.cells[d]
+        ia = sorted(range(len(A)), key=lambda i: -(A[i][0] * dr + A[i][1] * dcol))
+        ib = sorted(range(len(B)), key=lambda i: (B[i][0] * dr + B[i][1] * dcol))
+        pref = ("A", "B", "C", "D")
+        placed, taken_b = 0, set()
+        for i in ia:
+            if placed >= K:
+                break
+            u = i + self.off[c]
+            for j in ib:
+                if j in taken_b:
+                    continue
+                v = j + self.off[d]
+                if self._try_link(c, d, placed, u, v, pref, used, quiet=True):
+                    taken_b.add(j)
+                    self.long.add((min(u, v), max(u, v)))
+                    placed += 1
+                    break
+        if placed < K:
+            self.skipped.append((c, d, "long", K - placed, None))
+
+    def _try_link(self, c, d, t, u, v, pref, used, quiet=False):
+        """Place link (u, v) on the first colour free at both ends, with ghost room on both chips; False if not."""
+        if any(u in (x, y) or v in (x, y) for x, y, _ in self.links):
+            return False
+        free = [col for col in pref if col not in used[u] and col not in used[v]]
+        if not free:
+            if not quiet:
+                self.skipped.append((c, d, t, u, v))
+            return False
+        if self.rooms is not None:
+            ra, rb = self.rooms[c], self.rooms[d]
+            if not ra.take(self.local[u]):
+                if not quiet:
+                    self.skipped.append((c, d, t, u, v))
+                return False
+            if not rb.take(self.local[v]):
+                x = ra.sites.pop()
+                if x is not None:
+                    ra.used.discard(x)
+                    for s_ in ra.sids[x]:
+                        ra.width[s_] -= 1
+                if not quiet:
+                    self.skipped.append((c, d, t, u, v))
+                return False
+            self.ghost_sites[c].append((v, self.local[u], ra.sites[-1]))
+            self.ghost_sites[d].append((u, self.local[v], rb.sites[-1]))
+        used[u].add(free[0])
+        used[v].add(free[0])
+        self.links.append((u, v, free[0]))
+        return True
 
     def _link_pair(self, c, d, horiz, links, chosen, used):
         """Facing border sites of chips c (left/top) and d (right/bottom): per row (horizontal
@@ -14702,9 +14834,12 @@ class Field:
         per = {col: (sum(1 for u, v in es if (min(u, v), max(u, v)) not in self.link_set),
                      sum(1 for u, v in es if (min(u, v), max(u, v)) in self.link_set))
                for col, es in self.matchings.items()}
+        topo = {} if self.topology == "grid" and not self.long else dict(
+            topology=self.topology, chip_pairs=[list(p) for p in self.chip_pairs], hub=self.hub,
+            long_links=[[u, v] for u, v in sorted(self.long)])
         return dict(n=self.n, chips=[s["name"] for s in self.specs], chip_n=self.chip_n, arrangement=list(self.arr),
                     links=[[u, v, col] for u, v, col in self.links], couplers_per_colour=per,
-                    skipped_links=len(self.skipped), **({"links_cut": True} if self.cut else {}))
+                    skipped_links=len(self.skipped), **topo, **({"links_cut": True} if self.cut else {}))
 
     def tag(self):
         return hashlib.sha1(json.dumps(dict(chips=self.specs, arr=self.arr,
@@ -15260,7 +15395,10 @@ def build_field(a):
     # ghost room is judged even with --cut-links, so the cut field places exactly the links (and anchors)
     # of the woven one it is the baseline of
     ghost = engine_opts(a) if getattr(a, "loom", "mean") == "ghost" and hasattr(a, "backend") else None
-    return Field(a.repo, specs, arr, a.links, rows, cols, ghost=ghost, cut_links=getattr(a, "cut_links", False))
+    pairs = [tuple(int(x) for x in t.split("-")) for t in a.pairs.split(",") if t] if getattr(a, "pairs", None) else None
+    return Field(a.repo, specs, arr, a.links, rows, cols, ghost=ghost, cut_links=getattr(a, "cut_links", False),
+                 topology=getattr(a, "topology", "grid"), hub=getattr(a, "hub", None), pairs=pairs,
+                 long_links=getattr(a, "long_links", None))
 
 
 def engine_opts(a):
@@ -15757,7 +15895,21 @@ def cmd_field_plan(a):
     for u, v, col in field.links:
         cu, cv = field.chip_of[u], field.chip_of[v]
         print(f"  chip {cu} site {field.cells[cu][field.local[u]]} -- chip {cv} site {field.cells[cv][field.local[v]]}"
-              f"  colour {col}")
+              f"  colour {col}" + ("  long-range" if (min(u, v), max(u, v)) in field.long else ""))
+    per_pair = collections.Counter(tuple(sorted((field.chip_of[u], field.chip_of[v]))) for u, v, _ in field.links)
+    print(f"topology {field.topology}" + (f", hub chip {field.hub}" if field.hub is not None else "")
+          + f": {len(field.chip_pairs)} chip pairs, links per pair "
+          + ", ".join(f"{i}-{j} {per_pair.get(tuple(sorted((i, j))), 0)}" for i, j in field.chip_pairs)
+          + (f"; {len(field.long)} long-range links" if field.long else ""))
+    hops = field.chip_hops()
+    flat = [h for i, row in enumerate(hops) for j, h in enumerate(row) if j > i]
+    if flat:
+        reach = [h for h in flat if h is not None]
+        print("hops between chips (over the placed links): "
+              + (f"mean {np.mean(reach):.2f}, max {max(reach)}" if reach else "none reachable")
+              + (f", {len(flat) - len(reach)} pairs unreachable" if len(reach) < len(flat) else ""))
+        for i, row in enumerate(hops):
+            print(f"  chip {i}: " + " ".join("-" if h is None else str(h) for h in row))
     opts = engine_opts(a)
     total, splits = [], []
     on_cpu = a.cpu and not a.ace_gpu
@@ -16267,6 +16419,27 @@ def cmd_field_selftest(a):
                  f"{fmt(out['2', 'ghost'])};  all links mean {fmt(out['all', 'mean'])}, ghost {fmt(out['all', 'ghost'])}")
     ok &= selftest_hamming(a, report)
     ok &= selftest_split(report)
+    # [12] --topology / --pairs: the grid default unchanged, a ring, a hub (router chip) with long-range links,
+    # a long-range shortcut; hops over the placed links
+    ta = dict(repo=a.repo, chips="nighthawk88e*4", arrangement="2x2", links="2", link_rows=None, link_cols=None)
+    g0 = build_field(argparse.Namespace(**ta))
+    g1 = build_field(argparse.Namespace(**ta, topology="grid"))
+    rg = build_field(argparse.Namespace(**ta, topology="ring"))
+    hb = build_field(argparse.Namespace(**ta, topology="hub", hub=0))
+    sc = build_field(argparse.Namespace(**ta, pairs="0-3"))
+    hh, sh = hb.chip_hops(), sc.chip_hops()
+    pairs_of = lambda f: sorted(tuple(sorted(p)) for p in f.chip_pairs)
+    good = (g0.links == g1.links and g0.tag() == g1.tag() and not g0.long and "topology" not in g0.describe()
+            and pairs_of(g1) == [(0, 1), (0, 2), (1, 3), (2, 3)] and pairs_of(rg) == pairs_of(g1)
+            and pairs_of(hb) == [(0, 1), (0, 2), (0, 3)] and hb.hub == 0 and hb.long and hh[0] == [0, 1, 1, 1]
+            and hh[1][2] == 2 and all(hh[i][j] == hh[j][i] for i in range(4) for j in range(4))
+            and sc.long and sh[0][3] == 1 and g1.chip_hops()[0][3] == 2
+            and all(sc.chip_of[u] != sc.chip_of[v] for u, v in sc.long)
+            and all(len({q for e in es for q in e}) == 2 * len(es) for es in hb.matchings.values()))
+    report("[12] --topology grid / ring / hub, --pairs: grid unchanged (links, tag, describe), ring and hub pairs, "
+           "long-range links placed, hops", good,
+           f"grid {len(g1.links)} links, ring {len(rg.links)}, hub 0: {len(hb.links)} ({len(hb.long)} long-range, "
+           f"hops from 0 {hh[0]}), grid + 0-3: {len(sc.links)} ({len(sc.long)} long-range, hops 0-3 {sh[0][3]})")
     print("ALL OK" if ok else "SOME CHECKS FAILED")
     raise SystemExit(0 if ok else 1)
 
@@ -16334,6 +16507,16 @@ def add_field_args(p):
     p.add_argument("--link-rows", dest="link_rows", default=None,
                    help="horizontal neighbours: lattice rows that get a link, e.g. 2,5,8 (overrides --links)")
     p.add_argument("--link-cols", dest="link_cols", default=None, help="vertical neighbours: lattice columns")
+    p.add_argument("--topology", choices=["grid", "ring", "hub", "none"], default="grid",
+                   help="which chip pairs get l-couplers: grid (default): every pair of grid neighbours; ring: the "
+                        "chips in a cycle around the grid centre; hub: a router chip (--hub) linked to every other "
+                        "chip and no other pairs; none: only --pairs. Pairs that are not grid neighbours get "
+                        "long-range links (--long-links)")
+    p.add_argument("--hub", type=int, default=None, help="--topology hub: the router chip (default: nearest the centre)")
+    p.add_argument("--pairs", default=None,
+                   help="chip pairs to link as well, comma list of I-J, e.g. 0-5,2-3: long-range shortcuts")
+    p.add_argument("--long-links", dest="long_links", type=int, default=None,
+                   help="l-couplers per long-range pair (chips that are not grid neighbours; default --links, or 10)")
     p.add_argument("--broken", choices=["disable", "use"], default="disable", help="rect chips: broken qubits")
     p.add_argument("--backend", choices=["ace", "exact"], default="ace",
                    help="chip simulators: each chip's ACE preset (default), or exact (small chips)")

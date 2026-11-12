@@ -77,6 +77,12 @@ links and per-chip peak memory against --vram-gb), a "How this was measured" box
 command line. A woven configuration and its --cut-links baseline are paired by chips, arrangement, loom, family,
 protocol and fold; the largest pair is drawn unless --cfg names one.
 
+GHZ poster (--ghz-poster FILE): nighthawk_qrack.py ghz tiles on every chiplet of a field device, one records file per
+chiplet (--ghz-chip, repeated, in the field's chip order) and optionally a run without drift (--ghz-base). The field
+(--field-device, default the field run records' device, else r3) with each site coloured by its chiplet's mean F_GHZ,
+seam qubits ringed and link anchors square; per chiplet the seam and off-seam means against the exact reference; every
+unit's F_GHZ; a table per chiplet (anchors, F by class, Phi_coh spread, seconds from the run's .log beside the file).
+
 3D (--grid3d DIR, or the viewer's "Open shor9 / GHZ registers in 3D" button): view 17 as a rotatable page per
 register and code size, written to DIR with an index; each unit a column whose height is the logical
 information it kept, setups side by side, and a switch that pulls the patches apart into ACE's
@@ -133,6 +139,8 @@ Usage
   python3 nighthawk_graph.py --grid3d nighthawk_3d --open                  # shor9 registers in 3D
   python3 nighthawk_graph.py --out r3_mean.jsonl --poster r3_poster.png \
           --poster-note "Host: 2 CPU cores, 8 GB RAM."                   # the cloverfield poster
+  python3 nighthawk_graph.py --ghz-poster r3_ghz.png --ghz-chip chip0.jsonl ... --ghz-chip chip5.jsonl \
+          --ghz-base layer1a.jsonl --field-device r3                     # GHZ on every r3 chiplet
   python3 nighthawk_graph.py --grid3d nighthawk_3d --three node_modules/three --serve   # the same, offline
 Without a display (no DISPLAY / WAYLAND_DISPLAY) it writes PNGs to ./nighthawk_plots.
 """
@@ -3857,7 +3865,59 @@ def field_key(r):
     """What a woven configuration and its cut-links baseline have in common."""
     f = r["field"]
     return (tuple(f["chips"]), tuple(f["arrangement"]), r.get("loom"), r.get("family"), r.get("protocol"),
-            r.get("fold"), r.get("backend"), r.get("theta"))
+            r.get("fold"), r.get("backend"), r.get("theta"), field_topology(f))
+
+
+def field_topology(f):
+    """A record's chip topology as a label: grid (the default, and every record before --topology), ring, hub N, or
+    either with + I-J for the added pairs (--pairs)."""
+    t = f.get("topology", "grid")
+    pairs = [tuple(p) for p in f.get("chip_pairs") or []]
+    if not pairs:
+        return "grid"
+    gr, gc = f["arrangement"]
+    k = gr * gc
+    at = [divmod(c, gc) for c in range(k)]
+    if t == "grid":
+        base = {(c, c + 1) for c in range(k) if at[c][1] + 1 < gc} | {(c, c + gc) for c in range(k) if at[c][0] + 1 < gr}
+    elif t == "hub":
+        base = {tuple(sorted((f.get("hub"), d))) for d in range(k) if d != f.get("hub")}
+    elif t == "ring":
+        base = {tuple(sorted(p)) for p in pairs[:k]} if k > 2 else {tuple(sorted(p)) for p in pairs[:1]}
+    else:
+        base = set()
+    extra = [p for p in pairs if tuple(sorted(p)) not in {tuple(sorted(b)) for b in base}]
+    lab = f"hub {f.get('hub')}" if t == "hub" else t
+    if extra:
+        lab = ("" if t == "none" else lab + " + ") + ",".join(f"{a}-{b}" for a, b in extra)
+    return lab
+
+
+def field_hops(f):
+    """Chip-to-chip hops over a record's links (breadth first): k x k, None where unreachable."""
+    chip_n = f.get("chip_n") or []
+    off = [int(x) for x in np.cumsum([0] + list(chip_n[:-1]))]
+    k = len(chip_n)
+
+    def chip(q):
+        return max(i for i, o in enumerate(off) if o <= q)
+    nb = [set() for _ in range(k)]
+    for u, v, _ in f["links"]:
+        a_, b_ = chip(u), chip(v)
+        nb[a_].add(b_)
+        nb[b_].add(a_)
+    out = []
+    for s0 in range(k):
+        dist = [None] * k
+        dist[s0] = 0
+        todo = [s0]
+        for x in todo:
+            for y in nb[x]:
+                if dist[y] is None:
+                    dist[y] = dist[x] + 1
+                    todo.append(y)
+        out.append(dist)
+    return out
 
 
 def field_groups(store):
@@ -3878,11 +3938,31 @@ def field_groups(store):
     return sorted(out, key=lambda wc: -(len(wc[0]) + len(wc[1])))
 
 
-def field_group_for(store, cfg=None):
+def field_group_for(store, cfg=None, topology=None):
     groups = field_groups(store)
     if cfg:
         groups = [g for g in groups if any(r["cfg"] == cfg for r in g[0] + g[1])] or groups
+    if topology:
+        hit = [g for g in groups if field_topology((g[0] or g[1])[0]["field"]) == topology]
+        if not hit:
+            print(f"# --poster-topology {topology}: none of "
+                  + ", ".join(sorted({field_topology((g[0] or g[1])[0]['field']) for g in groups})))
+        groups = hit
     return groups[0] if groups else None
+
+
+def field_siblings(store, group):
+    """The other topologies of a group's field: [(label, woven records)] with the same chips, arrangement, loom,
+    family, protocol, fold, backend and theta."""
+    rec = (group[0] or group[1])[0]
+    base = field_key(rec)[:-1]
+    out = []
+    for g in field_groups(store):
+        r = (g[0] or g[1])[0]
+        if g is group or field_key(r) == field_key(rec) or field_key(r)[:-1] != base or not g[0]:
+            continue
+        out.append((field_topology(r["field"]), g[0]))
+    return out
 
 
 def field_device(f):
@@ -3910,10 +3990,20 @@ def field_geometry(store, rec, ghost=False):
 
     def chip(q):
         return max(i for i, o in enumerate(off) if o <= q)
+    longs = {tuple(sorted(x)) for x in f.get("long_links") or []}
+    long_pairs = Counter()
     for u, v, _ in f["links"]:
         pairs[tuple(sorted((chip(u), chip(v))))] += 1
-    per_pair = max(pairs.values(), default=0)
-    key = (tuple(f["chips"]), tuple(f["arrangement"]), per_pair, ghost, rec.get("backend"))
+        if (min(u, v), max(u, v)) in longs:
+            long_pairs[tuple(sorted((chip(u), chip(v))))] += 1
+    per_pair = max((n_ for p, n_ in pairs.items() if p not in long_pairs), default=0)
+    per_long = max(long_pairs.values(), default=0)
+    chip_pairs = [tuple(p) for p in f.get("chip_pairs") or []]
+    if chip_pairs:                                   # the record's pairs in its order: placement is repeated exactly
+        per_pair = max([per_pair] + [pairs[tuple(sorted(p))] for p in chip_pairs if tuple(sorted(p)) not in long_pairs])
+        per_long = max([per_long] + [pairs[tuple(sorted(p))] for p in chip_pairs if tuple(sorted(p)) in long_pairs])
+    key = (tuple(f["chips"]), tuple(f["arrangement"]), per_pair, ghost, rec.get("backend"), tuple(chip_pairs),
+           per_long)
     if key in _FIELD_GEO:
         return _FIELD_GEO[key]
     geo = None
@@ -3925,8 +4015,9 @@ def field_geometry(store, rec, ghost=False):
             from types import SimpleNamespace
             opts = nh.engine_opts(SimpleNamespace(backend=rec.get("backend", "ace"), cpu=True, ace_gpu=None,
                                                   ace_error_detection=False))
+        topo = dict(topology="none", pairs=chip_pairs, long_links=per_long or None) if chip_pairs else {}
         geo = nh.Field(store.a.repo, specs, tuple(f["arrangement"]), str(per_pair or "all"), None, None,
-                       ghost=opts, cut_links=False)
+                       ghost=opts, cut_links=False, **topo)
         geo._opts = opts
     except (SystemExit, Exception) as err:          # no release, unknown chip: the views that need it are empty
         print(f"# field geometry for {key[:3]}: {str(err).splitlines()[0] if str(err) else type(err).__name__}")
@@ -4018,9 +4109,15 @@ def fp_map(ax, geo, rec, regions, woven):
                 continue
             (ra, ca), (rb, cb) = pos[u], pos[v]
             ax.plot([ca, cb], [ra, rb], color=FP_EDGE, lw=0.9, zorder=1)
+    from matplotlib.patches import FancyArrowPatch
+    longs = {tuple(sorted(x)) for x in rec["field"].get("long_links") or []}
     for u, v in links:
         (ra, ca), (rb, cb) = pos[u], pos[v]
-        ax.plot([ca, cb], [ra, rb], color=FP_INK, lw=3.4, zorder=3, solid_capstyle="round")
+        if (u, v) in longs:                          # a long-range l-coupler: an arc over the chips it passes
+            ax.add_patch(FancyArrowPatch((ca, ra), (cb, rb), arrowstyle="-", connectionstyle="arc3,rad=0.18",
+                                         color=FP_INK, lw=1.6, ls=(0, (4, 2)), zorder=5, alpha=0.9))
+        else:
+            ax.plot([ca, cb], [ra, rb], color=FP_INK, lw=3.4, zorder=3, solid_capstyle="round")
     cnt = Counter(regions)
     for reg in ("bulk", "seam", "anchor"):
         qs = [q for q in range(geo.n) if regions[q] == reg]
@@ -4028,17 +4125,29 @@ def fp_map(ax, geo, rec, regions, woven):
                    color=FP_REGION[reg], zorder=4, edgecolors=FP_SURF, linewidths=1.0)
     hand = [Line2D([], [], marker="o", ls="", ms=9, mfc=FP_REGION[k], mec=FP_SURF,
                    label=f"{FP_REGION_LABEL[k]}  ({cnt[k]})") for k in ("bulk", "seam", "anchor")]
-    hand.append(Line2D([], [], color=FP_INK, lw=3.4, label=f"l-coupler, chip to chip  ({len(links)})"))
+    hand.append(Line2D([], [], color=FP_INK, lw=3.4, label=f"l-coupler, chip to chip  ({len(links) - len(longs)})"))
+    if longs:
+        hand.append(Line2D([], [], color=FP_INK, lw=1.6, ls=(0, (4, 2)), label=f"long-range l-coupler  ({len(longs)})"))
     hand.append(Line2D([], [], color=FP_EDGE, lw=1.4, label="intra-chip coupler"))
     ax.legend(handles=hand, loc="upper left", bbox_to_anchor=(0.0, 0.0), ncol=3, frameon=False, fontsize=11.5,
               labelcolor=FP_INK2, handlelength=1.6, columnspacing=1.6)
     return deep
 
 
-def fp_depth(ax, woven, cut, size=15):
+def fp_depth(ax, woven, cut, size=15, others=(), label=None):
+    """Signal against depth, woven and cut links; others: [(topology, woven records)] of the same field under
+    other topologies, thin lines labelled at their deepest point."""
     ylab = _fp_signal_label(woven or cut)
-    _fp_axes(ax, "Signal against depth", ylab, "depth (cycles)", size)
-    depths = sorted({r["depth"] for r in woven + cut})
+    _fp_axes(ax, "Signal against depth" + (f", {label} against the other topologies" if others and label else ""),
+             ylab, "depth (cycles)", size)
+    depths = sorted({r["depth"] for r in woven + cut} | {r["depth"] for _, rs in others for r in rs})
+    for lab_o, rs in others:
+        ds, m, _ = _fp_by_depth(rs, "fidelity")
+        if not ds:
+            continue
+        ax.plot(ds, m, color=FP_GRAYS[3], lw=1.3, marker="o", ms=4, zorder=1)
+        ax.annotate(f"{lab_o}  {m[-1]:.3f}", (ds[-1], m[-1]), xytext=(8, 0), textcoords="offset points",
+                    fontsize=10, color=FP_MUTED, va="center")
     for recs, lab, ls, col, mk in ((woven, "woven (links in the circuit)", "-", FP_INK, "o"),
                                   (cut, "cut links (baseline)", "--", FP_MUTED, "s")):
         if not recs:
@@ -4180,16 +4289,37 @@ def fp_command(rec, cut=False):
         s += f" --fold {rec['fold']}"
     if set(rec.get("devices") or []) == {"cpu"}:
         s += " --cpu"
+    t = f.get("topology", "grid")
+    if f.get("chip_pairs"):
+        lab = field_topology(f)
+        if t != "grid":
+            s += f" --topology {t}" + (f" --hub {f['hub']}" if t == "hub" and f.get("hub") is not None else "")
+        if "+" in lab or t == "none":
+            s += f" --pairs {lab.split(' + ')[-1]}"
+        longs = {tuple(sorted(x)) for x in f.get("long_links") or []}
+        geo_pairs = Counter()
+        chip_n = f.get("chip_n") or []
+        off = [int(x) for x in np.cumsum([0] + list(chip_n[:-1]))]
+        for u, v, _ in f["links"]:
+            if (min(u, v), max(u, v)) not in longs:
+                geo_pairs[(max(i for i, o in enumerate(off) if o <= u), max(i for i, o in enumerate(off) if o <= v))] += 1
+        k = max(geo_pairs.values(), default=0)
+        preset = getattr(nh, "DEVICES", {}).get(dev or "", {}).get("links")
+        if k and str(k) != str(preset):
+            s += f" --links {k}"
     return s
 
 
-def fp_title(rec):
+def fp_title(rec, always=False):
+    """always: name the topology even for the plain grid (a poster that compares topologies)."""
     f = rec["field"]
     dev = field_device(f)
     kinds = Counter(f["chips"])
     chips = ", ".join(f"{k} x {name}" for name, k in kinds.items())
     gr, gc = f["arrangement"]
-    head = f"{dev}: " if dev else ""
+    topo = field_topology(f)
+    head = (f"{dev}, {topo}: " if dev else f"{topo}: ") if topo != "grid" or f.get("chip_pairs") or always else \
+        (f"{dev}: " if dev else "")
     return f"{head}{chips} on a {gr} x {gc} grid, {f['n']} qubits"
 
 
@@ -4232,13 +4362,45 @@ def fig_field(plt, store, cfg=None):
     return fig
 
 
-def fig_field_poster(store, cfg=None, notes=(), vram_gb=8.0, dpi=150):
+def fp_hops(ax, f):
+    """Hops between chips over the placed links: a k x k table, darker = more hops."""
+    import matplotlib
+    H = field_hops(f)
+    k = len(H)
+    M = np.array([[np.nan if h is None else h for h in row] for row in H], dtype=float)
+    flat = [H[i][j] for i in range(k) for j in range(i + 1, k)]
+    reach = [h for h in flat if h is not None]
+    ax.set_title("Hops between chips" + (f": mean {np.mean(reach):.2f}, max {max(reach)}" if reach else ""),
+                 loc="left", fontsize=15, color=FP_INK, fontweight="bold", pad=12)
+    top = max(reach) if reach else 1
+    cmap = matplotlib.colors.LinearSegmentedColormap.from_list("fp_gray", FP_GRAYS)
+    cmap.set_bad("#ffffff")
+    ax.imshow(M, cmap=cmap, vmin=0, vmax=max(top, 3), aspect="auto")
+    for i in range(k):
+        for j in range(k):
+            t = "-" if H[i][j] is None else str(H[i][j])
+            dark = H[i][j] is not None and H[i][j] / max(top, 3) > 0.55
+            ax.text(j, i, t, ha="center", va="center", fontsize=12, color=FP_SURF if dark else FP_INK)
+    ax.set_xticks(range(k), [str(c) for c in range(k)])
+    ax.set_yticks(range(k), [f"chip {c}" for c in range(k)])
+    for x in np.arange(-0.5, k, 1):
+        ax.axvline(x, color=FP_SURF, lw=2)
+        ax.axhline(x, color=FP_SURF, lw=2)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    ax.tick_params(colors=FP_INK2, labelsize=11, length=0)
+    if len(reach) < len(flat):
+        ax.set_xlabel(f"-: {len(flat) - len(reach)} pairs not connected", color=FP_INK2, fontsize=11)
+    return reach
+
+
+def fig_field_poster(store, cfg=None, notes=(), vram_gb=8.0, dpi=150, topology=None):
     """The one-page cloverfield poster: header with stat tiles, the field map, signal against depth, signal by
     region, per-chip signal per depth, links per facing pair and (for a mean or sample loom run) the ghost-loom
     plan's links and per-chip memory, and how it was measured."""
     import textwrap
     from matplotlib.figure import Figure
-    g = field_group_for(store, cfg)
+    g = field_group_for(store, cfg, topology)
     if g is None:
         return None
     woven, cut = g
@@ -4246,13 +4408,14 @@ def fig_field_poster(store, cfg=None, notes=(), vram_gb=8.0, dpi=150):
     geo = field_geometry(store, rec)
     if geo is None:
         return None
+    others = field_siblings(store, g)
     plan = field_geometry(store, rec, ghost=True) if rec.get("loom") != "ghost" and rec.get("backend") == "ace" else None
     regions = field_regions(geo, rec)
     nl = len(rec["field"]["links"])
     fig = Figure(figsize=(24, 16.5), dpi=dpi, facecolor=FP_SURF)
     gs = fig.add_gridspec(3, 4, left=0.035, right=0.985, top=0.80, bottom=0.085,
                           height_ratios=[1.0, 1.0, 0.95], width_ratios=[1, 1, 1, 1.05], hspace=0.42, wspace=0.26)
-    fig.text(0.035, 0.955, fp_title(rec), fontsize=34, color=FP_INK, fontweight="bold", ha="left", va="baseline")
+    fig.text(0.035, 0.955, fp_title(rec, bool(others)), fontsize=34, color=FP_INK, fontweight="bold", ha="left", va="baseline")
     fig.text(0.035, 0.925, fp_subtitle(woven, cut), fontsize=14.5, color=FP_INK2, ha="left")
 
     common = sorted({r["depth"] for r in woven} & {r["depth"] for r in cut})
@@ -4263,8 +4426,13 @@ def fig_field_poster(store, cfg=None, notes=(), vram_gb=8.0, dpi=150):
     w_s, c_s = _fp_mean(main_recs, "fidelity", dc), _fp_mean(cut, "fidelity", dc) if woven else None
     w_a, c_a = _fp_mean(main_recs, "signal_anchor", d0), _fp_mean(cut, "signal_anchor", d0) if woven else None
     side = "woven" if woven else "cut links"
+    H = field_hops(rec["field"])
+    reach = [H[i][j] for i in range(len(H)) for j in range(i + 1, len(H)) if H[i][j] is not None]
+    nlong = len(rec["field"].get("long_links") or [])
     tiles = [(str(rec["field"]["n"]), f"qubits, {len(rec['field']['chips'])} chips"),
-             (str(nl), "l-couplers placed")]
+             (str(nl), "l-couplers placed" + (f", {nlong} long-range" if nlong else ""))]
+    if reach:
+        tiles.append((f"{np.mean(reach):.2f} / {max(reach)}", "hops between chips, mean / max"))
     if w_s is not None:
         tiles.append((f"{w_s:.3f}" + (f" / {c_s:.3f}" if c_s is not None else ""),
                       f"signal at depth {dc}, {side}" + (" / cut links" if c_s is not None else "")))
@@ -4272,7 +4440,7 @@ def fig_field_poster(store, cfg=None, notes=(), vram_gb=8.0, dpi=150):
         tiles.append((f"{w_a:.2f}" + (f" / {c_a:.2f}" if c_a is not None else ""),
                       f"link-anchor signal at depth {d0}, {side}" + (" / cut" if c_a is not None else "")))
     for i, (big, small) in enumerate(tiles):
-        x = 0.035 + i * 0.165
+        x = 0.035 + i * 0.19
         fig.text(x, 0.862, big, fontsize=30, color=FP_INK, fontweight="bold", ha="left")
         fig.text(x, 0.845, small, fontsize=11.5, color=FP_INK2, ha="left")
 
@@ -4281,13 +4449,15 @@ def fig_field_poster(store, cfg=None, notes=(), vram_gb=8.0, dpi=150):
     axm.set_title("The field: chips, seams and the l-couplers between them"
                   + (f"; chip signal at depth {deep}, woven" if deep is not None else ""), loc="left", fontsize=15,
                   color=FP_INK, fontweight="bold", pad=8)
-    fp_depth(fig.add_subplot(gs[0, 2:4]), woven, cut)
+    fp_depth(fig.add_subplot(gs[0, 2:4]), woven, cut, others=others, label=field_topology(rec["field"]))
     fp_regions(fig, gs[1, 2:4], woven, cut)
-    fp_chip_table(fig.add_subplot(gs[2, 0]), woven or cut, len(geo.specs))
-    fp_links(fig.add_subplot(gs[2, 1]), geo, rec, plan)
-    gbs = fp_memory(fig.add_subplot(gs[2, 2]), plan, vram_gb) if plan is not None else None
+    bot = gs[2, :].subgridspec(1, 5, wspace=0.34, width_ratios=[1.0, 0.85, 1.05, 1.0, 1.15])
+    fp_chip_table(fig.add_subplot(bot[0, 0]), woven or cut, len(geo.specs))
+    fp_hops(fig.add_subplot(bot[0, 1]), rec["field"])
+    fp_links(fig.add_subplot(bot[0, 2]), geo, rec, plan)
+    gbs = fp_memory(fig.add_subplot(bot[0, 3]), plan, vram_gb) if plan is not None else None
 
-    axn = fig.add_subplot(gs[2, 3] if plan is not None else gs[2, 2:4])
+    axn = fig.add_subplot(bot[0, 4] if plan is not None else bot[0, 3:5])
     axn.axis("off")
     cpc = rec["field"].get("couplers_per_colour") or {}
     intra = sum(v[0] for v in cpc.values())
@@ -4302,15 +4472,20 @@ def fig_field_poster(store, cfg=None, notes=(), vram_gb=8.0, dpi=150):
         lines.append(("Cut links: same links and anchors placed, left out of the circuit. The gap between the "
                       "curves is what the links cost.", False))
     if secs:
-        lines.append((f"Median {np.median(secs):.0f} s per point, {sum(secs) / 3600:.1f} h in all.", False))
-    if gbs:
-        lines.append((f"The ghost loom plan needs {min(gbs):.1f} to {max(gbs):.1f} GiB per chip.", False))
+        lines.append((f"Median {np.median(secs):.0f} s per point, {sum(secs) / 3600:.1f} h in all."
+                      + (f" Ghost plan: {min(gbs):.1f} to {max(gbs):.1f} GiB per chip." if gbs else ""), False))
     lines += [(t, False) for t in notes]
+    if plan is not None:
+        PH = plan.chip_hops()
+        miss = sum(1 for i in range(len(PH)) for j in range(i + 1, len(PH)) if PH[i][j] is None)
+        if miss:
+            lines.append((f"The ghost loom plan leaves {miss} chip pairs unconnected: its ghost room drops links.",
+                          False))
     y = 1.0
-    width = 56 if plan is not None else 120
+    width = 48 if plan is not None else 100
     ax_h = axn.get_position().height * fig.get_figheight()          # inches: line steps in axes fractions
     for txt, head in lines:
-        size = 14 if head else 11
+        size = 14 if head else 10.5
         for ln in textwrap.wrap(txt, width):                     # one text per line: a fixed pitch
             axn.text(0.0, y, ln, transform=axn.transAxes, fontsize=size, color=FP_INK if head else FP_INK2,
                      fontweight="bold" if head else None, va="top")
@@ -4318,6 +4493,344 @@ def fig_field_poster(store, cfg=None, notes=(), vram_gb=8.0, dpi=150):
         y -= (4 if head else 7) / 72 / ax_h
     fig.text(0.985, 0.014, fp_command(rec, cut=bool(cut and woven)), fontsize=10, color=FP_MUTED, ha="right",
              family="monospace")
+    return fig
+
+
+# ================================================================== GHZ on a field's chiplets (--ghz-poster)
+# nighthawk_qrack.py ghz tiles records, one file per chiplet of a field device (--ghz-chip, in the field's chip
+# order), optionally one more run without drift (--ghz-base: Layer 1a, the same circuit on every chiplet of one
+# register). The chiplets' lattice, placement and link anchors come from the device preset (--field-device) or from
+# field run records in --out.
+FP_SEQ = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#2a78d6", "#1c5cab", "#104281", "#0d366b"]
+GP_CLASS = {"seam": ("seam units", "#eb6834"), "off": ("off-seam units", "#2a78d6")}
+
+
+def ghz_chip_runs(paths):
+    """[(path, ghz_map, [tiles records])] per file, in order."""
+    out = []
+    for p in paths:
+        recs, gmap = [], None
+        for line in open(p):
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if r.get("test") == "ghz_map" and gmap is None:
+                gmap = r
+            elif r.get("test") == "ghz" and r.get("mode") == "tiles":
+                recs.append(r)
+        out.append((str(p), gmap, recs))
+    return out
+
+
+def field_geometry_device(store, name):
+    """A field device preset (nighthawk_qrack.DEVICES) as a Field: (Field, links [(u, v, colour)]) or (None, [])."""
+    d = getattr(nh, "DEVICES", {}).get(name)
+    if d is None:
+        return None, []
+    key = ("device", name)
+    if key not in _FIELD_GEO:
+        geo = None
+        try:
+            nh.load_register_files()
+            toks = []
+            for t in d["chips"].split(","):
+                k = 1
+                if "*" in t:
+                    t, k = t.rsplit("*", 1)
+                toks += [t] * int(k)
+            specs = [nh.parse_chip(t, store.a.repo) for t in toks]
+            arr = tuple(int(x) for x in d["arrangement"].lower().split("x"))
+            geo = nh.Field(store.a.repo, specs, arr, str(d.get("links", "all")), None, None, ghost=None,
+                           cut_links=False)
+        except (SystemExit, Exception) as err:
+            print(f"# field device {name}: {str(err).splitlines()[0] if str(err) else type(err).__name__}")
+        _FIELD_GEO[key] = geo
+    geo = _FIELD_GEO[key]
+    return geo, ([list(e) for e in geo.links] if geo is not None else [])
+
+
+def _gp_F(r):
+    return ghz_F(r)[1]
+
+
+def _gp_site_means(recs):
+    acc = defaultdict(list)
+    for r in recs:
+        f = _gp_F(r)
+        if f is None:
+            continue
+        for q in r.get("qubits") or []:
+            acc[int(q)].append(f)
+    return {q: float(np.mean(v)) for q, v in acc.items()}
+
+
+def _gp_split(recs, anchors=None):
+    """Unit fidelities: seam units (hold a seam qubit), off-seam units, and with anchors (local indices) the units
+    that hold a link anchor / hold none."""
+    seam = [_gp_F(r) for r in recs if r.get("seam_distance") == 0 and _gp_F(r) is not None]
+    off = [_gp_F(r) for r in recs if r.get("seam_distance", 0) > 0 and _gp_F(r) is not None]
+    out = {"all": seam + off, "seam": seam, "off": off}
+    if anchors is not None:
+        out["anchor"] = [_gp_F(r) for r in recs if set(r.get("qubits") or []) & anchors and _gp_F(r) is not None]
+        out["free"] = [_gp_F(r) for r in recs if not set(r.get("qubits") or []) & anchors and _gp_F(r) is not None]
+    return out
+
+
+def _gp_exact(recs):
+    v = [r.get("exact_F_GHZ") for r in recs if r.get("exact_F_GHZ") is not None]
+    return float(np.mean(v)) if v else None
+
+
+def fig_ghz_field_poster(store, chip_files, base_file=None, device=None, notes=(), dpi=150):
+    """One page: GHZ tiles on every chiplet of a field device. The field drawn with each chiplet's per-site mean
+    F_GHZ, seam qubits and link anchors marked; per chiplet the seam and off-seam means against the exact reference
+    and the run without drift; every unit's fidelity per chiplet; a table per chiplet with its link anchors."""
+    import matplotlib
+    import textwrap
+    from matplotlib.figure import Figure
+    from matplotlib.patches import FancyBboxPatch
+    from matplotlib.lines import Line2D
+    runs = ghz_chip_runs(chip_files)
+    base = ghz_chip_runs([base_file])[0] if base_file else None
+    g = field_group_for(store)
+    if device is None and g is not None:
+        device = field_device((g[0] or g[1])[0]["field"])
+    device = device or "r3"
+    geo, links = field_geometry_device(store, device)
+    if geo is None or not runs:
+        return None
+    nch = len(geo.specs)
+    if len(runs) != nch:
+        print(f"# --ghz-chip: {len(runs)} files for the {nch} chips of {device}; chips without a file stay empty")
+    gmap = next((m for _, m, _ in runs if m), None) or (base[1] if base else None)
+    seam_local = set(gmap["seam"]) if gmap else set()
+    anchors = [set() for _ in range(nch)]
+    for u, v, _ in links:
+        for q in (u, v):
+            anchors[geo.chip_of[q]].add(geo.local[q])
+    one = next((r for _, _, rs in runs for r in rs), None) or (base[2][0] if base and base[2] else None)
+    if one is None:
+        return None
+    l2 = one.get("layer2") or {}
+
+    fig = Figure(figsize=(24, 16.5), dpi=dpi, facecolor=FP_SURF)
+    gs = fig.add_gridspec(3, 4, left=0.035, right=0.985, top=0.80, bottom=0.085,
+                          height_ratios=[1.0, 1.0, 0.95], width_ratios=[1, 1, 1, 1.05], hspace=0.42, wspace=0.26)
+    reg = one.get("register")
+    title = f"{device}: GHZ tiles on all {nch} {reg} chiplets"
+    fig.text(0.035, 0.955, title, fontsize=34, color=FP_INK, fontweight="bold", ha="left", va="baseline")
+    ace = one.get("ace") or {}
+    widths = (gmap or {}).get("ace", {}).get("widths") or ace.get("widths")
+    seeds = [((rs[0].get("layer2") or {}).get("seed") if rs else None) for _, _, rs in runs]
+    sub = (f"{one.get('unit_size')}-qubit GHZ chains tiled along rows and columns, {len(runs[0][2])} units per chiplet, "
+           f"{one.get('shots')} shots per setting, MQC readout (Lemma 4). Layer 2: {l2.get('mode')} over "
+           f"{l2.get('blocks')} idle windows (T {l2.get('t_idle')}, J {l2.get('j_zz')}, sigma {l2.get('sigma_qs')}), "
+           f"each chiplet its own drift draw (seed {', '.join(str(s) for s in seeds)}). "
+           f"QrackAceBackend {len(widths or [])} patches"
+           + (f" ({', '.join(map(str, widths))} qubits)" if widths else "") + f", {len(seam_local)} seam qubits.")
+    for i, ln in enumerate(textwrap.wrap(sub, 205)):
+        fig.text(0.035, 0.925 - i * 0.017, ln, fontsize=14, color=FP_INK2, ha="left")
+
+    per = []
+    for c in range(nch):
+        rs = runs[c][2] if c < len(runs) else []
+        per.append(_gp_split(rs, anchors[c]) if rs else None)
+    seamF = [f for p in per if p for f in p["seam"]]
+    offF = [f for p in per if p for f in p["off"]]
+    exact_all = _gp_exact([r for _, _, rs in runs for r in rs])
+    tiles = [(f"{nch} x {len(runs[0][2])}", "chiplets x GHZ units"),
+             (f"{np.mean(offF):.3f}", "mean F_GHZ, off-seam units"),
+             (f"{np.mean(seamF):.3f}", "mean F_GHZ, seam units"),
+             (f"{100 * np.mean(np.array(seamF) <= 0.5):.0f} %", "seam units at or below F = 1/2")]
+    if exact_all is not None:
+        tiles.append((f"{exact_all:.3f}", "exact reference, every unit"))
+    for i, (big, small) in enumerate(tiles):
+        x = 0.035 + i * 0.165
+        fig.text(x, 0.862, big, fontsize=30, color=FP_INK, fontweight="bold", ha="left")
+        fig.text(x, 0.845, small, fontsize=11.5, color=FP_INK2, ha="left")
+
+    # the field, every site by its chiplet's mean F_GHZ
+    ax = fig.add_subplot(gs[0:2, 0:2])
+    ax.set_facecolor(FP_SURF)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    pos = geo.pos
+    rows = [p[0] for p in pos]
+    cols = [p[1] for p in pos]
+    ax.set_xlim(min(cols) - 1.6, max(cols) + 1.6)
+    ax.set_ylim(max(rows) + 3.0, min(rows) - 2.4)
+    cmap = matplotlib.colors.LinearSegmentedColormap.from_list("fp_seq", FP_SEQ)
+    cmap.set_bad(FP_GRAYS[1])
+    norm = matplotlib.colors.Normalize(0.0, 1.0)
+    for c in range(nch):
+        pts = np.array([pos[q] for q in range(geo.n) if geo.chip_of[q] == c])
+        r0, c0 = pts.min(axis=0)
+        r1, c1 = pts.max(axis=0)
+        ax.add_patch(FancyBboxPatch((c0 - 0.55, r0 - 0.55), c1 - c0 + 1.1, r1 - r0 + 1.1,
+                                    boxstyle="round,pad=0,rounding_size=0.8", fc=FP_TILE, ec=FP_EDGE, lw=1.2, zorder=0))
+        top = (r0 + r1) / 2 < (min(rows) + max(rows)) / 2 or geo.arr[0] == 1
+        lab = f"chip {c}" + (f"   F {np.mean(per[c]['all']):.3f}" if per[c] else "   no run")
+        ax.text(c0 - 0.3, (r0 - 1.0) if top else (r1 + 1.0), lab, fontsize=12.5, color=FP_INK, ha="left",
+                va="bottom" if top else "top", fontweight="bold")
+    lk = {(min(u, v), max(u, v)) for u, v, _ in links}
+    for es in geo.matchings.values():
+        for u, v in es:
+            if geo.chip_of[u] != geo.chip_of[v]:
+                continue
+            (ra, ca), (rb, cb) = pos[u], pos[v]
+            ax.plot([ca, cb], [ra, rb], color=FP_EDGE, lw=0.9, zorder=1)
+    for u, v in lk:
+        (ra, ca), (rb, cb) = pos[u], pos[v]
+        ax.plot([ca, cb], [ra, rb], color=FP_INK, lw=3.4, zorder=2, solid_capstyle="round")
+    site = [(_gp_site_means(runs[c][2]) if c < len(runs) else {}) for c in range(nch)]
+    for shape, sel in (("o", lambda q: geo.local[q] not in anchors[geo.chip_of[q]]),
+                       ("s", lambda q: geo.local[q] in anchors[geo.chip_of[q]])):
+        qs = [q for q in range(geo.n) if sel(q)]
+        vals = [site[geo.chip_of[q]].get(geo.local[q], np.nan) for q in qs]
+        ring = [FP_INK if geo.local[q] in seam_local else FP_SURF for q in qs]
+        ax.scatter([pos[q][1] for q in qs], [pos[q][0] for q in qs], s=74 if shape == "s" else 62, marker=shape,
+                   c=vals, cmap=cmap, norm=norm, edgecolors=ring, linewidths=1.6, zorder=4,
+                   plotnonfinite=True)
+    hand = [Line2D([], [], marker="o", ls="", ms=9, mfc=FP_SEQ[4], mec=FP_SURF, label="qubit, off the ACE seam"),
+            Line2D([], [], marker="o", ls="", ms=9, mfc=FP_SEQ[4], mec=FP_INK, mew=1.6, label="seam qubit (ACE)"),
+            Line2D([], [], marker="s", ls="", ms=9, mfc=FP_SEQ[4], mec=FP_SURF, label=f"{device} link anchor"),
+            Line2D([], [], color=FP_INK, lw=3.4, label=f"l-coupler ({len(lk)})")]
+    ax.legend(handles=hand, loc="upper left", bbox_to_anchor=(0.0, 0.035), ncol=2, frameon=False, fontsize=11.5,
+              labelcolor=FP_INK2, handlelength=1.4, columnspacing=1.6)
+    cax = ax.inset_axes([0.64, -0.005, 0.34, 0.018])
+    cb = fig.colorbar(matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax, orientation="horizontal")
+    cb.outline.set_visible(False)
+    cb.ax.tick_params(labelsize=10, colors=FP_INK2, length=0)
+    cax.set_title("per site: mean F_GHZ of the units holding it", fontsize=10.5, color=FP_INK2, loc="left", pad=4)
+    ax.set_title(f"The field: each chiplet's own GHZ run, {l2.get('mode')} Layer 2", loc="left", fontsize=15,
+                 color=FP_INK, fontweight="bold", pad=8)
+
+    # per chiplet: seam and off-seam means
+    axb = fig.add_subplot(gs[0, 2:4])
+    _fp_axes(axb, "Mean F_GHZ per chiplet, seam and off-seam units", "F_GHZ", None)
+    groups = ([("no drift", _gp_split(base[2]), _gp_exact(base[2]))] if base and base[2] else []) + \
+             [(f"chip {c}", per[c], _gp_exact(runs[c][2]) if c < len(runs) else None) for c in range(nch)]
+    x = np.arange(len(groups))
+    w = 0.36
+    for k, (cls, off_) in enumerate((("seam", -w / 2 - 0.01), ("off", w / 2 + 0.01))):
+        lab, col = GP_CLASS[cls]
+        ys = [float(np.mean(gp[1][cls])) if gp[1] and gp[1][cls] else 0.0 for gp in groups]
+        axb.bar(x + off_, ys, w, color=col, label=lab)
+        for xi, y in zip(x, ys):
+            if y > 0.08:
+                axb.text(xi + off_, y - 0.03, f"{y:.2f}", ha="center", va="top", fontsize=10.5, color=FP_SURF,
+                         fontweight="bold")
+    for xi, gp in zip(x, groups):
+        if gp[2] is not None:
+            axb.plot([xi - w - 0.05, xi + w + 0.05], [gp[2], gp[2]], color=FP_INK, lw=1.6, zorder=4)
+    axb.plot([], [], color=FP_INK, lw=1.6, label="exact reference")
+    axb.axhline(0.5, color=FP_INK2, lw=1.0, ls=":")
+    axb.set_xticks(x, [gp[0] for gp in groups])
+    axb.set_ylim(0, 1.18)
+    axb.legend(frameon=False, fontsize=11, labelcolor=FP_INK2, loc="upper left", ncol=3)
+
+    # every unit's fidelity per chiplet
+    axs = fig.add_subplot(gs[1, 2:4])
+    _fp_axes(axs, "Every unit's F_GHZ (dotted: 1/2, the GHZ entanglement threshold)", "F_GHZ", None)
+    rng = np.random.default_rng(0)
+    for xi, gp in zip(x, groups):
+        if not gp[1]:
+            continue
+        for cls, dx in (("seam", -0.18), ("off", 0.18)):
+            v = np.array(gp[1][cls])
+            axs.scatter(xi + dx + rng.uniform(-0.11, 0.11, len(v)), v, s=14, color=GP_CLASS[cls][1], alpha=0.55,
+                        lw=0, zorder=3)
+            if len(v):
+                axs.plot([xi + dx - 0.14, xi + dx + 0.14], [np.median(v)] * 2, color=FP_INK, lw=2.0, zorder=4)
+    axs.axhline(0.5, color=FP_INK2, lw=1.0, ls=":")
+    axs.set_xticks(x, [gp[0] for gp in groups])
+    axs.set_ylim(-0.03, 1.1)
+    axs.plot([], [], color=FP_INK, lw=2.0, label="median")
+    for cls in ("seam", "off"):
+        axs.scatter([], [], s=30, color=GP_CLASS[cls][1], label=GP_CLASS[cls][0])
+    axs.legend(frameon=False, fontsize=11, labelcolor=FP_INK2, loc="lower right", bbox_to_anchor=(1.0, 1.0), ncol=3)
+
+    # table per chiplet
+    axt = fig.add_subplot(gs[2, 0:2])
+    axt.axis("off")
+    axt.set_title("Per chiplet", loc="left", fontsize=15, color=FP_INK, fontweight="bold", pad=12)
+    axt.text(0.0, -0.06, "anchors: link-anchor qubits on the chiplet, on seam: of them ACE seam qubits; F anchor / "
+             "F rest: units holding an anchor / none; Phi sd: spread of Phi_coh over off-seam units.",
+             transform=axt.transAxes, fontsize=10.5, color=FP_INK2, va="top")
+    head = ["chip", "seed", "anchors", "on seam", "F all", "F seam", "F off", "F anchor", "F rest",
+            "Phi sd (rad)", "seconds"]
+    body = []
+    for c in range(nch):
+        p, rs = per[c], (runs[c][2] if c < len(runs) else [])
+        if not p:
+            body.append([str(c)] + [""] * (len(head) - 1))
+            continue
+        ph = [r["Phi_coh"] for r in rs if r.get("Phi_coh") is not None and r.get("seam_distance", 0) > 0]
+        body.append([str(c), str(seeds[c]), str(len(anchors[c])), str(len(anchors[c] & seam_local)),
+                     f"{np.mean(p['all']):.3f}", f"{np.mean(p['seam']):.3f}", f"{np.mean(p['off']):.3f}",
+                     f"{np.mean(p['anchor']):.3f}" if p["anchor"] else "", f"{np.mean(p['free']):.3f}",
+                     f"{np.std(ph):.3f}" if ph else "", ""])
+    secs_of = []
+    for c in range(nch):
+        log = Path(runs[c][0]).with_suffix(".log") if c < len(runs) else None
+        s = ""
+        if log and log.exists():
+            for line in open(log):
+                if line.startswith("seconds:"):
+                    s = f"{float(line.split()[1]):.0f}"
+        secs_of.append(s)
+    for c in range(nch):
+        body[c][-1] = secs_of[c]
+    tb = axt.table(cellText=body, colLabels=head, loc="upper left", cellLoc="center", colLoc="center",
+                   bbox=[0.0, 0.0, 1.0, 0.92])
+    tb.auto_set_font_size(False)
+    tb.set_fontsize(11.5)
+    for (i, j), cell in tb.get_celld().items():
+        cell.set_edgecolor(FP_SURF)
+        cell.set_linewidth(2)
+        cell.set_facecolor(FP_TILE if i == 0 else (FP_SURF if i % 2 else "#f7f6f3"))
+        cell.get_text().set_color(FP_INK if i == 0 else FP_INK2)
+        if i == 0:
+            cell.get_text().set_fontweight("bold")
+
+    # anchors against the rest
+    axa = fig.add_subplot(gs[2, 2])
+    _fp_axes(axa, f"Units on a {device} link anchor", "mean F_GHZ")
+    xa = np.arange(nch)
+    wa = 0.38
+    ya = [float(np.mean(per[c]["anchor"])) if per[c] and per[c]["anchor"] else 0.0 for c in range(nch)]
+    yf = [float(np.mean(per[c]["free"])) if per[c] and per[c]["free"] else 0.0 for c in range(nch)]
+    axa.bar(xa - wa / 2 - 0.01, ya, wa, color=FP_INK, label="holds an anchor")
+    axa.bar(xa + wa / 2 + 0.01, yf, wa, color=FP_GRAYS[2], label="holds none")
+    axa.set_xticks(xa, [f"chip {c}" for c in range(nch)])
+    axa.set_ylim(0, 1.15)
+    axa.legend(frameon=False, fontsize=10.5, labelcolor=FP_INK2, loc="upper left", ncol=2)
+
+    # notes
+    axn = fig.add_subplot(gs[2, 3])
+    axn.axis("off")
+    lines = [("How this was measured", True),
+             (f"Every chiplet is the same {reg} register on its QrackAceBackend preset; it runs alone, "
+              f"no loom: a GHZ unit never leaves its chiplet. The links and anchors are {device}'s placement "
+              f"({len(lk)} l-couplers), drawn to show where they land.", False),
+             ("F_GHZ = (P0 + P1 + C) / 2 from the MQC readout; an exact QrackSimulator of the 120 qubits runs "
+              "every unit beside ACE.", False)]
+    if base and base[2]:
+        lines.append(("No drift: one Layer 1a run, the same circuit for every chiplet.", False))
+    lines += [(t, False) for t in notes]
+    ax_h = axn.get_position().height * fig.get_figheight()
+    y = 1.0
+    for txt, head_ in lines:
+        size = 14 if head_ else 11
+        for ln in textwrap.wrap(txt, 56):
+            axn.text(0.0, y, ln, transform=axn.transAxes, fontsize=size, color=FP_INK if head_ else FP_INK2,
+                     fontweight="bold" if head_ else None, va="top")
+            y -= size * 1.45 / 72 / ax_h
+        y -= (4 if head_ else 7) / 72 / ax_h
+    cmd = (f"nighthawk_qrack.py ghz tiles --register {reg} --layer2 {l2.get('mode')} --seed <chip>  (per chiplet)"
+           + ("; --layer2 none (no drift)" if base else ""))
+    fig.text(0.985, 0.014, cmd, fontsize=10, color=FP_MUTED, ha="right", family="monospace")
     return fig
 
 
@@ -4698,9 +5211,20 @@ def main():
                          "to FILE (PNG, or PDF / SVG by extension), then exit; --cfg picks the configuration")
     ap.add_argument("--poster-note", dest="poster_note", action="append", default=[], metavar="TEXT",
                     help="--poster: a line for the 'How this was measured' box (repeatable), e.g. the host")
+    ap.add_argument("--poster-topology", dest="poster_topology", default=None, metavar="LABEL",
+                    help="--poster: draw the field of this topology (grid, ring, hub N, grid + I-J, ...)")
     ap.add_argument("--poster-dpi", dest="poster_dpi", type=int, default=150, help="--poster: resolution (default 150)")
     ap.add_argument("--vram-gb", dest="vram_gb", type=float, default=8.0,
                     help="--poster: one die's memory, the line on the ghost-loom memory panel (default 8)")
+    ap.add_argument("--ghz-poster", dest="ghz_poster", default=None, metavar="FILE",
+                    help="write the one-page GHZ overview of a field device's chiplets to FILE, then exit: one "
+                         "nighthawk_qrack.py ghz tiles records file per chiplet (--ghz-chip)")
+    ap.add_argument("--ghz-chip", dest="ghz_chip", action="append", default=[], metavar="JSONL",
+                    help="--ghz-poster: a chiplet's ghz tiles records, in the field's chip order (repeat per chip)")
+    ap.add_argument("--ghz-base", dest="ghz_base", default=None, metavar="JSONL",
+                    help="--ghz-poster: a run without drift (--layer2 none) of the same register, drawn beside the chips")
+    ap.add_argument("--field-device", dest="field_device", default=None,
+                    help="--ghz-poster: the field device preset (default: the field run records' device, else r3)")
     ap.add_argument("--fxeb-dmin", dest="fxeb_dmin", type=int, default=8,
                     help="views 10-11 and --table: smallest depth used in the decay fit (default 8; "
                          "shallower outputs are too concentrated)")
@@ -4743,17 +5267,30 @@ def main():
         if a.open:
             webbrowser.open(pages[0].resolve().as_uri())
         return
+    if a.ghz_poster:
+        import matplotlib
+        matplotlib.use("Agg")
+        store = Store(a)
+        fig = fig_ghz_field_poster(store, a.ghz_chip, a.ghz_base, a.field_device, a.poster_note, a.poster_dpi)
+        if fig is None:
+            print("no ghz tiles records (--ghz-chip) or no buildable field device: no GHZ poster")
+            return
+        fig.savefig(a.ghz_poster, facecolor=FP_SURF, dpi=a.poster_dpi)
+        print(f"GHZ poster: {a.ghz_poster} ({len(a.ghz_chip)} chiplet files"
+              + (", one without drift" if a.ghz_base else "") + ")")
+        return
     if a.poster:
         import matplotlib
         matplotlib.use("Agg")
         store = Store(a)
         print(store.summary())
-        fig = fig_field_poster(store, (a.cfg or [None])[0], a.poster_note, a.vram_gb, a.poster_dpi)
+        fig = fig_field_poster(store, (a.cfg or [None])[0], a.poster_note, a.vram_gb, a.poster_dpi,
+                               a.poster_topology)
         if fig is None:
             print("no field run records (nighthawk_qrack.py field run --out) with a buildable field: no poster")
             return
         fig.savefig(a.poster, facecolor=FP_SURF, dpi=a.poster_dpi)
-        woven, cut = field_group_for(store, (a.cfg or [None])[0])
+        woven, cut = field_group_for(store, (a.cfg or [None])[0], a.poster_topology)
         print(f"poster: {a.poster} ({len(woven)} woven, {len(cut)} cut-links records)")
         return
     if a.table:
