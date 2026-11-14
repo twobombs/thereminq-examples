@@ -77,6 +77,21 @@ links and per-chip peak memory against --vram-gb), a "How this was measured" box
 command line. A woven configuration and its --cut-links baseline are paired by chips, arrangement, loom, family,
 protocol and fold; the largest pair is drawn unless --cfg names one.
 
+Lab posters (--lab FILE --lab-poster PREFIX): the configuration lab (nighthawk_qrack.py lab), three pages. _between:
+how the l-couplers are carried (ghost, mean-field and sample loom, QrackBridge by bond qubits, an ACE seam, links
+cut), against depth, links per pair and bond budget, and the mirror signal against the fidelity. _inside: ACE patches
+against QrackBridge patches inside one chip, the inside x between table, fidelity against simulator width, ghost room.
+_place: border rows, border against chip centre, disabled qubits near or far, six-chip topologies, and r3 at full size
+(--lab-r3, from lab --r3plan). _shor (lab --shor records): Shor's [[9,1,3]] code across a link, the cut between its
+blocks and through them: decoded logical Z and X success per interconnect, the ghost loom read per chip and through
+its ghosts, the bridge by bond qubits. _rounds (lab --rounds records): repeated syndrome extraction across the link
+under QrackBridge, success and truncations against rounds per bond count, beside the random circuit. _wheel (lab
+--exp wheel records, with --lab-r3): every chip linked directly to every chip, the r3 plan and the four-chip test. _port (lab --exp port
+records, with --lab-r3): every l-coupler of a chip on one port qubit, layers or multiplexed. _bell (lab --bell records): Quantum NUMA, a
+Bell pair between every chip pair by hops, on the grid, ring and wheel.
+Every score is against the exact state of the same circuit. A page is written
+when its records are present.
+
 GHZ poster (--ghz-poster FILE): nighthawk_qrack.py ghz tiles on every chiplet of a field device, one records file per
 chiplet (--ghz-chip, repeated, in the field's chip order) and optionally a run without drift (--ghz-base). The field
 (--field-device, default the field run records' device, else r3) with each site coloured by its chiplet's mean F_GHZ,
@@ -261,7 +276,7 @@ def read_records(out):
                 r = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if "cfg" not in r:
+            if "cfg" not in r or "family" not in r:          # not a run record (e.g. the lab's: --lab reads those)
                 continue
             f_ = r.get("fidelity")
             if isinstance(f_, float) and not math.isfinite(f_):   # a broken run's record (NaN): ignored
@@ -3869,7 +3884,7 @@ def field_key(r):
 
 
 def field_topology(f):
-    """A record's chip topology as a label: grid (the default, and every record before --topology), ring, hub N, or
+    """A record's chip topology as a label: grid (the default, and every record before --topology), ring, wheel, hub N, or
     either with + I-J for the added pairs (--pairs)."""
     t = f.get("topology", "grid")
     pairs = [tuple(p) for p in f.get("chip_pairs") or []]
@@ -3884,12 +3899,16 @@ def field_topology(f):
         base = {tuple(sorted((f.get("hub"), d))) for d in range(k) if d != f.get("hub")}
     elif t == "ring":
         base = {tuple(sorted(p)) for p in pairs[:k]} if k > 2 else {tuple(sorted(p)) for p in pairs[:1]}
+    elif t == "wheel":
+        base = {(c, d) for c in range(k) for d in range(c + 1, k)}
     else:
         base = set()
     extra = [p for p in pairs if tuple(sorted(p)) not in {tuple(sorted(b)) for b in base}]
     lab = f"hub {f.get('hub')}" if t == "hub" else t
     if extra:
         lab = ("" if t == "none" else lab + " + ") + ",".join(f"{a}-{b}" for a, b in extra)
+    if f.get("port"):
+        lab += f", port {f['port']['mode']}"
     return lab
 
 
@@ -4002,8 +4021,9 @@ def field_geometry(store, rec, ghost=False):
     if chip_pairs:                                   # the record's pairs in its order: placement is repeated exactly
         per_pair = max([per_pair] + [pairs[tuple(sorted(p))] for p in chip_pairs if tuple(sorted(p)) not in long_pairs])
         per_long = max([per_long] + [pairs[tuple(sorted(p))] for p in chip_pairs if tuple(sorted(p)) in long_pairs])
+    port = f.get("port") or {}
     key = (tuple(f["chips"]), tuple(f["arrangement"]), per_pair, ghost, rec.get("backend"), tuple(chip_pairs),
-           per_long)
+           per_long, port.get("mode"), port.get("site"))
     if key in _FIELD_GEO:
         return _FIELD_GEO[key]
     geo = None
@@ -4016,6 +4036,8 @@ def field_geometry(store, rec, ghost=False):
             opts = nh.engine_opts(SimpleNamespace(backend=rec.get("backend", "ace"), cpu=True, ace_gpu=None,
                                                   ace_error_detection=False))
         topo = dict(topology="none", pairs=chip_pairs, long_links=per_long or None) if chip_pairs else {}
+        if port.get("mode"):
+            topo.update(port=port["mode"], port_site=port.get("site") or "inner")
         geo = nh.Field(store.a.repo, specs, tuple(f["arrangement"]), str(per_pair or "all"), None, None,
                        ghost=opts, cut_links=False, **topo)
         geo._opts = opts
@@ -4023,6 +4045,79 @@ def field_geometry(store, rec, ghost=False):
         print(f"# field geometry for {key[:3]}: {str(err).splitlines()[0] if str(err) else type(err).__name__}")
     _FIELD_GEO[key] = geo
     return geo
+
+
+FP_PATCH = ["#3b82c4", "#d98a1f", "#2a9d8f", "#c8557a", "#7b61c9", "#7f9a2e", "#2f9fc4", "#a8683c", "#5d6b7a", "#b0589f",
+            "#4a9a5a", "#c46a4a"]
+
+
+def field_patches(geo, rec):
+    """Per chip, the ACE patch of every qubit (None: a seam qubit, held in more than one patch) and the number of
+    patches; None for a chip that is not on QrackAceBackend or whose placement cannot be rebuilt."""
+    if rec.get("backend") != "ace":
+        return [None] * len(geo.specs)
+    key = ("patches", tuple(s_["name"] for s_ in geo.specs), json.dumps(rec.get("chips_geometry"), sort_keys=True,
+                                                                         default=str))
+    if key in _FIELD_GEO:
+        return _FIELD_GEO[key]
+    from types import SimpleNamespace
+    out, memo = [], {}
+    for c, spec in enumerate(geo.specs):
+        g = (rec.get("chips_geometry") or [{}] * len(geo.specs))[c] or {}
+        ca = f"{g.get('ace_register')}:{g.get('ace_lrc')}:{g.get('ace_lrr')}" + (":t" if g.get("ace_torus") else "") \
+            if g.get("ace_register") and spec.get("kind") == "rect" else None
+        mk = (spec["name"], ca)
+        if mk not in memo:
+            try:
+                opts = nh.engine_opts(SimpleNamespace(backend="ace", cpu=True, ace_gpu=None, ace_error_detection=False,
+                                                      chip_ace=ca))
+                room = nh.GhostRoom(spec, opts)
+                single = sorted({next(iter(x)) for x in room.sids if len(x) == 1})
+                memo[mk] = ([single.index(next(iter(room.sids[room.site[q]]))) if len(room.sids[room.site[q]]) == 1
+                             else None for q in range(spec["n"] if "n" in spec else len(room.site))], len(single))
+            except (SystemExit, Exception) as err:
+                print(f"# patches of chip {spec['name']}: {str(err).splitlines()[0] if str(err) else type(err).__name__}")
+                memo[mk] = None
+        out.append(memo[mk])
+    _FIELD_GEO[key] = out
+    return out
+
+
+def fp_patches(ax, geo, rec):
+    """ACE patches inside the chips: every bulk cell tinted by its patch, the outline of each patch region drawn
+    in the patch's colour (the lines run along the seam qubits, which stay untinted), the patch number at its
+    centre. Returns the number of chips drawn."""
+    from matplotlib.patches import Rectangle
+    import matplotlib.patheffects as pe
+    pos, drawn = geo.pos, 0
+    for c, pp in enumerate(field_patches(geo, rec)):
+        if pp is None:
+            continue
+        drawn += 1
+        patch, _ = pp
+        qs = [q for q in range(geo.n) if geo.chip_of[q] == c]
+        at = {tuple(pos[q]): patch[geo.local[q]] if geo.local[q] < len(patch) else None for q in qs}
+        cen = {}
+        for (r, x), p_ in at.items():
+            if p_ is None:
+                continue
+            col = FP_PATCH[p_ % len(FP_PATCH)]
+            ax.add_patch(Rectangle((x - 0.5, r - 0.5), 1, 1, fc=col, ec="none", alpha=0.20, zorder=0.4))
+            for (dr, dx), seg in (((-1, 0), ((x - 0.5, x + 0.5), (r - 0.5, r - 0.5))),
+                                  ((1, 0), ((x - 0.5, x + 0.5), (r + 0.5, r + 0.5))),
+                                  ((0, -1), ((x - 0.5, x - 0.5), (r - 0.5, r + 0.5))),
+                                  ((0, 1), ((x + 0.5, x + 0.5), (r - 0.5, r + 0.5)))):
+                nb = (r + dr, x + dx)
+                if nb in at and at[nb] != p_:        # another patch or a seam qubit next door: a demarcation line
+                    ax.plot(seg[0], seg[1], color=col, lw=2.0, zorder=1.6, solid_capstyle="projecting")
+            cen.setdefault(p_, []).append((r, x))
+        for p_, pts in cen.items():
+            mr, mx = np.mean([a_ for a_, _ in pts]), np.mean([b_ for _, b_ in pts])
+            r, x = min(pts, key=lambda t: (t[0] - mr) ** 2 + (t[1] - mx) ** 2)
+            ax.text(x + 0.5, r + 0.5, f"p{p_}", fontsize=9.5, color=FP_PATCH[p_ % len(FP_PATCH)], fontweight="bold",
+                    ha="center", va="center", zorder=6,
+                    path_effects=[pe.withStroke(linewidth=2.6, foreground=FP_SURF)])
+    return drawn
 
 
 def field_regions(geo, rec):
@@ -4102,6 +4197,7 @@ def fp_map(ax, geo, rec, regions, woven):
         lab = f"chip {c}" + (f"   {sig[c]:.3f}" if sig is not None else "")
         ax.text(c0 - 0.3, (r0 - 1.0) if top else (r1 + 1.0), lab, fontsize=12.5, color=FP_INK, ha="left",
                 va="bottom" if top else "top", fontweight="bold")
+    npatch = fp_patches(ax, geo, rec)
     links = {(min(u, v), max(u, v)) for u, v, _ in rec["field"]["links"]}
     for es in geo.matchings.values():
         for u, v in es:
@@ -4123,12 +4219,23 @@ def fp_map(ax, geo, rec, regions, woven):
         qs = [q for q in range(geo.n) if regions[q] == reg]
         ax.scatter([pos[q][1] for q in qs], [pos[q][0] for q in qs], s={"bulk": 26, "seam": 40, "anchor": 58}[reg],
                    color=FP_REGION[reg], zorder=4, edgecolors=FP_SURF, linewidths=1.0)
+    port = rec["field"].get("port") or {}
+    if port.get("qubits"):
+        ax.scatter([pos[q][1] for q in port["qubits"]], [pos[q][0] for q in port["qubits"]], s=330, facecolors="none",
+                   edgecolors=FP_INK, linewidths=2.4, zorder=6)
     hand = [Line2D([], [], marker="o", ls="", ms=9, mfc=FP_REGION[k], mec=FP_SURF,
                    label=f"{FP_REGION_LABEL[k]}  ({cnt[k]})") for k in ("bulk", "seam", "anchor")]
     hand.append(Line2D([], [], color=FP_INK, lw=3.4, label=f"l-coupler, chip to chip  ({len(links) - len(longs)})"))
     if longs:
         hand.append(Line2D([], [], color=FP_INK, lw=1.6, ls=(0, (4, 2)), label=f"long-range l-coupler  ({len(longs)})"))
     hand.append(Line2D([], [], color=FP_EDGE, lw=1.4, label="intra-chip coupler"))
+    if port.get("qubits"):
+        hand.append(Line2D([], [], marker="o", ls="", ms=13, mfc="none", mec=FP_INK, mew=2.2,
+                           label=f"port qubit: every l-coupler of its chip  ({len(port['qubits'])})"))
+    if npatch:
+        from matplotlib.patches import Patch
+        hand.append(Patch(fc=FP_PATCH[0], ec=FP_PATCH[0], alpha=0.45, lw=2.0,
+                          label="ACE patch p0, p1, ...: tint and outline"))
     ax.legend(handles=hand, loc="upper left", bbox_to_anchor=(0.0, 0.0), ncol=3, frameon=False, fontsize=11.5,
               labelcolor=FP_INK2, handlelength=1.6, columnspacing=1.6)
     return deep
@@ -4232,7 +4339,7 @@ def _fp_pairs(geo, links):
 
 def fp_links(ax, geo, rec, plan):
     """Links placed per facing chip pair: this run, and the ghost-loom plan when the run is not the ghost loom."""
-    _fp_axes(ax, "l-couplers per facing pair", "links placed")
+    _fp_axes(ax, "l-couplers per chip pair", "links placed")
     cm = _fp_pairs(geo, rec["field"]["links"])
     cg = _fp_pairs(plan, plan.links) if plan is not None else Counter()
     pairs = sorted(set(cm) | set(cg))
@@ -4249,6 +4356,8 @@ def fp_links(ax, geo, rec, plan):
     else:
         ax.bar(x, [cm[p] for p in pairs], 0.6, color=FP_INK, label=run_lab)
     ax.set_xticks(x, [f"{u}-{v}" for u, v in pairs])
+    if len(pairs) > 9:
+        ax.tick_params(axis="x", labelsize=8.5, labelrotation=90)
     top = max(list(cm.values()) + list(cg.values()) + [1])
     ax.set_ylim(0, top * 1.25)
     ax.legend(frameon=False, fontsize=10.5, labelcolor=FP_INK2, loc="upper left")
@@ -4294,6 +4403,7 @@ def fp_command(rec, cut=False):
         lab = field_topology(f)
         if t != "grid":
             s += f" --topology {t}" + (f" --hub {f['hub']}" if t == "hub" and f.get("hub") is not None else "")
+        lab = lab.split(", port ")[0]
         if "+" in lab or t == "none":
             s += f" --pairs {lab.split(' + ')[-1]}"
         longs = {tuple(sorted(x)) for x in f.get("long_links") or []}
@@ -4305,7 +4415,9 @@ def fp_command(rec, cut=False):
                 geo_pairs[(max(i for i, o in enumerate(off) if o <= u), max(i for i, o in enumerate(off) if o <= v))] += 1
         k = max(geo_pairs.values(), default=0)
         preset = getattr(nh, "DEVICES", {}).get(dev or "", {}).get("links")
-        if k and str(k) != str(preset):
+        if f.get("port"):
+            s += f" --link-port {f['port']['mode']}" + (" --port-site centre" if f["port"].get("site") == "centre" else "")
+        elif k and str(k) != str(preset):
             s += f" --links {k}"
     return s
 
@@ -4446,7 +4558,7 @@ def fig_field_poster(store, cfg=None, notes=(), vram_gb=8.0, dpi=150, topology=N
 
     axm = fig.add_subplot(gs[0:2, 0:2])
     deep = fp_map(axm, geo, rec, regions, woven)
-    axm.set_title("The field: chips, seams and the l-couplers between them"
+    axm.set_title("The field: chips, their ACE patches and seams, and the l-couplers"
                   + (f"; chip signal at depth {deep}, woven" if deep is not None else ""), loc="left", fontsize=15,
                   color=FP_INK, fontweight="bold", pad=8)
     fp_depth(fig.add_subplot(gs[0, 2:4]), woven, cut, others=others, label=field_topology(rec["field"]))
@@ -4468,6 +4580,12 @@ def fig_field_poster(store, cfg=None, notes=(), vram_gb=8.0, dpi=150, topology=N
               f"the loom carries the {nl} l-couplers between them ({intra} intra-chip and {link_cz} link CZ "
               f"couplers over {len(cpc)} colours).", False),
              (FP_LOOM.get(rec.get("loom"), f"Loom: {rec.get('loom')}."), False)]
+    port = rec["field"].get("port")
+    if port:
+        lines.insert(2, (f"--link-port {port['mode']}: every l-coupler of a chip on its port qubit (ringed). A round is "
+                         f"{' '.join(port.get('schedule') or [])}"
+                         + (f", P carrying one of {port.get('matchings')} matchings per round." if port["mode"] == "mux"
+                            else "."), False))
     if cut:
         lines.append(("Cut links: same links and anchors placed, left out of the circuit. The gap between the "
                       "curves is what the links cost.", False))
@@ -4831,6 +4949,1415 @@ def fig_ghz_field_poster(store, chip_files, base_file=None, device=None, notes=(
     cmd = (f"nighthawk_qrack.py ghz tiles --register {reg} --layer2 {l2.get('mode')} --seed <chip>  (per chiplet)"
            + ("; --layer2 none (no drift)" if base else ""))
     fig.text(0.985, 0.014, cmd, fontsize=10, color=FP_MUTED, ha="right", family="monospace")
+    return fig
+
+
+# ================================================================== configuration lab (--lab-poster)
+# nighthawk_qrack.py lab run records: small fields scored against the exact state of the same circuit. One record
+# per (experiment, configuration, depth, instance): fclass (classical fidelity of the whole output distribution,
+# when the configuration has one), fb_intra / fb_cross (classical fidelity of 8-qubit blocks inside a chip / across
+# a link; every configuration has these), fxeb, marg, signal (the mirror observable), width (widest simulator).
+LP_COL = {"ghost": "#2a78d6", "mean": "#1baf7a", "sample": "#eda100", "ghost+stitch": "#e87ba4",
+          "bridge": "#eb6834", "ace": "#6250d6", "cut": "#8a8984", "exact": "#0b0b0b"}
+LP_NAME = {"ghost": "ghost loom", "mean": "mean-field loom", "sample": "sample loom", "cut": "links cut",
+           "ghost+stitch": "ghost loom, stitched readout"}
+LP_METRIC = {"fclass": "classical fidelity of the output distribution", "fb_cross": "8-qubit block fidelity across a link",
+             "fb_intra": "8-qubit block fidelity inside a chip", "fxeb": "linear XEB / ideal", "marg": "mean |P(1) - exact|",
+             "signal": "mirror signal 1 - 2h"}
+
+
+def lab_load(paths):
+    recs, fails = [], []
+    for p in paths:
+        for line in open(p):
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            (fails if r.get("failed") else recs).append(r)
+    return recs, fails
+
+
+def lab_family(inter):
+    for k in ("ghost+stitch", "ghost", "mean", "sample", "cut", "bridge", "ace", "exact"):
+        if inter.startswith(k):
+            return k
+    return "exact"
+
+
+def lab_label(inter):
+    f = inter.split(":")
+    if f[0] == "bridge":
+        return f"bridge, {f[1]} bond" + ("s" if f[1] != "1" else "") + (" (ring)" if "wrap" in f else "")
+    if f[0] == "ace":
+        return f"ACE seam {':'.join(f[1:4])}"
+    return LP_NAME.get(inter, inter)
+
+
+def lab_stat(recs, exp, cfg, metric, depth=None):
+    """Mean and standard error over instances: {depth: (mean, se, count)}, or that tuple for one depth."""
+    by = defaultdict(list)
+    for r in recs:
+        if r["exp"] == exp and r["cfg"] == cfg and r.get(metric) is not None:
+            by[r["depth"]].append(r[metric])
+    out = {d: (float(np.mean(v)), float(np.std(v, ddof=1) / math.sqrt(len(v))) if len(v) > 1 else 0.0, len(v))
+           for d, v in by.items()}
+    return out if depth is None else out.get(depth)
+
+
+def lab_cfgs(recs, exp, group=None):
+    seen = {}
+    for r in recs:
+        if r["exp"] == exp and (group is None or r.get("group") == group):
+            seen.setdefault(r["cfg"], r)
+    return seen
+
+
+def _lp_style(inter):
+    fam = lab_family(inter)
+    f = inter.split(":")
+    kw = dict(color=LP_COL[fam], lw=2.2, marker="o", ms=6.5, mec=FP_SURF, mew=1.2)
+    if fam == "cut":
+        kw.update(ls="--", marker="s")
+    if fam == "bridge":
+        b = int(f[1])
+        kw.update(lw=1.0 + 0.45 * b, marker="D", ms=5.5, alpha=min(1.0, 0.45 + 0.14 * b))
+    if fam == "sample":
+        kw.update(marker="^")
+    if fam == "ghost+stitch":
+        kw.update(ls=":", marker="v")
+    return kw
+
+
+def lp_spread(ends, lo, hi, gap):
+    """Label heights pushed apart by at least gap, kept under hi. ends: [[y, ...]] sorted in place."""
+    ends.sort(key=lambda t: t[0])
+    for i in range(1, len(ends)):
+        if ends[i][0] - ends[i - 1][0] < gap:
+            ends[i][0] = ends[i - 1][0] + gap
+    over = ends[-1][0] - (hi - gap * 0.4) if ends else 0
+    if over > 0:
+        for t in ends:
+            t[0] -= over
+    return ends
+
+
+def lp_lines(ax, recs, exp, cfgs, metric, title, size=15, ylim=(0, 1.04), labels=None, ylabel=None, gap=0.045):
+    """Metric against depth, one line per configuration, labelled at its last point (labels spread apart)."""
+    _fp_axes(ax, title, ylabel or LP_METRIC[metric], "depth (cycles)", size)
+    ends, depths = [], set()
+    for cfg, inter in cfgs:
+        st = lab_stat(recs, exp, cfg, metric)
+        if not st:
+            continue
+        ds = sorted(st)
+        depths |= set(ds)
+        m = [st[d][0] for d in ds]
+        e = [st[d][1] for d in ds]
+        kw = _lp_style(inter)
+        ax.errorbar(ds, m, yerr=e, capsize=0, elinewidth=1.0, zorder=3, **kw)
+        ends.append([m[-1], (labels or {}).get(cfg, lab_label(inter)), kw["color"], ds[-1], m[-1]])
+    if not ends:
+        return
+    ax.set_xticks(sorted(depths))
+    lo, hi = ylim if ylim else ax.get_ylim()
+    ax.set_ylim(lo, hi)
+    lp_spread(ends, lo, hi, (hi - lo) * gap)
+    xmax = max(depths)
+    ax.set_xlim(min(depths) - 0.6, xmax + (xmax - min(depths)) * 0.42 + 0.6)
+    for y, lab, col, x0, y0 in ends:
+        ax.plot([x0 + 0.15, x0 + 0.75], [y0, y], color=col, lw=0.8, alpha=0.7, zorder=2)
+        ax.text(x0 + 0.85, y, f"{lab}  {y0:.2f}", fontsize=10.5, color=FP_INK2, va="center")
+
+
+def lp_bars(ax, recs, exp, groups, inters, metric, depth, title, size=15, find=None, ylim=(0, 1.08), fmt="{:.2f}",
+            xlabels=None, ylabel=None):
+    """Grouped bars: one group per entry of groups [(label, cfg name prefix or callable)], one bar per interconnect."""
+    _fp_axes(ax, title, ylabel or f"{LP_METRIC[metric]}, depth {depth}", None, size)
+    w = 0.8 / max(1, len(inters))
+    for gi, (glab, gkey) in enumerate(groups):
+        for ii, inter in enumerate(inters):
+            cfg = find(gkey, inter) if find else f"{gkey} {inter}"
+            ex = exp(gkey) if callable(exp) else exp
+            st = lab_stat(recs, ex, cfg, metric, depth)
+            if st is None:
+                continue
+            x = gi - 0.4 + (ii + 0.5) * w
+            kw = _lp_style(inter)
+            ax.bar(x, st[0], w * 0.92, color=kw["color"], alpha=kw.get("alpha", 1.0),
+                   hatch="//" if lab_family(inter) == "cut" else None, edgecolor=FP_SURF, linewidth=0.8)
+            ax.errorbar([x], [st[0]], yerr=[st[1]], color=FP_INK, lw=1.0, capsize=0)
+            ax.text(x, st[0] + 0.02 * (ylim[1] - ylim[0]), fmt.format(st[0]), ha="center", fontsize=8.8, color=FP_INK2,
+                    rotation=90 if len(inters) * len(groups) > 22 else 0, va="bottom")
+    ax.set_xticks(range(len(groups)), xlabels or [g[0] for g in groups])
+    ax.set_ylim(*ylim)
+    ax.tick_params(axis="x", labelsize=10.5)
+
+
+def lp_legend(ax, inters, ncol=1, loc="upper right", **kw):
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    hand = []
+    for inter in inters:
+        st = _lp_style(inter)
+        hand.append(Patch(fc=st["color"], alpha=st.get("alpha", 1.0), ec=FP_SURF,
+                          hatch="//" if lab_family(inter) == "cut" else None, label=lab_label(inter)))
+    del Line2D
+    ax.legend(handles=hand, frameon=False, fontsize=10, labelcolor=FP_INK2, loc=loc, ncol=ncol, handlelength=1.3,
+              columnspacing=1.2, **kw)
+
+
+def lp_notes(fig, ax, lines, width=56):
+    import textwrap
+    ax.axis("off")
+    ax_h = ax.get_position().height * fig.get_figheight()
+    y = 1.0
+    for txt, head in lines:
+        size = 14 if head else 10.8
+        for ln in textwrap.wrap(txt, width):
+            ax.text(0.0, y, ln, transform=ax.transAxes, fontsize=size, color=FP_INK if head else FP_INK2,
+                    fontweight="bold" if head else None, va="top")
+            y -= size * 1.45 / 72 / ax_h
+        y -= (4 if head else 7) / 72 / ax_h
+
+
+def lp_header(fig, title, sub, tiles):
+    import textwrap
+    fig.text(0.035, 0.955, title, fontsize=34, color=FP_INK, fontweight="bold", ha="left", va="baseline")
+    for i, ln in enumerate(textwrap.wrap(sub, 215)[:2]):
+        fig.text(0.035, 0.925 - i * 0.017, ln, fontsize=14, color=FP_INK2, ha="left")
+    for i, (big, small) in enumerate(tiles):
+        x = 0.035 + i * 0.19
+        fig.text(x, 0.862, big, fontsize=30, color=FP_INK, fontweight="bold", ha="left")
+        fig.text(x, 0.845, small, fontsize=11.5, color=FP_INK2, ha="left")
+
+
+def _lp_fig(dpi):
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(24, 16.5), dpi=dpi, facecolor=FP_SURF)
+    gs = fig.add_gridspec(3, 4, left=0.04, right=0.985, top=0.80, bottom=0.07,
+                          height_ratios=[1.0, 1.0, 0.95], width_ratios=[1, 1, 1, 1.05], hspace=0.46, wspace=0.26)
+    return fig, gs
+
+
+def _lp_v(recs, exp, cfg, metric, depth):
+    st = lab_stat(recs, exp, cfg, metric, depth)
+    return st[0] if st else float("nan")
+
+
+LP_FOOT = "nighthawk_qrack.py lab run; every score is against the exact state of the same circuit on the same field"
+
+
+def fig_lab_between(recs, notes=(), dpi=150):
+    """Poster 1: how the l-couplers are carried between chiplets (chips exact, so the interconnect is the only error)."""
+    fig, gs = _lp_fig(dpi)
+    inters = ["bridge:6", "bridge:4", "bridge:3", "bridge:2", "bridge:1", "ghost", "ghost+stitch", "mean", "sample", "cut"]
+    D = 8
+    g3, m3, c3 = (_lp_v(recs, "inter", f"K3 {k}", "fclass", D) for k in ("ghost", "mean", "cut"))
+    b = {k: _lp_v(recs, "inter", f"K3 bridge:{k}", "fclass", D) for k in (1, 2, 3, 4)}
+    lp_header(fig, "Between chiplets: what carries the l-couplers best",
+              "Two exact chips of 3 x 4 qubits (24 qubits), one to three l-couplers on the facing border, Haar single-qubit "
+              "gates and CZ on the four coupler colours. Each interconnect runs the same circuit; its whole output "
+              "distribution is compared with the exact state's (classical fidelity, 1 = identical). 3 to 4 instances per point.",
+              [(f"{g3:.2f}", f"ghost loom, 3 links, depth {D}"), (f"{m3:.2f} / {c3:.2f}", "mean-field loom / links cut"),
+               (f"{b[2]:.2f} / {b[4]:.2f}", "QrackBridge, 2 / 4 bond qubits"),
+               (f"{_lp_v(recs, 'inter', 'K3 cut', 'signal', D):.2f}", "mirror signal with the links cut"),
+               (f"{_lp_v(recs, 'inter', 'K3 ghost', 'fclass', 12):.2f} / {_lp_v(recs, 'inter', 'K3 bridge:4', 'fclass', 12):.2f}",
+                "depth 12: ghost loom / bridge, 4 bonds")])
+    ax = fig.add_subplot(gs[0:2, 0:2])
+    lp_lines(ax, recs, "inter", [(f"K3 {i}", i) for i in inters], "fclass",
+             "Three l-couplers: fidelity of the output distribution against depth")
+    lp_lines(fig.add_subplot(gs[0, 2:4]), recs, "inter", [(f"K1 {i}", i) for i in inters if i != "bridge:6"], "fclass",
+             "One l-coupler", gap=0.085)
+    # links per pair
+    ax = fig.add_subplot(gs[1, 2])
+    _fp_axes(ax, f"More links: fidelity at depth {D}", LP_METRIC["fclass"], "l-couplers per pair")
+    ends = []
+    for inter in ("bridge:3", "bridge:2", "bridge:1", "ghost", "mean", "cut"):
+        ys = [_lp_v(recs, "inter" if K != 2 else "links", f"K{K} {inter}", "fclass", D) for K in (1, 2, 3)]
+        ax.plot([1, 2, 3], ys, **_lp_style(inter))
+        ends.append([ys[-1], lab_label(inter), _lp_style(inter)["color"], ys[-1]])
+    for y, lab, col, y0 in lp_spread(ends, 0, 1.04, 0.075):
+        ax.plot([3.04, 3.16], [y0, y], color=col, lw=0.8, alpha=0.7)
+        ax.text(3.2, y, f"{lab}  {y0:.2f}", fontsize=9.5, color=FP_INK2, va="center")
+    ax.set_xticks([1, 2, 3])
+    ax.set_xlim(0.8, 4.9)
+    ax.set_ylim(0, 1.04)
+    # bond budget
+    ax = fig.add_subplot(gs[1, 3])
+    _fp_axes(ax, "Bond budget, three links", LP_METRIC["fclass"], "bond qubits on the cut")
+    ends = []
+    for dd, a_ in ((D, 1.0), (12, 0.55)):
+        ys = [_lp_v(recs, "inter", f"K3 bridge:{b_}", "fclass", dd) for b_ in (1, 2, 3, 4)]
+        ax.plot([1, 2, 3, 4], ys, color=LP_COL["bridge"], lw=2.0, marker="D", ms=5.5, mec=FP_SURF, alpha=a_)
+        ends.append([ys[-1], f"bridge, depth {dd}", LP_COL["bridge"], ys[-1]])
+        gy = _lp_v(recs, "inter", "K3 ghost", "fclass", dd)
+        ax.plot([0.8, 4.0], [gy, gy], color=LP_COL["ghost"], lw=1.6, alpha=a_, ls="-" if dd == D else "--")
+        ends.append([gy, f"ghost loom, depth {dd}", LP_COL["ghost"], gy])
+    for y, lab, col, y0 in lp_spread(ends, 0, 1.04, 0.075):
+        ax.plot([4.05, 4.2], [y0, y], color=col, lw=0.8, alpha=0.7)
+        ax.text(4.25, y, f"{lab}  {y0:.2f}", fontsize=9.5, color=FP_INK2, va="center")
+    ax.set_xticks([1, 2, 3, 4])
+    ax.set_xlim(0.7, 6.6)
+    ax.set_ylim(0, 1.04)
+    # mirror signal against the truth
+    ax = fig.add_subplot(gs[2, 0])
+    _fp_axes(ax, "The mirror signal is not the fidelity", LP_METRIC["fclass"], LP_METRIC["signal"])
+    ax.grid(axis="x", color=FP_GRID, lw=0.8)
+    ax.plot([0, 1], [0, 1], color=FP_EDGE, lw=1.2, zorder=1)
+    fams = []
+    for r in recs:
+        if r["exp"] in ("inter", "links") and r.get("fclass") is not None and r.get("signal") is not None:
+            fam = lab_family(r["inter"])
+            if fam in ("exact",):
+                continue
+            fams.append(fam)
+            ax.scatter(r["signal"], r["fclass"], s=22, color=LP_COL[fam], alpha=0.6, lw=0, zorder=3,
+                       marker="s" if fam == "cut" else "o")
+    lp_legend(ax, ["ghost", "mean", "sample", "bridge:4", "cut"], ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.2))
+    ax.get_legend().get_texts()[3].set_text("QrackBridge")
+    ax.set_xlim(-0.03, 1.05)
+    ax.set_ylim(0, 1.04)
+    # block fidelity across the link, with the ACE seam
+    ax = fig.add_subplot(gs[2, 1])
+    sel = ["ghost", "mean", "cut", "bridge:2", "bridge:4", "ace:24:3:3", "ace:32:4:4"]
+    _fp_axes(ax, "Blocks across a link, incl. an ACE seam", LP_METRIC["fb_cross"], None)
+    w = 0.8 / len(sel)
+    for gi, dd in enumerate((4, 6, 8)):
+        for ii, inter in enumerate(sel):
+            st = lab_stat(recs, "inter", f"K3 {inter}", "fb_cross", dd)
+            if st is None:
+                continue
+            x = gi - 0.4 + (ii + 0.5) * w
+            kw = _lp_style(inter)
+            ax.bar(x, st[0] - 0.5, w * 0.92, bottom=0.5, color=kw["color"], alpha=kw.get("alpha", 1.0),
+                   hatch="//" if lab_family(inter) == "cut" else None, edgecolor=FP_SURF, linewidth=0.8)
+            ax.text(x, st[0] + 0.006, f"{st[0]:.2f}", ha="center", fontsize=8.5, color=FP_INK2, rotation=90, va="bottom")
+    ax.set_xticks(range(3), ["depth 4", "depth 6", "depth 8"])
+    ax.set_ylim(0.5, 1.09)
+    lp_legend(ax, sel, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.09))
+    # width
+    ax = fig.add_subplot(gs[2, 2])
+    _fp_axes(ax, f"What it costs: widest simulator, 3 links, depth {D}", "qubits in the widest simulator", None)
+    sel = ["cut", "mean", "ghost", "bridge:1", "bridge:2", "bridge:3", "bridge:4", "ace:24:3:3"]
+    for i, inter in enumerate(sel):
+        wv = _lp_v(recs, "inter", f"K3 {inter}", "width", D)
+        kw = _lp_style(inter)
+        ax.bar(i, wv, 0.66, color=kw["color"], alpha=kw.get("alpha", 1.0), hatch="//" if inter == "cut" else None,
+               edgecolor=FP_SURF)
+        ax.text(i, wv + 0.25, f"{wv:.0f}", ha="center", fontsize=10.5, color=FP_INK2)
+    ax.axhline(24, color=FP_INK2, lw=1.0, ls=":")
+    ax.text(len(sel) - 0.5, 24.2, "the whole field, exact", fontsize=10, color=FP_INK2, ha="right", va="bottom")
+    ax.set_xticks(range(len(sel)), [lab_label(i).replace("bridge, ", "br ").replace(" bonds", "b").replace(" bond", "b")
+                                    .replace("mean-field loom", "mean").replace("ghost loom", "ghost")
+                                    .replace("links cut", "cut").replace("ACE seam ", "ACE ") for i in sel], fontsize=9.5)
+    ax.set_ylim(0, 27)
+    lines = [("What the data says", True),
+             (f"The looms give a product over the chips. The ghost loom still reaches {g3:.2f} at depth {D} with three "
+              f"links; the mean-field loom ({m3:.2f}) is no better than leaving the links out ({c3:.2f}).", False),
+             (f"QrackBridge is exact while its bonds hold the cut, then decays; the ghost loom holds a plateau. With "
+              f"one bond for three links it is below the cut baseline at depth 6 "
+              f"({_lp_v(recs, 'inter', 'K3 bridge:1', 'fclass', 6):.2f} against "
+              f"{_lp_v(recs, 'inter', 'K3 cut', 'fclass', 6):.2f}).", False),
+             ("Stitching the ghost loom's readout through its ghosts helps at depth 4 and hurts from depth 6.", False),
+             (f"Mirror signal: 1 with the links cut, {_lp_v(recs, 'inter', 'K3 mean', 'signal', D):.2f} for the "
+              "mean-field loom at the same fidelity. It cannot rank interconnects.", False)]
+    lp_notes(fig, fig.add_subplot(gs[2, 3]), lines + [(t, False) for t in notes])
+    fig.text(0.985, 0.014, LP_FOOT, fontsize=10, color=FP_MUTED, ha="right", family="monospace")
+    return fig
+
+
+def _lp_inside_label(cfg):
+    return {"exact": "exact chips"}.get(cfg, cfg)
+
+
+def fig_lab_inside(recs, notes=(), dpi=150):
+    """Poster 2: inside the chiplet (ACE patches against QrackBridge patches), and inside x between."""
+    fig, gs = _lp_fig(dpi)
+    D = 8
+    br = {b_: _lp_v(recs, "inside", f"bridge 2 strips b{b_}", "fclass", D) for b_ in (1, 2, 3, 4, 6)}
+    ace_i = _lp_v(recs, "inside", "ace:20:2:4", "fb_intra", D)
+    br_i = _lp_v(recs, "inside", "bridge 2 strips b3", "fb_intra", D)
+    lp_header(fig, "Inside the chiplet: ACE patches or QrackBridge patches",
+              "Left and top: one chip of 4 x 5 qubits cut in two (or four) patches, no interconnect. A row cut crosses "
+              "five couplers, as a 12 x 10 chiplet's crosses ten. Bottom: the two-chip field of poster 1 (three links) "
+              "with each engine inside the chips and each interconnect between them. ACE keeps no state to read, so it "
+              "is scored on 8-qubit blocks and on XEB.",
+              [(f"{br[2]:.2f} / {br[3]:.2f}", f"bridge inside, 2 / 3 bonds, depth {D}"),
+               (f"{br_i:.3f}", "bridge 3 bonds, blocks inside the chip"),
+               (f"{ace_i:.3f}", "ACE 20:2:4, blocks inside the chip"),
+               (f"{_lp_v(recs, 'inside', 'ace:20:2:4', 'width', D):.0f} / {_lp_v(recs, 'inside', 'bridge 2 strips b3', 'width', D):.0f}",
+                "widest simulator: ACE / bridge 3 bonds"),
+               (f"{_lp_v(recs, 'inside', 'ace:20:2:4', 'signal', D):.2f} / {_lp_v(recs, 'inside', 'bridge 2 strips b3', 'signal', D):.2f}",
+                "mirror signal: ACE / bridge 3 bonds")])
+    ax = fig.add_subplot(gs[0:2, 0:2])
+    cf = [(f"bridge 2 strips b{b_}", f"bridge:{b_}") for b_ in (6, 4, 3, 2, 1)]
+    lp_lines(ax, recs, "inside", cf, "fclass", "One 4 x 5 chip as two QrackBridge patches: fidelity of the output distribution",
+             labels={c: f"2 patches, {i.split(':')[1]} bonds" for c, i in cf})
+    for b_ in (1, 2, 3):
+        st = lab_stat(recs, "inside", f"bridge 4 strips b{b_}", "fclass")
+        if st:
+            ds = sorted(st)
+            ax.plot(ds, [st[d][0] for d in ds], color=LP_COL["bridge"], ls=":", lw=1.0 + 0.45 * b_, marker="x", ms=6)
+            ax.text(ds[0] - 0.15, st[ds[0]][0], f"4 patches, {b_}b", fontsize=9.5, color=FP_INK2, ha="right", va="center")
+    ax.set_xlim(ax.get_xlim()[0] - 1.2, ax.get_xlim()[1])
+    # blocks inside the chip: ACE against bridge
+    ax = fig.add_subplot(gs[0, 2:4])
+    aces = ["ace:20:2:4", "ace:20:2:4:noed", "ace:20:1:4", "ace:30:3:5"]
+    cf = [(f"bridge 2 strips b{b_}", f"bridge:{b_}") for b_ in (3, 2, 1)] + [(a_, a_) for a_ in aces]
+    lab = {c: f"bridge {i.split(':')[1]}b" for c, i in cf[:3]}
+    lab.update({a_: "ACE " + a_[4:].replace(":noed", " no e.d.") for a_ in aces})
+    lp_lines(ax, recs, "inside", cf, "fb_intra", "The same chip, 8-qubit blocks: bridge against ACE registers", labels=lab,
+             ylim=(0.5, 1.02), gap=0.075)
+    # mixed table
+    ax = fig.add_subplot(gs[1, 2:4])
+    ax.axis("off")
+    ax.set_title(f"Inside x between, three links, depth {D}: block fidelity inside / across the link (XEB)", loc="left",
+                 fontsize=15, color=FP_INK, fontweight="bold", pad=12)
+    rows = [("exact chips", "inter", "K3 {}"), ("bridge 2 patches, 3 bonds for 3 couplers", "mixed", "bridge:2:3:cols + {}"),
+            ("bridge 2 patches, 2 bonds for 3 couplers", "mixed", "bridge:2:2:cols + {}"), ("ACE 24:3:3", "mixed", "ace:24:3:3 + {}"),
+            ("ACE 20:2:4", "mixed", "ace:20:2:4 + {}"), ("ACE 16:2:4", "mixed", "ace:16:2:4 + {}"),
+            ("ACE 12:2:3 (no spare site)", "mixed", "ace:12:2:3 + {}")]
+    cols = ["ghost", "mean", "cut"]
+    body, shade = [], []
+    for name, exp, pat in rows:
+        line, sh = [name], [None]
+        for c in cols:
+            a_, x_, f_ = (_lp_v(recs, exp, pat.format(c), m, D) for m in ("fb_intra", "fb_cross", "fxeb"))
+            line.append("" if not np.isfinite(a_) else f"{a_:.3f} / {x_:.3f}  ({f_:.2f})")
+            sh.append(x_ if np.isfinite(a_) else None)
+        body.append(line)
+        shade.append(sh)
+    for b_ in (4, 3, 2, 1):
+        a_, x_, f_ = (_lp_v(recs, "mixed", f"bridge everywhere b{b_}", m, D) for m in ("fb_intra", "fb_cross", "fxeb"))
+        body.append([f"bridge everywhere, {b_} bonds (4 patches)", f"{a_:.3f} / {x_:.3f}  ({f_:.2f})" if np.isfinite(a_) else "", "", ""])
+        shade.append([None, x_ if np.isfinite(a_) else None, None, None])
+    tb = ax.table(cellText=body, colLabels=["inside the chips", "ghost loom", "mean-field loom", "links cut"],
+                  loc="upper left", cellLoc="center", colLoc="center", bbox=[0.0, 0.0, 1.0, 0.97],
+                  colWidths=[0.31, 0.23, 0.23, 0.23])
+    tb.auto_set_font_size(False)
+    tb.set_fontsize(11)
+    vals = [v for sh in shade for v in sh if v is not None]
+    lo, hi = (min(vals), max(vals)) if vals else (0, 1)
+    for (i, j), cell in tb.get_celld().items():
+        cell.set_edgecolor(FP_SURF)
+        cell.set_linewidth(2)
+        cell.get_text().set_color(FP_INK if i == 0 else FP_INK2)
+        if i == 0:
+            cell.set_facecolor(FP_TILE)
+            cell.get_text().set_fontweight("bold")
+        else:
+            v = shade[i - 1][j]
+            if v is None:
+                cell.set_facecolor(FP_SURF if j else "#f7f6f3")
+            else:
+                t = (v - lo) / (hi - lo + 1e-12)
+                cell.set_facecolor(FP_GRAYS[min(len(FP_GRAYS) - 1, int(t * (len(FP_GRAYS) - 0.01)))])
+                cell.get_text().set_color(FP_SURF if t > 0.6 else FP_INK)
+    ax.text(0.0, -0.03, "bridge everywhere: one QrackBridge chain of four patches over both chips, no loom; every cut "
+            "crosses 3 couplers or links.",
+            transform=ax.transAxes, fontsize=10, color=FP_INK2, va="top")
+    # fidelity against width
+    ax = fig.add_subplot(gs[2, 0:2])
+    _fp_axes(ax, f"Fidelity for memory: blocks across the link against the widest simulator, depth {D}",
+             LP_METRIC["fb_cross"], "qubits in the widest simulator (memory doubles per qubit)")
+    ax.grid(axis="x", color=FP_GRID, lw=0.8)
+    pts = []
+    for exp in ("inter", "mixed"):
+        for cfg, r in lab_cfgs(recs, exp).items():
+            if exp == "inter" and not cfg.startswith("K3"):
+                continue
+            y, wv = _lp_v(recs, exp, cfg, "fb_cross", D), _lp_v(recs, exp, cfg, "width", D)
+            if np.isfinite(y) and np.isfinite(wv):
+                ins = r.get("inside", "exact")
+                fam = "ace" if (ins.startswith("ace") or r["inter"].startswith("ace")) else lab_family(r["inter"])
+                if ins.startswith("bridge") and fam != "bridge":
+                    fam = "bridge"
+                if "stitch" in r["inter"] or "sample" in r["inter"]:
+                    continue
+                pts.append((wv, y, fam, cfg.replace("K3 ", "exact + ").replace(":cols", "")))
+    for wv, y, fam, name in pts:
+        ax.scatter(wv, y, s=70, color=LP_COL[fam], edgecolors=FP_SURF, linewidths=1.2, zorder=3,
+                   marker={"ace": "s", "bridge": "D", "cut": "X"}.get(fam, "o"))
+    # label the upper envelope and a few others without collisions
+    used = []
+    for wv, y, fam, name in sorted(pts, key=lambda t: -t[1]):
+        if all(abs(wv - u[0]) > 1.6 or abs(y - u[1]) > 0.02 for u in used):
+            used.append((wv, y))
+            ax.annotate(name, (wv, y), xytext=(7, 5), textcoords="offset points", fontsize=9, color=FP_INK2)
+    ax.set_ylim(min([p_[1] for p_ in pts] + [1.0]) - 0.04, 1.02)
+    lp_legend(ax, ["ghost", "mean", "cut", "bridge:4", "ace:1:1:1"], ncol=5, loc="upper center", bbox_to_anchor=(0.5, -0.2))
+    tx = ax.get_legend().get_texts()
+    tx[3].set_text("QrackBridge (inside or between)")
+    tx[4].set_text("ACE (inside or between)")
+    # ghost room
+    ax = fig.add_subplot(gs[2, 2])
+    _fp_axes(ax, "Ghost room in the ACE register (3 links wanted)", "links that get a ghost", None)
+    regs = ["ace:12:2:3", "ace:16:2:4", "ace:20:2:4", "ace:24:3:3"]
+    got = []
+    for rg in regs:
+        r = lab_cfgs(recs, "mixed").get(f"{rg} + ghost")
+        got.append(r["links"] if r else 0)
+    ax.bar(range(len(regs)), got, 0.6, color=LP_COL["ace"])
+    for i, v in enumerate(got):
+        ax.text(i, v + 0.06, str(v), ha="center", fontsize=11, color=FP_INK2)
+    ax.set_xticks(range(len(regs)), [f"{rg.split(':')[1]} sites\n{rg[4:]}" for rg in regs], fontsize=10)
+    ax.set_ylim(0, 3.6)
+    ax.set_yticks([0, 1, 2, 3])
+    ag, am = (_lp_v(recs, "mixed", f"ace:20:2:4 + {k}", "fb_cross", D) for k in ("ghost", "mean"))
+    lines = [("What the data says", True),
+             (f"A bridge cut needs about as many bonds as the couplers it crosses. Five couplers on three bonds: "
+              f"{br[3]:.2f} at depth {D}; on two: {br[2]:.2f}.", False),
+             (f"On the same chip ACE's blocks hold {ace_i:.2f} at every depth; the three-bond bridge's are at "
+              f"{br_i:.2f} by depth {D}. Where three bonds cover three couplers (table) the bridge inside is ahead "
+              "of ACE; with two they are level.", False),
+             (f"ACE inside costs more than the interconnect (0.99 to 0.92 inside). The ghost loom keeps its lead "
+              f"across the link ({ag:.2f} against {am:.2f}).", False),
+             ("A ghost needs a free ACE site coupled to its anchor.", False)]
+    lp_notes(fig, fig.add_subplot(gs[2, 3]), lines + [(t, False) for t in notes])
+    fig.text(0.985, 0.014, LP_FOOT, fontsize=10, color=FP_MUTED, ha="right", family="monospace")
+    return fig
+
+
+def fig_lab_place(recs, r3=None, notes=(), dpi=150):
+    """Poster 3: where the links land, where the disabled qubits sit, the chip topology, and r3 at full size."""
+    fig, gs = _lp_fig(dpi)
+    D = 8
+    sel = ["ghost", "mean", "bridge:1", "bridge:2", "cut"]
+    v = lambda exp, cfg, m="fclass": _lp_v(recs, exp, cfg, m, D)
+    lp_header(fig, "Where the links land, what to disable, which topology",
+              "Top: two exact chips, the same links placed on different rows of the facing border, at the chip's centre "
+              "instead of its border, and with the three disabled qubits next to the link anchors or far from them. "
+              "Middle: six 2 x 2 chips on a 2 x 3 grid, one link per pair. Bottom: Nighthawk r3 at full size, from "
+              "field plan. Classical fidelity of the output distribution, depth 8.",
+              [(f"{v('rows', 'centre row ghost'):.2f} / {v('inter', 'K1 ghost'):.2f}", "one link: centre row / corner row, ghost"),
+               (f"{v('holes', 'centre of the chip ghost'):.2f} / {v('holes', 'corner of the border ghost'):.2f}",
+                "one link: chip centre / border corner, ghost"),
+               (f"{v('holes', 'disabled at the links ghost'):.2f} / {v('holes', 'disabled far from the links ghost'):.2f}",
+                "disabled at the links / far, ghost"),
+               (f"{v('numa', 'grid ghost'):.2f} / {v('numa', 'ring ghost'):.2f}", "six chips: grid / ring, ghost"),
+               (f"{v('numa', 'grid bridge chain b2'):.2f}", "six chips, grid: bridge chain, 2 bonds")])
+    ax = fig.add_subplot(gs[0, 0:2])
+    groups = [("1 link\ncorner row", ("inter", "K1 {}")), ("1 link\ncentre row", ("rows", "centre row {}")),
+              ("2 links\nrows 0, 1", ("rows", "adjacent rows 0,1 {}")), ("2 links\nrows 0, 2", ("links", "K2 {}")),
+              ("3 links\nall rows", ("inter", "K3 {}"))]
+    lp_bars(ax, recs, lambda g: g[0], groups, sel, "fclass", D, "Rows of the facing border", find=lambda g, i: g[1].format(i))
+    lp_legend(ax, sel, ncol=5, loc="upper center", bbox_to_anchor=(0.5, 1.02))
+    ax.set_ylim(0, 1.25)
+    ax = fig.add_subplot(gs[0, 2:4])
+    groups = [("1 link\nborder corner", "corner of the border"), ("1 link\nchip centre", "centre of the chip"),
+              ("2 links\ntwo corners", "two corners"), ("2 links\ncentre + corner", "centre + corner"),
+              ("2 links, disabled\nat the links", "disabled at the links"),
+              ("2 links, disabled\nfar from the links", "disabled far from the links")]
+    lp_bars(ax, recs, "holes", groups, sel, "fclass", D, "Border or centre; disabled qubits near or far (3 x 5 cells, 3 disabled)")
+    ax.set_ylim(0, 1.25)
+    ax = fig.add_subplot(gs[1, 0:2])
+    selt = ["ghost", "mean", "cut", "bridge:1", "bridge:2", "bridge:1:wrap", "bridge:2:wrap"]
+
+    def find_numa(g, i):
+        f = i.split(":")
+        if f[0] == "bridge":
+            return f"{g} bridge {'ring' if 'wrap' in f else 'chain'} b{f[1]}"
+        return f"{g} {i}"
+    _fp_axes(ax, "Six chips, one link per pair: topology and interconnect", f"{LP_METRIC['fclass']}, depth {D}", None)
+    topo = ["grid", "ring", "grid + 0-5"]
+    w = 0.8 / len(selt)
+    for gi, g in enumerate(topo):
+        for ii, inter in enumerate(selt):
+            st = lab_stat(recs, "numa", find_numa(g, inter), "fclass", D)
+            if st is None:
+                continue
+            x = gi - 0.4 + (ii + 0.5) * w
+            kw = _lp_style(inter)
+            ax.bar(x, st[0], w * 0.92, color=kw["color"], alpha=kw.get("alpha", 1.0), edgecolor=FP_SURF, linewidth=0.8,
+                   hatch="//" if inter == "cut" else ("..." if "wrap" in inter else None))
+            ax.text(x, st[0] + 0.015, f"{st[0]:.2f}", ha="center", fontsize=9, color=FP_INK2)
+    ax.set_xticks(range(len(topo)), ["grid (7 pairs, hops 1.67 / 3)", "ring (6 pairs, hops 1.80 / 3)",
+                                     "grid + long link 0-5 (8 pairs, hops 1.53 / 2)"])
+    ax.set_ylim(0, 1.2)
+    from matplotlib.patches import Patch
+    hand = [Patch(fc=LP_COL[k], ec=FP_SURF, hatch=h, label=l) for k, h, l in (
+        ("ghost", None, "ghost loom"), ("mean", None, "mean-field loom"), ("cut", "//", "links cut"),
+        ("bridge", None, "bridge chain 0..5, 1 / 2 bonds"), ("bridge", "...", "bridge ring 0-1-2-5-4-3, 1 / 2 bonds"))]
+    ax.legend(handles=hand, frameon=False, fontsize=10, labelcolor=FP_INK2, loc="upper center", ncol=5,
+              handlelength=1.3, columnspacing=1.2)
+    # disabled near / far with ACE chips
+    ax = fig.add_subplot(gs[1, 2:4])
+    _fp_axes(ax, "Disabled qubits near or far, ACE inside the chips: blocks across the link", f"{LP_METRIC['fb_cross']}, depth 6", None)
+    combos = [("exact chips", "{} {}", "ghost"), ("exact chips", "{} {}", "mean"),
+              ("ACE 20:2:4", "{} ace:20:2:4 + {}", "ghost"), ("ACE 20:2:4", "{} ace:20:2:4 + {}", "mean"),
+              ("ACE 16:2:4", "{} ace:16:2:4 + {}", "ghost"), ("ACE 16:2:4", "{} ace:16:2:4 + {}", "mean")]
+    for gi, g in enumerate(("disabled at the links", "disabled far from the links")):
+        for ii, (ins, pat, inter) in enumerate(combos):
+            st = lab_stat(recs, "holes", pat.format(g, inter), "fb_cross", 6)
+            if st is None:
+                continue
+            x = gi - 0.4 + (ii + 0.5) * 0.8 / len(combos)
+            ax.bar(x, st[0] - 0.5, 0.8 / len(combos) * 0.92, bottom=0.5, color=LP_COL[inter], edgecolor=FP_SURF,
+                   hatch=None if ins.startswith("exact") else ("xx" if "20" in ins else ".."))
+            ax.text(x, st[0] + 0.006, f"{st[0]:.3f}", ha="center", fontsize=9.5, color=FP_INK2)
+    ax.set_xticks([0, 1], ["disabled at the links", "disabled far from the links"])
+    ax.set_ylim(0.5, 1.1)
+    hand = [Patch(fc=LP_COL["ghost"], ec=FP_SURF, label="ghost loom"), Patch(fc=LP_COL["mean"], ec=FP_SURF, label="mean-field loom"),
+            Patch(fc=FP_GRAYS[2], ec=FP_SURF, label="exact chips"), Patch(fc=FP_GRAYS[2], ec=FP_SURF, hatch="xx", label="ACE 20:2:4"),
+            Patch(fc=FP_GRAYS[2], ec=FP_SURF, hatch="..", label="ACE 16:2:4")]
+    ax.legend(handles=hand, frameon=False, fontsize=10, labelcolor=FP_INK2, loc="upper center", ncol=5, handlelength=1.3)
+    # r3 at full size
+    ax = fig.add_subplot(gs[2, 0:3])
+    ax.axis("off")
+    ax.set_title("Nighthawk r3 at full size on the ghost loom (field plan, six 8 GB dies): what each choice costs",
+                 loc="left", fontsize=15, color=FP_INK, fontweight="bold", pad=12)
+    if r3:
+        head = ["option", "links placed", "skipped", "ghosts per chip", "widest patch", "peak per chip (GiB)", "fits 8 GB dies"]
+        body = [[r["label"], str(r["links"]), str(r["skipped"]), f"{min(r['ghosts'])} to {max(r['ghosts'])}",
+                 str(r["widest"]), f"{min(r['gib']):.1f} to {max(r['gib']):.1f}", "yes" if max(r["gib"]) <= 8.0 else "no (GTT)"]
+                for r in r3]
+        tb = ax.table(cellText=body, colLabels=head, loc="upper left", cellLoc="center", colLoc="center",
+                      bbox=[0.0, 0.0, 1.0, 0.97], colWidths=[0.30, 0.11, 0.09, 0.13, 0.11, 0.15, 0.11])
+        tb.auto_set_font_size(False)
+        tb.set_fontsize(11.5)
+        for (i, j), cell in tb.get_celld().items():
+            cell.set_edgecolor(FP_SURF)
+            cell.set_linewidth(2)
+            cell.set_facecolor(FP_TILE if i == 0 else (FP_SURF if i % 2 else "#f7f6f3"))
+            cell.get_text().set_color(FP_INK if i == 0 else FP_INK2)
+            if i == 0:
+                cell.get_text().set_fontweight("bold")
+    g = lambda cfg, exp="holes": v(exp, cfg)
+    lines = [("What the data says", True),
+             (f"Rows: for the ghost loom the place on the border does not matter ({v('inter', 'K1 ghost'):.2f} corner, "
+              f"{v('rows', 'centre row ghost'):.2f} centre row).", False),
+             (f"Centre or border: the same for the ghost loom ({g('centre of the chip ghost'):.2f}, "
+              f"{g('corner of the border ghost'):.2f}), though a centre link matters more when it is left out "
+              f"({g('centre of the chip cut'):.2f} against {g('corner of the border cut'):.2f}).", False),
+             (f"Disabled qubits at the links buy nothing ({g('disabled at the links ghost'):.2f} against "
+              f"{g('disabled far from the links ghost'):.2f}); the mean-field loom does worse with them there.", False),
+             (f"Six chips: the ghost loom holds {v('numa', 'grid ghost'):.2f} on every topology. A bridge chain only "
+              "wins when the chips form the same chain or ring.", False)]
+    if r3:
+        d_ = next((r for r in r3 if r["args"] == ["--links", "10"]), None)
+        if d_:
+            lines.append((f"r3: 10 links per pair fit the 8 GB dies ({d_['links']} links with a ghost, "
+                          f"{max(d_['gib']):.1f} GiB at most).", False))
+    lp_notes(fig, fig.add_subplot(gs[2, 3]), lines + [(t, False) for t in notes])
+    fig.text(0.985, 0.014, LP_FOOT, fontsize=10, color=FP_MUTED, ha="right", family="monospace")
+    return fig
+
+
+def _ls_stat(recs, layout, inter, logical, key):
+    v = [r[key] for r in recs if r["exp"] == "shor" and r["layout"] == layout and r["inter"] == inter
+         and r["logical"] == logical and r.get(key) is not None]
+    return (float(np.mean(v)), float(np.std(v)), len(v)) if v else None
+
+
+def _ls_schematic(ax, layout, title):
+    """Two 3 x 4 chips, the unit's nine qubits with their blocks outlined, the links, and chip A's ghosts."""
+    from matplotlib.patches import FancyBboxPatch
+    ax.set_aspect("equal")
+    ax.axis("off")
+    gap = 3.2
+    xs = {0: 0.0, 1: 3 + gap}
+    for chip, x0 in xs.items():
+        ax.add_patch(FancyBboxPatch((x0 - 0.5, -0.5), 4, 3, boxstyle="round,pad=0,rounding_size=0.3", fc=FP_TILE,
+                                    ec=FP_EDGE, lw=1.2, zorder=0))
+        for r in range(3):
+            for c in range(4):
+                if c < 3:
+                    ax.plot([x0 + c, x0 + c + 1], [r, r], color=FP_EDGE, lw=1.0, zorder=1)
+                if r < 2:
+                    ax.plot([x0 + c, x0 + c], [r, r + 1], color=FP_EDGE, lw=1.0, zorder=1)
+        ax.text(x0 + 1.5, 2.95, f"chip {'AB'[chip]}", ha="center", fontsize=12, color=FP_INK2)
+    unit = [(0, r, c) for r in range(3) for c in (2, 3)] + [(1, r, 0) for r in range(3)]
+    px = lambda chip, c: xs[chip] + c
+    rows = [1] if layout == "between" else [0, 1, 2]
+    for r in rows:
+        ax.plot([px(0, 3), px(1, 0)], [r, r], color=FP_INK, lw=3.2, zorder=2, solid_capstyle="round")
+        gx = px(0, 3) + 1.05
+        ax.plot([px(0, 3), gx], [r - 0.0, r - 0.34], color=LP_COL["ghost"], lw=1.4, zorder=2)
+        ax.scatter(gx, r - 0.34, s=150, facecolors=FP_SURF, edgecolors=LP_COL["ghost"], linewidths=2.0, zorder=4)
+    blockcol = ["#eb6834", "#6250d6", "#1baf7a"]
+    if layout == "between":
+        blocks = [[(0, r, 2) for r in range(3)], [(0, r, 3) for r in range(3)], [(1, r, 0) for r in range(3)]]
+    else:
+        blocks = [[(0, r, 2), (0, r, 3), (1, r, 0)] for r in range(3)]
+    for bi, blk in enumerate(blocks):
+        for chip in (0, 1):
+            part = [(r, c) for ch, r, c in blk if ch == chip]
+            if not part:
+                continue
+            r0, r1 = min(p[0] for p in part), max(p[0] for p in part)
+            c0, c1 = min(p[1] for p in part), max(p[1] for p in part)
+            ax.add_patch(FancyBboxPatch((px(chip, c0) - 0.3, r0 - 0.3), c1 - c0 + 0.6, r1 - r0 + 0.6,
+                                        boxstyle="round,pad=0,rounding_size=0.25", fc="none", ec=blockcol[bi], lw=2.2,
+                                        zorder=3))
+    for chip in (0, 1):
+        for r in range(3):
+            for c in range(4):
+                on = (chip, r, c) in unit
+                ax.scatter(px(chip, c), r, s=150 if on else 46, color=FP_INK if on else FP_GRAYS[2], zorder=5,
+                           edgecolors=FP_SURF, linewidths=1.2)
+    ax.text((px(0, 3) + px(1, 0)) / 2, -0.95, "l-coupler" + ("s" if len(rows) > 1 else ""), ha="center", fontsize=11,
+            color=FP_INK2)
+    ax.set_xlim(-0.9, 3 + gap + 3.9)
+    ax.set_ylim(3.3, -1.3)
+    ax.set_title(title, loc="left", fontsize=15, color=FP_INK, fontweight="bold", pad=6)
+
+
+def fig_lab_shor(recs, notes=(), dpi=150):
+    """Poster 4: Shor's [[9,1,3]] code laid across a link: logical Z and X success under every interconnect,
+    read per chip and through the ghosts."""
+    from matplotlib.figure import Figure
+    from matplotlib.patches import Patch
+    fig = Figure(figsize=(24, 16.5), dpi=dpi, facecolor=FP_SURF)
+    gs = fig.add_gridspec(3, 4, left=0.04, right=0.985, top=0.80, bottom=0.07, height_ratios=[1.0, 1.0, 0.95],
+                          width_ratios=[1, 1, 1, 1.05], hspace=0.46, wspace=0.26)
+    s = lambda lay, inter, lg, key="decoded": (_ls_stat(recs, lay, inter, lg, key) or (float("nan"),))[0]
+    one = next(r for r in recs if r["exp"] == "shor")
+    nrep = len({r["instance"] for r in recs if r["exp"] == "shor"})
+    lp_header(fig, "Shor's code across an l-coupler: what survives the interconnect",
+              "One [[9,1,3]] unit on the two-chip field (chip A's two border columns, chip B's border column), all four "
+              "logical states, encoder only. Z_L is read from block parities in X, X_L from block majorities in Z; "
+              f"decoded = after the majority vote. {one['shots']} shots, {nrep} sampling seeds. Exact chips; 1.000 is "
+              "the exact result, 0.5 a coin flip.",
+              [(f"{s('between', 'ghost', 'X'):.2f} to {s('between', 'ghost', 'X', 'ghost_decoded'):.2f}",
+                "X_L, cut between blocks: per chip, then through the ghosts"),
+               (f"{s('through', 'ghost', 'Z'):.2f} to {s('through', 'ghost', 'Z', 'ghost_decoded'):.2f}",
+                "Z_L, cut through blocks: per chip, then through the ghosts"),
+               (f"{s('between', 'cut', 'Z'):.2f} / {s('through', 'cut', 'X'):.2f}",
+                "links cut: Z_L between / X_L through, decoded"),
+               (f"{s('through', 'bridge:1', 'Z'):.2f} / {s('through', 'bridge:2', 'Z'):.2f}",
+                "bridge, 1 / 2 bonds: Z_L through blocks"),
+               (f"{s('through', 'ghost', 'X', 'raw'):.2f} / {s('through', 'mean', 'X', 'raw'):.2f} / {s('through', 'cut', 'X', 'raw'):.2f}",
+                "raw X_L through: ghost / mean / cut")])
+    _ls_schematic(fig.add_subplot(gs[0, 0:2]), "between", "Cut between blocks: blocks are columns, one link joins two block leaders")
+    _ls_schematic(fig.add_subplot(gs[1, 0:2]), "through", "Cut through blocks: blocks are rows, every block's GHZ crosses a link")
+    inters = ["ghost", "mean", "sample", "cut", "bridge:1", "bridge:2", "bridge:3"]
+    for row, lay in ((0, "between"), (1, "through")):
+        ax = fig.add_subplot(gs[row, 2:4])
+        _fp_axes(ax, f"Decoded logical success, cut {lay} blocks (read per chip)", "success", None)
+        for i, inter in enumerate(inters):
+            for j, lg in enumerate(("Z", "X")):
+                st = _ls_stat(recs, lay, inter, lg, "decoded")
+                if st is None:
+                    continue
+                kw = _lp_style(inter)
+                x = i + (j - 0.5) * 0.4
+                ax.bar(x, st[0], 0.36, color=kw["color"], alpha=kw.get("alpha", 1.0), edgecolor=FP_SURF, linewidth=0.8,
+                       hatch="//" if lg == "X" else None)
+                ax.text(x, st[0] + 0.015, f"{st[0]:.2f}", ha="center", fontsize=10, color=FP_INK2)
+        ax.axhline(0.5, color=FP_INK2, lw=1.0, ls=":")
+        ax.set_xticks(range(len(inters)), [lab_label(i).replace("-field", "").replace(" loom", "\nloom").replace(", ", "\n")
+                                           for i in inters], fontsize=10.5)
+        ax.set_ylim(0, 1.22)
+        ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+        ax.legend(handles=[Patch(fc=FP_GRAYS[3], ec=FP_SURF, label="Z_L (logical 0, 1)"),
+                           Patch(fc=FP_GRAYS[3], ec=FP_SURF, hatch="//", label="X_L (logical +, -)")],
+                  frameon=False, fontsize=10.5, labelcolor=FP_INK2, loc="upper right", ncol=2)
+    # ghost loom: raw, decoded, through the ghosts
+    ax = fig.add_subplot(gs[2, 0:2])
+    _fp_axes(ax, "Ghost loom: reading the cross-link checks in one simulator", "success", None)
+    groups = [("between", "Z"), ("between", "X"), ("through", "Z"), ("through", "X")]
+    kinds = [("raw", "raw, per chip", FP_GRAYS[2], None), ("decoded", "decoded, per chip", FP_GRAYS[4], None),
+             ("ghost_raw", "raw, through the ghosts", LP_COL["ghost"], "//"),
+             ("ghost_decoded", "decoded, through the ghosts", LP_COL["ghost"], None)]
+    for gi, (lay, lg) in enumerate(groups):
+        for ki, (key, _, col, hatch) in enumerate(kinds):
+            st = _ls_stat(recs, lay, "ghost", lg, key)
+            if st is None:
+                continue
+            x = gi - 0.4 + (ki + 0.5) * 0.2
+            ax.bar(x, st[0], 0.18, color=col, hatch=hatch, edgecolor=FP_SURF, linewidth=0.8)
+            ax.text(x, st[0] + 0.015, f"{st[0]:.3f}", ha="center", fontsize=10, color=FP_INK2)
+    ax.axhline(0.5, color=FP_INK2, lw=1.0, ls=":")
+    ax.set_xticks(range(4), [f"{lg}_L, cut {lay} blocks" for lay, lg in groups])
+    ax.set_ylim(0, 1.25)
+    ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+    ax.legend(handles=[Patch(fc=c, ec=FP_SURF, hatch=h, label=l) for _, l, c, h in kinds], frameon=False, fontsize=10.5,
+              labelcolor=FP_INK2, loc="upper center", ncol=4)
+    # bridge bonds
+    ax = fig.add_subplot(gs[2, 2])
+    _fp_axes(ax, "QrackBridge: bonds for the cut through blocks", "Z_L success", "bond qubits (3 links)")
+    for key, lab, kw in (("raw", "raw", dict(ls="--", alpha=0.6)), ("decoded", "decoded", {})):
+        ys = [s("through", f"bridge:{b_}", "Z", key) for b_ in (1, 2, 3)]
+        ax.plot([1, 2, 3], ys, color=LP_COL["bridge"], lw=2.2, marker="D", ms=7, mec=FP_SURF, label=lab, **kw)
+        for b_, y in zip((1, 2, 3), ys):
+            ax.text(b_, y + 0.04, f"{y:.2f}", ha="center", fontsize=10, color=FP_INK2)
+    ax.axhline(s("through", "ghost", "Z", "ghost_decoded"), color=LP_COL["ghost"], lw=1.6)
+    ax.text(0.75, 1.13, "blue line: ghost loom read through the ghosts", fontsize=10, color=FP_INK2, va="bottom")
+    ax.set_xticks([1, 2, 3])
+    ax.set_xlim(0.7, 3.3)
+    ax.set_ylim(0, 1.28)
+    ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+    ax.legend(frameon=False, fontsize=10.5, labelcolor=FP_INK2, loc="lower right")
+    lines = [("What the data says", True),
+             ("Read chip by chip, the logical operator that needs coherence across the link is a coin flip on every "
+              "loom, the ghost loom included.", False),
+             ("Chip A already holds replicas of chip B's anchors. Reading the far qubits from those replicas puts the "
+              "whole check in one simulator and restores 1.000 in both layouts.", False),
+             ("Layout chooses what is safe without it: between blocks Z_L survives even with the links cut; through "
+              "blocks X_L survives after the majority vote.", False),
+             ("A bridge carries the link between blocks with one bond; three links through the blocks need two for "
+              "the decoded and three for the raw result.", False)]
+    lp_notes(fig, fig.add_subplot(gs[2, 3]), lines + [(t, False) for t in notes])
+    fig.text(0.985, 0.014, "nighthawk_qrack.py lab --shor FILE; 1.000 = the exact simulator's result", fontsize=10,
+             color=FP_MUTED, ha="right", family="monospace")
+    return fig
+
+
+def fig_lab_rounds(recs, notes=(), dpi=150):
+    """Poster 5: repeated syndrome extraction across the link under QrackBridge: the bond demand stays fixed."""
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(24, 16.5), dpi=dpi, facecolor=FP_SURF)
+    gs = fig.add_gridspec(3, 4, left=0.04, right=0.985, top=0.80, bottom=0.07, height_ratios=[1.0, 1.0, 0.8],
+                          width_ratios=[1, 1, 1, 1.05], hspace=0.46, wspace=0.26)
+    R = [r for r in recs if r["exp"] == "rounds"]
+    rounds = sorted({r["rounds"] for r in R})
+    bonds = sorted({r["bonds"] for r in R if r["bonds"] is not None})
+
+    def m(layout, b, lg, key, rd=None):
+        v = [r[key] for r in R if r["layout"] == layout and r["bonds"] == b and (lg is None or r["logical"] == lg)
+             and (rd is None or r["rounds"] == rd) and r.get(key) is not None]
+        return float(np.mean(v)) if v else float("nan")
+    need = {}
+    for lay in ("between", "through"):
+        ok = [b for b in bonds if all(m(lay, b, lg, "decoded", rd) > 0.999 for lg in "ZX" for rd in rounds)]
+        need[lay] = min(ok) if ok else None
+    cross = {lay: next(r["cross_cx_per_round"] for r in R if r["layout"] == lay) for lay in ("between", "through")}
+    last = rounds[-1]
+    lp_header(fig, "QrackBridge across the seam with syndrome measurement: a fixed bond budget",
+              "The Shor [[9,1,3]] unit across the link of the two-chip field. Each round injects one random Pauli error "
+              "and extracts all eight stabiliser checks to ancillas, with CXs across the link where a check straddles "
+              "it; each ancilla is returned to 0 with the predicted syndrome (the stand-in for measure and reset). "
+              "Final readout with the Pauli frame. 1.000 = faithful simulation.",
+              [(f"{need['between']} / {need['through']}", "bonds for an exact result: between / through"),
+               (f"{cross['between']} / {cross['through']}", "CXs across the link per round: between / through"),
+               (f"{m('between', 1, 'X', 'decoded', last):.2f}", f"between blocks, 1 bond, X_L after {last} rounds"),
+               (f"{m('through', 3, 'Z', 'decoded', 1):.2f} / {m('through', 3, 'Z', 'decoded', last):.2f}",
+                f"through blocks, 3 bonds, Z_L after 1 / {last} rounds"),
+               (f"{m('through', 3, None, 'truncations', 2):.1f} / {m('through', 3, None, 'truncations', last):.1f}",
+                f"truncations, 3 bonds: after 2 / {last} rounds")])
+    xs = list(range(len(rounds)))
+    for col, lay, lg in ((0, "between", "X"), (2, "through", "Z")):
+        ax = fig.add_subplot(gs[0, col:col + 2])
+        _fp_axes(ax, f"Cut {lay} blocks: decoded {lg}_L success against syndrome rounds", "success", "syndrome rounds")
+        ends = []
+        for b in bonds:
+            ys = [m(lay, b, lg, "decoded", rd) for rd in rounds]
+            ax.plot(xs, ys, color=LP_COL["bridge"], lw=1.0 + 0.45 * b, alpha=min(1.0, 0.4 + 0.15 * b), marker="D", ms=6,
+                    mec=FP_SURF)
+            ends.append([ys[-1], f"{b} bond" + ("s" if b > 1 else ""), LP_COL["bridge"], ys[-1]])
+        ax.plot(xs, [m(lay, None, lg, "decoded", rd) for rd in rounds], color=FP_INK, lw=1.2, ls=":")
+        for y, lab, colr, y0 in lp_spread(ends, 0, 1.12, 0.06):
+            ax.plot([xs[-1] + 0.05, xs[-1] + 0.2], [y0, y], color=colr, lw=0.8, alpha=0.7)
+            ax.text(xs[-1] + 0.25, y, f"{lab}  {y0:.2f}", fontsize=10.5, color=FP_INK2, va="center")
+        ax.axhline(0.5, color=FP_INK2, lw=1.0, ls=":")
+        ax.set_xticks(xs, [str(r) for r in rounds])
+        ax.set_xlim(-0.3, xs[-1] + 1.3)
+        ax.set_ylim(0.4, 1.12)
+        ax.text(0.01, 0.04, f"the other logical operator ({'Z' if lg == 'X' else 'X'}_L) is 1.00 at every bond count"
+                + (" from 2 bonds" if lay == "through" and lg == "Z" and False else ""), transform=ax.transAxes,
+                fontsize=10.5, color=FP_INK2)
+    # truncations: syndrome rounds against the random circuit
+    ax = fig.add_subplot(gs[1, 0:2])
+    _fp_axes(ax, "Truncating sweeps per run: syndrome rounds stop adding them", "truncations", "syndrome rounds")
+    for lay, ls in (("between", "--"), ("through", "-")):
+        for b in bonds[:3]:
+            ys = [m(lay, b, None, "truncations", rd) for rd in rounds]
+            ax.plot(xs, ys, color=LP_COL["bridge"], lw=1.0 + 0.45 * b, alpha=min(1.0, 0.4 + 0.15 * b), ls=ls, marker="D",
+                    ms=5, mec=FP_SURF)
+            if lay == "between" and b == 3:
+                continue
+            ax.text(xs[-1] + 0.12, ys[-1] + (0.14 if (lay, b) == ("through", 3) else -0.14 if (lay, b) == ("through", 1)
+                                             else 0.0),
+                    f"{lay}, {b}b" if (lay, b) != ("between", 2) else "between, 2b and up", fontsize=9.5, color=FP_INK2,
+                    va="center")
+    ax.set_xticks(xs, [str(r) for r in rounds])
+    ax.set_xlim(-0.3, xs[-1] + 1.2)
+    ax.set_ylim(-0.4, 8.5)
+    ax = fig.add_subplot(gs[1, 2:4])
+    _fp_axes(ax, "For comparison: the random circuit over 3 links (poster 1)", "truncations (bars), fidelity (numbers)",
+             "depth (cycles)")
+    rc = [r for r in recs if r["exp"] == "inter" and r["cfg"].startswith("K3 bridge:") and r.get("truncations") is not None]
+    if rc:
+        ds = sorted({r["depth"] for r in rc})
+        for bi, b in enumerate((1, 2, 3)):
+            tr = [np.mean([r["truncations"] for r in rc if r["cfg"] == f"K3 bridge:{b}" and r["depth"] == d]) for d in ds]
+            fc = [np.mean([r["fclass"] for r in rc if r["cfg"] == f"K3 bridge:{b}" and r["depth"] == d]) for d in ds]
+            ax.bar(np.arange(len(ds)) + (bi - 1) * 0.26, tr, 0.24, color=LP_COL["bridge"], alpha=0.4 + 0.15 * b,
+                   edgecolor=FP_SURF)
+            for x_, t_, f_ in zip(np.arange(len(ds)) + (bi - 1) * 0.26, tr, fc):
+                ax.text(x_, t_ + 0.15, f"{f_:.2f}", ha="center", fontsize=9.5, color=FP_INK2)
+        ax.set_xticks(range(len(ds)), [str(d) for d in ds])
+        ax.set_ylim(0, 9.5)
+        ax.text(0.01, 0.93, "bars: 1, 2, 3 bonds; numbers: classical fidelity of the output distribution",
+                transform=ax.transAxes, fontsize=10.5, color=FP_INK2)
+    else:
+        ax.text(0.5, 0.5, "add the lab's inter records (--lab lab_inter.jsonl)", transform=ax.transAxes, ha="center",
+                color=FP_INK2)
+    # table
+    ax = fig.add_subplot(gs[2, 0:3])
+    ax.axis("off")
+    ax.set_title("What the cut costs", loc="left", fontsize=15, color=FP_INK, fontweight="bold", pad=12)
+    head = ["workload across the link", "CXs across per round or cycle", "bonds for an exact result", "with one bond fewer",
+            "widest patch (qubits)"]
+    body = []
+    for lay in ("between", "through"):
+        nb = need[lay]
+        lg = "X" if lay == "between" else "Z"
+        body.append([f"syndrome rounds, cut {lay} blocks", str(cross[lay]), f"{nb}, at any number of rounds",
+                     f"{m(lay, nb - 1, lg, 'decoded', last):.2f} ({lg}_L, flat in rounds)",
+                     f"{max(r['width'] for r in R if r['layout'] == lay and r['bonds'] == nb):.0f}"])
+    if rc:
+        body.append(["random circuit, 3 links", "3 every 4 cycles", "grows with depth (3 at depth 4, 6 at depth 6 and 8)",
+                     "fidelity falls with depth", "16 at 4 bonds, 18 at 6"])
+    tb = ax.table(cellText=body, colLabels=head, loc="upper left", cellLoc="center", colLoc="center", bbox=[0, 0.1, 1, 0.85],
+                  colWidths=[0.24, 0.17, 0.27, 0.19, 0.13])
+    tb.auto_set_font_size(False)
+    tb.set_fontsize(11.5)
+    for (i, j), cell in tb.get_celld().items():
+        cell.set_edgecolor(FP_SURF)
+        cell.set_linewidth(2)
+        cell.set_facecolor(FP_TILE if i == 0 else (FP_SURF if i % 2 else "#f7f6f3"))
+        cell.get_text().set_color(FP_INK if i == 0 else FP_INK2)
+        if i == 0:
+            cell.get_text().set_fontweight("bold")
+    lines = [("What the data says", True),
+             ("Measured checks keep the entanglement across the link at the code's own level, so the bridge's "
+              "truncations happen in the first round or not at all, and success is flat out to 16 rounds.", False),
+             (f"The budget is set by the layout and the extraction, not by time: {need['between']} bonds with the cut "
+              f"between blocks, {need['through']} through them.", False),
+             ("QrackBridge has no measure or reset: the ancillas here are reset with the predicted syndrome, which "
+              "works because the injected errors are known.", False)]
+    lp_notes(fig, fig.add_subplot(gs[2, 3]), lines + [(t, False) for t in notes])
+    fig.text(0.985, 0.014, "nighthawk_qrack.py lab --rounds FILE; 1.000 = the exact simulator's result", fontsize=10,
+             color=FP_MUTED, ha="right", family="monospace")
+    return fig
+
+
+def _lw_wheel(ax, row, title):
+    """Six chips on a rim, a line per chip pair: width by the links placed, dashed grey where none fit."""
+    k = 6
+    rim = [0, 1, 2, 5, 4, 3]
+    ang = {c: math.pi / 2 + math.pi / 6 - 2 * math.pi * i / k for i, c in enumerate(rim)}
+    xy = {c: (math.cos(a), math.sin(a)) for c, a in ang.items()}
+    ax.set_title(title, loc="left", fontsize=15, color=FP_INK, fontweight="bold", pad=12)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    top = max(list(row["pairs"].values()) + [1])
+    for key, n_ in row["pairs"].items():
+        a_, b_ = (int(t) for t in key.split("-"))
+        (x0, y0), (x1, y1) = xy[a_], xy[b_]
+        on_rim = abs(rim.index(a_) - rim.index(b_)) in (1, k - 1)
+        if n_:
+            ax.plot([x0, x1], [y0, y1], color=FP_INK if on_rim else LP_COL["ghost"], lw=1.0 + 5.0 * n_ / top, zorder=2,
+                    solid_capstyle="round", alpha=0.9)
+        else:
+            ax.plot([x0, x1], [y0, y1], color=FP_MUTED, lw=1.2, ls=(0, (3, 3)), zorder=1)
+        f_ = 0.5 if on_rim else (0.3 if abs(rim.index(a_) - rim.index(b_)) == 3 else 0.22)
+        ax.text(x0 + (x1 - x0) * f_, y0 + (y1 - y0) * f_, str(n_), fontsize=10.5, color=FP_INK, ha="center", va="center",
+                zorder=5, bbox=dict(boxstyle="round,pad=0.18", fc=FP_SURF, ec="none"))
+    for c, (x, y) in xy.items():
+        ax.scatter([x], [y], s=6800, color=FP_TILE, edgecolors=FP_INK, linewidths=1.6, zorder=6)
+        ax.text(x, y + 0.035, f"chip {c}", fontsize=11.5, color=FP_INK, ha="center", va="center", zorder=7,
+                fontweight="bold")
+        ax.text(x, y - 0.06, f"{row['ghosts'][c]} ghosts\n{row['gib'][c]:.1f} GiB", fontsize=8.5, linespacing=1.1, color=FP_INK2, ha="center",
+                va="top", zorder=7)
+    ax.set_xlim(-1.25, 1.25)
+    ax.set_ylim(-1.22, 1.22)
+
+
+def fig_lab_wheel(recs, r3=None, notes=(), dpi=150):
+    """Poster 6: the wheel, every chip linked directly to every chip: the r3 plan and the four-chip test."""
+    from matplotlib.figure import Figure
+    fig = Figure(figsize=(24, 16.5), dpi=dpi, facecolor=FP_SURF)
+    gs = fig.add_gridspec(2, 4, left=0.04, right=0.985, top=0.80, bottom=0.06, height_ratios=[1.25, 1.0],
+                          width_ratios=[1, 1, 1, 1.05], hspace=0.22, wspace=0.26)
+    r3 = r3 or []
+    W = {r["args"][1]: r for r in r3 if "wheel" in r["args"] and "pairs" in r}
+    full = [w for w in W.values() if all(v > 0 for v in w["pairs"].values())]
+    best = max(full, key=lambda w: (min(w["pairs"].values()), w["links"])) if full else None
+    D = max((r["depth"] for r in recs if r["exp"] == "wheel"), default=8)
+    g_g, g_w = (lab_stat(recs, "wheel", f"{t} ghost", "fclass", D) for t in ("grid", "wheel"))
+    c_g, c_w = (lab_stat(recs, "wheel", f"{t} cut", "fclass", D) for t in ("grid", "wheel"))
+    tiles = [("15", "chip pairs, each with its own l-couplers"), ("1.00 / 1", "hops between chips, mean / max")]
+    if best:
+        tiles.append((f"{min(best['pairs'].values())} x 15 = {best['links']}",
+                      "r3: most links per pair that fit every pair"))
+        tiles.append((f"{min(best['gib']):.1f} to {max(best['gib']):.1f} GiB", "per chip on the ghost loom (8 GB dies)"))
+    if g_g and g_w:
+        tiles.append((f"{g_w[0]:.2f} / {g_g[0]:.2f}", f"four-chip test, ghost loom, depth {D}: wheel / grid"))
+    lp_header(fig, "The wheel: every chiplet linked directly to every chiplet",
+              "--topology wheel: the ring of chips as the rim plus every chord across it, so each pair of chips has its own "
+              "l-couplers and no state has to pass through a third chip. Top: Nighthawk r3 at full size (field plan, "
+              "ghost loom). Bottom: four 2 x 3 chips, one link per pair, scored against the exact state.", tiles)
+    if best:
+        _lw_wheel(fig.add_subplot(gs[0, 0:2]), best,
+                  f"r3 as a wheel, {best['args'][1]} links per pair: l-couplers placed per pair (black rim, blue chords)")
+    else:
+        fig.add_subplot(gs[0, 0:2]).axis("off")
+    ax = fig.add_subplot(gs[0, 2:4])
+    ax.axis("off")
+    ax.set_title("r3 at full size on the ghost loom: the wheel against the other topologies", loc="left", fontsize=15,
+                 color=FP_INK, fontweight="bold", pad=12)
+    pick = [r for r in r3 if r["args"] in (["--links", "10"], ["--links", "10", "--topology", "ring"],
+                                           ["--links", "8", "--topology", "hub"]) or "wheel" in r["args"]]
+    if pick:
+        head = ["topology", "links placed", "pairs linked", "links per pair", "hops mean / max", "ghosts per chip",
+                "GiB per chip"]
+        body = []
+        for r in pick:
+            pr = r.get("pairs") or {}
+            on = [v for v in pr.values() if v]
+            body.append([{"10 links per pair (the device)": "grid, 10 links per pair", "10 links, ring":
+                          "ring, 10 links per pair", "8 links, hub on chip 1": "hub on chip 1, 8 links per pair"}
+                         .get(r["label"], r["label"]),
+                         str(r["links"]), f"{len(on)} of {len(pr)}" if pr else "", f"{min(on)} to {max(on)}" if on else "",
+                         f"{r['hops_mean']:.2f} / {r['hops_max']}" if r.get("hops_mean") else "",
+                         f"{min(r['ghosts'])} to {max(r['ghosts'])}", f"{min(r['gib']):.1f} to {max(r['gib']):.1f}"])
+        tb = ax.table(cellText=body, colLabels=head, loc="upper left", cellLoc="center", colLoc="center",
+                      bbox=[0, 0.12, 1, 0.86], colWidths=[0.27, 0.11, 0.11, 0.12, 0.14, 0.13, 0.12])
+        tb.auto_set_font_size(False)
+        tb.set_fontsize(11.5)
+        for (i, j), cell in tb.get_celld().items():
+            cell.set_edgecolor(FP_SURF)
+            cell.set_linewidth(2)
+            hot = i > 0 and best is not None and pick[i - 1] is best
+            cell.set_facecolor(FP_TILE if i == 0 else ("#e6eefb" if hot else (FP_SURF if i % 2 else "#f7f6f3")))
+            cell.get_text().set_color(FP_INK if i == 0 or hot else FP_INK2)
+            if i == 0 or hot:
+                cell.get_text().set_fontweight("bold")
+        ax.text(0, 0.03, "pairs linked: chip pairs with at least one l-coupler whose ghost fits; only border sites of a 12 x 10 "
+                "chiplet have a coupler colour free", transform=ax.transAxes, fontsize=10.5, color=FP_INK2)
+    else:
+        ax.text(0.5, 0.5, "add the r3 plan (--lab-r3 lab_r3.json)", transform=ax.transAxes, ha="center", color=FP_INK2)
+    inters = ["ghost", "mean", "cut"]
+    ds = sorted({r["depth"] for r in recs if r["exp"] == "wheel"})
+    for col, metric in ((0, "fclass"), (1, "fb_cross")):
+        ax = fig.add_subplot(gs[1, col])
+        groups = [(f"{t}, d{d}", (t, d)) for d in ds[1:] for t in ("grid", "wheel")]
+        _fp_axes(ax, f"Four chips: {'whole output' if metric == 'fclass' else 'blocks across a link'}", LP_METRIC[metric],
+                 None)
+        w = 0.8 / len(inters)
+        for gi, (_, (t, d)) in enumerate(groups):
+            for ii, inter in enumerate(inters):
+                st = lab_stat(recs, "wheel", f"{t} {inter}", metric, d)
+                if st is None:
+                    continue
+                x = gi - 0.4 + (ii + 0.5) * w
+                kw = _lp_style(inter)
+                ax.bar(x, st[0], w * 0.92, color=kw["color"], hatch="//" if inter == "cut" else None, edgecolor=FP_SURF,
+                       linewidth=0.8)
+                ax.errorbar([x], [st[0]], yerr=[st[1]], color=FP_INK, lw=1.0, capsize=0)
+                ax.text(x, st[0] + 0.03, f"{st[0]:.2f}", ha="center", fontsize=9.5, color=FP_INK2)
+        ax.set_xticks(range(len(groups)), [g[0] for g in groups])
+        ax.set_ylim(0, 1.2)
+        if col == 0:
+            lp_legend(ax, inters, ncol=3, loc="upper left")
+    ax = fig.add_subplot(gs[1, 2])
+    ax.axis("off")
+    ax.set_title("Four-chip test: what the two extra pairs cost", loc="left", fontsize=15, color=FP_INK, fontweight="bold",
+                 pad=12)
+    head = ["", "grid", "wheel"]
+    lk = {t: next((r["links"] for r in recs if r["exp"] == "wheel" and r["cfg"] == f"{t} ghost"), None)
+          for t in ("grid", "wheel")}
+    wd = {t: max((r["width"] for r in recs if r["exp"] == "wheel" and r["cfg"] == f"{t} ghost"), default=None)
+          for t in ("grid", "wheel")}
+
+    def cell(t, inter, metric="fclass"):
+        st = lab_stat(recs, "wheel", f"{t} {inter}", metric, D)
+        return f"{st[0]:.2f}" if st else ""
+    body = [["chip pairs linked", "4 of 6", "6 of 6"], ["links", str(lk["grid"]), str(lk["wheel"])],
+            ["hops, max", "2", "1"], ["widest simulator (qubits)", str(wd["grid"]), str(wd["wheel"])],
+            [f"ghost loom, depth {D}", cell("grid", "ghost"), cell("wheel", "ghost")],
+            [f"mean-field loom, depth {D}", cell("grid", "mean"), cell("wheel", "mean")],
+            [f"links cut, depth {D}", cell("grid", "cut"), cell("wheel", "cut")],
+            ["ghost minus cut", f"{g_g[0] - c_g[0]:+.2f}" if g_g and c_g else "", f"{g_w[0] - c_w[0]:+.2f}" if g_w and c_w else ""]]
+    tb = ax.table(cellText=body, colLabels=head, loc="upper left", cellLoc="center", colLoc="center", bbox=[0, 0.05, 1, 0.93],
+                  colWidths=[0.5, 0.25, 0.25])
+    tb.auto_set_font_size(False)
+    tb.set_fontsize(11.5)
+    for (i, j), c_ in tb.get_celld().items():
+        c_.set_edgecolor(FP_SURF)
+        c_.set_linewidth(2)
+        c_.set_facecolor(FP_TILE if i == 0 else (FP_SURF if i % 2 else "#f7f6f3"))
+        c_.get_text().set_color(FP_INK if i == 0 else FP_INK2)
+        if i == 0:
+            c_.get_text().set_fontweight("bold")
+    lines = [("What the data says", True)]
+    if best:
+        lines.append((f"r3 fits a full wheel on the 8 GB dies at {min(best['pairs'].values())} links per pair: "
+                      f"{best['links']} links, {max(best['ghosts'])} ghosts and at most {max(best['gib']):.1f} GiB per chip. "
+                      "Above that the border sites with a free coupler colour run out and pairs get fewer links or none.",
+                      False))
+    if g_g and g_w and c_g and c_w:
+        lines.append((f"Four chips, depth {D}: the wheel's ghost loom scores {g_w[0]:.2f} against {g_g[0]:.2f} on the grid. "
+                      "Each extra pair is one more coupler the loom approximates, so direct links do not raise the "
+                      f"fidelity of a random circuit; what the ghosts recover over cut links is {g_w[0] - c_w[0]:+.2f} "
+                      f"(wheel) and {g_g[0] - c_g[0]:+.2f} (grid).", False))
+    lines.append(("What the wheel buys is reach: every pair is one hop apart, so a state shared by two chips never passes "
+                  "through a third, and a cross-chip check can always be read through one chip's ghosts (the Shor poster).",
+                  False))
+    lp_notes(fig, fig.add_subplot(gs[1, 3]), lines + [(t, False) for t in notes])
+    fig.text(0.985, 0.014, "nighthawk_qrack.py field plan --device r3 --topology wheel; lab --exp wheel; lab --r3plan FILE",
+             fontsize=10, color=FP_MUTED, ha="right", family="monospace")
+    return fig
+
+
+LP_PORT = {"dedicated": "#52514e", "port layers": "#2a78d6", "port mux": "#e07a3a"}
+LP_PORT_LABEL = {"dedicated": "a link qubit per partner", "port layers": "one port, a layer per matching",
+                 "port mux": "one port, multiplexed"}
+
+
+def _lpo_schedule(ax):
+    """One round of each schedule as a strip of layers (four chips: three matchings of the six pairs)."""
+    from matplotlib.patches import FancyBboxPatch
+    ax.axis("off")
+    ax.set_title("One round of the cycle (four chips, six chip pairs in three matchings)", loc="left", fontsize=15,
+                 color=FP_INK, fontweight="bold", pad=12)
+    ax.set_xlim(0, 13.2)
+    ax.set_ylim(0, 6.6)
+    rows = [("dedicated", ["A", "B", "C", "D"], "3 link qubits per chip, one per partner; the 6 l-couplers sit in A to D "
+             "beside the chip's own couplers"),
+            ("port layers", ["A", "B", "C", "D", "P1", "P2", "P3"], "1 port per chip; every l-coupler fires once per "
+             "round, in 3 extra layers"),
+            ("port mux", ["A", "B", "C", "D", "P"], "1 port per chip; P carries matching 1, 2, 3, 1, ... : every "
+             "l-coupler once per 3 rounds")]
+    for i, (key, lay, note) in enumerate(rows):
+        y = 5.2 - i * 2.1
+        ax.text(0, y + 0.95, LP_PORT_LABEL[key], fontsize=12.5, color=FP_INK, fontweight="bold", va="center")
+        for j, nm in enumerate(lay):
+            p_ = nm.startswith("P")
+            ax.add_patch(FancyBboxPatch((j * 1.02, y - 0.3), 0.9, 0.78, boxstyle="round,pad=0,rounding_size=0.12",
+                                        fc=LP_PORT[key] if p_ else FP_TILE, ec=LP_PORT[key] if p_ else FP_EDGE, lw=1.2))
+            ax.text(j * 1.02 + 0.45, y + 0.09, nm, fontsize=11.5, ha="center", va="center",
+                    color=FP_SURF if p_ else FP_INK2, fontweight="bold" if p_ else None)
+        ax.text(len(lay) * 1.02 + 0.25, y + 0.09, "\n".join(textwrap.wrap(note, 62)), fontsize=10.5, color=FP_INK2,
+                va="center", linespacing=1.3)
+
+
+def fig_lab_port(recs, r3=None, notes=(), dpi=150):
+    """Poster 7: every l-coupler of a chip on one port qubit, extra layers or multiplexed, against a link qubit per
+    partner."""
+    from matplotlib.figure import Figure
+    from matplotlib.lines import Line2D
+    fig = Figure(figsize=(24, 16.5), dpi=dpi, facecolor=FP_SURF)
+    gs = fig.add_gridspec(2, 4, left=0.04, right=0.985, top=0.80, bottom=0.07, height_ratios=[0.8, 1.0],
+                          width_ratios=[1, 1, 1, 1.05], hspace=0.34, wspace=0.26)
+    R = [r for r in recs if r["exp"] == "port" and r.get("fclass") is not None]
+    r3 = r3 or []
+
+    def st(grp, inter, metric, rounds):
+        v = [r[metric] for r in R if r["group"] == grp and r["inter"] == inter and abs(r["rounds"] - rounds) < 1e-9
+             and r.get(metric) is not None]
+        return (float(np.mean(v)), float(np.std(v) / math.sqrt(len(v))) if len(v) > 1 else 0.0) if v else None
+
+    def rounds_of(grp):
+        return sorted({r["rounds"] for r in R if r["group"] == grp})
+
+    def gates(grp, rounds):
+        return next((r["link_gates"] for r in R if r["group"] == grp and abs(r["rounds"] - rounds) < 1e-9), None)
+    keys = ["dedicated", "port layers", "port mux"]
+    row_w = next((r for r in r3 if r["args"] == ["--links", "6", "--topology", "wheel"]), None)
+    row_p = next((r for r in r3 if r["args"] == ["--topology", "wheel", "--link-port", "layers"]), None)
+    tiles = []
+    if row_w and row_p:
+        tiles.append((f"{max(row_p['ghosts'])} / {max(row_w['ghosts'])}", "r3 wheel, ghosts per chip: port / 6 links per pair"))
+        tiles.append((f"{max(row_p['gib']):.1f} / {max(row_w['gib']):.1f} GiB", "r3 wheel, largest chip: port / 6 per pair"))
+    g2 = {k: st(f"4 chips, {k}", "ghost", "fclass", 2) for k in keys}
+    if all(g2.values()):
+        tiles.append((" / ".join(f"{g2[k][0]:.2f}" for k in keys), "4 chips, ghost loom, 2 rounds: dedicated / layers / mux"))
+    c2 = {k: st(f"4 chips, {k}", "cut", "fclass", 2) for k in keys}
+    s6 = st("6 chips, port layers", "ghost", "fclass", 2)
+    if s6:
+        tiles.append((f"{s6[0]:.2f}", "6 chips, wheel through ports, ghost loom, 2 rounds"))
+    lp_header(fig, "One port qubit per chip for every l-coupler",
+              "--link-port: the chip's l-couplers to all its partners meet on one qubit. A qubit takes one two-qubit gate "
+              "per layer, so the port couplers get layers of their own after A, B, C, D: one per matching of the chip "
+              "pairs (layers), or one layer that serves one matching per round (mux). Exact chips on a wheel, classical "
+              "fidelity of the output distribution against the exact state of the same circuit.", tiles)
+    _lpo_schedule(fig.add_subplot(gs[0, 0:2]))
+    ax = fig.add_subplot(gs[0, 2:4])
+    ax.axis("off")
+    ax.set_title("r3 at full size as a wheel on the ghost loom (field plan, 8 GB dies)", loc="left", fontsize=15,
+                 color=FP_INK, fontweight="bold", pad=12)
+    pick = [r for r in r3 if r["args"] == ["--links", "6", "--topology", "wheel"] or "--link-port" in r["args"]]
+    if pick:
+        head = ["link placement", "l-couplers", "pairs linked", "link qubits", "layers per round", "ghosts per chip",
+                "GiB per chip"]
+        body = []
+        for r in pick:
+            pr = r.get("pairs") or {}
+            on = [v for v in pr.values() if v]
+            mode = r["args"][r["args"].index("--link-port") + 1] if "--link-port" in r["args"] else None
+            body.append([r["label"].replace("wheel, ", ""), str(r["links"]), f"{len(on)} of {len(pr)}",
+                         str(r.get("anchors", "")), {"layers": "4 + 5", "mux": "4 + 1", None: "4"}[mode],
+                         str(max(r["ghosts"])) if min(r["ghosts"]) == max(r["ghosts"]) else
+                         f"{min(r['ghosts'])} to {max(r['ghosts'])}",
+                         f"{max(r['gib']):.1f}" if min(r["gib"]) == max(r["gib"]) else
+                         f"{min(r['gib']):.1f} to {max(r['gib']):.1f}"])
+        tb = ax.table(cellText=body, colLabels=head, loc="upper left", cellLoc="center", colLoc="center",
+                      bbox=[0, 0.22, 1, 0.76], colWidths=[0.28, 0.1, 0.12, 0.11, 0.14, 0.13, 0.12])
+        tb.auto_set_font_size(False)
+        tb.set_fontsize(11.5)
+        for (i, j), cell in tb.get_celld().items():
+            cell.set_edgecolor(FP_SURF)
+            cell.set_linewidth(2)
+            cell.set_facecolor(FP_TILE if i == 0 else (FP_SURF if i % 2 else "#f7f6f3"))
+            cell.get_text().set_color(FP_INK if i == 0 else FP_INK2)
+            if i == 0:
+                cell.get_text().set_fontweight("bold")
+        ax.text(0, 0.02, "\n".join(textwrap.wrap(
+            "A pair is dropped when the chip's ACE register has no free site left beside the port for one more ghost. "
+            "A port is a router qubit with a coupler to every partner chip: not the point-to-point l-couplers of the "
+            "device.", 118)), transform=ax.transAxes, fontsize=10.5, color=FP_INK2, linespacing=1.35, va="bottom")
+    else:
+        ax.text(0.5, 0.5, "add the r3 plan (--lab-r3 lab_r3.json)", transform=ax.transAxes, ha="center", color=FP_INK2)
+    # four chips: against rounds, per loom
+    for col, inter in ((0, "ghost"), (1, "mean")):
+        ax = fig.add_subplot(gs[1, col])
+        _fp_axes(ax, f"Four chips, {LP_NAME.get(inter, inter)}", LP_METRIC["fclass"], "rounds of the cycle")
+        ends = []
+        for k in keys:
+            grp = f"4 chips, {k}"
+            rs = [x for x in rounds_of(grp) if x >= 2]
+            ys = [st(grp, inter, "fclass", x) for x in rs]
+            cs = [st(grp, "cut", "fclass", x) for x in rs]
+            ax.plot(rs, [y[0] for y in ys], color=LP_PORT[k], lw=2.4, marker="o", ms=8, mec=FP_SURF, mew=1.5, zorder=3)
+            ax.errorbar(rs, [y[0] for y in ys], yerr=[y[1] for y in ys], color=LP_PORT[k], lw=1.0, ls="none", zorder=3)
+            ax.plot(rs, [y[0] for y in cs], color=LP_PORT[k], lw=1.4, ls=(0, (4, 3)), marker="s", ms=5, mec=FP_SURF,
+                    alpha=0.75, zorder=2)
+            ends.append([ys[-1][0], f"{ys[-1][0]:.2f}", LP_PORT[k], rs[-1]])
+        for y, lab, colr, x in lp_spread(ends, 0.15, 0.9, 0.035):
+            ax.text(x + 0.12, y, lab, fontsize=10.5, color=colr, va="center", fontweight="bold")
+        ax.set_ylim(0.15, 0.9)
+        ax.set_xlim(1.6, 6.7)
+        ax.set_xticks([2, 3, 4, 5, 6])
+        if col == 0:
+            hand = [Line2D([], [], color=LP_PORT[k], lw=2.4, marker="o", ms=7, mec=FP_SURF, label=LP_PORT_LABEL[k])
+                    for k in keys] + [Line2D([], [], color=FP_INK2, lw=1.4, ls=(0, (4, 3)), marker="s", ms=5,
+                                             label="the same links cut")]
+            ax.legend(handles=hand, loc="upper right", frameon=False, fontsize=10.5, labelcolor=FP_INK2)
+    ax = fig.add_subplot(gs[1, 2])
+    ax.axis("off")
+    ax.set_title("At 12 l-coupler gates: what each schedule costs and gives", loc="left", fontsize=15, color=FP_INK,
+                 fontweight="bold", pad=12)
+    head = ["", "dedicated", "port layers", "port mux"]
+    at = {"dedicated": 2, "port layers": 2, "port mux": 6}
+
+    def cell(k, inter, metric="fclass"):
+        x = st(f"4 chips, {k}", inter, metric, at[k])
+        return f"{x[0]:.2f}" if x else ""
+
+    def first(k, key):
+        return next((r[key] for r in R if r["group"] == f"4 chips, {k}" and r["inter"] == "ghost" and r.get(key)), None)
+    body = [["link qubits per chip", "3", "1", "1"],
+            ["rounds", *[str(at[k]) for k in keys]],
+            ["layers", *[str(int(at[k] * (first(k, "round_len") or 0))) for k in keys]],
+            ["l-coupler gates", *[str(gates(f"4 chips, {k}", at[k])) for k in keys]],
+            ["ghosts per chip", *[str(max(first(k, "ghosts") or [0])) for k in keys]],
+            ["ghost loom", *[cell(k, "ghost") for k in keys]],
+            ["mean-field loom", *[cell(k, "mean") for k in keys]],
+            ["links cut", *[cell(k, "cut") for k in keys]],
+            ["blocks across a link", *[cell(k, "ghost", "fb_cross") for k in keys]]]
+    tb = ax.table(cellText=body, colLabels=head, loc="upper left", cellLoc="center", colLoc="center", bbox=[0, 0.02, 1, 0.96],
+                  colWidths=[0.37, 0.21, 0.21, 0.21])
+    tb.auto_set_font_size(False)
+    tb.set_fontsize(11.5)
+    for (i, j), c_ in tb.get_celld().items():
+        c_.set_edgecolor(FP_SURF)
+        c_.set_linewidth(2)
+        c_.set_facecolor(FP_TILE if i == 0 else (FP_SURF if i % 2 else "#f7f6f3"))
+        c_.get_text().set_color(FP_INK if i == 0 else FP_INK2)
+        if i == 0:
+            c_.get_text().set_fontweight("bold")
+    lines = [("What the data says", True)]
+    if all(g2.values()) and all(c2.values()):
+        lines.append((f"Same six couplers, same gates per round: the ghost loom scores {g2['port layers'][0]:.2f} with one "
+                      f"port and {g2['dedicated'][0]:.2f} with a link qubit per partner (2 rounds), the same within the "
+                      "spread. Concentrating the links on one qubit costs no fidelity here and gains none.", False))
+        lines.append(("Every chip holds a ghost of every other port, and the loom applies the port-to-port gates on those "
+                      "ghosts too: each chip carries a copy of the whole port network.", False))
+    m6, d2 = st("4 chips, port mux", "ghost", "fclass", 6), g2.get("dedicated")
+    if m6 and d2:
+        lines.append((f"Multiplexing spreads the same 12 gates over 6 rounds and ends at {m6[0]:.2f}: the ghost loom "
+                      "does not decay with the extra rounds, the looms without ghosts do.", False))
+    s6m = st("6 chips, port layers", "mean", "fclass", 2)
+    s6c = st("6 chips, port layers", "cut", "fclass", 2)
+    if s6 and s6m and s6c:
+        lines.append((f"Six chips, all 15 pairs through ports (2 rounds, 30 gates): ghost loom {s6[0]:.2f}, mean-field "
+                      f"{s6m[0]:.2f}, links cut {s6c[0]:.2f}, with 5 ghosts per chip.", False))
+    lines.append(("The port is one qubit: everything a chip shares with the field passes through it, and it is busy in "
+                  "every port layer.", False))
+    lp_notes(fig, fig.add_subplot(gs[1, 3]), lines + [(t, False) for t in notes])
+    fig.text(0.985, 0.014, "nighthawk_qrack.py lab --exp port; field plan --device r3 --topology wheel --link-port layers|mux",
+             fontsize=10, color=FP_MUTED, ha="right", family="monospace")
+    return fig
+
+
+LP_BELL = {"grid": "#52514e", "ring": "#8a6fc9", "grid + 0-5": "#e07a3a", "wheel": "#2a78d6"}
+
+
+def _lb_map(ax, rec, title):
+    """The six chips with the l-couplers of the topology and the path of the 0-5 Bell pair."""
+    pos, chip_of = rec["pos"], rec["chip_of"]
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_title(title, loc="left", fontsize=15, color=FP_INK, fontweight="bold", pad=10)
+    from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+    k = max(chip_of) + 1
+    for c in range(k):
+        pts = np.array([pos[q] for q in range(len(pos)) if chip_of[q] == c])
+        (r0, c0), (r1, c1) = pts.min(axis=0), pts.max(axis=0)
+        ax.add_patch(FancyBboxPatch((c0 - 0.45, r0 - 0.45), c1 - c0 + 0.9, r1 - r0 + 0.9,
+                                    boxstyle="round,pad=0,rounding_size=0.35", fc=FP_TILE, ec=FP_EDGE, lw=1.2, zorder=0))
+        ax.text(c0 - 0.35, r0 - 0.62 if r0 < 4 else r1 + 0.62, f"chip {c}", fontsize=11, color=FP_INK, fontweight="bold",
+                va="bottom" if r0 < 4 else "top")
+    path = rec["path"]
+    on = {tuple(sorted(e)) for e in zip(path, path[1:])}
+    for u, v in rec["link_list"]:
+        (ra, ca), (rb, cb) = pos[u], pos[v]
+        hot = tuple(sorted((u, v))) in on
+        near = abs(ra - rb) + abs(ca - cb) <= 2
+        if near:
+            ax.plot([ca, cb], [ra, rb], color=LP_COL["ghost"] if hot else FP_MUTED, lw=4.0 if hot else 1.6, zorder=3 if hot else 1,
+                    solid_capstyle="round")
+        else:
+            ax.add_patch(FancyArrowPatch((ca, ra), (cb, rb), arrowstyle="-", connectionstyle="arc3,rad=0.16",
+                                         color=LP_COL["ghost"] if hot else FP_MUTED, lw=4.0 if hot else 1.2,
+                                         ls="-" if hot else (0, (4, 2)), zorder=3 if hot else 1))
+    for u, v in on:
+        if chip_of[u] == chip_of[v]:
+            ax.plot([pos[u][1], pos[v][1]], [pos[u][0], pos[v][0]], color=LP_COL["ghost"], lw=4.0, zorder=3,
+                    solid_capstyle="round")
+    anchors = {q for e in rec["link_list"] for q in e}
+    rest = [q for q in range(len(pos)) if q not in path]
+    ax.scatter([pos[q][1] for q in rest], [pos[q][0] for q in rest], s=[46 if q in anchors else 22 for q in rest],
+               color=[FP_INK2 if q in anchors else FP_MUTED for q in rest], zorder=4, edgecolors=FP_SURF, linewidths=0.8)
+    mid = path[1:-1]
+    ax.scatter([pos[q][1] for q in mid], [pos[q][0] for q in mid], s=70, color=LP_COL["ghost"], zorder=5,
+               edgecolors=FP_SURF, linewidths=1.0)
+    for q, nm in ((path[0], "A"), (path[-1], "B")):
+        ax.scatter([pos[q][1]], [pos[q][0]], s=330, color=FP_INK, zorder=6, edgecolors=FP_SURF, linewidths=1.4)
+        ax.text(pos[q][1], pos[q][0], nm, fontsize=10.5, color=FP_SURF, fontweight="bold", ha="center", va="center", zorder=7)
+    rows, cols = [p_[0] for p_ in pos], [p_[1] for p_ in pos]
+    ax.set_xlim(min(cols) - 1.0, max(cols) + 1.0)
+    ax.set_ylim(max(rows) + 1.9, min(rows) - 1.4)
+    ax.text(0.0, -0.02, f"{rec['hops']} hop{'s' if rec['hops'] > 1 else ''}: {rec['cx']} CX, {rec['link_cx']} on l-couplers, "
+            f"{rec['relay_qubits']} relay qubits in {len(rec['chip_path']) - 2} relay chips", transform=ax.transAxes,
+            fontsize=11.5, color=FP_INK2, va="top")
+
+
+def fig_lab_bell(recs, notes=(), dpi=150, p_cx=0.003):
+    """Poster 8: Quantum NUMA as a number: a Bell pair between chips, by hops, on the grid and the wheel."""
+    from matplotlib.figure import Figure
+    from matplotlib.patches import Patch
+    fig = Figure(figsize=(24, 16.5), dpi=dpi, facecolor=FP_SURF)
+    gs = fig.add_gridspec(2, 4, left=0.04, right=0.985, top=0.80, bottom=0.07, height_ratios=[0.95, 1.0],
+                          width_ratios=[1, 1, 1, 1.05], hspace=0.30, wspace=0.26)
+    R = [r for r in recs if r["exp"] == "bell" and "error" not in r]
+    topos = [t for t in LP_BELL if any(r["topology"] == t for r in R)]
+
+    def sel(topo=None, inter="ghost", hops=None, pair=None):
+        return [r for r in R if (topo is None or r["topology"] == topo) and r["inter"] == inter
+                and (hops is None or r["hops"] == hops) and (pair is None or r["pair"] == list(pair))]
+
+    def mean(rows, key):
+        v = [r[key] for r in rows if r.get(key) is not None]
+        return float(np.mean(v)) if v else None
+    far = {t: (sel(t, pair=(0, 5)) or [None])[0] for t in topos}
+    g, w = far.get("grid"), far.get("wheel")
+    tiles = []
+    if g and w:
+        tiles = [(f"{g['hops']} / {w['hops']}", "hops between chips 0 and 5: grid / wheel"),
+                 (f"{g['cx']} / {w['cx']}", "CX gates for the 0-5 Bell pair: grid / wheel"),
+                 (f"{g['link_cx']} / {w['link_cx']}", "of which on l-couplers: grid / wheel"),
+                 (f"{g['f_best']:.2f} / {w['f_best']:.2f}", "ghost loom, Bell fidelity 0-5: grid / wheel"),
+                 (f"{sum(1 for r in sel('grid') if r.get('f_end_chip'))} / {sum(1 for r in sel('wheel') if r.get('f_end_chip'))}"
+                  f" of {len(sel('wheel'))}", "chip pairs whose pair an end chip can read: grid / wheel")]
+    lp_header(fig, "Quantum NUMA as a number: a Bell pair between chips",
+              "Six chips of 3 x 4 qubits on a 2 x 3 grid, one l-coupler per chip pair. For every pair of chips: H on the link "
+              "anchor A, CXs down the shortest path to the anchor B (through relay chips where the two are not linked), "
+              "then the CXs back, which leave (|00> + |11>) on A and B alone. Fidelity 1.00 = the Bell pair, 0.50 = the "
+              "best a state without entanglement reaches, 0.25 = no correlation.", tiles)
+    for col, t in ((0, "grid"), (2, "wheel")):
+        if far.get(t) and far[t].get("pos"):
+            _lb_map(fig.add_subplot(gs[0, col:col + 2]), far[t], f"{t}: the path of the Bell pair between chips 0 and 5")
+    # fidelity by hops, ghost loom
+    ax = fig.add_subplot(gs[1, 0])
+    _fp_axes(ax, "Ghost loom: Bell fidelity by hops", "Bell fidelity", "hops between the two chips")
+    hs = sorted({r["hops"] for r in sel()})
+    series = [("f_ends", "the two chips read apart (the loom's output)", FP_MUTED, None),
+              ("f_end_chip", "read in an end chip (its ghost of the far end)", LP_COL["ghost"], None),
+              ("f_best", "read in the best simulator (a relay chip)", LP_COL["ghost"], "//")]
+    wbar = 0.26
+    for i, (key, lab, colr, hatch) in enumerate(series):
+        for j, h in enumerate(hs):
+            v = mean(sel(hops=h), key)
+            x = j + (i - 1) * wbar
+            if v is None:
+                ax.text(x, 0.03, "none", rotation=90, ha="center", va="bottom", fontsize=9.5, color=FP_INK2)
+                continue
+            ax.bar(x, v, wbar * 0.92, color=colr, alpha=0.55 if hatch else 1.0, hatch=hatch, edgecolor=FP_SURF, linewidth=0.8)
+            ax.text(x, v + 0.02, f"{v:.2f}", ha="center", fontsize=10, color=FP_INK2)
+    ax.axhline(0.5, color=FP_INK2, lw=1.0, ls=":")
+    ax.text(len(hs) - 0.45, 0.515, "no entanglement below", fontsize=9.5, color=FP_INK2, ha="right")
+    ax.set_xticks(range(len(hs)), [f"{h} hop{'s' if h > 1 else ''}" for h in hs])
+    ax.set_ylim(0, 1.3)
+    ax.legend(handles=[Patch(fc=c_, alpha=0.55 if h_ else 1.0, hatch=h_, ec=FP_SURF, label=l_) for _, l_, c_, h_ in series],
+              loc="upper right", frameon=False, fontsize=10, labelcolor=FP_INK2)
+    # table per topology
+    ax = fig.add_subplot(gs[1, 1:3])
+    ax.axis("off")
+    ax.set_title("All 15 chip pairs per topology (ghost loom)", loc="left", fontsize=15, color=FP_INK, fontweight="bold",
+                 pad=12)
+    head = ["topology", "l-couplers", "hops mean / max", "CX per pair", "on l-couplers", "read in an end chip",
+            "read in any chip", "exact", "mean-field loom"]
+    body = []
+    for t in topos:
+        rs = sel(t)
+        body.append([t, str(rs[0]["links"]), f"{np.mean([r['hops'] for r in rs]):.2f} / {max(r['hops'] for r in rs)}",
+                     f"{mean(rs, 'cx'):.1f}", f"{mean(rs, 'link_cx'):.1f}",
+                     f"{sum(1 for r in rs if (r.get('f_end_chip') or 0) > 0.99)} of {len(rs)}",
+                     f"{sum(1 for r in rs if r['f_best'] > 0.99)} of {len(rs)}",
+                     f"{mean(sel(t, 'exact'), 'f_best'):.2f}", f"{mean(sel(t, 'mean'), 'f_best'):.2f}"])
+    tb = ax.table(cellText=body, colLabels=head, loc="upper left", cellLoc="center", colLoc="center", bbox=[0, 0.42, 1, 0.56],
+                  colWidths=[0.12, 0.1, 0.13, 0.1, 0.11, 0.14, 0.12, 0.07, 0.13])
+    tb.auto_set_font_size(False)
+    tb.set_fontsize(11)
+    for (i, j), c_ in tb.get_celld().items():
+        c_.set_edgecolor(FP_SURF)
+        c_.set_linewidth(2)
+        c_.set_facecolor(FP_TILE if i == 0 else (FP_SURF if i % 2 else "#f7f6f3"))
+        c_.get_text().set_color(FP_INK if i == 0 else FP_INK2)
+        if i == 0 or body[i - 1][0] == "wheel":
+            c_.get_text().set_fontweight("bold")
+    # what the gate counts would cost on hardware, under assumed error rates
+    sub = ax.inset_axes([0.06, 0.0, 0.9, 0.33])
+    _fp_axes(sub, None, "survival of the pair", "assumed error per l-coupler CX", size=12)
+    ps = np.linspace(0, 0.05, 51)
+    for h in hs:
+        rs = sel("grid", hops=h) or sel(hops=h)
+        nl, ni = mean(rs, "link_cx"), mean(rs, "cx") - mean(rs, "link_cx")
+        ys = (1 - ps) ** nl * (1 - p_cx) ** ni
+        sub.plot(ps * 100, ys, color=FP_INK, lw=1.2 + 0.7 * (3 - h), ls=["-", "--", ":"][min(h, 3) - 1])
+        sub.text(5.08, ys[-1], f"{h} hop{'s' if h > 1 else ''}  {ys[-1]:.2f}", fontsize=10, color=FP_INK2, va="center")
+    sub.set_xlim(0, 6.2)
+    sub.set_ylim(0.6, 1.02)
+    sub.set_xticks([0, 1, 2, 3, 4, 5], ["0", "1 %", "2 %", "3 %", "4 %", "5 %"])
+    sub.set_title(f"Not measured: the grid's gate counts as (1 - p) per gate, {p_cx * 100:.1f} % assumed per on-chip CX",
+                  loc="left", fontsize=11.5, color=FP_INK2)
+    lines = [("What the data says", True)]
+    if g and w:
+        lines.append((f"Between the far corners the grid needs {g['cx']} CX ({g['link_cx']} on l-couplers) through "
+                      f"{len(g['chip_path']) - 2} relay chips; the wheel needs {w['cx']}. On a noiseless exact simulator "
+                      "both give 1.00: the cost of the hops is gates, and gates are what the hardware pays for.", False))
+    lines.append(("The ghost loom carries entanglement exactly one hop: a chip holds a ghost of its link partners and of "
+                  "nothing further. Linked chips read the pair at 1.00 in either end chip; at two hops only the relay chip "
+                  "sees it; at three hops no simulator holds both ends and the pair is lost (0.25).", False))
+    lines.append(("On the wheel all 15 pairs are linked, so every Bell pair is readable from its own end chips. The "
+                  "mean-field loom reaches 0.50 at any distance: correlation, no entanglement.", False))
+    lp_notes(fig, fig.add_subplot(gs[1, 3]), lines + [(t, False) for t in notes])
+    fig.text(0.985, 0.014, "nighthawk_qrack.py lab --bell FILE", fontsize=10, color=FP_MUTED, ha="right", family="monospace")
     return fig
 
 
@@ -5212,7 +6739,7 @@ def main():
     ap.add_argument("--poster-note", dest="poster_note", action="append", default=[], metavar="TEXT",
                     help="--poster: a line for the 'How this was measured' box (repeatable), e.g. the host")
     ap.add_argument("--poster-topology", dest="poster_topology", default=None, metavar="LABEL",
-                    help="--poster: draw the field of this topology (grid, ring, hub N, grid + I-J, ...)")
+                    help="--poster: draw the field of this topology (grid, ring, wheel, hub N, grid + I-J, ...)")
     ap.add_argument("--poster-dpi", dest="poster_dpi", type=int, default=150, help="--poster: resolution (default 150)")
     ap.add_argument("--vram-gb", dest="vram_gb", type=float, default=8.0,
                     help="--poster: one die's memory, the line on the ghost-loom memory panel (default 8)")
@@ -5225,6 +6752,13 @@ def main():
                     help="--ghz-poster: a run without drift (--layer2 none) of the same register, drawn beside the chips")
     ap.add_argument("--field-device", dest="field_device", default=None,
                     help="--ghz-poster: the field device preset (default: the field run records' device, else r3)")
+    ap.add_argument("--lab", action="append", default=[], metavar="JSONL",
+                    help="nighthawk_qrack.py lab records (repeatable), for --lab-poster")
+    ap.add_argument("--lab-poster", dest="lab_poster", default=None, metavar="PREFIX",
+                    help="write the configuration-lab posters PREFIX_between.png, PREFIX_inside.png, PREFIX_place.png "
+                         "and PREFIX_shor.png from the --lab records (each when its records are present), then exit")
+    ap.add_argument("--lab-r3", dest="lab_r3", default=None, metavar="JSON",
+                    help="--lab-poster: the full-size r3 plan table (nighthawk_qrack.py lab --r3plan JSON)")
     ap.add_argument("--fxeb-dmin", dest="fxeb_dmin", type=int, default=8,
                     help="views 10-11 and --table: smallest depth used in the decay fit (default 8; "
                          "shallower outputs are too concentrated)")
@@ -5266,6 +6800,38 @@ def main():
                 return
         if a.open:
             webbrowser.open(pages[0].resolve().as_uri())
+        return
+    if a.lab_poster:
+        import matplotlib
+        matplotlib.use("Agg")
+        recs, fails = lab_load(a.lab)
+        if not recs:
+            print("no lab records (--lab FILE from nighthawk_qrack.py lab): no posters")
+            return
+        r3 = json.load(open(a.lab_r3)) if a.lab_r3 else None
+        exps = {r["exp"] for r in recs}
+        todo = []
+        if "inter" in exps:
+            todo.append(("between", lambda: fig_lab_between(recs, a.poster_note, a.poster_dpi)))
+        if exps & {"inside", "mixed"}:
+            todo.append(("inside", lambda: fig_lab_inside(recs, a.poster_note, a.poster_dpi)))
+        if exps & {"rows", "holes", "numa"}:
+            todo.append(("place", lambda: fig_lab_place(recs, r3, a.poster_note, a.poster_dpi)))
+        if "shor" in exps:
+            todo.append(("shor", lambda: fig_lab_shor(recs, a.poster_note, a.poster_dpi)))
+        if "rounds" in exps:
+            todo.append(("rounds", lambda: fig_lab_rounds(recs, a.poster_note, a.poster_dpi)))
+        if "wheel" in exps:
+            todo.append(("wheel", lambda: fig_lab_wheel(recs, r3, a.poster_note, a.poster_dpi)))
+        if "port" in exps:
+            todo.append(("port", lambda: fig_lab_port(recs, r3, a.poster_note, a.poster_dpi)))
+        if "bell" in exps:
+            todo.append(("bell", lambda: fig_lab_bell(recs, a.poster_note, a.poster_dpi)))
+        for name, make in todo:
+            fn = f"{a.lab_poster}_{name}.png"
+            make().savefig(fn, facecolor=FP_SURF, dpi=a.poster_dpi)
+            print(f"lab poster: {fn}")
+        print(f"{len(recs)} records" + (f", {len(fails)} failed points or builds" if fails else ""))
         return
     if a.ghz_poster:
         import matplotlib

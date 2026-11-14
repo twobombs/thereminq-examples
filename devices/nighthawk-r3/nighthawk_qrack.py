@@ -732,6 +732,10 @@ def build_cycles(lay, ncyc, seed, inst, removed=frozenset(), rotate=None, n=None
         ang = [haar_angles(seed, inst, c, q) for q in range(n)]
         col = lay.schedule[c % len(lay.schedule)]
         es = [e for e in lay.matchings[col] if e[0] < n and e[1] < n and tuple(sorted(e)) not in removed]
+        mux = getattr(lay, "mux", None)
+        if mux and col in mux:                      # a multiplexed port colour: one of its matchings per round
+            live = mux[col][(c // len(lay.schedule)) % len(mux[col])]
+            es = [e for e in es if tuple(sorted(e)) in live]
         if rotate:
             cut = rotate[c % len(rotate)]
             es = [e for e in es if tuple(sorted(e)) not in cut]
@@ -14146,6 +14150,9 @@ def make_parser():
     sub.add_parser("field", add_help=False,
                    help="the cloverfield: chips in isolated workers woven by the loom into one virtual chip, and the "
                         "Nighthawk r3 device presets (formerly nighthawk_cloverfield.py; nighthawk_qrack.py field -h)")
+    sub.add_parser("lab", add_help=False,
+                   help="configuration lab: small fields scored against their exact state, to choose between ACE, "
+                        "QrackBridge and the looms inside and between chiplets (nighthawk_qrack.py lab -h)")
     sub.add_parser("erepr", add_help=False,
                    help="ER=EPR on the cloverleaf and the cloverfield (formerly nighthawk_erepr.py; "
                         "nighthawk_qrack.py erepr -h)")
@@ -14173,6 +14180,9 @@ def main():
         return
     if len(sys.argv) > 1 and sys.argv[1] == "erepr":               # the ER=EPR commands, with their own parser
         erepr_main(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "lab":                 # the configuration lab, with its own parser
+        lab_main(sys.argv[2:])
         return
     load_register_files()
     ap = make_parser()
@@ -14543,7 +14553,8 @@ class Field:
     nighthawk_qrack's circuit generation (n, schedule, matchings, partitions, inputs)."""
 
     def __init__(self, repo, chip_specs, arrangement=None, links="all", link_rows=None, link_cols=None,
-                 ghost=None, cut_links=False, topology="grid", hub=None, pairs=None, long_links=None):
+                 ghost=None, cut_links=False, topology="grid", hub=None, pairs=None, long_links=None, port=None,
+                 port_site="inner"):
         self.cut = bool(cut_links)            # links placed (same anchors, same tag base) but not in the circuit
         self.repo = find_repo(repo)
         L = json.loads((self.repo / "data/layout.json").read_text())
@@ -14563,10 +14574,11 @@ class Field:
             self.chip_of += [c] * nn
         self.local = [q - self.off[self.chip_of[q]] for q in range(self.n)]
         self.cells = [[(p // self.C_dev, p % self.C_dev) for p in lay.l2p] for lay in self.lays]
-        self.schedule = L["schedule"]
+        self.schedule = list(L["schedule"])
         self.base_seed = L["base_seed"]
         self.instances = L["instances"]
         self.depths = L["depths"]
+        self.port, self.ports, self.mux, self.port_layers = port or None, None, None, []
         # intra-chip couplers, global indices
         self.matchings = {col: [] for col in COLOURS}
         for c, lay in enumerate(self.lays):
@@ -14581,12 +14593,12 @@ class Field:
         self.rooms = [GhostRoom(s, ghost) for s in chip_specs] if ghost else None
         self.ghost_sites = [[] for _ in chip_specs]       # (partner global, anchor local, ACE site or None)
         self.links, self.skipped = [], []
-        self.topology, self.hub = topology or "grid", None
+        self.topology, self.hub, self.rim = topology or "grid", None, None
         self.chip_pairs = self._chip_pairs(self.topology, hub, pairs)
         self.long = set()                     # links between chips that are not grid neighbours
         K_long = long_links if long_links is not None else (int(links) if str(links).isdigit() else 10)
         far = []
-        for c, d in self.chip_pairs:                # grid neighbours first, long-range pairs on what is left
+        for c, d in ([] if self.port else self.chip_pairs):   # grid neighbours first, long-range pairs on what is left
             (ci, cj), (di, dj) = divmod(c, gc), divmod(d, gc)
             if ci == di and abs(cj - dj) == 1:
                 lt, rt = (c, d) if cj < dj else (d, c)
@@ -14598,6 +14610,8 @@ class Field:
                 far.append((c, d))
         for c, d in far:
             self._link_far(c, d, int(K_long), used)
+        if self.port:
+            self._link_ports(self.port, port_site)
         if not self.cut:
             for (u, v, col) in self.links:
                 self.matchings[col].append((u, v))
@@ -14633,7 +14647,8 @@ class Field:
         """The chip pairs that get l-couplers, in placement order. grid: every pair of grid neighbours (row-major,
         right then down: the original order, so grid fields keep their links and tags). ring: the chips in a cycle
         by angle around the grid centre, each linked to the next. hub: one chip (--hub, default the chip nearest
-        the centre) linked to every other chip, no other pairs: a router chip. none: no pairs. extra: pairs added
+        the centre) linked to every other chip, no other pairs: a router chip. wheel: the ring as the rim plus every
+        chord across it, so each chip has its own l-couplers to each other chip (all pairs, one hop). none: no pairs. extra: pairs added
         to any of these (--pairs 0-5,2-3), e.g. long-range shortcuts across a grid."""
         gr, gc = self.arr
         k = gr * gc
@@ -14647,13 +14662,20 @@ class Field:
                     out.append((c, c + 1))
                 if ci + 1 < gr:
                     out.append((c, c + gc))
-        elif topology == "ring":
+        elif topology in ("ring", "wheel"):
             order = sorted(range(k), key=lambda c: (math.atan2(at[c][0] - mid[0], at[c][1] - mid[1]) + 2 * math.pi
                                                     + math.pi) % (2 * math.pi))
             if k == 2:
                 out.append((order[0], order[1]))
             elif k > 2:
                 out += [(order[i], order[(i + 1) % k]) for i in range(k)]
+            if topology == "wheel":                 # the rim, then every chord: each chip one hop from each chip
+                self.rim = list(order)
+                for step in range(2, k // 2 + 1):
+                    for i in range(k):
+                        pr = (order[i], order[(i + step) % k])
+                        if pr not in out and pr[::-1] not in out:
+                            out.append(pr)
         elif topology == "hub":
             h = int(hub) if hub is not None else min(range(k), key=lambda c: ((at[c][0] - mid[0]) ** 2
                                                                             + (at[c][1] - mid[1]) ** 2, c))
@@ -14662,7 +14684,7 @@ class Field:
             self.hub = h
             out += [(h, d) for d in range(k) if d != h]
         elif topology != "none":
-            raise SystemExit(f"--topology {topology}: grid, ring, hub or none")
+            raise SystemExit(f"--topology {topology}: grid, ring, wheel, hub or none")
         for x in extra or []:
             c, d = (int(t) for t in x)
             if c == d or not (0 <= c < k and 0 <= d < k):
@@ -14691,6 +14713,81 @@ class Field:
                         todo.append(y)
             out.append(dist)
         return out
+
+    def _link_ports(self, mode, site):
+        """--link-port: one port qubit per chip carries every l-coupler of the chip, one coupler per chip pair.
+        The port is the chip's site nearest the centre of the field (site "inner") or of the chip ("centre"). A
+        qubit takes one two-qubit gate per layer, so the port couplers get layers of their own after A, B, C, D:
+        the pairs are edge-coloured into m matchings; "layers" adds m layers P1..Pm per round (every coupler once
+        per round), "mux" adds one layer P that carries one matching per round, round robin (every coupler once
+        per m rounds)."""
+        if mode not in ("layers", "mux"):
+            raise SystemExit(f"--link-port {mode}: layers or mux")
+        self.port_site = site
+        gr, gc = self.arr
+        k = len(self.lays)
+        fr, fc = (gr * (self.R_dev + 1) - 2) / 2.0, (gc * (self.C_dev + 1) - 2) / 2.0
+        self.ports = []
+        for c in range(k):
+            ci, cj = divmod(c, gc)
+            cells = self.cells[c]
+            if site == "centre":
+                tr, tc = float(np.mean([r for r, _ in cells])), float(np.mean([x for _, x in cells]))
+            elif site == "inner":
+                tr, tc = fr - ci * (self.R_dev + 1), fc - cj * (self.C_dev + 1)
+            else:
+                raise SystemExit(f"--port-site {site}: inner or centre")
+            i = min(range(len(cells)), key=lambda i_: ((cells[i_][0] - tr) ** 2 + (cells[i_][1] - tc) ** 2, i_))
+            self.ports.append(self.off[c] + i)
+        pairs = [tuple(sorted(p_)) for p_ in self.chip_pairs]
+        best = None
+        for trial in range(200):                    # proper edge colouring, fewest colours of 200 greedy orders
+            order = list(pairs) if trial == 0 else [pairs[i] for i in
+                                                    np.random.default_rng([self.base_seed, trial]).permutation(len(pairs))]
+            busy, col = {}, {}
+            for c, d in order:
+                x = 0
+                while x in busy.get(c, ()) or x in busy.get(d, ()):
+                    x += 1
+                col[(c, d)] = x
+                busy.setdefault(c, set()).add(x)
+                busy.setdefault(d, set()).add(x)
+            m = 1 + max(col.values(), default=-1)
+            if best is None or m < best[0]:
+                best = (m, col)
+        m, col = best
+        placed = {}
+        for c, d in pairs:
+            u, v = self.ports[c], self.ports[d]
+            if self.rooms is not None:
+                ra, rb = self.rooms[c], self.rooms[d]
+                if not ra.take(self.local[u]):
+                    self.skipped.append((c, d, "port", u, v))
+                    continue
+                if not rb.take(self.local[v]):
+                    x = ra.sites.pop()
+                    if x is not None:
+                        ra.used.discard(x)
+                        for s_ in ra.sids[x]:
+                            ra.width[s_] -= 1
+                    self.skipped.append((c, d, "port", u, v))
+                    continue
+                self.ghost_sites[c].append((v, self.local[u], ra.sites[-1]))
+                self.ghost_sites[d].append((u, self.local[v], rb.sites[-1]))
+            placed[(c, d)] = col[(c, d)]
+            (ci, cj), (di, dj) = divmod(c, gc), divmod(d, gc)
+            if abs(ci - di) + abs(cj - dj) != 1:
+                self.long.add((min(u, v), max(u, v)))
+        names = [f"P{x + 1}" for x in range(m)] if mode == "layers" else ["P"]
+        for nm in names:
+            self.matchings[nm] = []
+        self.port_layers = names
+        self.schedule = self.schedule + names       # kept with --cut-links: the baseline has the same layers
+        for (c, d), x in placed.items():
+            self.links.append((self.ports[c], self.ports[d], names[x] if mode == "layers" else "P"))
+        if mode == "mux":
+            self.mux = {"P": [frozenset((min(self.ports[c], self.ports[d]), max(self.ports[c], self.ports[d]))
+                                        for (c, d), y in placed.items() if y == x) for x in range(m)]}
 
     def _link_far(self, c, d, K, used):
         """K l-couplers between chips that are not grid neighbours (a long-range link): on each chip the sites
@@ -14837,6 +14934,13 @@ class Field:
         topo = {} if self.topology == "grid" and not self.long else dict(
             topology=self.topology, chip_pairs=[list(p) for p in self.chip_pairs], hub=self.hub,
             long_links=[[u, v] for u, v in sorted(self.long)])
+        if self.port:
+            topo.update(topology=self.topology, chip_pairs=[list(p) for p in self.chip_pairs], hub=self.hub,
+                        long_links=[[u, v] for u, v in sorted(self.long)],
+                        port=dict(mode=self.port, site=self.port_site, qubits=list(self.ports),
+                                  layers=list(self.port_layers),
+                                  matchings=len(self.mux["P"]) if self.mux else len(self.port_layers),
+                                  schedule=list(self.schedule)))
         return dict(n=self.n, chips=[s["name"] for s in self.specs], chip_n=self.chip_n, arrangement=list(self.arr),
                     links=[[u, v, col] for u, v, col in self.links], couplers_per_colour=per,
                     skipped_links=len(self.skipped), **topo, **({"links_cut": True} if self.cut else {}))
@@ -15398,7 +15502,8 @@ def build_field(a):
     pairs = [tuple(int(x) for x in t.split("-")) for t in a.pairs.split(",") if t] if getattr(a, "pairs", None) else None
     return Field(a.repo, specs, arr, a.links, rows, cols, ghost=ghost, cut_links=getattr(a, "cut_links", False),
                  topology=getattr(a, "topology", "grid"), hub=getattr(a, "hub", None), pairs=pairs,
-                 long_links=getattr(a, "long_links", None))
+                 long_links=getattr(a, "long_links", None), port=getattr(a, "link_port", None),
+                 port_site=getattr(a, "port_site", "inner") or "inner")
 
 
 def engine_opts(a):
@@ -15886,9 +15991,15 @@ def cmd_field_plan(a):
     if device_note(a, field):
         print(device_note(a, field))
     print("colour   intra-chip CZ   link CZ")
-    for col in COLOURS:
+    for col in desc["couplers_per_colour"]:
         i_, l_ = desc["couplers_per_colour"][col]
-        print(f"  {col}      {i_:>8}        {l_:>4}")
+        print(f"  {col:<3}    {i_:>8}        {l_:>4}")
+    if field.port:
+        pm = desc["port"]
+        print(f"--link-port {field.port}: every l-coupler of a chip on its port qubit {pm['qubits']}; the "
+              f"{len(field.chip_pairs)} chip pairs in {pm['matchings']} matchings; a round is "
+              f"{' '.join(pm['schedule'])}" + (f", P carrying one matching per round (every coupler once per "
+                                               f"{pm['matchings']} rounds)" if field.port == "mux" else ""))
     print(f"links: {len(field.links)}, loom {a.loom}" + (f" ({len(field.skipped)} facing pairs skipped: no colour free "
                                          f"at both ends{', or no ghost room under the caps' if field.rooms else ''})"
                                          if field.skipped else ""))
@@ -16427,6 +16538,8 @@ def cmd_field_selftest(a):
     rg = build_field(argparse.Namespace(**ta, topology="ring"))
     hb = build_field(argparse.Namespace(**ta, topology="hub", hub=0))
     sc = build_field(argparse.Namespace(**ta, pairs="0-3"))
+    wh = build_field(argparse.Namespace(**ta, topology="wheel"))
+    w6 = build_field(argparse.Namespace(**dict(ta, chips="nighthawk88e*6", arrangement="2x3"), topology="wheel"))
     hh, sh = hb.chip_hops(), sc.chip_hops()
     pairs_of = lambda f: sorted(tuple(sorted(p)) for p in f.chip_pairs)
     good = (g0.links == g1.links and g0.tag() == g1.tag() and not g0.long and "topology" not in g0.describe()
@@ -16434,12 +16547,36 @@ def cmd_field_selftest(a):
             and pairs_of(hb) == [(0, 1), (0, 2), (0, 3)] and hb.hub == 0 and hb.long and hh[0] == [0, 1, 1, 1]
             and hh[1][2] == 2 and all(hh[i][j] == hh[j][i] for i in range(4) for j in range(4))
             and sc.long and sh[0][3] == 1 and g1.chip_hops()[0][3] == 2
+            and len(wh.chip_pairs) == 6 and len(w6.chip_pairs) == 15 and len(set(map(frozenset, w6.chip_pairs))) == 15
+            and all(h == (0 if i == j else 1) for f_ in (wh, w6) for i, r_ in enumerate(f_.chip_hops())
+                    for j, h in enumerate(r_))
             and all(sc.chip_of[u] != sc.chip_of[v] for u, v in sc.long)
             and all(len({q for e in es for q in e}) == 2 * len(es) for es in hb.matchings.values()))
-    report("[12] --topology grid / ring / hub, --pairs: grid unchanged (links, tag, describe), ring and hub pairs, "
-           "long-range links placed, hops", good,
+    report("[12] --topology grid / ring / hub / wheel, --pairs: grid unchanged (links, tag, describe), ring and hub "
+           "pairs, wheel: all pairs at one hop, long-range links placed, hops", good,
            f"grid {len(g1.links)} links, ring {len(rg.links)}, hub 0: {len(hb.links)} ({len(hb.long)} long-range, "
-           f"hops from 0 {hh[0]}), grid + 0-3: {len(sc.links)} ({len(sc.long)} long-range, hops 0-3 {sh[0][3]})")
+           f"hops from 0 {hh[0]}), grid + 0-3: {len(sc.links)} ({len(sc.long)} long-range, hops 0-3 {sh[0][3]}), "
+           f"wheel 2x3: {len(w6.chip_pairs)} pairs, {len(w6.links)} links")
+    # [13] --link-port: one port qubit per chip carries every l-coupler; layers of their own, or one multiplexed
+    t6 = dict(ta, chips="nighthawk88e*6", arrangement="2x3", topology="wheel")
+    pl = build_field(argparse.Namespace(**t6, link_port="layers"))
+    pm = build_field(argparse.Namespace(**t6, link_port="mux"))
+    pc = build_field(argparse.Namespace(**t6, link_port="layers", cut_links=True))
+    cyc_m = build_cycles(pm, 5 * len(pm.schedule), 1, 0)
+    fired = [tuple(sorted(e)) for r_ in range(5) for e in cyc_m[r_ * len(pm.schedule) + 4][1]]
+    good = (len(pl.links) == 15 == len(pm.links) and len(pl.anchor_set) == 6 == len(set(pl.ports))
+            and pl.anchor_set == frozenset(pl.ports) and pm.ports == pl.ports
+            and len(pl.port_layers) == 5 and pl.schedule[:4] == list(w6.schedule) and pl.schedule[4:] == pl.port_layers
+            and all(len({q for e in pl.matchings[x] for q in e}) == 2 * len(pl.matchings[x]) for x in pl.port_layers)
+            and pm.schedule[4:] == ["P"] and len(pm.mux["P"]) == 5 and sorted(fired) == sorted(pm.link_set)
+            and all(len(cyc_m[r_ * 5 + 4][1]) == 3 for r_ in range(5))
+            and all(h == (0 if i == j else 1) for i, r_ in enumerate(pl.chip_hops()) for j, h in enumerate(r_))
+            and pc.schedule == pl.schedule and not any(pc.matchings[x] for x in pc.port_layers)
+            and [len(g_) for g_ in pl.ghost_plan()] == [5] * 6 and pl.tag() != pm.tag() != w6.tag())
+    report("[13] --link-port layers / mux: one port per chip, 15 couplers on 6 qubits, layers a proper edge colouring, "
+           "mux one matching per round and every coupler once per 5 rounds, the cut baseline keeps the layers", good,
+           f"ports {pl.ports}, a round is {' '.join(pl.schedule)} (layers) or {' '.join(pm.schedule)} (mux), "
+           f"{len(pl.ghost_plan()[0])} ghosts per chip")
     print("ALL OK" if ok else "SOME CHECKS FAILED")
     raise SystemExit(0 if ok else 1)
 
@@ -16507,14 +16644,25 @@ def add_field_args(p):
     p.add_argument("--link-rows", dest="link_rows", default=None,
                    help="horizontal neighbours: lattice rows that get a link, e.g. 2,5,8 (overrides --links)")
     p.add_argument("--link-cols", dest="link_cols", default=None, help="vertical neighbours: lattice columns")
-    p.add_argument("--topology", choices=["grid", "ring", "hub", "none"], default="grid",
+    p.add_argument("--topology", choices=["grid", "ring", "wheel", "hub", "none"], default="grid",
                    help="which chip pairs get l-couplers: grid (default): every pair of grid neighbours; ring: the "
-                        "chips in a cycle around the grid centre; hub: a router chip (--hub) linked to every other "
+                        "chips in a cycle around the grid centre; wheel: that ring as the rim plus every chord, so "
+                        "each chip links directly to each other chip; hub: a router chip (--hub) linked to every other "
                         "chip and no other pairs; none: only --pairs. Pairs that are not grid neighbours get "
                         "long-range links (--long-links)")
     p.add_argument("--hub", type=int, default=None, help="--topology hub: the router chip (default: nearest the centre)")
     p.add_argument("--pairs", default=None,
                    help="chip pairs to link as well, comma list of I-J, e.g. 0-5,2-3: long-range shortcuts")
+    p.add_argument("--link-port", dest="link_port", choices=["layers", "mux"], default=None,
+                   help="concentrate every l-coupler of a chip on one port qubit, one coupler per chip pair of "
+                        "--topology / --pairs (--links and --long-links are not used). A qubit takes one two-qubit "
+                        "gate per layer, so the port couplers get their own layers after A, B, C, D. layers: one "
+                        "layer per matching of the chip pairs (5 for a six-chip wheel), every coupler once per "
+                        "round. mux: one extra layer that carries one matching per round, round robin. Not the "
+                        "point-to-point l-couplers of the device: a router qubit per chip")
+    p.add_argument("--port-site", dest="port_site", choices=["inner", "centre"], default="inner",
+                   help="--link-port: the port is the chip's site nearest the centre of the field (inner, default) "
+                        "or the centre of the chip")
     p.add_argument("--long-links", dest="long_links", type=int, default=None,
                    help="l-couplers per long-range pair (chips that are not grid neighbours; default --links, or 10)")
     p.add_argument("--broken", choices=["disable", "use"], default="disable", help="rect chips: broken qubits")
@@ -18677,6 +18825,1325 @@ def erepr_main(argv=None):
     a = ap.parse_args(argv)
     dict(derive=cmd_derive, plan=cmd_erepr_plan, run=cmd_erepr_run, ds=cmd_ds, pairs=cmd_pairs, table=cmd_table, aceprobe=cmd_aceprobe,
          selftest=cmd_erepr_selftest)[a.cmd](a)
+
+
+# ================================================================== configuration lab (the `lab` command)
+# Scaled-down fields (up to about 24 qubits) whose whole register is simulated exactly, so every way of building the
+# device is scored against the truth instead of against itself:
+#   inside a chiplet     exact, ACE patches (the chip's QrackAceBackend register), QrackBridge patches
+#   between chiplets     the loom (ghost, mean, sample), QrackBridge (a patch per chip or per strip of a chip),
+#                        an ACE seam (one QrackAceBackend over the field), cut (links left out)
+#   links                how many per facing pair, on which rows, at the border or at the chip's centre
+#   disabled qubits      next to the link anchors or far from them
+#   topology             six small chips on a grid, a ring, a grid with a long link
+# Scores per (configuration, depth, instance), all against the exact state of the same circuit on the same field:
+#   fclass     classical fidelity (sum sqrt(p q))^2 of the configuration's whole output distribution q, where it
+#              has one (looms with exact or bridge chips: the product of the chips'; QrackBridge: its state)
+#   fb_intra   the same on 8-qubit blocks inside a chip; fb_cross on blocks around a link (every configuration;
+#              from samples for ACE, which keeps no state to read)
+#   fxeb       linear XEB of q (or of its samples) against the exact probabilities, over the ideal XEB
+#   marg       mean |P(q = 1) - exact|;  signal: the mirror observable 1 - 2h after U U^dagger;  width: qubits of
+#              the widest simulator
+# nighthawk_graph.py --lab FILE --lab-poster PREFIX draws the three posters of a run.
+LAB_ABOUT = ("configuration lab: small fields scored against their exact state (inside a chiplet: exact, ACE, "
+             "QrackBridge; between chiplets: loom, QrackBridge, ACE seam, cut; link count and placement; disabled "
+             "qubits; topology)")
+LAB_SHOTS = 4096
+
+
+# ------------------------------------------------------------------ geometry
+def lab_spec(rows, cols, drop_cells=()):
+    """A rect chip spec with chosen disabled cells [(row, col)] (lattice coordinates)."""
+    (r0, r1), (c0, c1) = rows, cols
+    _, C_, _, _ = lattice_info(None)
+    drop = sorted(r * C_ + c for r, c in drop_cells)
+    n = (r1 - r0 + 1) * (c1 - c0 + 1) - len(drop)
+    name = f"rect:{r0}-{r1},{c0}-{c1}" + ("~" + ".".join(f"{r}_{c}" for r, c in sorted(drop_cells)) if drop_cells else "")
+    return dict(kind="rect", name=name, rows=[r0, r1], cols=[c0, c1], drop=drop, n=n)
+
+
+class LabField(Field):
+    """A Field whose links can be given cell by cell: custom = {(chip c, chip d): [((r, c), (r, c)), ...]}
+    (lattice cells of chip c and chip d). Pairs without an entry are placed as Field places them."""
+
+    def __init__(self, specs, arr, links="all", link_rows=None, link_cols=None, custom=None, cut=False,
+                 topology="grid", hub=None, pairs=None, long_links=None, ghost=None, port=None, port_site="inner"):
+        self._custom = custom or {}
+        super().__init__(None, specs, arr, links, link_rows, link_cols, ghost=ghost, cut_links=cut,
+                         topology=topology, hub=hub, pairs=pairs, long_links=long_links, port=port,
+                         port_site=port_site)
+
+    def _link_pair(self, c, d, horiz, links, chosen, used):
+        if (c, d) not in self._custom:
+            return super()._link_pair(c, d, horiz, links, chosen, used)
+        pref = ("A", "B", "C", "D") if horiz else ("C", "D", "A", "B")
+        for t, (ca, cb) in enumerate(self._custom[(c, d)]):
+            u = self.off[c] + self.cells[c].index(tuple(ca))
+            v = self.off[d] + self.cells[d].index(tuple(cb))
+            if not self._try_link(c, d, t, u, v, pref, used, quiet=True):
+                self.skipped.append((c, d, t, u, v))
+
+
+# ------------------------------------------------------------------ engines
+class LabBridgeEngine:
+    """QrackBridge behind the tool's engine interface. order: logical qubit -> bridge index (so chosen qubits
+    share a patch); n_real: the qubits that are read out (ghosts come after them)."""
+
+    def __init__(self, n, patches, bonds, wrap=False, order=None, n_real=None, seed=1):
+        self.n, self.n_real = n, n_real if n_real is not None else n
+        self.kw = dict(max_bonds=int(bonds), patches=int(patches), wrap=bool(wrap), seed=int(seed), is_gpu=False,
+                       is_cpu_gpu_hybrid=False)
+        self.idx = list(order) if order is not None else list(range(n))
+        self.reset()
+
+    def reset(self):
+        self.sim = qrack_bridge()(self.n, **self.kw)
+
+    def g1(self, q, M):
+        self.sim.mtrx(flat(M), self.idx[q])
+
+    def pauli(self, p, q):
+        if p != "i":
+            getattr(self.sim, p)(self.idx[q])
+
+    def cz(self, a, b):
+        self.sim.cz(self.idx[a], self.idx[b])
+
+    def prob1(self, q):
+        from pyqrack import Pauli
+        return float((1.0 - self.sim.pauli_expectation([self.idx[q]], [Pauli.PauliZ])) / 2.0)
+
+    def shots(self, s):
+        return np.array(self.sim.measure_shots([self.idx[q] for q in range(self.n_real)], s), dtype=np.uint64)
+
+    def dist(self):
+        """Exact distribution of the read-out qubits (logical order, ghosts traced out)."""
+        N = self.n
+        P = np.abs(np.asarray(self.sim.out_ket(), dtype=np.complex128)) ** 2
+        P = P.reshape([2] * N).transpose([N - 1 - self.idx[q] for q in reversed(range(N))]).reshape(-1)
+        P = P.reshape(1 << (N - self.n_real), 1 << self.n_real).sum(axis=0)
+        return P / P.sum()
+
+    def width(self):
+        return int(self.sim.peak_patch_qubits)
+
+    def extra(self):
+        return dict(bridge_fidelity=float(self.sim.fidelity_estimate), truncations=int(self.sim.truncations),
+                    peak_bonds=int(self.sim.peak_bonds))
+
+
+def lab_strip_order(cells_per_chip, per_chip, strips="rows", chain=None, extra=None):
+    """Logical qubit -> QrackBridge index for a chain of patches: chips in `chain` order (default 0, 1, ...), each
+    chip cut into per_chip strips along its rows (strips of rows, cut crossing the columns' couplers) or cols.
+    cells_per_chip: per chip, its qubits' (row, col) in local order. extra: per chip, [(local anchor, logical
+    index)] qubits appended to the strip of their anchor (a chip's ghosts)."""
+    chain = list(chain) if chain is not None else list(range(len(cells_per_chip)))
+    off = np.cumsum([0] + [len(c) for c in cells_per_chip])
+    seq = []
+    for c in chain:
+        cells = cells_per_chip[c]
+        key = [(rc[0], rc[1]) if strips == "rows" else (rc[1], rc[0]) for rc in cells]
+        ranked = sorted(range(len(cells)), key=lambda i: key[i])
+        size = len(cells) / per_chip
+        groups = [[] for _ in range(per_chip)]
+        strip_of = {}
+        for pos_, i in enumerate(ranked):
+            k = min(per_chip - 1, int(pos_ / size))
+            groups[k].append(int(off[c]) + i)
+            strip_of[i] = k
+        for anc, q in (extra[c] if extra else []):
+            groups[strip_of[anc]].append(q)
+        seq += [q for g in groups for q in g]
+    order = [0] * len(seq)
+    for pos_, q in enumerate(seq):
+        order[q] = pos_
+    return order
+
+
+class LabEngineChip:
+    """A chip for the tool's Loom around any engine (the loom's batch protocol, in process)."""
+
+    def __init__(self, eng, n):
+        self.eng, self.n, self._r = eng, n, None
+        self.info = dict(seam=[])
+
+    def put(self, msg):
+        ops, query = msg[1], msg[2]
+        e = self.eng
+        for op in ops:
+            k = op[0]
+            if k == "g":
+                M = gate(op[2])
+                e.g1(op[1], M.conj().T if op[3] else M)
+            elif k == "p":
+                e.pauli(op[1], op[2])
+            elif k == "cz":
+                e.cz(op[1], op[2])
+            elif k == "ph":
+                e.g1(op[1], np.diag([1.0, np.exp(1j * op[2])]))
+            elif k == "reset":
+                e.reset()
+            else:
+                raise ValueError(f"lab chip: op {k}")
+        self._r = ("m", [e.prob1(q) for q in query])
+
+    def get(self, want):
+        return self._r
+
+    def shots(self, s):
+        return self.eng.shots(s)
+
+    def dist(self):
+        return self.eng.dist()
+
+    def width(self):
+        return self.eng.width()
+
+    def close(self):
+        pass
+
+
+def lab_fast_probs(sim):
+    """QrackSimulator.out_probs() as a numpy array: the library fills a buffer directly (out_probs builds a
+    Python list of 2^n floats, ten seconds and more at 24 qubits)."""
+    import ctypes
+    from pyqrack.qrack_system import Qrack
+    real, dt = (ctypes.c_float, np.float32) if Qrack.fppow < 6 else (ctypes.c_double, np.float64)
+    buf = (real * (1 << sim.num_qubits()))()
+    Qrack.qrack_lib.OutProbs(sim.sid, buf)
+    sim._throw_if_error()
+    return np.frombuffer(buf, dtype=dt).astype(np.float64)
+
+
+def lab_exact_dist(sim, n_real):
+    """Distribution of the first n_real qubits of a QrackSimulator (the rest, ghosts, traced out)."""
+    P = lab_fast_probs(sim)
+    P = P.reshape(-1, 1 << n_real).sum(axis=0)
+    return P / P.sum()
+
+
+class LabToolChip:
+    """The tool's own chip simulator (ChipSim: exact or the chip's ACE preset), in process."""
+
+    def __init__(self, index, spec, opts):
+        self.c = LocalChip(index, spec, None, opts, "haar")
+        self.n = spec["n"]
+        self.info = self.c.info
+
+    def put(self, msg):
+        self.c.put(msg)
+
+    def get(self, want):
+        return self.c.get(want)
+
+    def shots(self, s):
+        v = self.c.sim.eng.shots(s)
+        return v & np.uint64((1 << self.n) - 1)
+
+    def dist(self):
+        if self.c.sim.backend == "ace":
+            return None                                   # ACE has no state to read: samples only
+        return lab_exact_dist(self.c.sim.eng.sim, self.n)
+
+    def width(self):
+        e = self.c.sim.eng
+        if self.c.sim.backend == "ace":
+            w = (self.c.sim.ghost.get("widths") or e.widths)
+            return int(max(w))
+        return int(self.n + self.c.sim.ghost["count"])
+
+    def close(self):
+        self.c.close()
+
+
+def lab_chip_opts(inside, plan):
+    """Engine options of one chip: inside = "exact" or "ace:SIZE:LRC:LRR[:noed]"."""
+    o = dict(backend="exact", cpu=True, ace_gpu=False, ace_host_pointer=False, chip_ace=None, max_width=None,
+             max_wide=None, ace_error_detection=True, ghost_anchors=[anc for _, anc, _ in plan],
+             ghost_sites=[site for _, _, site in plan])
+    if inside.startswith("ace"):
+        f = inside.split(":")
+        o.update(backend="ace", chip_ace=":".join(f[1:4]), ace_error_detection="noed" not in f)
+    return o
+
+
+def lab_make_chips(field, inside, loom_mode):
+    plan = field.ghost_plan() if loom_mode == "ghost" else [[] for _ in field.specs]
+    chips = []
+    for c, spec in enumerate(field.specs):
+        if inside.startswith("bridge"):
+            f = inside.split(":")
+            n, P = spec["n"], int(f[1])
+            lay = field.lays[c]
+            order = lab_strip_order([lay.pos], P, f[3] if len(f) > 3 else "rows",
+                                extra=[[(anc, n + j) for j, (_, anc, _) in enumerate(plan[c])]])
+            chips.append(LabEngineChip(LabBridgeEngine(n + len(plan[c]), P, int(f[2]), order=order, n_real=n, seed=c + 1), n))
+        else:
+            chips.append(LabToolChip(c, spec, lab_chip_opts(inside, plan[c])))
+    return chips
+
+
+# ------------------------------------------------------------------ circuits
+def lab_forward(e, cyc):
+    for ang, es in cyc:
+        for q, t in enumerate(ang):
+            e.g1(q, gate(tuple(t)))
+        for a, b in es:
+            e.cz(a, b)
+
+
+def lab_inverse(e, cyc):
+    for ang, es in reversed(cyc):
+        for a, b in reversed(es):
+            e.cz(a, b)
+        for q in reversed(range(len(ang))):
+            e.g1(q, gate(tuple(ang[q])).conj().T)
+
+
+def lab_loom_forward(loom, cyc, srng):
+    queues = [[("reset",)] for _ in loom.chips]
+    for ang, es in cyc:
+        for q, t in enumerate(ang):
+            loom._emit1(queues, q, "g", tuple(t), False)
+        loom._layer(es, None, queues, srng)
+    return loom._flush(queues, [list(range(n_)) for n_ in loom.f.chip_n])
+
+
+def lab_fxeb(p, shots, n):
+    """Linear XEB of the samples against the exact probabilities, over the ideal XEB; and its standard error."""
+    ideal = float((1 << n) * np.sum(p * p) - 1.0)
+    x = (1 << n) * p[shots.astype(np.int64)]
+    return float((x.mean() - 1.0) / ideal), float(x.std(ddof=1) / math.sqrt(len(x)) / ideal)
+
+
+def lab_dist_scores(p, q, n):
+    """With the configuration's whole distribution q in hand (no shot noise): the linear XEB of q against the
+    exact p over the ideal XEB, and the classical fidelity (sum sqrt(p q))^2."""
+    ideal = float((1 << n) * np.sum(p * p) - 1.0)
+    return float(((1 << n) * np.dot(p, q) - 1.0) / ideal), float(np.sum(np.sqrt(p * q)) ** 2)
+
+
+def lab_blocks(field, size=8):
+    """Qubit blocks for the block fidelity: intra blocks (the breadth-first ball of `size` qubits around a qubit,
+    inside its chip, one per distinct set) and cross blocks (per link, size/2 qubits around each of its ends)."""
+    nb = defaultdict(list)
+    for es in field.matchings.values():
+        for u, v in es:
+            if field.chip_of[u] == field.chip_of[v]:
+                nb[u].append(v)
+                nb[v].append(u)
+
+    def ball(q, k):
+        seen, todo = [q], [q]
+        for x in todo:
+            for y in sorted(nb[x]):
+                if y not in seen and len(seen) < k:
+                    seen.append(y)
+                    todo.append(y)
+        return tuple(sorted(seen))
+    intra = sorted({ball(q, size) for q in range(field.n)})
+    if len(intra) > 16:
+        intra = [intra[i] for i in np.linspace(0, len(intra) - 1, 16).astype(int)]
+    cross = sorted({tuple(sorted(set(ball(u, size // 2)) | set(ball(v, size // 2)))) for u, v, _ in field.links})
+    return intra, cross
+
+
+_BLOCK_LUT = {}
+
+
+def lab_block_of_dist(p, n, block):
+    """Marginal of a 2^n distribution on the block's qubits (lowest qubit in the lowest bit). The block value
+    of every basis state is kept (one byte per state per block, per field size)."""
+    key = (n, tuple(sorted(block)))
+    lut = _BLOCK_LUT.get(key)
+    if lut is None:
+        if len(_BLOCK_LUT) > 40:
+            _BLOCK_LUT.clear()
+        x = np.arange(1 << n, dtype=np.uint32)
+        lut = np.zeros(1 << n, dtype=np.uint8)
+        for j, q in enumerate(key[1]):
+            lut |= (((x >> np.uint32(q)) & np.uint32(1)) << np.uint32(j)).astype(np.uint8)
+        _BLOCK_LUT[key] = lut
+    return np.bincount(lut, weights=p, minlength=1 << len(block))
+
+
+def lab_block_of_shots(sh, block):
+    idx = np.zeros(len(sh), dtype=np.int64)
+    for j, q in enumerate(sorted(block)):
+        idx |= ((sh >> np.uint64(q)) & np.uint64(1)).astype(np.int64) << j
+    h = np.bincount(idx, minlength=1 << len(block)).astype(np.float64)
+    return h / h.sum()
+
+
+def lab_block_fidelity(a, b):
+    return float(np.sum(np.sqrt(a * b)) ** 2)
+
+
+def lab_product_dist(parts):
+    """Chips' distributions -> the field's (chip 0 in the low bits): the loom's output is this product."""
+    q = parts[0]
+    for x in parts[1:]:
+        q = np.outer(x, q).reshape(-1)
+    return q
+
+
+# ------------------------------------------------------------------ one configuration
+def lab_stitched_dist(field, chips):
+    """Two exact chips on the ghost loom, read out through the ghosts instead of independently: chip A's
+    sample fixes chip B's anchors (A holds their ghosts) and B's ghosts of A's anchors,
+    q(xA, xB) = QA(xA, ghosts = B's anchor bits) QB(xB, ghosts = A's anchor bits) / QB(B's anchor bits, ghosts)."""
+    plan = field.ghost_plan()
+    nA, nB = field.chip_n
+    QA = lab_fast_probs(chips[0].c.sim.eng.sim).reshape(-1, 1 << nA)
+    QB = lab_fast_probs(chips[1].c.sim.eng.sim).reshape(-1, 1 << nB)
+    xA, xB = np.arange(1 << nA), np.arange(1 << nB)
+    aB = np.zeros(1 << nB, dtype=np.int64)               # B's anchor bits, in the order of A's ghosts
+    for j, (q, _, _) in enumerate(plan[0]):
+        aB |= ((xB >> field.local[q]) & 1) << j
+    aA = np.zeros(1 << nA, dtype=np.int64)               # A's anchor bits, in the order of B's ghosts
+    for j, (q, _, _) in enumerate(plan[1]):
+        aA |= ((xA >> field.local[q]) & 1) << j
+    gB = np.arange(QB.shape[0])
+    MB = np.zeros((1 << len(plan[0]), QB.shape[0]))
+    np.add.at(MB, (aB[None, :].repeat(len(gB), 0), gB[:, None].repeat(len(xB), 1)), QB)
+    num = QA[aB[None, :], xA[:, None]] * QB[aA[:, None], xB[None, :]]
+    den = MB[aB[None, :], aA[:, None]]
+    q = np.where(den > 0, num / np.where(den > 0, den, 1.0), 0.0).T.reshape(-1)
+    return q / q.sum()
+
+
+class LabRunner:
+    """One configuration, built once, scored point by point against a truth it is handed.
+    cfg: dict(name, chips=[spec], arr, links, link_rows, custom, topology, hub, pairs, long_links, inside, inter).
+    inter: ghost | mean | sample (the loom, chips = inside), ghost+stitch (ghost loom, read out through the ghosts),
+    bridge:B[:wrap] (one QrackBridge, a patch per chip, or per part of a chip with inside = bridge:P:0),
+    ace:SIZE:LRC:LRR (one QrackAceBackend over the field), cut (the chips alone), exact (the reference itself)."""
+
+    def __init__(self, cfg, shots=LAB_SHOTS):
+        self.cfg, self.shots = cfg, shots
+        inside, inter = cfg.get("inside", "exact"), cfg["inter"]
+        self.stitch = inter == "ghost+stitch"
+        loom_mode = "ghost" if self.stitch else (inter if inter in ("ghost", "mean", "sample") else None)
+        fkw = lab_field_kw(cfg)
+        gopts = lab_chip_opts(inside, []) if (loom_mode == "ghost" and inside.startswith("ace")) else None
+        self.field = field = LabField(cfg["chips"], cfg["arr"], ghost=gopts, **fkw)
+        n = field.n
+        self.base = dict(cfg=cfg["name"], exp=cfg.get("exp"), n=n, chips=len(field.specs), chip_n=field.chip_n,
+                         links=len(field.links), skipped=len(field.skipped), inside=inside, inter=inter,
+                         anchors=sorted(field.anchor_set), link_list=[[u, v] for u, v, _ in field.links],
+                         round_len=len(field.schedule), port=field.port,
+                         ghosts=[len(g) for g in field.ghost_plan()] if loom_mode == "ghost" else None,
+                         **{k: v for k, v in cfg.items() if k in ("label", "group", "x")})
+        self.chips = self.eng = self.loom = None
+        self.run_field = field
+        t0 = time.time()
+        if loom_mode:
+            self.chips = lab_make_chips(field, inside, loom_mode)
+            self.loom = Loom(field, self.chips, loom_mode)
+            seam = [ch.info.get("seam") or [] for ch in self.chips]
+            self.base["seam"] = sorted(field.off[c] + q for c, qs in enumerate(seam) for q in qs)
+        elif inter == "cut":
+            self.run_field = LabField(cfg["chips"], cfg["arr"], cut=True, **fkw)
+            self.chips = lab_make_chips(self.run_field, inside, "mean")
+            self.loom = Loom(self.run_field, self.chips, "mean")
+        elif inter.startswith("bridge"):
+            f = inter.split(":")
+            fi = inside.split(":")
+            per_chip = int(fi[1]) if inside.startswith("bridge") else 1
+            order = lab_strip_order([lay.pos for lay in field.lays], per_chip, fi[3] if len(fi) > 3 else "rows",
+                                chain=cfg.get("chain"))
+            self.eng = LabBridgeEngine(n, len(field.specs) * per_chip, int(f[1]), wrap="wrap" in f, order=order)
+        elif inter.startswith("ace"):
+            f = inter.split(":")
+            a = chip_engine_args(dict(kind="rect", name="lab"), dict(
+                backend="ace", cpu=True, ace_gpu=False, chip_ace=":".join(f[1:4]),
+                ace_error_detection="noed" not in f))
+            field.name = "labfield-" + field.tag()         # a register name of its own: the placement cache key
+            REGISTERS.setdefault(field.name, dict(n=n, ace=None))
+            self.eng = AceEngine(field, n, a)
+            row = layout_row(self.eng.size, self.eng.lrc, self.eng.lrr, self.eng.torus, self.eng.opts)
+            self.base["seam"] = [q for q in range(n) if len({s_ for s_, _ in row["unpack"][self.eng.idx[q]]}) > 1]
+            self.base["ace_widths"] = list(self.eng.widths)
+        elif inter == "exact":
+            self.eng = ExactEngine(n, True)
+        else:
+            raise SystemExit(f"lab: inter {inter}")
+        self.base["build_s"] = round(time.time() - t0, 2)
+
+    def point(self, d, inst, p, marg_x, cyc, blocks=None):
+        field, n, shots = self.field, self.field.n, self.shots
+        t0 = time.time()
+        srng = np.random.default_rng([BASE_SEED, d, inst, 13])
+        rec = dict(self.base, depth=d, instance=inst, rounds=d / len(field.schedule),
+                   link_gates=sum(1 for _, es in cyc for e in es if tuple(sorted(e)) in field.link_set))
+        eng = self.eng
+        try:
+            if self.chips is not None:
+                rcyc = cyc if self.run_field is field else fxeb_cycles(self.run_field, d, inst, n)
+                ps = lab_loom_forward(self.loom, rcyc, srng)
+                marg = np.array([x for pc in ps for x in pc])
+                if self.stitch:
+                    qd = lab_stitched_dist(field, self.chips)
+                else:
+                    parts = [ch.dist() for ch in self.chips]
+                    qd = lab_product_dist(parts) if all(x is not None for x in parts) else None
+                sh = None
+                if qd is None:
+                    sh = np.zeros(shots, dtype=np.uint64)
+                    for c, ch in enumerate(self.chips):
+                        sh |= ch.shots(shots) << np.uint64(field.off[c])
+                rec["width"] = max(ch.width() for ch in self.chips)
+                pm = self.loom.run_hamming(rcyc, None, 1, srng)
+                h = float(np.mean([x for pc in pm for x in pc]))
+                if self.loom.drift:
+                    rec["ghost_drift"] = float(np.mean(self.loom.drift))
+                    self.loom.drift = []
+            else:
+                eng.reset()
+                lab_forward(eng, cyc)
+                marg = np.array([eng.prob1(q) for q in range(n)])
+                qd = eng.dist() if hasattr(eng, "dist") else (
+                    lab_exact_dist(eng.sim, n) if isinstance(eng, ExactEngine) else None)
+                sh = None if qd is not None else eng.shots(shots) & np.uint64((1 << n) - 1)
+                if hasattr(eng, "extra"):
+                    rec.update(eng.extra())
+                rec["width"] = eng.width() if hasattr(eng, "width") else (
+                    max(eng.widths) if hasattr(eng, "widths") else n)
+                if isinstance(eng, ExactEngine):
+                    h = 0.0
+                else:
+                    eng.reset()
+                    lab_forward(eng, cyc)
+                    lab_inverse(eng, cyc)
+                    h = float(np.mean([eng.prob1(q) for q in range(n)]))
+            if qd is not None:
+                F, Fc = lab_dist_scores(p, qd, n)
+                se = 0.0
+                rec["fclass"] = Fc
+            else:
+                F, se = lab_fxeb(p, sh, n)
+            if blocks:
+                for kind, items in blocks.items():
+                    fs = [lab_block_fidelity(pb, lab_block_of_dist(qd, n, blk) if qd is not None else lab_block_of_shots(sh, blk))
+                          for blk, pb in items]
+                    if fs:
+                        rec[f"fb_{kind}"] = float(np.mean(fs))
+            err = np.abs(marg - marg_x)
+            anc = sorted(field.anchor_set)
+            rec.update(fxeb=F, fxeb_se=se, marg=float(err.mean()), signal=1.0 - 2.0 * h,
+                       marg_anchor=float(err[anc].mean()) if anc else None,
+                       marg_rest=float(np.delete(err, anc).mean()) if len(anc) < n else None)
+        except Exception as ex:                          # a backend that cannot run this point: recorded
+            rec.update(failed=f"{type(ex).__name__}: {str(ex).splitlines()[0][:160] if str(ex) else ''}")
+            if eng is not None and hasattr(eng, "rebuild"):
+                eng.rebuild()
+        rec["seconds"] = round(time.time() - t0, 2)
+        return rec
+
+    def close(self):
+        for ch in self.chips or []:
+            ch.close()
+
+
+def lab_field_kw(cfg):
+    return dict(links=cfg.get("links", "all"), link_rows=cfg.get("link_rows"), link_cols=cfg.get("link_cols"),
+                custom=cfg.get("custom"), topology=cfg.get("topology", "grid"), hub=cfg.get("hub"),
+                pairs=cfg.get("pairs"), long_links=cfg.get("long_links"), port=cfg.get("port"),
+                port_site=cfg.get("port_site", "inner"))
+
+
+def lab_truth(field, d, inst):
+    """Exact probabilities and marginals of U|0> on the woven field, and the circuit."""
+    cyc = fxeb_cycles(field, d, inst, field.n)
+    e = ExactEngine(field.n, True)
+    lab_forward(e, cyc)
+    p = lab_fast_probs(e.sim)
+    p /= p.sum()
+    return p, np.array([e.prob1(q) for q in range(field.n)]), cyc
+
+
+def lab_run_all(cfgs, depths, instances, out, shots=LAB_SHOTS):
+    """Configurations grouped by their woven field: one exact reference per (field, depth, instance), every
+    configuration of the group scored against it. Resumable: finished (experiment, configuration, depth,
+    instance) points in `out` are skipped."""
+    done = set()
+    if os.path.exists(out):
+        for line in open(out):
+            r = json.loads(line)
+            done.add((r["exp"], r["cfg"], r["depth"], r["instance"]))
+    groups = defaultdict(list)
+    for cfg in cfgs:
+        f = LabField(cfg["chips"], cfg["arr"], **lab_field_kw(cfg))
+        groups[f.tag()].append(cfg)
+    with open(out, "a") as fh:
+        for tag, grp in groups.items():
+            todo = [(c, d, i) for c in grp for d in c.get("depths", depths) for i in range(instances)
+                    if (c.get("exp"), c["name"], d, i) not in done and (c.get("exp"), c["name"], -1, -1) not in done]
+            if not todo:
+                continue
+            runners = {}
+            for cfg in grp:
+                if not any(t[0] is cfg for t in todo):
+                    continue
+                try:
+                    runners[cfg["name"], cfg.get("exp")] = LabRunner(cfg, shots)
+                except (SystemExit, Exception) as ex:
+                    fh.write(json.dumps(dict(exp=cfg.get("exp"), cfg=cfg["name"], depth=-1, instance=-1,
+                                             **{k: v for k, v in cfg.items() if k in ("label", "group", "x")},
+                                             failed=f"build: {type(ex).__name__}: {str(ex)[:300]}")) + "\n")
+                    fh.flush()
+                    print(f"  {cfg.get('exp')} {cfg['name']}: BUILD FAILED {type(ex).__name__}: {str(ex)[:160]}",
+                          flush=True)
+            if not runners:
+                continue
+            field = next(iter(runners.values())).field
+            acc = defaultdict(lambda: defaultdict(list))
+            t0 = time.time()
+            for d in sorted({t[1] for t in todo}):
+                for inst in range(instances):
+                    need = [c for c, dd, ii in todo if dd == d and ii == inst and (c["name"], c.get("exp")) in runners]
+                    if not need:
+                        continue
+                    p, marg_x, cyc = lab_truth(field, d, inst)
+                    blocks = {kind: [(blk, lab_block_of_dist(p, field.n, blk)) for blk in items]
+                              for kind, items in zip(("intra", "cross"), lab_blocks(field))}
+                    for cfg in need:
+                        rec = runners[cfg["name"], cfg.get("exp")].point(d, inst, p, marg_x, cyc, blocks)
+                        fh.write(json.dumps(rec) + "\n")
+                        fh.flush()
+                        if "fxeb" in rec:
+                            acc[cfg.get("exp"), cfg["name"]][d].append((rec["fxeb"], rec.get("fclass", float("nan")),
+                                                                         rec["signal"], rec.get("fb_intra", float("nan")),
+                                                                         rec.get("fb_cross", float("nan"))))
+                    del p
+            for r in runners.values():
+                r.close()
+            for (exp, name), byd in acc.items():
+                print(f"  {exp} {name:<30} " + "  ".join(
+                    f"d{d} C {np.mean([x[1] for x in v]):.3f} Bi {np.mean([x[3] for x in v]):.3f} "
+                    f"Bx {np.mean([x[4] for x in v]):.3f} X {np.mean([x[0] for x in v]):.2f} "
+                    f"S {np.mean([x[2] for x in v]):.2f}" for d, v in sorted(byd.items())), flush=True)
+            print(f"  [field {tag}: {len(runners)} configurations, {time.time() - t0:.0f} s]", flush=True)
+
+
+# ------------------------------------------------------------------ the lab_experiments
+def lab_two_chips(rows=(0, 2), cols=(0, 3), drop_a=(), drop_b=()):
+    return [lab_spec(rows, cols, drop_a), lab_spec(rows, cols, drop_b)]
+
+
+def lab_experiments(which):
+    """The lab's configurations by experiment key. Fields are at most 24 qubits: two chips of 3 rows x 4 columns
+    (three facing rows, so up to three l-couplers), one 4 x 5 chip, or six 2 x 2 chips on a 2 x 3 grid."""
+    E = []
+
+    def add(exp, name, **kw):
+        if exp in ("mixed", "holes", "numa", "wheel"):
+            kw.setdefault("depths", [4, 6, 8])
+        E.append(dict(exp=exp, name=name, **kw))
+
+    C2 = lab_two_chips()
+    two = dict(chips=C2, arr=(1, 2))
+    if "inter" in which:                                     # the interconnect method, chips exact
+        for K in (1, 3):
+            for inter in ("ghost", "ghost+stitch", "mean", "sample", "cut", "bridge:1", "bridge:2", "bridge:3",
+                          "bridge:4", "bridge:6", "ace:24:3:3", "ace:32:4:4"):
+                add("inter", f"K{K} {inter}", links=str(K), inter=inter, group=f"K{K}", label=inter, x=K,
+                    **({"depths": [4, 6, 8]} if inter == "bridge:6" else {}), **two)
+    if "links" in which:                                     # links per pair
+        for inter in ("ghost", "mean", "sample", "cut", "bridge:1", "bridge:2", "bridge:3", "bridge:4"):
+            add("links", f"K2 {inter}", links="2", inter=inter, group="K2", label=inter, x=2, **two)
+    if "rows" in which:                                      # which rows of the facing border
+        for lab, rows in (("centre row", [1]), ("adjacent rows 0,1", [0, 1])):
+            for inter in ("ghost", "mean", "cut", "bridge:1", "bridge:2"):
+                add("rows", f"{lab} {inter}", link_rows=rows, inter=inter, group=lab, label=inter, x=len(rows), **two)
+    if "inside" in which:                                    # inside one chiplet (no interconnect)
+        one = dict(chips=[lab_spec((0, 3), (0, 4))], arr=(1, 1))     # 4 x 5 = 20 qubits
+        for b_ in (1, 2, 3, 4, 6):
+            add("inside", f"bridge 2 strips b{b_}", inside="bridge:2:0:rows", inter=f"bridge:{b_}",
+                label=f"bridge, 2 patches, {b_} bonds", group="bridge2", x=b_, **one)
+        for b_ in (1, 2, 3):
+            add("inside", f"bridge 4 strips b{b_}", inside="bridge:4:0:rows", inter=f"bridge:{b_}",
+                label=f"bridge, 4 patches, {b_} bonds", group="bridge4", x=b_, **one)
+        for ace in ("ace:20:2:4", "ace:20:2:4:noed", "ace:24:3:3", "ace:20:1:4", "ace:25:2:5", "ace:30:3:5"):
+            add("inside", ace, inter=ace, label=ace, group="ace", **one)
+    if "mixed" in which:                                     # inside x between, three links
+        for inside in ("ace:16:2:4", "ace:20:2:4", "ace:24:3:3", "bridge:2:2:cols", "bridge:2:3:cols"):
+            for inter in ("ghost", "mean", "cut"):
+                add("mixed", f"{inside} + {inter}", links="3", inside=inside, inter=inter, group=inside, label=inter, **two)
+        add("mixed", "ace:12:2:3 + mean", links="3", inside="ace:12:2:3", inter="mean", group="ace:12:2:3", label="mean", **two)
+        add("mixed", "ace:12:2:3 + cut", links="3", inside="ace:12:2:3", inter="cut", group="ace:12:2:3", label="cut", **two)
+        for b_ in (1, 2, 3, 4):
+            add("mixed", f"bridge everywhere b{b_}", links="3", inside="bridge:2:0:cols", inter=f"bridge:{b_}",
+                group="bridge everywhere", label=f"{b_} bonds", x=b_, **two)
+    if "holes" in which:                                     # where the link lands, and where the disabled qubits sit
+        # 3 x 5 cells minus three: both chips lose (1,1), (1,3), (2,2); the chip centre (1,2) then has free coupler
+        # colours, as the border corners do
+        H = [lab_spec((0, 2), (0, 4), [(1, 1), (1, 3), (2, 2)])] * 2
+        for lab, custom in (("corner of the border", {(0, 1): [((0, 4), (0, 0))]}),
+                            ("centre of the chip", {(0, 1): [((1, 2), (1, 2))]}),
+                            ("centre + corner", {(0, 1): [((1, 2), (1, 2)), ((0, 4), (0, 0))]}),
+                            ("two corners", {(0, 1): [((0, 4), (0, 0)), ((2, 4), (2, 0))]})):
+            for inter in ("ghost", "mean", "cut", "bridge:1", "bridge:2"):
+                add("holes", f"{lab} {inter}", chips=H, arr=(1, 2), custom=custom, inter=inter, group=lab, label=inter)
+        # disabled qubits next to the link anchors (the border's middle and the two cells behind it) or far from them
+        near = [lab_spec((0, 2), (0, 4), [(1, 4), (1, 3), (1, 2)]), lab_spec((0, 2), (0, 4), [(1, 0), (1, 1), (1, 2)])]
+        far = [lab_spec((0, 2), (0, 4), [(1, 0), (1, 1), (1, 2)]), lab_spec((0, 2), (0, 4), [(1, 4), (1, 3), (1, 2)])]
+        corners = {(0, 1): [((0, 4), (0, 0)), ((2, 4), (2, 0))]}
+        for lab, chips in (("disabled at the links", near), ("disabled far from the links", far)):
+            for inter in ("ghost", "mean", "cut", "bridge:1", "bridge:2"):
+                add("holes", f"{lab} {inter}", chips=chips, arr=(1, 2), custom=corners, inter=inter, group=lab, label=inter)
+            for inside in ("ace:16:2:4", "ace:20:2:4"):
+                for inter in ("ghost", "mean"):
+                    add("holes", f"{lab} {inside} + {inter}", chips=chips, arr=(1, 2), custom=corners, inside=inside,
+                        inter=inter, group=lab, label=f"{inside} + {inter}")
+    if "numa" in which:                                      # six 2 x 2 chips on a 2 x 3 grid, one link per pair
+        six = dict(chips=[lab_spec((0, 1), (0, 1))] * 6, arr=(2, 3), links="1")
+        for topo, kw in (("grid", {}), ("ring", dict(topology="ring")), ("grid + 0-5", dict(pairs=[(0, 5)], long_links=1))):
+            for inter in ("ghost", "mean", "cut"):
+                add("numa", f"{topo} {inter}", inter=inter, group=topo, label=inter, **six, **kw)
+            for b_ in (1, 2):
+                add("numa", f"{topo} bridge chain b{b_}", inter=f"bridge:{b_}", group=topo, label=f"bridge chain, {b_} bonds",
+                    **six, **kw)
+                add("numa", f"{topo} bridge ring b{b_}", inter=f"bridge:{b_}:wrap", chain=[0, 1, 2, 5, 4, 3], group=topo,
+                    label=f"bridge ring, {b_} bonds", **six, **kw)
+    if "wheel" in which:                                     # four 2 x 3 chips on a 2 x 2 grid, one link per pair
+        four = dict(chips=[lab_spec((0, 1), (0, 2))] * 4, arr=(2, 2), links="1")
+        for topo, kw in (("grid", {}), ("wheel", dict(topology="wheel", long_links=1))):
+            for inter in ("ghost", "mean", "cut"):
+                add("wheel", f"{topo} {inter}", inter=inter, group=topo, label=inter, **four, **kw)
+    if "port" in which:              # all of a chip's links on one port qubit, against a link qubit per partner
+        four = dict(chips=[lab_spec((0, 1), (0, 2))] * 4, arr=(2, 2), topology="wheel")
+        six = dict(chips=[lab_spec((0, 1), (0, 1))] * 6, arr=(2, 3), topology="wheel")
+        for grp, kw, per, rounds in (("4 chips, dedicated", dict(links="1", long_links=1, **four), 4, (1, 2, 3)),
+                                     ("4 chips, port layers", dict(port="layers", **four), 7, (1, 2, 3)),
+                                     ("4 chips, port mux", dict(port="mux", **four), 5, (1, 2, 3, 6)),
+                                     ("6 chips, port layers", dict(port="layers", **six), 9, (1, 2)),
+                                     ("6 chips, port mux", dict(port="mux", **six), 5, (1, 2, 5))):
+            for inter in ("ghost", "mean", "cut"):
+                add("port", f"{grp} {inter}", inter=inter, group=grp, label=inter, depths=[per * r for r in rounds],
+                    **kw)
+    return E
+
+
+def lab_r3_plan_rows(device="r3"):
+    """The device at full size on the ghost loom, option by option (field plan's numbers): links placed and
+    skipped, ghosts per chip, widest patch, peak memory per chip."""
+    opts = [("4 links per pair", ["--links", "4"]), ("6 links per pair", ["--links", "6"]),
+            ("8 links per pair", ["--links", "8"]), ("10 links per pair (the device)", ["--links", "10"]),
+            ("every facing row and column", ["--links", "all"]),
+            ("10 links, 16 GB host memory per die (--gtt 16)", ["--links", "10", "--gtt", "16"]),
+            ("10 links, ring", ["--links", "10", "--topology", "ring"]),
+            ("8 links, hub on chip 1", ["--links", "8", "--topology", "hub"]),
+            ("10 links + long links 0-5, 2-3", ["--links", "10", "--pairs", "0-5,2-3"]),
+            ("wheel, 4 links per pair", ["--links", "4", "--topology", "wheel"]),
+            ("wheel, 6 links per pair", ["--links", "6", "--topology", "wheel"]),
+            ("wheel, 8 links per pair", ["--links", "8", "--topology", "wheel"]),
+            ("wheel, 10 links per pair", ["--links", "10", "--topology", "wheel"]),
+            ("wheel, one port per chip (layers)", ["--topology", "wheel", "--link-port", "layers"]),
+            ("wheel, one port per chip (mux)", ["--topology", "wheel", "--link-port", "mux"]),
+            ("wheel, port at the chip centre", ["--topology", "wheel", "--link-port", "layers", "--port-site", "centre"])]
+    cap = []
+    keep = globals()["cmd_field_plan"]
+    globals()["cmd_field_plan"] = lambda a: cap.append((a, build_field(a)))
+    rows = []
+    try:
+        for label, extra in opts:
+            field_main(["plan", "--device", device, "--loom", "ghost", "--cpu"] + extra)
+            a, f = cap[-1]
+            hops = [h for i, row in enumerate(f.chip_hops()) for j, h in enumerate(row) if j > i]
+            per = {}
+            for u, v, _ in f.links:
+                kk = "-".join(str(x) for x in sorted((f.chip_of[u], f.chip_of[v])))
+                per[kk] = per.get(kk, 0) + 1
+            reach = [h for h in hops if h is not None]
+            rows.append(dict(label=label, args=extra, links=len(f.links), skipped=len(f.skipped),
+                             anchors=len(f.anchor_set),
+                             pairs={"-".join(str(x) for x in sorted(p_)): per.get("-".join(str(x) for x in sorted(p_)), 0)
+                                    for p_ in f.chip_pairs}, long=len(f.long),
+                             hops_mean=float(np.mean(reach)) if reach else None, hops_max=max(reach, default=None),
+                             ghosts=[len(r.sites) for r in f.rooms], widest=max(max(r.widths()) for r in f.rooms),
+                             gib=[float(r.gib()) for r in f.rooms], unreachable=sum(1 for h in hops if h is None),
+                             anchors_on_seam=None))
+            print(f"  {label}: {rows[-1]['links']} links, ghosts {rows[-1]['ghosts']}, widest {rows[-1]['widest']}, "
+                  f"GiB {[round(g, 1) for g in rows[-1]['gib']]}", flush=True)
+    finally:
+        globals()["cmd_field_plan"] = keep
+    return rows
+
+
+# ------------------------------------------------------------------ Shor's code across a link (lab --shor)
+class LabShorEngine:
+    """A QrackSimulator behind the engine interface, for chips that take arbitrary single-qubit matrices."""
+
+    def __init__(self, n):
+        self.n = n
+        self.reset()
+
+    def reset(self):
+        from pyqrack import QrackSimulator
+        self.sim = QrackSimulator(self.n, is_gpu=False)
+
+    def g1(self, q, M):
+        self.sim.mtrx(flat(M), q)
+
+    def cz(self, a, b):
+        self.sim.mcz([a], b)
+
+    def pauli(self, p, q):
+        if p != "i":
+            getattr(self.sim, p)(q)
+
+    def prob1(self, q):
+        return self.sim.prob(q)
+
+
+class LabShorChip(LabEngineChip):
+    """A loom chip that also takes ("lab_u", qubit, 2x2 matrix) ops."""
+
+    def put(self, msg):
+        rest = []
+        for op in msg[1]:
+            if op[0] == "lab_u":
+                super().put(("batch", rest, []))
+                rest = []
+                self.eng.g1(op[1], op[2])
+            else:
+                rest.append(op)
+        super().put(("batch", rest, msg[2]))
+
+
+SHOR_LAYOUTS = ("between", "through")
+SHOR_INTERS = ("exact", "ghost", "mean", "sample", "cut", "bridge:1", "bridge:2", "bridge:3")
+
+
+def lab_shor_unit(layout):
+    """One [[9,1,3]] unit over the link of the two-chip field: chip A's two border columns and chip B's border
+    column. between: the blocks are the columns and the single link joins two block leaders (the cut runs between
+    blocks). through: the blocks are the rows and each block's GHZ crosses a link (the cut runs through every
+    block, three links). Returns field, blocks, leaders, input qubit, outer CXs, inner CXs."""
+    f = LabField(lab_two_chips(), (1, 2), link_rows=[1] if layout == "between" else [0, 1, 2])
+    g = lambda chip, r, c: f.off[chip] + f.cells[chip].index((r, c))
+    cols = [[g(0, r, 2) for r in range(3)], [g(0, r, 3) for r in range(3)], [g(1, r, 0) for r in range(3)]]
+    blocks = cols if layout == "between" else [[cols[0][r], cols[1][r], cols[2][r]] for r in range(3)]
+    lead = [b[1] for b in blocks]
+    inp = lead[1]
+    outer = [(inp, lead[0]), (inp, lead[2])]
+    inner = [(b[1], b[0]) for b in blocks] + [(b[1], b[2]) for b in blocks]
+    return f, blocks, lead, inp, outer, inner
+
+
+def lab_shor_point(layout, inter, state, shots=4096, seed=1):
+    """Encode logical `state` (0, 1, +, -) across the link under one interconnect and read it out: all qubits in
+    X for 0 / 1 (block parities, majority of three), in Z for + / - (block majorities, their parity). raw: no
+    decoding (every block right); decoded: after the majority; with the ghost loom also ghost_*: the far chip's
+    qubits read from their replicas in chip A's simulator, so the cross-link check is evaluated in one simulator."""
+    Hm = np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+    Xm = np.array([[0, 1], [1, 0]], dtype=complex)
+    f, blocks, lead, inp, outer, inner = lab_shor_unit(layout)
+    data = [q for b in blocks for q in b]
+    basis = "X" if state in ("0", "1") else "Z"
+    ops = []
+    if state in ("1", "-"):
+        ops.append(("u", inp, Xm))
+    if state in ("+", "-"):
+        ops.append(("u", inp, Hm))
+    for c, t in outer:
+        ops += [("u", t, Hm), ("cz", c, t), ("u", t, Hm)]
+    ops += [("u", q, Hm) for q in lead]
+    for c, t in inner:
+        ops += [("u", t, Hm), ("cz", c, t), ("u", t, Hm)]
+    if basis == "X":
+        ops += [("u", q, Hm) for q in data]
+    ghostbits, width = None, f.n
+    if inter in ("ghost", "mean", "sample", "cut"):
+        mode = "mean" if inter == "cut" else inter
+        plan = f.ghost_plan() if mode == "ghost" else [[] for _ in f.specs]
+        chips = [LabShorChip(LabShorEngine(f.chip_n[c] + len(plan[c])), f.chip_n[c]) for c in range(2)]
+        loom = Loom(f, chips, mode)
+        queues = [[("reset",)] for _ in chips]
+        srng = np.random.default_rng(seed)
+        for op in ops:
+            if op[0] == "u":
+                for c, lq in loom.reps(op[1]):
+                    queues[c].append(("lab_u", lq, op[2]))
+            elif f.chip_of[op[1]] == f.chip_of[op[2]] or inter != "cut":
+                loom._layer([(op[1], op[2])], None, queues, srng)
+        loom._flush(queues, [[], []])
+        samples = [np.array(ch.eng.sim.measure_shots(list(range(ch.eng.n)), shots), dtype=np.uint64) for ch in chips]
+        bits = {q: ((samples[f.chip_of[q]] >> np.uint64(f.local[q])) & np.uint64(1)).astype(int) for q in data}
+        width = max(ch.eng.n for ch in chips)
+        if inter == "ghost":
+            ghostbits = {q: ((samples[0] >> np.uint64(f.chip_n[0] + j)) & np.uint64(1)).astype(int)
+                         for j, (q, _, _) in enumerate(plan[0])}
+    else:
+        e = ExactEngine(f.n, True) if inter == "exact" else LabBridgeEngine(f.n, 2, int(inter.split(":")[1]), seed=seed)
+        for op in ops:
+            if op[0] == "u":
+                e.g1(op[1], op[2])
+            else:
+                e.cz(op[1], op[2])
+        sh = e.shots(shots)
+        bits = {q: ((sh >> np.uint64(q)) & np.uint64(1)).astype(int) for q in data}
+        width = e.width() if hasattr(e, "width") else f.n
+    want = 0 if state in ("0", "+") else 1
+
+    def score(bits_):
+        B = np.array([[bits_[q] for q in blk] for blk in blocks])            # block, qubit, shot
+        if basis == "X":
+            par = B.sum(axis=1) % 2
+            raw = np.all(par == want, axis=0)
+            dec = (par.sum(axis=0) >= 2).astype(int) == want
+        else:
+            maj = (B.sum(axis=1) >= 2).astype(int)
+            raw = np.all((B.sum(axis=1) % 3) == 0, axis=0) & ((maj.sum(axis=0) % 2) == want)
+            dec = (maj.sum(axis=0) % 2) == want
+        return float(raw.mean()), float(dec.mean())
+    raw, dec = score(bits)
+    rec = dict(exp="shor", cfg=f"{layout} {inter}", layout=layout, inter=inter, state=state, depth=0, instance=seed,
+               logical="Z" if basis == "X" else "X", raw=raw, decoded=dec, shots=shots, links=len(f.links), width=width,
+               blocks=blocks, link_list=[[u, v] for u, v, _ in f.links])
+    if ghostbits:
+        gb = dict(bits)
+        for q, v_ in ghostbits.items():
+            if q in gb:
+                gb[q] = v_
+        if layout == "between" and basis == "Z":       # the far block is read by its leader's replica alone
+            for q in blocks[2]:
+                gb[q] = ghostbits[lead[2]]
+        rec["ghost_raw"], rec["ghost_decoded"] = score(gb)
+    return rec
+
+
+def lab_shor(out, shots=4096, repeats=3):
+    """Every layout x interconnect x logical state, `repeats` sampling seeds each; one record per run."""
+    with open(out, "a") as fh:
+        for layout in SHOR_LAYOUTS:
+            for inter in SHOR_INTERS:
+                acc = defaultdict(list)
+                for state in "01+-":
+                    for seed in range(1, repeats + 1):
+                        r = lab_shor_point(layout, inter, state, shots, seed)
+                        fh.write(json.dumps(r) + "\n")
+                        fh.flush()
+                        for k in ("raw", "decoded", "ghost_decoded"):
+                            if k in r:
+                                acc[r["logical"], k].append(r[k])
+                m = lambda lg, k: float(np.mean(acc[lg, k]))
+                print(f"  {layout:8} {inter:9} Z_L raw {m('Z', 'raw'):.3f} decoded {m('Z', 'decoded'):.3f} | "
+                      f"X_L raw {m('X', 'raw'):.3f} decoded {m('X', 'decoded'):.3f}"
+                      + (f" | through the ghosts: Z_L {m('Z', 'ghost_decoded'):.3f} X_L {m('X', 'ghost_decoded'):.3f}"
+                         if ("Z", "ghost_decoded") in acc else ""), flush=True)
+
+
+# ------------------------------------------------------------------ Quantum NUMA: a Bell pair between chips (lab --bell)
+BELL_TOPOS = (("grid", {}), ("ring", dict(topology="ring")), ("grid + 0-5", dict(pairs=[(0, 5)], long_links=1)),
+              ("wheel", dict(topology="wheel", long_links=1)))
+BELL_INTERS = ("exact", "ghost", "mean")
+
+
+def lab_bell_field(kw):
+    """Six chips of 3 x 4 qubits on a 2 x 3 grid, one l-coupler per chip pair of the topology."""
+    return LabField([lab_spec((0, 2), (0, 3))] * 6, (2, 3), links="1", **kw)
+
+
+def lab_bell_path(f, c, d):
+    """The qubits a Bell pair between chips c and d runs over: the chip path with the fewest hops over the placed
+    links, on every hop its link, inside every relay chip the shortest run of couplers from the entry anchor to
+    the exit anchor. The ends are the link anchors on c and d. Returns (qubit path, chip path) or None."""
+    k = len(f.specs)
+    link = {}
+    for u, v, _ in f.links:
+        a_, b_ = f.chip_of[u], f.chip_of[v]
+        link.setdefault((a_, b_), (u, v))
+        link.setdefault((b_, a_), (v, u))
+    prev, todo = {c: None}, [c]
+    for x in todo:
+        for y in range(k):
+            if (x, y) in link and y not in prev:
+                prev[y] = x
+                todo.append(y)
+    if d not in prev:
+        return None
+    chips = [d]
+    while chips[-1] != c:
+        chips.append(prev[chips[-1]])
+    chips.reverse()
+    nb = defaultdict(list)
+    for u, v in f.edges:
+        if f.chip_of[u] == f.chip_of[v]:
+            nb[u].append(v)
+            nb[v].append(u)
+    path = [link[(chips[0], chips[1])][0]]
+    for i in range(len(chips) - 1):
+        u, v = link[(chips[i], chips[i + 1])]
+        if path[-1] != u:                               # across the relay chip, entry anchor to exit anchor
+            pr, td = {path[-1]: None}, [path[-1]]
+            for x in td:
+                for y in sorted(nb[x]):
+                    if y not in pr:
+                        pr[y] = x
+                        td.append(y)
+            run = [u]
+            while run[-1] != path[-1]:
+                run.append(pr[run[-1]])
+            path += run[::-1][1:]
+        path.append(v)
+    return path, chips
+
+
+def lab_bell_point(f, topo, c, d, inter, shots=4096, seed=1):
+    """A Bell pair between the link anchors A (chip c) and B (chip d): H on A, CXs down the path (a GHZ state over
+    it), then the CXs again from the far end back, which return every relay qubit to 0 and leave (|00> + |11>) on
+    A and B. Its fidelity is read in every simulator that holds a copy of both ends (the pair rotated back to |00>
+    there): on the looms that is chip c or d when they share a link (each holds a ghost of the other's anchor), a
+    relay chip that is linked to both, or no chip at all. ends: what the loom's own output gives, the two chips
+    read independently. exact: one simulator over the field."""
+    Hm = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
+    Sd = np.diag([1.0, -1j])
+    got = lab_bell_path(f, c, d)
+    hops = f.chip_hops()[c][d]
+    rec = dict(exp="bell", cfg=f"{topo} {inter}", topology=topo, inter=inter, pair=[c, d], hops=hops, depth=0,
+               instance=seed, shots=shots, links=len(f.links), chip_pairs=len(f.chip_pairs))
+    if got is None:
+        return dict(rec, error="no path")
+    path, chips = got
+    A, B = path[0], path[-1]
+    cxs = [(path[i], path[i + 1]) for i in range(len(path) - 1)] + \
+          [(path[i - 1], path[i]) for i in range(len(path) - 2, 0, -1)]
+    cross = sum(1 for u, v in cxs if f.chip_of[u] != f.chip_of[v])
+    rec.update(path=path, chip_path=chips, cx=len(cxs), link_cx=cross, relay_qubits=len(path) - 2)
+    ops = [("u", A, Hm)]
+    for u, v in cxs:
+        ops += [("u", v, Hm), ("cz", u, v), ("u", v, Hm)]
+
+    def bell_f(sim, la, lb):
+        """<Phi+| rho |Phi+> of two qubits of one simulator: CX, H, then P(00)."""
+        sim.mcx([la], lb)
+        sim.h(la)
+        sh = np.array(sim.measure_shots([la, lb], shots))
+        return float(np.mean(sh == 0))
+
+    def pauli_exp(sim, q):
+        z = 1.0 - 2.0 * sim.prob(q)
+        sim.h(q)
+        x = 1.0 - 2.0 * sim.prob(q)
+        sim.h(q)
+        sim.mtrx(flat(Sd), q)
+        sim.h(q)
+        y = 1.0 - 2.0 * sim.prob(q)
+        sim.h(q)
+        sim.mtrx(flat(Sd.conj()), q)
+        return x, y, z
+    if inter == "exact":
+        e = LabShorEngine(f.n)
+        for op in ops:
+            if op[0] == "u":
+                e.g1(op[1], op[2])
+            else:
+                e.cz(op[1], op[2])
+        F = bell_f(e.sim, A, B)
+        return dict(rec, f_best=F, f_ends=F, read="one simulator", width=f.n)
+    plan = f.ghost_plan() if inter == "ghost" else [[] for _ in f.specs]
+    chips_ = [LabShorChip(LabShorEngine(f.chip_n[x] + len(plan[x])), f.chip_n[x]) for x in range(len(f.specs))]
+    loom = Loom(f, chips_, inter)
+    queues = [[("reset",)] for _ in chips_]
+    srng = np.random.default_rng(seed)
+    for op in ops:
+        if op[0] == "u":
+            for x, lq in loom.reps(op[1]):
+                queues[x].append(("lab_u", lq, op[2]))
+        else:
+            loom._layer([(op[1], op[2])], None, queues, srng)
+    loom._flush(queues, [[] for _ in chips_])
+    xa, ya, za = pauli_exp(chips_[c].eng.sim, f.local[A])
+    xb, yb, zb = pauli_exp(chips_[d].eng.sim, f.local[B])
+    rec["f_ends"] = float((1 + xa * xb - ya * yb + za * zb) / 4)
+    ra, rb = dict(loom.reps(A)), dict(loom.reps(B))
+    reads = {}
+    for x in sorted(set(ra) & set(rb)):
+        role = "end" if x in (c, d) else "relay"
+        reads[x] = (role, bell_f(chips_[x].eng.sim, ra[x], rb[x]))
+    rec["reads"] = {str(x): [role, F] for x, (role, F) in reads.items()}
+    ends = [F for role, F in reads.values() if role == "end"]
+    rec["f_end_chip"] = max(ends) if ends else None
+    rec["f_best"] = max([F for _, F in reads.values()] + [rec["f_ends"]])
+    rec["read"] = ("end chip" if ends and max(ends) >= rec["f_best"] - 1e-9 else "relay chip") if reads else "none"
+    rec["width"] = max(ch.eng.n for ch in chips_)
+    rec["ghosts"] = [len(g) for g in plan]
+    return rec
+
+
+def lab_bell(out, shots=4096, repeats=1):
+    """Every topology x chip pair x interconnect; one record per run, a table by hops per topology."""
+    with open(out, "a") as fh:
+        for topo, kw in BELL_TOPOS:
+            f = lab_bell_field(kw)
+            H = f.chip_hops()
+            k = len(f.specs)
+            geo = dict(pos=[list(map(int, p_)) for p_ in f.pos], chip_of=list(f.chip_of),
+                       link_list=[[u, v] for u, v, _ in f.links])
+            print(f"{topo}: {len(f.chip_pairs)} chip pairs, {len(f.links)} l-couplers, hops mean "
+                  f"{np.mean([H[i][j] for i in range(k) for j in range(i + 1, k)]):.2f}, max "
+                  f"{max(H[i][j] for i in range(k) for j in range(i + 1, k))}", flush=True)
+            acc = defaultdict(list)
+            for inter in BELL_INTERS:
+                for c in range(k):
+                    for d in range(c + 1, k):
+                        for seed in range(1, repeats + 1):
+                            r = lab_bell_point(f, topo, c, d, inter, shots, seed)
+                            if (c, d) == (0, k - 1) and seed == 1:
+                                r.update(geo)
+                            fh.write(json.dumps(r) + "\n")
+                            fh.flush()
+                            if "error" not in r:
+                                acc[inter, r["hops"]].append(r)
+            for h in sorted({h for _, h in acc}):
+                rs = acc["ghost", h]
+                m = lambda key, rows: float(np.mean([x[key] for x in rows if x.get(key) is not None] or [float("nan")]))
+                print(f"  {h} hop{'s' if h > 1 else ' '}: {len(rs):2d} pairs, {m('cx', rs):4.1f} CX of which "
+                      f"{m('link_cx', rs):.1f} on l-couplers | exact {m('f_best', acc['exact', h]):.3f} | ghost loom: "
+                      f"ends read apart {m('f_ends', rs):.3f}, in an end chip {m('f_end_chip', rs):.3f}, best "
+                      f"simulator {m('f_best', rs):.3f} ({', '.join(sorted({x['read'] for x in rs}))}) | mean loom "
+                      f"{m('f_best', acc['mean', h]):.3f}", flush=True)
+
+
+
+# ------------------------------------------------------------------ syndrome rounds across the seam (lab --rounds)
+def lab_rounds_unit(layout):
+    """The Shor unit of lab --shor with its eight stabiliser checks (six ZZ inside the blocks, two X-type over
+    pairs of blocks) and one ancilla per check, on the chip that holds most of the check. Returns the unit, the
+    data qubits, the checks [(kind, support)], the ancillas and the CXs per round that cross the link."""
+    f, blocks, lead, inp, outer, inner = lab_shor_unit(layout)
+    data = [q for b in blocks for q in b]
+    spare = {c: [q for q in range(f.n) if f.chip_of[q] == c and q not in data] for c in (0, 1)}
+    checks = [("Z", [b[0], b[1]]) for b in blocks] + [("Z", [b[1], b[2]]) for b in blocks] + \
+             [("X", blocks[0] + blocks[1]), ("X", blocks[1] + blocks[2])]
+    anc = []
+    for kind, sup in checks:
+        c = 0 if sum(f.chip_of[q] == 0 for q in sup) * 2 >= len(sup) else 1
+        anc.append(spare[c if spare[c] else 1 - c].pop(0))
+    cross = sum(1 for (kind, sup), a in zip(checks, anc) for q in sup if f.chip_of[q] != f.chip_of[a])
+    return (f, blocks, lead, inp, outer, inner), data, checks, anc, cross
+
+
+def lab_rounds_point(layout, bonds, state, rounds, seed, shots=1024):
+    """Encode `state`, then `rounds` times: one random Pauli X or Z on a random data qubit, all eight checks
+    extracted to their ancillas (CXs across the link where a check straddles it), each ancilla returned to 0
+    with the syndrome the injected errors predict (the measurement's outcome is deterministic, so this stands in
+    for measure-and-reset, which QrackBridge does not have). Final readout with the Pauli frame of the injected
+    errors. bonds None: the exact simulator. Success is 1 when the simulation is faithful; syndrome_clean is the
+    share of shots in which every ancilla reads 0, that is, every extracted syndrome was the predicted one."""
+    Hm = np.array([[1, 1], [1, -1]]) / np.sqrt(2)
+    (f, blocks, lead, inp, outer, inner), data, checks, anc, cross = lab_rounds_unit(layout)
+    e = ExactEngine(f.n, True) if bonds is None else LabBridgeEngine(f.n, 2, bonds, seed=seed)
+
+    def pauli(p, q):
+        if bonds is None:
+            getattr(e.sim, p)(q)
+        else:
+            e.pauli(p, q)
+
+    def cx(c, t):
+        e.g1(t, Hm)
+        e.cz(c, t)
+        e.g1(t, Hm)
+    if state in "1-":
+        pauli("x", inp)
+    if state in "+-":
+        e.g1(inp, Hm)
+    for c, t in outer:
+        cx(c, t)
+    for q in lead:
+        e.g1(q, Hm)
+    for c, t in inner:
+        cx(c, t)
+    rng = np.random.default_rng([seed, rounds, 7])
+    xerr, zblk = np.zeros(f.n, int), np.zeros(3, int)
+    blk_of = {q: i for i, b in enumerate(blocks) for q in b}
+    for _ in range(rounds):
+        q, p = int(rng.choice(data)), ("x" if rng.random() < 0.5 else "z")
+        pauli(p, q)
+        if p == "x":
+            xerr[q] ^= 1
+        else:
+            zblk[blk_of[q]] ^= 1
+        for (kind, sup), a in zip(checks, anc):
+            if kind == "Z":
+                for d in sup:
+                    cx(d, a)
+                syn = int(sum(xerr[d] for d in sup) % 2)
+            else:
+                e.g1(a, Hm)
+                for d in sup:
+                    cx(a, d)
+                e.g1(a, Hm)
+                syn = int((zblk[blk_of[sup[0]]] + zblk[blk_of[sup[-1]]]) % 2)
+            if syn:
+                pauli("x", a)
+    basis = "X" if state in "01" else "Z"
+    if basis == "X":
+        for q in data:
+            e.g1(q, Hm)
+    sh = e.shots(shots)
+    bit = lambda q: ((sh >> np.uint64(q)) & np.uint64(1)).astype(int)
+    B = np.array([[bit(q) for q in blk] for blk in blocks])
+    want = 0 if state in "0+" else 1
+    if basis == "X":                                   # the frame: Z errors flip block parities
+        par = (B.sum(axis=1) + zblk[:, None]) % 2
+        ok = (par.sum(axis=0) >= 2).astype(int) == want
+        raw = np.all(par == want, axis=0)
+    else:                                              # X errors flip bits
+        Bf = (B + np.array([[xerr[q] for q in blk] for blk in blocks])[:, :, None]) % 2
+        maj = (Bf.sum(axis=1) >= 2).astype(int)
+        ok = (maj.sum(axis=0) % 2) == want
+        raw = np.all((Bf.sum(axis=1) % 3) == 0, axis=0) & ok
+    clean = np.all(np.array([bit(a) for a in anc]) == 0, axis=0)
+    rec = dict(exp="rounds", cfg=f"{layout} {'exact' if bonds is None else f'bridge:{bonds}'}", layout=layout,
+               inter="exact" if bonds is None else f"bridge:{bonds}", bonds=bonds, state=state,
+               logical="Z" if basis == "X" else "X", rounds=rounds, depth=rounds, instance=seed,
+               decoded=float(ok.mean()), raw=float(raw.mean()), syndrome_clean=float(clean.mean()),
+               cross_cx_per_round=cross, shots=shots, links=len(f.links))
+    if bonds is not None:
+        rec.update(e.extra(), width=e.width())
+    return rec
+
+
+def lab_rounds(out, shots=1024, repeats=2, rounds=(0, 1, 2, 4, 8, 16), bonds=(None, 1, 2, 3, 4)):
+    with open(out, "a") as fh:
+        for layout in SHOR_LAYOUTS:
+            print(f"  cut {layout} blocks: {lab_rounds_unit(layout)[-1]} CXs across the link per round", flush=True)
+            for b in bonds:
+                line = []
+                for R in rounds:
+                    rs = [lab_rounds_point(layout, b, st, R, seed, shots) for st in "01+-" for seed in range(1, repeats + 1)]
+                    for r in rs:
+                        fh.write(json.dumps(r) + "\n")
+                    fh.flush()
+                    m = lambda lg: float(np.mean([r["decoded"] for r in rs if r["logical"] == lg]))
+                    line.append(f"R{R} Z {m('Z'):.2f} X {m('X'):.2f}"
+                                + (f" t{np.mean([r['truncations'] for r in rs]):.0f}" if b is not None else ""))
+                print(f"    {'exact' if b is None else f'bridge, {b} bonds':16} " + " | ".join(line), flush=True)
+
+
+def lab_selftest():
+    """The lab's own checks on a 16-qubit field (two 2 x 4 chips, two links): the scoring returns 1 for the exact
+    engine and for a bridge with bonds to spare, the cut baseline keeps the mirror signal at 1 while its fidelity
+    falls, the ghost loom beats it, and the direct probability buffer agrees with out_probs."""
+    C = [lab_spec((0, 1), (0, 3))] * 2
+    base = dict(chips=C, arr=(1, 2), links="2", exp="selftest")
+    field = LabField(C, (1, 2), links="2")
+    acc = defaultdict(list)
+    runners = {k: LabRunner(dict(base, name=k, inter=k), 512) for k in ("exact", "bridge:6", "cut", "ghost", "mean")}
+    for inst in range(2):
+        p, marg_x, cyc = lab_truth(field, 8, inst)
+        blocks = {kind: [(blk, lab_block_of_dist(p, field.n, blk)) for blk in items]
+                  for kind, items in zip(("intra", "cross"), lab_blocks(field))}
+        for k, r in runners.items():
+            acc[k].append(r.point(8, inst, p, marg_x, cyc, blocks))
+    e = ExactEngine(6, True)
+    lab_forward(e, fxeb_cycles(LabField([lab_spec((0, 1), (0, 2))], (1, 1)), 3, 0, 6))
+    m = lambda k, key: float(np.mean([r[key] for r in acc[k]]))
+    fg, fw = lab_bell_field({}), lab_bell_field(dict(BELL_TOPOS)["wheel"])
+    bg = {i_: lab_bell_point(fg, "grid", 0, 5, i_, 512) for i_ in ("exact", "ghost")}
+    bw, b2 = lab_bell_point(fw, "wheel", 0, 5, "ghost", 512), lab_bell_point(fg, "grid", 0, 2, "ghost", 512)
+    checks = [
+        ("exact engine scores 1 (fclass, blocks, fxeb)", abs(m("exact", "fclass") - 1) < 1e-5
+         and abs(m("exact", "fb_cross") - 1) < 1e-5 and abs(m("exact", "fxeb") - 1) < 1e-4, f"{m('exact', 'fclass'):.6f}"),
+        ("bridge with 6 bonds for 2 links scores 1", abs(m("bridge:6", "fclass") - 1) < 1e-4, f"{m('bridge:6', 'fclass'):.6f}"),
+        ("cut: mirror signal 1, fidelity below 1", abs(m("cut", "signal") - 1) < 1e-6 and m("cut", "fclass") < 0.95,
+         f"signal {m('cut', 'signal'):.3f}, fclass {m('cut', 'fclass'):.3f}"),
+        ("ghost loom above the cut baseline", m("ghost", "fclass") > m("cut", "fclass"),
+         f"{m('ghost', 'fclass'):.3f} > {m('cut', 'fclass'):.3f}"),
+        ("probability buffer = out_probs", float(np.abs(lab_fast_probs(e.sim) - np.asarray(e.sim.out_probs())).max()) < 1e-6, ""),
+        ("links placed", len(field.links) == 2 and field.n == 16, f"{len(field.links)} links, {field.n} qubits"),
+    ]
+    sx = lab_shor_point("between", "exact", "-", 512)
+    sg = lab_shor_point("through", "ghost", "1", 2048)
+    sb = lab_shor_point("through", "bridge:3", "+", 512)
+    checks += [
+        ("Shor unit: exact engine and a bridge with spare bonds decode to 1", sx["raw"] == 1.0 and sb["decoded"] == 1.0, ""),
+        ("syndrome rounds across the link: 2 bonds carry 4 rounds exactly when the cut runs between blocks",
+         (lambda r: r["decoded"] == 1.0 and r["truncations"] == 0 and r["syndrome_clean"] == 1.0)(
+             lab_rounds_point("between", 2, "+", 4, 1, 256)), ""),
+        ("Shor unit through the link, ghost loom: Z_L is a coin flip read per chip, 1 read through the ghosts",
+         abs(sg["decoded"] - 0.5) < 0.06 and sg["ghost_decoded"] == 1.0, f"{sg['decoded']:.3f}, {sg['ghost_decoded']:.3f}"),
+        ("Bell pair between chips 0 and 5: exact 1 on the grid (3 hops, 15 CX); ghost loom 1 in an end chip on the wheel "
+         "(1 hop, 1 CX), 1 in the relay chip at 2 hops, lost at 3 hops",
+         bg["exact"]["f_best"] == 1.0 and bg["exact"]["hops"] == 3 and bg["exact"]["cx"] == 15
+         and abs(bg["ghost"]["f_best"] - 0.25) < 1e-6 and bg["ghost"]["read"] == "none"
+         and bw["f_end_chip"] == 1.0 and bw["hops"] == 1 and bw["cx"] == 1 and abs(bw["f_ends"] - 0.25) < 1e-6
+         and b2["f_best"] == 1.0 and b2["read"] == "relay chip" and b2["f_end_chip"] is None,
+         f"grid {bg['ghost']['f_best']:.2f}, wheel {bw['f_best']:.2f}, 2 hops {b2['f_best']:.2f}"),
+    ]
+    for r in runners.values():
+        r.close()
+    ok = True
+    for i, (name, good, info) in enumerate(checks, 1):
+        ok &= bool(good)
+        print(f"[{i}] {name}: {'ok' if good else 'FAIL'}" + (f" ({info})" if info else ""))
+    print("ALL OK" if ok else "SOME CHECKS FAILED")
+    return ok
+
+
+def lab_main(argv=None):
+    ap = argparse.ArgumentParser(prog="nighthawk_qrack.py lab", description=LAB_ABOUT)
+    ap.add_argument("--exp", nargs="+", default=["inter"],
+                    help="experiments: inter (interconnect methods), links (two links), rows (which border rows), "
+                         "inside (one chip: ACE against QrackBridge), mixed (inside x between), holes (border or "
+                         "centre, disabled qubits near or far), numa (six chips: grid, ring, long link), wheel (four "
+                         "chips: grid against every pair linked), port (every link of a chip on one port qubit, "
+                         "extra layers or multiplexed, against a link qubit per partner)")
+    ap.add_argument("--depths", type=int, nargs="+", default=[4, 6, 8, 12])
+    ap.add_argument("--instances", type=int, default=5)
+    ap.add_argument("--shots", type=int, default=LAB_SHOTS)
+    ap.add_argument("--out", default="lab.jsonl")
+    ap.add_argument("--only", default=None, help="substring of the configuration name")
+    ap.add_argument("--r3plan", default=None, metavar="JSON", help="write the full-size r3 ghost-loom plan table, then exit")
+    ap.add_argument("--shor", default=None, metavar="JSONL",
+                    help="Shor's [[9,1,3]] code laid across the link of the two-chip field (the cut between its "
+                         "blocks, and through them) under every interconnect: logical Z and X success raw, decoded, "
+                         "and read through the ghosts; appends records to JSONL, then exit")
+    ap.add_argument("--repeats", type=int, default=3, help="--shor: sampling seeds per point")
+    ap.add_argument("--bell", default=None, metavar="JSONL",
+                    help="Quantum NUMA: a Bell pair between every pair of six 3 x 4 chips on the grid, the ring, the grid "
+                         "with a 0-5 chord and the wheel, built along the shortest path over the l-couplers (relay chips "
+                         "in between) on the exact simulator and the ghost and mean-field looms; Bell fidelity read "
+                         "per chip and in every simulator that holds both ends, CXs and l-coupler CXs per pair; appends "
+                         "records to JSONL, then exit")
+    ap.add_argument("--rounds", default=None, metavar="JSONL",
+                    help="repeated syndrome extraction on the Shor unit across the link under QrackBridge (1 to 4 bond "
+                         "qubits) and the exact simulator: one injected Pauli error and all eight checks per round, "
+                         "0 to 16 rounds; logical success with the Pauli frame, truncations and peak bonds per run; "
+                         "appends records to JSONL, then exit")
+    ap.add_argument("--selftest", action="store_true", help="the lab's own checks (16 qubits, under a minute), then exit")
+    ap.add_argument("--list", action="store_true", help="list the configurations of --exp, then exit")
+    a = ap.parse_args(argv)
+    if a.selftest:
+        raise SystemExit(0 if lab_selftest() else 1)
+    if a.list:
+        for c in lab_experiments(set(a.exp)):
+            print(f"{c['exp']:<8} {c['name']:<44} inside {c.get('inside', 'exact'):<16} between {c['inter']}")
+        return
+    if a.shor:
+        print(f"lab shor: {len(SHOR_LAYOUTS)} layouts x {len(SHOR_INTERS)} interconnects x 4 logical states, "
+              f"{a.repeats} seeds, {a.shots} shots -> {a.shor}")
+        lab_shor(a.shor, a.shots, a.repeats)
+        return
+    if a.bell:
+        print(f"lab bell: a Bell pair between every chip pair, {len(BELL_TOPOS)} topologies x {len(BELL_INTERS)} "
+              f"interconnects, {a.shots} shots -> {a.bell}")
+        lab_bell(a.bell, a.shots, 1)
+        return
+    if a.rounds:
+        print(f"lab rounds: syndrome rounds across the link, {a.shots} shots -> {a.rounds}")
+        lab_rounds(a.rounds, min(a.shots, 1024))
+        return
+    if a.r3plan:
+        json.dump(lab_r3_plan_rows(), open(a.r3plan, "w"), indent=1)
+        return
+    cfgs = [c for c in lab_experiments(set(a.exp)) if not a.only or a.only in c["name"]]
+    print(f"lab: {len(cfgs)} configurations, depths {a.depths}, {a.instances} instances, {a.shots} shots -> {a.out}")
+    lab_run_all(cfgs, a.depths, a.instances, a.out, a.shots)
 
 
 if __name__ == "__main__":
