@@ -5754,9 +5754,8 @@ def fig_lab_rounds(recs, notes=(), dpi=150):
         ax.set_xticks(xs, [str(r) for r in rounds])
         ax.set_xlim(-0.3, xs[-1] + 1.3)
         ax.set_ylim(0.4, 1.12)
-        ax.text(0.01, 0.04, f"the other logical operator ({'Z' if lg == 'X' else 'X'}_L) is 1.00 at every bond count"
-                + (" from 2 bonds" if lay == "through" and lg == "Z" and False else ""), transform=ax.transAxes,
-                fontsize=10.5, color=FP_INK2)
+        ax.text(0.01, 0.04, f"the other logical operator ({'Z' if lg == 'X' else 'X'}_L) is 1.00 at every bond count",
+                transform=ax.transAxes, fontsize=10.5, color=FP_INK2)
     # truncations: syndrome rounds against the random circuit
     ax = fig.add_subplot(gs[1, 0:2])
     _fp_axes(ax, "Truncating sweeps per run: syndrome rounds stop adding them", "truncations", "syndrome rounds")

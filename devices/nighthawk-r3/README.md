@@ -42,8 +42,9 @@ Where an older folder's function differs from the base, the base's newer version
 | `ghz` | `chip` `tiles` `stack` `sweep` `probe` `stackmap` `shor` `shormap` `shoralg` `dual` `dualmap` `dualplot` `plot` `selftest` |
 | `field` | `plan` `run` `linksearch` `layoutsearch` `selftest` |
 | `erepr` | `derive` `plan` `run` `ds` `pairs` `table` `aceprobe` `selftest` |
+| `lab` | options instead of commands: `--exp`, `--r3plan`, `--shor`, `--rounds`, `--bell`, `--list`, `--selftest` (section 3.7) |
 
-`-h` works per group (`ghz -h`, `field -h`, `erepr -h`) and per command.
+`-h` works per group (`ghz -h`, `field -h`, `erepr -h`, `lab -h`) and per command.
 
 ## 3. Nighthawk r3
 
@@ -245,12 +246,13 @@ python3 nighthawk_graph.py --out r3_mean.jsonl --out r3_topo.jsonl --poster post
 
 | Option | Effect |
 |---|---|
-| `--exp inter links rows inside mixed holes numa` | which experiments (table below) |
+| `--exp inter links rows inside mixed holes numa wheel port` | which experiments (table below; `wheel` 3.6, `port` 3.10) |
 | `--depths`, `--instances`, `--shots`, `--out` | defaults 4 6 8 12, 5, 4096, `lab.jsonl`; resumable |
 | `--only TEXT`, `--list` | select / list configurations |
 | `--r3plan JSON` | the full-size r3 ghost-loom plan, option by option |
-| `--shor JSONL`, `--repeats` | Shor's code across the link (section 3.8) |
-| `--selftest` | 8 checks: 6 on 16 qubits (exact scores 1, bridge with spare bonds scores 1, cut keeps signal 1) |
+| `--shor JSONL`, `--rounds JSONL`, `--bell JSONL` | Shor's code across the link (3.8), syndrome rounds (3.9), Bell pairs (3.11) |
+| `--repeats` | sampling seeds per point: 3 for `--shor`, 2 for `--rounds`, 1 for `--bell` by default |
+| `--selftest` | 10 checks: 6 on 16 qubits (exact scores 1, bridge with spare bonds scores 1, cut keeps signal 1), then [7] Shor unit, [8] syndrome rounds, [9] Shor through the ghosts, [10] Bell pair |
 
 Between two exact 3 x 4 chips, `fclass` (3 to 4 instances):
 
@@ -515,7 +517,7 @@ Every other name is unchanged. `import nighthawk_cloverfield` and `import nighth
 
 | Place | Change |
 |---|---|
-| `main()` | dispatches `field`, `erepr`, `chipworker` before the main parser |
+| `main()` | dispatches `_hbridge-server`, `ghz`, `field`, `erepr`, `lab`, `chipworker` before the main parser |
 | `cloverfield()` | returns this module instead of loading `nighthawk_cloverfield.py`; `--cloverfield` and `$NIGHTHAWK_CLOVERFIELD` are accepted and ignored |
 | chip workers | started as `nighthawk_qrack.py chipworker` |
 | `erepr` tile cache | `$NIGHTHAWK_TILE_CACHE` default set when `erepr` runs, not at import |

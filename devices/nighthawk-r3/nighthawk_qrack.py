@@ -14199,7 +14199,7 @@ up to 3 parents up, via $NIGHTHAWK_REPO or --repo):
           --sizes 27-36,61 --depths 4 6 8 12 --out clean_ace.jsonl
   python3 nighthawk_qrack.py field plan --device r3                 # Nighthawk r3: 6 x 120-qubit chiplets
 help per command: python3 nighthawk_qrack.py <command> -h
-                  python3 nighthawk_qrack.py ghz | field | erepr -h""")
+                  python3 nighthawk_qrack.py ghz | field | erepr | lab -h""")
         return
     a = ap.parse_args()
     if getattr(a, "gtt", None) and not getattr(a, "cpu", False):
@@ -20103,7 +20103,8 @@ def lab_main(argv=None):
                     help="Shor's [[9,1,3]] code laid across the link of the two-chip field (the cut between its "
                          "blocks, and through them) under every interconnect: logical Z and X success raw, decoded, "
                          "and read through the ghosts; appends records to JSONL, then exit")
-    ap.add_argument("--repeats", type=int, default=3, help="--shor: sampling seeds per point")
+    ap.add_argument("--repeats", type=int, default=None,
+                    help="sampling seeds per point: --shor (default 3), --rounds (default 2), --bell (default 1)")
     ap.add_argument("--bell", default=None, metavar="JSONL",
                     help="Quantum NUMA: a Bell pair between every pair of six 3 x 4 chips on the grid, the ring, the grid "
                          "with a 0-5 chord and the wheel, built along the shortest path over the l-couplers (relay chips "
@@ -20125,18 +20126,21 @@ def lab_main(argv=None):
             print(f"{c['exp']:<8} {c['name']:<44} inside {c.get('inside', 'exact'):<16} between {c['inter']}")
         return
     if a.shor:
+        reps = 3 if a.repeats is None else a.repeats
         print(f"lab shor: {len(SHOR_LAYOUTS)} layouts x {len(SHOR_INTERS)} interconnects x 4 logical states, "
-              f"{a.repeats} seeds, {a.shots} shots -> {a.shor}")
-        lab_shor(a.shor, a.shots, a.repeats)
+              f"{reps} seeds, {a.shots} shots -> {a.shor}")
+        lab_shor(a.shor, a.shots, reps)
         return
     if a.bell:
+        reps = 1 if a.repeats is None else a.repeats
         print(f"lab bell: a Bell pair between every chip pair, {len(BELL_TOPOS)} topologies x {len(BELL_INTERS)} "
-              f"interconnects, {a.shots} shots -> {a.bell}")
-        lab_bell(a.bell, a.shots, 1)
+              f"interconnects, {reps} seeds, {a.shots} shots -> {a.bell}")
+        lab_bell(a.bell, a.shots, reps)
         return
     if a.rounds:
-        print(f"lab rounds: syndrome rounds across the link, {a.shots} shots -> {a.rounds}")
-        lab_rounds(a.rounds, min(a.shots, 1024))
+        reps = 2 if a.repeats is None else a.repeats
+        print(f"lab rounds: syndrome rounds across the link, {reps} seeds, {min(a.shots, 1024)} shots -> {a.rounds}")
+        lab_rounds(a.rounds, min(a.shots, 1024), reps)
         return
     if a.r3plan:
         json.dump(lab_r3_plan_rows(), open(a.r3plan, "w"), indent=1)
