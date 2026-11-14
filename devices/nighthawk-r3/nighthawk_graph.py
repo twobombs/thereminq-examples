@@ -74,27 +74,27 @@ Figures (one window each; --save writes PNGs too):
 Poster (--poster FILE): the cloverfield on one page (24 x 16.5 in): view 29 plus stat tiles, the per-chip signal per
 depth, the links per facing chip pair and, for a mean or sample loom run, the ghost-loom plan of the same chips (its
 links and per-chip peak memory against --vram-gb), a "How this was measured" box (--poster-note adds lines) and the
-command line. A woven configuration and its --cut-links baseline are paired by chips, arrangement, loom, family,
+command line (--poster-loom picks one loom's records). A woven configuration and its --cut-links baseline are paired by chips, arrangement, loom, family,
 protocol and fold; the largest pair is drawn unless --cfg names one.
 
 Lab posters (--lab FILE --lab-poster PREFIX): the configuration lab (nighthawk_qrack.py lab), three pages. _between:
 how the l-couplers are carried (ghost, mean-field and sample loom, QrackBridge by bond qubits, an ACE seam, links
 cut), against depth, links per pair and bond budget, and the mirror signal against the fidelity. _inside: ACE patches
 against QrackBridge patches inside one chip, the inside x between table, fidelity against simulator width, ghost room.
-_place: border rows, border against chip centre, disabled qubits near or far, six-chip topologies, and r3 at full size
-(--lab-r3, from lab --r3plan). _shor (lab --shor records): Shor's [[9,1,3]] code across a link, the cut between its
+_place: border rows, border against chip centre, disabled qubits near or far, six-chip topologies, and the six-chiplet field
+at full size (--lab-plan, from lab --fieldplan). _shor (lab --shor records): Shor's [[9,1,3]] code across a link, the cut between its
 blocks and through them: decoded logical Z and X success per interconnect, the ghost loom read per chip and through
 its ghosts, the bridge by bond qubits. _rounds (lab --rounds records): repeated syndrome extraction across the link
 under QrackBridge, success and truncations against rounds per bond count, beside the random circuit. _wheel (lab
---exp wheel records, with --lab-r3): every chip linked directly to every chip, the r3 plan and the four-chip test. _port (lab --exp port
-records, with --lab-r3): every l-coupler of a chip on one port qubit, layers or multiplexed. _bell (lab --bell records): Quantum NUMA, a
+--exp wheel records, with --lab-plan): every chip linked directly to every chip, the six-chiplet plan and the four-chip test. _port (lab --exp port
+records, with --lab-plan): every l-coupler of a chip on one port qubit, layers or multiplexed. _bell (lab --bell records): Quantum NUMA, a
 Bell pair between every chip pair by hops, on the grid, ring and wheel.
 Every score is against the exact state of the same circuit. A page is written
 when its records are present.
 
 GHZ poster (--ghz-poster FILE): nighthawk_qrack.py ghz tiles on every chiplet of a field device, one records file per
 chiplet (--ghz-chip, repeated, in the field's chip order) and optionally a run without drift (--ghz-base). The field
-(--field-device, default the field run records' device, else r3) with each site coloured by its chiplet's mean F_GHZ,
+(--field-device, default the field run records' device, else clover6) with each site coloured by its chiplet's mean F_GHZ,
 seam qubits ringed and link anchors square; per chiplet the seam and off-seam means against the exact reference; every
 unit's F_GHZ; a table per chiplet (anchors, F by class, Phi_coh spread, seconds from the run's .log beside the file).
 
@@ -152,10 +152,10 @@ Usage
   python3 nighthawk_graph.py --ghz box_mb2.jsonl --ghz shor9_box5_mb2.jsonl --ghz dual_r1.jsonl \
           --ghz dualmap.jsonl --figs 18-25 --save plots                    # bridge, box, shor, dual R1
   python3 nighthawk_graph.py --grid3d nighthawk_3d --open                  # shor9 registers in 3D
-  python3 nighthawk_graph.py --out r3_mean.jsonl --poster r3_poster.png \
+  python3 nighthawk_graph.py --out clover6_mean.jsonl --poster clover6_poster.png \
           --poster-note "Host: 2 CPU cores, 8 GB RAM."                   # the cloverfield poster
-  python3 nighthawk_graph.py --ghz-poster r3_ghz.png --ghz-chip chip0.jsonl ... --ghz-chip chip5.jsonl \
-          --ghz-base layer1a.jsonl --field-device r3                     # GHZ on every r3 chiplet
+  python3 nighthawk_graph.py --ghz-poster clover6_ghz.png --ghz-chip chip0.jsonl ... --ghz-chip chip5.jsonl \
+          --ghz-base layer1a.jsonl --field-device clover6               # GHZ on every chiplet
   python3 nighthawk_graph.py --grid3d nighthawk_3d --three node_modules/three --serve   # the same, offline
 Without a display (no DISPLAY / WAYLAND_DISPLAY) it writes PNGs to ./nighthawk_plots.
 """
@@ -3957,8 +3957,14 @@ def field_groups(store):
     return sorted(out, key=lambda wc: -(len(wc[0]) + len(wc[1])))
 
 
+_POSTER_LOOM = [None]                       # --poster-loom: which loom's records the poster shows
+
+
 def field_group_for(store, cfg=None, topology=None):
     groups = field_groups(store)
+    every = groups
+    if _POSTER_LOOM[0]:
+        groups = [g for g in groups if (g[0] or g[1])[0].get("loom") == _POSTER_LOOM[0]]
     if cfg:
         groups = [g for g in groups if any(r["cfg"] == cfg for r in g[0] + g[1])] or groups
     if topology:
@@ -3967,7 +3973,17 @@ def field_group_for(store, cfg=None, topology=None):
             print(f"# --poster-topology {topology}: none of "
                   + ", ".join(sorted({field_topology((g[0] or g[1])[0]['field']) for g in groups})))
         groups = hit
-    return groups[0] if groups else None
+    if not groups:
+        return None
+    woven, cut = groups[0]
+    if woven and not cut:                       # the cut-links baseline is the same circuit under any loom
+        k = field_key(woven[0])
+        for g in every:
+            kk = field_key((g[0] or g[1])[0])
+            if g[1] and kk[:2] == k[:2] and kk[3:] == k[3:]:
+                cut = g[1]
+                break
+    return woven, cut
 
 
 def field_siblings(store, group):
@@ -3987,6 +4003,7 @@ def field_siblings(store, group):
 def field_device(f):
     """The DEVICES preset these chips and this arrangement are, else None."""
     arr = "x".join(map(str, f["arrangement"]))
+    hits = []
     for name, d in getattr(nh, "DEVICES", {}).items():
         toks = []
         for t in str(d.get("chips", "")).split(","):
@@ -3995,7 +4012,17 @@ def field_device(f):
                 t, k = t.rsplit("*", 1)
             toks += [t] * int(k)
         if toks == list(f["chips"]) and str(d.get("arrangement", "")).lower() == arr:
-            return name
+            hits.append((name, d))
+    if hits:                                    # presets that share chips (r1x2, r3x2s) differ by their l-couplers
+        from collections import Counter
+        import bisect
+        off = list(np.cumsum(f.get("chip_n") or [0]))
+        chip = lambda q: bisect.bisect_right(off, q)
+        per = max(Counter(tuple(sorted((chip(u), chip(v)))) for u, v, _ in f.get("links", [])).values(), default=0)
+        for name, d in hits:
+            if str(d.get("links")) == str(per):
+                return name
+        return hits[0][0]
     return None
 
 
@@ -4714,7 +4741,7 @@ def fig_ghz_field_poster(store, chip_files, base_file=None, device=None, notes=(
     g = field_group_for(store)
     if device is None and g is not None:
         device = field_device((g[0] or g[1])[0]["field"])
-    device = device or "r3"
+    device = device or "clover6"
     geo, links = field_geometry_device(store, device)
     if geo is None or not runs:
         return None
@@ -5420,7 +5447,7 @@ def fig_lab_inside(recs, notes=(), dpi=150):
 
 
 def fig_lab_place(recs, r3=None, notes=(), dpi=150):
-    """Poster 3: where the links land, where the disabled qubits sit, the chip topology, and r3 at full size."""
+    """Poster 3: where the links land, where the disabled qubits sit, the chip topology, and the six-chiplet field at full size."""
     fig, gs = _lp_fig(dpi)
     D = 8
     sel = ["ghost", "mean", "bridge:1", "bridge:2", "cut"]
@@ -5428,7 +5455,7 @@ def fig_lab_place(recs, r3=None, notes=(), dpi=150):
     lp_header(fig, "Where the links land, what to disable, which topology",
               "Top: two exact chips, the same links placed on different rows of the facing border, at the chip's centre "
               "instead of its border, and with the three disabled qubits next to the link anchors or far from them. "
-              "Middle: six 2 x 2 chips on a 2 x 3 grid, one link per pair. Bottom: Nighthawk r3 at full size, from "
+              "Middle: six 2 x 2 chips on a 2 x 3 grid, one link per pair. Bottom: the six-chiplet field (clover6, 6 x 120 qubits) at full size, from "
               "field plan. Classical fidelity of the output distribution, depth 8.",
               [(f"{v('rows', 'centre row ghost'):.2f} / {v('inter', 'K1 ghost'):.2f}", "one link: centre row / corner row, ghost"),
                (f"{v('holes', 'centre of the chip ghost'):.2f} / {v('holes', 'corner of the border ghost'):.2f}",
@@ -5505,7 +5532,7 @@ def fig_lab_place(recs, r3=None, notes=(), dpi=150):
     # r3 at full size
     ax = fig.add_subplot(gs[2, 0:3])
     ax.axis("off")
-    ax.set_title("Nighthawk r3 at full size on the ghost loom (field plan, six 8 GB dies): what each choice costs",
+    ax.set_title("clover6 (six 120-qubit chiplets) at full size on the ghost loom (field plan, six 8 GB dies): what each choice costs",
                  loc="left", fontsize=15, color=FP_INK, fontweight="bold", pad=12)
     if r3:
         head = ["option", "links placed", "skipped", "ghosts per chip", "widest patch", "peak per chip (GiB)", "fits 8 GB dies"]
@@ -5537,7 +5564,7 @@ def fig_lab_place(recs, r3=None, notes=(), dpi=150):
     if r3:
         d_ = next((r for r in r3 if r["args"] == ["--links", "10"]), None)
         if d_:
-            lines.append((f"r3: 10 links per pair fit the 8 GB dies ({d_['links']} links with a ghost, "
+            lines.append((f"clover6: 10 links per pair fit the 8 GB dies ({d_['links']} links with a ghost, "
                           f"{max(d_['gib']):.1f} GiB at most).", False))
     lp_notes(fig, fig.add_subplot(gs[2, 3]), lines + [(t, False) for t in notes])
     fig.text(0.985, 0.014, LP_FOOT, fontsize=10, color=FP_MUTED, ha="right", family="monospace")
@@ -5754,8 +5781,9 @@ def fig_lab_rounds(recs, notes=(), dpi=150):
         ax.set_xticks(xs, [str(r) for r in rounds])
         ax.set_xlim(-0.3, xs[-1] + 1.3)
         ax.set_ylim(0.4, 1.12)
-        ax.text(0.01, 0.04, f"the other logical operator ({'Z' if lg == 'X' else 'X'}_L) is 1.00 at every bond count",
-                transform=ax.transAxes, fontsize=10.5, color=FP_INK2)
+        ax.text(0.01, 0.04, f"the other logical operator ({'Z' if lg == 'X' else 'X'}_L) is 1.00 at every bond count"
+                + (" from 2 bonds" if lay == "through" and lg == "Z" and False else ""), transform=ax.transAxes,
+                fontsize=10.5, color=FP_INK2)
     # truncations: syndrome rounds against the random circuit
     ax = fig.add_subplot(gs[1, 0:2])
     _fp_axes(ax, "Truncating sweeps per run: syndrome rounds stop adding them", "truncations", "syndrome rounds")
@@ -5866,7 +5894,7 @@ def _lw_wheel(ax, row, title):
 
 
 def fig_lab_wheel(recs, r3=None, notes=(), dpi=150):
-    """Poster 6: the wheel, every chip linked directly to every chip: the r3 plan and the four-chip test."""
+    """Poster 6: the wheel, every chip linked directly to every chip: the six-chiplet plan and the four-chip test."""
     from matplotlib.figure import Figure
     fig = Figure(figsize=(24, 16.5), dpi=dpi, facecolor=FP_SURF)
     gs = fig.add_gridspec(2, 4, left=0.04, right=0.985, top=0.80, bottom=0.06, height_ratios=[1.25, 1.0],
@@ -5881,22 +5909,22 @@ def fig_lab_wheel(recs, r3=None, notes=(), dpi=150):
     tiles = [("15", "chip pairs, each with its own l-couplers"), ("1.00 / 1", "hops between chips, mean / max")]
     if best:
         tiles.append((f"{min(best['pairs'].values())} x 15 = {best['links']}",
-                      "r3: most links per pair that fit every pair"))
+                      "clover6: most links per pair that fit every pair"))
         tiles.append((f"{min(best['gib']):.1f} to {max(best['gib']):.1f} GiB", "per chip on the ghost loom (8 GB dies)"))
     if g_g and g_w:
         tiles.append((f"{g_w[0]:.2f} / {g_g[0]:.2f}", f"four-chip test, ghost loom, depth {D}: wheel / grid"))
     lp_header(fig, "The wheel: every chiplet linked directly to every chiplet",
               "--topology wheel: the ring of chips as the rim plus every chord across it, so each pair of chips has its own "
-              "l-couplers and no state has to pass through a third chip. Top: Nighthawk r3 at full size (field plan, "
+              "l-couplers and no state has to pass through a third chip. Top: the six-chiplet field clover6 at full size (field plan, "
               "ghost loom). Bottom: four 2 x 3 chips, one link per pair, scored against the exact state.", tiles)
     if best:
         _lw_wheel(fig.add_subplot(gs[0, 0:2]), best,
-                  f"r3 as a wheel, {best['args'][1]} links per pair: l-couplers placed per pair (black rim, blue chords)")
+                  f"clover6 as a wheel, {best['args'][1]} links per pair: l-couplers placed per pair (black rim, blue chords)")
     else:
         fig.add_subplot(gs[0, 0:2]).axis("off")
     ax = fig.add_subplot(gs[0, 2:4])
     ax.axis("off")
-    ax.set_title("r3 at full size on the ghost loom: the wheel against the other topologies", loc="left", fontsize=15,
+    ax.set_title("clover6 at full size on the ghost loom: the wheel against the other topologies", loc="left", fontsize=15,
                  color=FP_INK, fontweight="bold", pad=12)
     pick = [r for r in r3 if r["args"] in (["--links", "10"], ["--links", "10", "--topology", "ring"],
                                            ["--links", "8", "--topology", "hub"]) or "wheel" in r["args"]]
@@ -5907,7 +5935,7 @@ def fig_lab_wheel(recs, r3=None, notes=(), dpi=150):
         for r in pick:
             pr = r.get("pairs") or {}
             on = [v for v in pr.values() if v]
-            body.append([{"10 links per pair (the device)": "grid, 10 links per pair", "10 links, ring":
+            body.append([{"10 links per pair (the default)": "grid, 10 links per pair", "10 links, ring":
                           "ring, 10 links per pair", "8 links, hub on chip 1": "hub on chip 1, 8 links per pair"}
                          .get(r["label"], r["label"]),
                          str(r["links"]), f"{len(on)} of {len(pr)}" if pr else "", f"{min(on)} to {max(on)}" if on else "",
@@ -5928,7 +5956,7 @@ def fig_lab_wheel(recs, r3=None, notes=(), dpi=150):
         ax.text(0, 0.03, "pairs linked: chip pairs with at least one l-coupler whose ghost fits; only border sites of a 12 x 10 "
                 "chiplet have a coupler colour free", transform=ax.transAxes, fontsize=10.5, color=FP_INK2)
     else:
-        ax.text(0.5, 0.5, "add the r3 plan (--lab-r3 lab_r3.json)", transform=ax.transAxes, ha="center", color=FP_INK2)
+        ax.text(0.5, 0.5, "add the field plan (--lab-plan lab_clover6.json)", transform=ax.transAxes, ha="center", color=FP_INK2)
     inters = ["ghost", "mean", "cut"]
     ds = sorted({r["depth"] for r in recs if r["exp"] == "wheel"})
     for col, metric in ((0, "fclass"), (1, "fb_cross")):
@@ -5984,7 +6012,7 @@ def fig_lab_wheel(recs, r3=None, notes=(), dpi=150):
             c_.get_text().set_fontweight("bold")
     lines = [("What the data says", True)]
     if best:
-        lines.append((f"r3 fits a full wheel on the 8 GB dies at {min(best['pairs'].values())} links per pair: "
+        lines.append((f"clover6 fits a full wheel on the 8 GB dies at {min(best['pairs'].values())} links per pair: "
                       f"{best['links']} links, {max(best['ghosts'])} ghosts and at most {max(best['gib']):.1f} GiB per chip. "
                       "Above that the border sites with a free coupler colour run out and pairs get fewer links or none.",
                       False))
@@ -5997,7 +6025,7 @@ def fig_lab_wheel(recs, r3=None, notes=(), dpi=150):
                   "through a third, and a cross-chip check can always be read through one chip's ghosts (the Shor poster).",
                   False))
     lp_notes(fig, fig.add_subplot(gs[1, 3]), lines + [(t, False) for t in notes])
-    fig.text(0.985, 0.014, "nighthawk_qrack.py field plan --device r3 --topology wheel; lab --exp wheel; lab --r3plan FILE",
+    fig.text(0.985, 0.014, "nighthawk_qrack.py field plan --device clover6 --topology wheel; lab --exp wheel; lab --fieldplan FILE",
              fontsize=10, color=FP_MUTED, ha="right", family="monospace")
     return fig
 
@@ -6060,8 +6088,8 @@ def fig_lab_port(recs, r3=None, notes=(), dpi=150):
     row_p = next((r for r in r3 if r["args"] == ["--topology", "wheel", "--link-port", "layers"]), None)
     tiles = []
     if row_w and row_p:
-        tiles.append((f"{max(row_p['ghosts'])} / {max(row_w['ghosts'])}", "r3 wheel, ghosts per chip: port / 6 links per pair"))
-        tiles.append((f"{max(row_p['gib']):.1f} / {max(row_w['gib']):.1f} GiB", "r3 wheel, largest chip: port / 6 per pair"))
+        tiles.append((f"{max(row_p['ghosts'])} / {max(row_w['ghosts'])}", "clover6 wheel, ghosts per chip: port / 6 links per pair"))
+        tiles.append((f"{max(row_p['gib']):.1f} / {max(row_w['gib']):.1f} GiB", "clover6 wheel, largest chip: port / 6 per pair"))
     g2 = {k: st(f"4 chips, {k}", "ghost", "fclass", 2) for k in keys}
     if all(g2.values()):
         tiles.append((" / ".join(f"{g2[k][0]:.2f}" for k in keys), "4 chips, ghost loom, 2 rounds: dedicated / layers / mux"))
@@ -6077,7 +6105,7 @@ def fig_lab_port(recs, r3=None, notes=(), dpi=150):
     _lpo_schedule(fig.add_subplot(gs[0, 0:2]))
     ax = fig.add_subplot(gs[0, 2:4])
     ax.axis("off")
-    ax.set_title("r3 at full size as a wheel on the ghost loom (field plan, 8 GB dies)", loc="left", fontsize=15,
+    ax.set_title("clover6 at full size as a wheel on the ghost loom (field plan, 8 GB dies)", loc="left", fontsize=15,
                  color=FP_INK, fontweight="bold", pad=12)
     pick = [r for r in r3 if r["args"] == ["--links", "6", "--topology", "wheel"] or "--link-port" in r["args"]]
     if pick:
@@ -6110,7 +6138,7 @@ def fig_lab_port(recs, r3=None, notes=(), dpi=150):
             "A port is a router qubit with a coupler to every partner chip: not the point-to-point l-couplers of the "
             "device.", 118)), transform=ax.transAxes, fontsize=10.5, color=FP_INK2, linespacing=1.35, va="bottom")
     else:
-        ax.text(0.5, 0.5, "add the r3 plan (--lab-r3 lab_r3.json)", transform=ax.transAxes, ha="center", color=FP_INK2)
+        ax.text(0.5, 0.5, "add the field plan (--lab-plan lab_clover6.json)", transform=ax.transAxes, ha="center", color=FP_INK2)
     # four chips: against rounds, per loom
     for col, inter in ((0, "ghost"), (1, "mean")):
         ax = fig.add_subplot(gs[1, col])
@@ -6188,7 +6216,7 @@ def fig_lab_port(recs, r3=None, notes=(), dpi=150):
     lines.append(("The port is one qubit: everything a chip shares with the field passes through it, and it is busy in "
                   "every port layer.", False))
     lp_notes(fig, fig.add_subplot(gs[1, 3]), lines + [(t, False) for t in notes])
-    fig.text(0.985, 0.014, "nighthawk_qrack.py lab --exp port; field plan --device r3 --topology wheel --link-port layers|mux",
+    fig.text(0.985, 0.014, "nighthawk_qrack.py lab --exp port; field plan --device clover6 --topology wheel --link-port layers|mux",
              fontsize=10, color=FP_MUTED, ha="right", family="monospace")
     return fig
 
@@ -6277,7 +6305,7 @@ def fig_lab_bell(recs, notes=(), dpi=150, p_cx=0.003):
               "Six chips of 3 x 4 qubits on a 2 x 3 grid, one l-coupler per chip pair. For every pair of chips: H on the link "
               "anchor A, CXs down the shortest path to the anchor B (through relay chips where the two are not linked), "
               "then the CXs back, which leave (|00> + |11>) on A and B alone. Fidelity 1.00 = the Bell pair, 0.50 = the "
-              "best a state without entanglement reaches, 0.25 = no correlation.", tiles)
+              "best a state without entanglement reaches, 0.25 = no correlation. A hypothetical six-chip field.", tiles)
     for col, t in ((0, "grid"), (2, "wheel")):
         if far.get(t) and far[t].get("pos"):
             _lb_map(fig.add_subplot(gs[0, col:col + 2]), far[t], f"{t}: the path of the Bell pair between chips 0 and 5")
@@ -6331,20 +6359,30 @@ def fig_lab_bell(recs, notes=(), dpi=150, p_cx=0.003):
         if i == 0 or body[i - 1][0] == "wheel":
             c_.get_text().set_fontweight("bold")
     # what the gate counts would cost on hardware, under assumed error rates
-    sub = ax.inset_axes([0.06, 0.0, 0.9, 0.33])
-    _fp_axes(sub, None, "survival of the pair", "assumed error per l-coupler CX", size=12)
-    ps = np.linspace(0, 0.05, 51)
+    lc = dict(transfer=0.99, cz=0.9475, transfer_target=0.999, source="arXiv:2610.29986")
+    lc.update(getattr(nh, "LCOUPLER", {}))
+    sub = ax.inset_axes([0.06, 0.0, 0.9, 0.29])
+    _fp_axes(sub, None, "survival of the pair", "error per l-coupler gate", size=12)
+    ps = np.linspace(0, 0.06, 61)
     for h in hs:
         rs = sel("grid", hops=h) or sel(hops=h)
         nl, ni = mean(rs, "link_cx"), mean(rs, "cx") - mean(rs, "link_cx")
         ys = (1 - ps) ** nl * (1 - p_cx) ** ni
         sub.plot(ps * 100, ys, color=FP_INK, lw=1.2 + 0.7 * (3 - h), ls=["-", "--", ":"][min(h, 3) - 1])
-        sub.text(5.08, ys[-1], f"{h} hop{'s' if h > 1 else ''}  {ys[-1]:.2f}", fontsize=10, color=FP_INK2, va="center")
-    sub.set_xlim(0, 6.2)
+        at = float((1 - (1 - lc["cz"])) ** nl * (1 - p_cx) ** ni)
+        sub.text(6.08, ys[-1], f"{h} hop{'s' if h > 1 else ''}  {at:.2f}", fontsize=10, color=FP_INK2, va="center")
+        sub.scatter([(1 - lc["cz"]) * 100], [at], s=34, color=FP_INK, zorder=4)
+    for val, lab_, ha in ((1 - lc["cz"], "distant CZ, r1", "right"), (1 - lc["transfer"], "state transfer, r1", "left"),
+                          (1 - lc["transfer_target"], "target", "left")):
+        sub.axvline(val * 100, color=LP_COL["ghost"], lw=1.2, ls=(0, (3, 2)))
+        sub.text(val * 100 + (-0.06 if ha == "right" else 0.06), 0.615, f"{lab_} {val * 100:.3g} %", fontsize=9.5,
+                 color=FP_INK2, ha=ha, va="bottom")
+    sub.set_xlim(0, 7.3)
     sub.set_ylim(0.6, 1.02)
-    sub.set_xticks([0, 1, 2, 3, 4, 5], ["0", "1 %", "2 %", "3 %", "4 %", "5 %"])
-    sub.set_title(f"Not measured: the grid's gate counts as (1 - p) per gate, {p_cx * 100:.1f} % assumed per on-chip CX",
-                  loc="left", fontsize=11.5, color=FP_INK2)
+    sub.set_xticks([0, 1, 2, 3, 4, 5, 6], ["0", "1 %", "2 %", "3 %", "4 %", "5 %", "6 %"])
+    sub.set_title(f"Estimate: the grid's gate counts as (1 - p) per gate; dots at the measured distant CZ.\nl-coupler "
+                  f"errors from two r1 chips ({lc['source']}); {p_cx * 100:.1f} % per on-chip CX assumed.",
+                  loc="left", fontsize=10.5, color=FP_INK2, linespacing=1.35)
     lines = [("What the data says", True)]
     if g and w:
         lines.append((f"Between the far corners the grid needs {g['cx']} CX ({g['link_cx']} on l-couplers) through "
@@ -6355,6 +6393,8 @@ def fig_lab_bell(recs, notes=(), dpi=150, p_cx=0.003):
                   "sees it; at three hops no simulator holds both ends and the pair is lost (0.25).", False))
     lines.append(("On the wheel all 15 pairs are linked, so every Bell pair is readable from its own end chips. The "
                   "mean-field loom reaches 0.50 at any distance: correlation, no entanglement.", False))
+    lines.append(("Six chips are a hypothetical field. IBM's planned r3 system is two chips: one hop, the 1-hop row.",
+                  False))
     lp_notes(fig, fig.add_subplot(gs[1, 3]), lines + [(t, False) for t in notes])
     fig.text(0.985, 0.014, "nighthawk_qrack.py lab --bell FILE", fontsize=10, color=FP_MUTED, ha="right", family="monospace")
     return fig
@@ -6739,6 +6779,9 @@ def main():
                     help="--poster: a line for the 'How this was measured' box (repeatable), e.g. the host")
     ap.add_argument("--poster-topology", dest="poster_topology", default=None, metavar="LABEL",
                     help="--poster: draw the field of this topology (grid, ring, wheel, hub N, grid + I-J, ...)")
+    ap.add_argument("--poster-loom", dest="poster_loom", default=None, choices=["ghost", "mean", "sample"],
+                    help="--poster: the records of this loom when the files hold more than one; a loom without its "
+                         "own --cut-links records is paired with another loom's (the cut circuit is the same)")
     ap.add_argument("--poster-dpi", dest="poster_dpi", type=int, default=150, help="--poster: resolution (default 150)")
     ap.add_argument("--vram-gb", dest="vram_gb", type=float, default=8.0,
                     help="--poster: one die's memory, the line on the ghost-loom memory panel (default 8)")
@@ -6750,14 +6793,15 @@ def main():
     ap.add_argument("--ghz-base", dest="ghz_base", default=None, metavar="JSONL",
                     help="--ghz-poster: a run without drift (--layer2 none) of the same register, drawn beside the chips")
     ap.add_argument("--field-device", dest="field_device", default=None,
-                    help="--ghz-poster: the field device preset (default: the field run records' device, else r3)")
+                    help="--ghz-poster: the field device preset (default: the field run records' device, else clover6)")
     ap.add_argument("--lab", action="append", default=[], metavar="JSONL",
                     help="nighthawk_qrack.py lab records (repeatable), for --lab-poster")
     ap.add_argument("--lab-poster", dest="lab_poster", default=None, metavar="PREFIX",
                     help="write the configuration-lab posters PREFIX_between.png, PREFIX_inside.png, PREFIX_place.png "
                          "and PREFIX_shor.png from the --lab records (each when its records are present), then exit")
-    ap.add_argument("--lab-r3", dest="lab_r3", default=None, metavar="JSON",
-                    help="--lab-poster: the full-size r3 plan table (nighthawk_qrack.py lab --r3plan JSON)")
+    ap.add_argument("--lab-plan", "--lab-r3", dest="lab_r3", default=None, metavar="JSON",
+                    help="--lab-poster: the full-size plan table of the six-chiplet field (nighthawk_qrack.py lab "
+                         "--fieldplan JSON)")
     ap.add_argument("--fxeb-dmin", dest="fxeb_dmin", type=int, default=8,
                     help="views 10-11 and --table: smallest depth used in the decay fit (default 8; "
                          "shallower outputs are too concentrated)")
@@ -6849,6 +6893,7 @@ def main():
         matplotlib.use("Agg")
         store = Store(a)
         print(store.summary())
+        _POSTER_LOOM[0] = a.poster_loom
         fig = fig_field_poster(store, (a.cfg or [None])[0], a.poster_note, a.vram_gb, a.poster_dpi,
                                a.poster_topology)
         if fig is None:

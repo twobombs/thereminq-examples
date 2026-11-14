@@ -32,9 +32,10 @@ thereminq-examples/devices/nighthawk:
   ghz-, dual-nighthawk         nighthawk_ghz.py       the `ghz` command (its own parser: ghz -h)
   rcs-nighthawk                nighthawk_cloverfield.py   the `field` command (its own parser: field -h)
   erepr-nighthawk              nighthawk_erepr.py     the `erepr` command (its own parser: erepr -h)
-and the Nighthawk r3 device as a field of chiplets: `field --device r3` is six 120-qubit chiplets (register
-nighthawk120, the whole 12 x 10 square lattice) on a 2 x 3 grid, ten l-couplers per adjacent pair, one
-isolated chip worker per chiplet, woven by the loom. nighthawk_cloverfield.py, nighthawk_erepr.py and
+and IBM's Nighthawk devices as fields of chips: `field --device r3x2` is the system planned for 2027, two
+Nighthawk r3 chips of 520 qubits joined by ten l-couplers; `--device r3x2s` is the same shape on two 120-qubit
+chips (register nighthawk120, the whole 12 x 10 square lattice), which runs here; `--device clover6` is a
+hypothetical six-chiplet field. One isolated chip worker per chip, woven by the loom. nighthawk_cloverfield.py, nighthawk_erepr.py and
 nighthawk_ghz.py next to this file are stubs that forward to it.
 
 Subcommands
@@ -90,7 +91,7 @@ Subcommands
             across them and the dual Nighthawk R1 (formerly nighthawk_ghz.py): ghz -h.
   field     the cloverfield (formerly nighthawk_cloverfield.py): chips in isolated workers woven by the loom
             into one virtual chip; plan, run, linksearch, layoutsearch, selftest. --device r2 | r1x2 | r3 |
-            r3x2 picks a Nighthawk device (r3: 6 x 120-qubit chiplets, 2 x 3, ten l-couplers per pair):
+            r3x2 picks a Nighthawk device (r3x2: two 520-qubit chips, ten l-couplers), r3x2s and clover6 a model:
             field -h.
   erepr     ER=EPR on the cloverleaf and the cloverfield (formerly nighthawk_erepr.py): derive, plan, run,
             ds, pairs, table, aceprobe, selftest: erepr -h.
@@ -181,11 +182,13 @@ Examples
   python nighthawk_qrack.py aceplan  --repo rcs-nighthawk --max-width 33
   python nighthawk_qrack.py run      --repo rcs-nighthawk --backend ace --families fxeb \
          --sizes 27-34 --ace-max-width 33 --out big_ace.jsonl
-  python nighthawk_qrack.py field plan --device r3 --png r3.png
-  python nighthawk_qrack.py field run  --device r3 --family hamming --protocol nnqab --fold 1 3 \
-         --depths 4 6 8 --ace-gpu --gpus 0-5 --out r3.jsonl
-  python nighthawk_qrack.py field run  --device r3 --cut-links --family hamming --protocol nnqab --fold 1 3 \
-         --depths 4 6 8 --ace-gpu --gpus 0-5 --out r3.jsonl
+  python nighthawk_qrack.py field plan --device r3x2 --backend exact --png r3x2.png
+  python nighthawk_qrack.py field run  --device r3x2s --family hamming --protocol nnqab --fold 1 3 \
+         --depths 4 6 8 --ace-gpu --gpus 0-1 --out r3x2s.jsonl
+  python nighthawk_qrack.py field run  --device r3x2s --cut-links --family hamming --protocol nnqab --fold 1 3 \
+         --depths 4 6 8 --ace-gpu --gpus 0-1 --out r3x2s.jsonl
+  python nighthawk_qrack.py field run  --device clover6 --family hamming --protocol nnqab --fold 1 3 \
+         --depths 4 6 8 --ace-gpu --gpus 0-5 --out clover6.jsonl
   python nighthawk_qrack.py erepr run --backend loom --field narrow --loom ghost mean --out erepr/loom.jsonl
 """
 
@@ -589,6 +592,13 @@ REGISTERS = {
                        46, 97, 123, 15, 14, 11, 9, 60, 86, 136, 149, 16, 41, 40, 12, 13, 37, 10, 35, 112, 42, 67, 68,
                        66, 38, 39, 63, 36, 61, 62, 69, 70, 95, 94, 64, 65, 90, 89, 87, 88, 96, 121, 120, 91, 92, 93,
                        117, 113, 114, 115])),
+    "nighthawk520": dict(
+        n=520, rows=(0, 19), cols=(0, 25), drop=[],
+        about="one Nighthawk r3 chip: 520 programmable qubits on a square lattice (IBM, 11 Nov 2026). The 20 x 26 "
+              "shape is an assumption, IBM has not stated the lattice dimensions. No ACE placement is stored for it: "
+              "plans, the exact engines and --chip-ace SIZE:LRC:LRR work, a field run on QrackAceBackend needs a "
+              "placement first",
+        ace=None),
     "nighthawk120w": dict(
         n=120, rows=(0, 11), cols=(0, 9), drop=[],
         about="the same 120 sites as six patches filling one 8 GB die: fewer boundary qubits than nighthawk120, "
@@ -656,7 +666,7 @@ class RegisterLayout(Layout):
             strings.append("".join(bits))
         self.name = name
         self.n = n
-        self.l2p = [(r0 + i // C) * cols_dev + (c0 + i % C) for i in keep]
+        self.l2p = [(r0 + i // C) * max(cols_dev, c1 + 1) + (c0 + i % C) for i in keep]
         self.schedule = L["schedule"]
         self.matchings = {k: [tuple(e) for e in v] for k, v in m.items()}
         self.base_seed = base
@@ -14197,9 +14207,9 @@ up to 3 parents up, via $NIGHTHAWK_REPO or --repo):
   python3 nighthawk_qrack.py hwxeb    --cache xeb_cache
   python3 nighthawk_qrack.py run      --backend ace --families mirror \\
           --sizes 27-36,61 --depths 4 6 8 12 --out clean_ace.jsonl
-  python3 nighthawk_qrack.py field plan --device r3                 # Nighthawk r3: 6 x 120-qubit chiplets
+  python3 nighthawk_qrack.py field plan --device r3x2s              # two chips, ten l-couplers (r3x2 at 120 qubits)
 help per command: python3 nighthawk_qrack.py <command> -h
-                  python3 nighthawk_qrack.py ghz | field | erepr | lab -h""")
+                  python3 nighthawk_qrack.py ghz | field | erepr -h""")
         return
     a = ap.parse_args()
     if getattr(a, "gtt", None) and not getattr(a, "cpu", False):
@@ -14291,13 +14301,19 @@ Field
 Devices (--device NAME sets --chips, --arrangement and --links; giving any of the three overrides it)
   r2      one Nighthawk chip: nighthawk120, the whole 12 x 10 square lattice, 120 qubits
   r1x2    IBM's two-module Nighthawk r1 demonstration: nighthawk120*2, 1 x 2, four l-couplers
-  r3      Nighthawk r3 as six 120-qubit chiplets: nighthawk120*6, 2 x 3, ten l-couplers per adjacent pair
-          (720 qubits, 7 chiplet pairs, up to 70 l-couplers); one chip worker per chiplet, so --gpus 0-5
-          puts one chiplet on each of six dies
-  r3x2    two r3 processors side by side: nighthawk120*12, 2 x 6
-  IBM states 520 qubits per r3 processor and a 1,040-qubit system of two; the chiplet count, the lattice of
-  one chiplet and the placement of the l-couplers are this tool's model, not IBM data. The chiplets carry no
-  broken qubits (the release's 17, 55, 62 belong to ibm_phoenix).
+          (arXiv:2610.29986: state transfer 99.0 % mean, distant CZ 94.75 % mean; LCOUPLER in this file)
+  r3      Nighthawk r3, one chip: nighthawk520, 520 programmable qubits on a square lattice, 10,000 operations
+  r3x2    the system IBM plans for 2027: nighthawk520*2, 1 x 2, ten l-couplers, 1,040 qubits
+  r3x2s   r3x2 scaled to what runs here: nighthawk120*2, 1 x 2, ten l-couplers
+  clover6   hypothetical, not an IBM device: nighthawk120*6, 2 x 3, ten l-couplers per pair (720 qubits; this
+            tool's r3 model before the announcement); one chip worker per chiplet, so --gpus 0-5 puts one
+            chiplet on each of six dies. The topology, port and Quantum NUMA studies were done on it
+  clover12  hypothetical: two clover6 fields side by side, nighthawk120*12, 2 x 6
+  IBM states (11 Nov 2026) 520 programmable qubits per r3 chip (2,034 physical), a square lattice, ten
+  chip-to-chip l-couplers and a 1,040-qubit system of two chips in 2027. Not stated, so this tool's model: the
+  lattice dimensions (20 x 26 here), where the l-couplers attach, and any layout of more than two chips. No
+  ACE placement is stored for nighthawk520 yet. The chips carry no broken qubits (the release's 17, 55, 62
+  belong to ibm_phoenix).
 
 Subcommands
   plan          the field: chips, qubits, couplers per colour, links, ACE presets and
@@ -14395,7 +14411,9 @@ class ChipLayout:
             raise SystemExit(f"chip {name}: {len(keep)} sites, expected {n}")
         m = rl.remove_qubits(rl.rect_matchings(R, C), gone)
         self.name, self.n = name, n
-        self.l2p = [(r0 + i // C) * cols_dev + (c0 + i % C) for i in keep]
+        wide = max(cols_dev, c1 + 1)                 # a chip wider than the 12 x 10 device keeps its own numbering
+        self.l2p = [(r0 + i // C) * wide + (c0 + i % C) for i in keep]
+        self.cells = [(r0 + i // C, c0 + i % C) for i in keep]
         self.matchings = {k: [tuple(e) for e in v] for k, v in m.items()}
         self.schedule = L["schedule"]
         self.grid = (R, C)
@@ -14446,7 +14464,7 @@ def chip_engine_args(spec, opts):
                            ace_error_detection=opts.get("ace_error_detection", True))
     if opts["backend"] != "ace":
         return a
-    if spec["kind"] == "register":
+    if spec["kind"] == "register" and REGISTERS[spec["name"]]["ace"] is not None:
         ace = REGISTERS[spec["name"]]["ace"]
         a.ace_transpile, a.transpile_engine = True, "exact"
         a.ace_width, a.lrc, a.lrr, a.ace_torus = ace["width"], ace["lrc"], ace["lrr"], ace["torus"]
@@ -14459,7 +14477,8 @@ def chip_engine_args(spec, opts):
         return a
     ca = opts.get("chip_ace")
     if not ca:
-        raise SystemExit(f"chip {spec['name']}: --backend ace on a rect chip needs --chip-ace SIZE:LRC:LRR[:t]")
+        raise SystemExit(f"chip {spec['name']}: no ACE placement is stored for it; --backend ace needs "
+                         f"--chip-ace SIZE:LRC:LRR[:t] (a placement search), or use --backend exact")
     f = ca.split(":")
     a.ace_transpile, a.ace_width, a.lrc, a.lrr = True, int(f[0]), int(f[1]), int(f[2])
     a.ace_torus = len(f) > 3 and f[3] in ("t", "torus")
@@ -14482,7 +14501,7 @@ class GhostRoom:
             return
         a = chip_engine_args(spec, opts)
         size = int(a.ace_width)
-        if spec["kind"] == "register":
+        if spec["kind"] == "register" and REGISTERS[spec["name"]]["ace"] is not None:
             site = list(REGISTERS[spec["name"]]["ace"]["site"])
             row = layout_row(size, a.lrc, a.lrr, a.ace_torus, {})
         else:
@@ -14573,7 +14592,10 @@ class Field:
         for c, nn in enumerate(self.chip_n):
             self.chip_of += [c] * nn
         self.local = [q - self.off[self.chip_of[q]] for q in range(self.n)]
-        self.cells = [[(p // self.C_dev, p % self.C_dev) for p in lay.l2p] for lay in self.lays]
+        self.cells = [list(lay.cells) if hasattr(lay, "cells") else [(p // self.C_dev, p % self.C_dev) for p in lay.l2p]
+                      for lay in self.lays]
+        self.R_dev = max([self.R_dev] + [r + 1 for cs in self.cells for r, _ in cs])     # the tile of the largest chip
+        self.C_dev = max([self.C_dev] + [x + 1 for cs in self.cells for _, x in cs])
         self.schedule = list(L["schedule"])
         self.base_seed = L["base_seed"]
         self.instances = L["instances"]
@@ -16577,6 +16599,24 @@ def cmd_field_selftest(a):
            "mux one matching per round and every coupler once per 5 rounds, the cut baseline keeps the layers", good,
            f"ports {pl.ports}, a round is {' '.join(pl.schedule)} (layers) or {' '.join(pm.schedule)} (mux), "
            f"{len(pl.ghost_plan()[0])} ghosts per chip")
+    # [14] device presets against IBM's stated figures
+    def dev(name, **kw):
+        d = DEVICES[name]
+        return build_field(argparse.Namespace(**dict(ta, chips=d["chips"], arrangement=d["arrangement"], links=d["links"],
+                                                     **kw)))
+    d2, ds, d6, d1 = dev("r3x2"), dev("r3x2s"), dev("clover6"), dev("r1x2")
+    rows3 = {r for r, _ in d2.cells[0]}
+    cols3 = {x for _, x in d2.cells[0]}
+    good = (d2.n == 1040 and d2.chip_n == [520, 520] and len(d2.links) == 10 and len(d2.chip_pairs) == 1
+            and (len(rows3), len(cols3)) == (20, 26) and len(set(d2.pos)) == 1040
+            and sum(len(es) for es in d2.lays[0].matchings.values()) == 2 * 20 * 26 - 20 - 26
+            and ds.n == 240 and len(ds.links) == 10 and d1.n == 240 and len(d1.links) == 4
+            and d6.n == 720 and len(d6.chip_pairs) == 7 and DEVICES["r3"]["chips"] == "nighthawk520"
+            and LCOUPLER["cz"] < LCOUPLER["transfer"] < LCOUPLER["transfer_target"])
+    report("[14] devices: r3x2 is two 520-qubit chips (20 x 26) with ten l-couplers, 1,040 qubits; r3x2s the same "
+           "shape on 120-qubit chips; r1x2 four l-couplers; clover6 the six-chiplet model", good,
+           f"r3x2 {d2.n} qubits, {len(d2.links)} links; r3x2s {ds.n}, {len(ds.links)}; clover6 {d6.n}, "
+           f"{len(d6.links)}; l-coupler CZ {LCOUPLER['cz']}")
     print("ALL OK" if ok else "SOME CHECKS FAILED")
     raise SystemExit(0 if ok else 1)
 
@@ -16593,11 +16633,23 @@ DEVICES = {
                about="Nighthawk r2, one 120-qubit chip (12 x 10 square lattice)"),
     "r1x2": dict(chips="nighthawk120*2", arrangement="1x2", links="4", gates=5000,
                  about="two-module Nighthawk r1 demonstration, 2 x 120 qubits, four l-couplers"),
-    "r3": dict(chips="nighthawk120*6", arrangement="2x3", links="10", gates=10000,
-               about="Nighthawk r3 as 6 x 120-qubit chiplets on a 2 x 3 grid, ten l-couplers per adjacent pair"),
-    "r3x2": dict(chips="nighthawk120*12", arrangement="2x6", links="10", gates=10000,
-                 about="two Nighthawk r3 processors side by side, 12 x 120-qubit chiplets on a 2 x 6 grid"),
+    "r3": dict(chips="nighthawk520", arrangement="1x1", links="0", gates=10000,
+               about="Nighthawk r3, one chip of 520 programmable qubits on a square lattice (20 x 26 assumed), "
+                     "designed for 10,000 operations (IBM, 11 Nov 2026)"),
+    "r3x2": dict(chips="nighthawk520*2", arrangement="1x2", links="10", gates=10000,
+                 about="the system IBM plans for 2027: two Nighthawk r3 chips, 1,040 qubits, ten l-couplers"),
+    "r3x2s": dict(chips="nighthawk120*2", arrangement="1x2", links="10", gates=10000,
+                  about="r3x2 scaled to what runs here: the same two chips and ten l-couplers on 120-qubit chips"),
+    "clover6": dict(chips="nighthawk120*6", arrangement="2x3", links="10", gates=10000,
+                    about="hypothetical, not an IBM device: six 120-qubit chiplets on a 2 x 3 grid, ten l-couplers "
+                          "per pair (this tool's r3 model before the announcement)"),
+    "clover12": dict(chips="nighthawk120*12", arrangement="2x6", links="10", gates=10000,
+                     about="hypothetical, not an IBM device: two clover6 fields side by side, 12 chiplets"),
 }
+# the measured l-coupler (two Nighthawk r1 chips, four l-couplers over 80 cm of coax; arXiv:2610.29986, IBM blog
+# 27 Oct 2026): state transfer between the chips and the distant CZ built from transfers; IBM's transfer target
+LCOUPLER = dict(transfer=0.99, transfer_best=0.9929, cz=0.9475, cz_best=0.9642, transfer_target=0.999,
+                source="arXiv:2610.29986")
 FIELD_DEFAULTS = dict(chips="nighthawk88e*2", links="4")
 
 
@@ -19525,11 +19577,11 @@ def lab_experiments(which):
     return E
 
 
-def lab_r3_plan_rows(device="r3"):
+def lab_r3_plan_rows(device="clover6"):
     """The device at full size on the ghost loom, option by option (field plan's numbers): links placed and
     skipped, ghosts per chip, widest patch, peak memory per chip."""
     opts = [("4 links per pair", ["--links", "4"]), ("6 links per pair", ["--links", "6"]),
-            ("8 links per pair", ["--links", "8"]), ("10 links per pair (the device)", ["--links", "10"]),
+            ("8 links per pair", ["--links", "8"]), ("10 links per pair (the default)", ["--links", "10"]),
             ("every facing row and column", ["--links", "all"]),
             ("10 links, 16 GB host memory per die (--gtt 16)", ["--links", "10", "--gtt", "16"]),
             ("10 links, ring", ["--links", "10", "--topology", "ring"]),
@@ -20098,13 +20150,14 @@ def lab_main(argv=None):
     ap.add_argument("--shots", type=int, default=LAB_SHOTS)
     ap.add_argument("--out", default="lab.jsonl")
     ap.add_argument("--only", default=None, help="substring of the configuration name")
-    ap.add_argument("--r3plan", default=None, metavar="JSON", help="write the full-size r3 ghost-loom plan table, then exit")
+    ap.add_argument("--fieldplan", default=None, metavar="JSON",
+                    help="write the full-size ghost-loom plan table of the six-chiplet field (--device clover6, a "
+                         "hypothetical layout), then exit")
     ap.add_argument("--shor", default=None, metavar="JSONL",
                     help="Shor's [[9,1,3]] code laid across the link of the two-chip field (the cut between its "
                          "blocks, and through them) under every interconnect: logical Z and X success raw, decoded, "
                          "and read through the ghosts; appends records to JSONL, then exit")
-    ap.add_argument("--repeats", type=int, default=None,
-                    help="sampling seeds per point: --shor (default 3), --rounds (default 2), --bell (default 1)")
+    ap.add_argument("--repeats", type=int, default=3, help="--shor: sampling seeds per point")
     ap.add_argument("--bell", default=None, metavar="JSONL",
                     help="Quantum NUMA: a Bell pair between every pair of six 3 x 4 chips on the grid, the ring, the grid "
                          "with a 0-5 chord and the wheel, built along the shortest path over the l-couplers (relay chips "
@@ -20126,24 +20179,21 @@ def lab_main(argv=None):
             print(f"{c['exp']:<8} {c['name']:<44} inside {c.get('inside', 'exact'):<16} between {c['inter']}")
         return
     if a.shor:
-        reps = 3 if a.repeats is None else a.repeats
         print(f"lab shor: {len(SHOR_LAYOUTS)} layouts x {len(SHOR_INTERS)} interconnects x 4 logical states, "
-              f"{reps} seeds, {a.shots} shots -> {a.shor}")
-        lab_shor(a.shor, a.shots, reps)
+              f"{a.repeats} seeds, {a.shots} shots -> {a.shor}")
+        lab_shor(a.shor, a.shots, a.repeats)
         return
     if a.bell:
-        reps = 1 if a.repeats is None else a.repeats
         print(f"lab bell: a Bell pair between every chip pair, {len(BELL_TOPOS)} topologies x {len(BELL_INTERS)} "
-              f"interconnects, {reps} seeds, {a.shots} shots -> {a.bell}")
-        lab_bell(a.bell, a.shots, reps)
+              f"interconnects, {a.shots} shots -> {a.bell}")
+        lab_bell(a.bell, a.shots, 1)
         return
     if a.rounds:
-        reps = 2 if a.repeats is None else a.repeats
-        print(f"lab rounds: syndrome rounds across the link, {reps} seeds, {min(a.shots, 1024)} shots -> {a.rounds}")
-        lab_rounds(a.rounds, min(a.shots, 1024), reps)
+        print(f"lab rounds: syndrome rounds across the link, {a.shots} shots -> {a.rounds}")
+        lab_rounds(a.rounds, min(a.shots, 1024))
         return
-    if a.r3plan:
-        json.dump(lab_r3_plan_rows(), open(a.r3plan, "w"), indent=1)
+    if a.fieldplan:
+        json.dump(lab_r3_plan_rows(), open(a.fieldplan, "w"), indent=1)
         return
     cfgs = [c for c in lab_experiments(set(a.exp)) if not a.only or a.only in c["name"]]
     print(f"lab: {len(cfgs)} configurations, depths {a.depths}, {a.instances} instances, {a.shots} shots -> {a.out}")

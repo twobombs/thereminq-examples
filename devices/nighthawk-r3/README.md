@@ -1,10 +1,10 @@
 # Nighthawk, consolidated: `nighthawk_qrack.py`
 
-One script for every Nighthawk simulation in `devices/nighthawk`, plus IBM Quantum Nighthawk r3 as a field of six 120-qubit chiplets.
+One script for every Nighthawk simulation in `devices/nighthawk`, plus IBM Quantum Nighthawk fields: the two-chip r3 system IBM plans for 2027, the same shape at a size that runs on small hosts, and a hypothetical six-chiplet field.
 
 | | |
 |---|---|
-| Script | `nighthawk_qrack.py`, 20,150 lines |
+| Script | `nighthawk_qrack.py`, 20,204 lines |
 | Viewers | `nighthawk_graph.py` (the `dual-nighthawk` version plus view 29, `--poster` for `field run` records and `--ghz-poster` for GHZ per chiplet and `--lab-poster` for the configuration lab, sections 3.4, 3.5 and 3.7), `nighthawk_3dgraph.py` (unchanged) |
 | Stubs | `nighthawk_ghz.py`, `nighthawk_cloverfield.py`, `nighthawk_erepr.py`: forward to the script |
 | Data | [`BlueQubitDev/rcs-nighthawk`](https://github.com/BlueQubitDev/rcs-nighthawk) next to the script, `--repo`, or `$NIGHTHAWK_REPO` |
@@ -23,7 +23,7 @@ One script for every Nighthawk simulation in `devices/nighthawk`, plus IBM Quant
 | `ghz-nighthawk`, `shrs-nighthawk` | `nighthawk_ghz.py` | 4,505 | covered by the base (`ghz` command): all 138 present |
 | `rcs-nighthawk` | `nighthawk_cloverfield.py` | 2,179 | merged in as the `field` command |
 | `erepr-nighthawk` | `nighthawk_erepr.py` | 2,068 | merged in as the `erepr` command |
-| new | | | device presets `r2`, `r1x2`, `r3`, `r3x2`; registers `nighthawk120`, `nighthawk120w`; `field --no-ace-error-detection` |
+| new | | | device presets `r2`, `r1x2`, `r3`, `r3x2`, `r3x2s`, `clover6`, `clover12`; registers `nighthawk120`, `nighthawk120w`, `nighthawk520`; `field --no-ace-error-detection` |
 
 Where an older folder's function differs from the base, the base's newer version is the one kept (16 functions against `rcs`, 11 against `vqe`, 3 against `shrs`). `bro-nighthawk` is a different toolkit (DCS XEB, `tnsweep.py`) and is not part of this file.
 
@@ -42,49 +42,65 @@ Where an older folder's function differs from the base, the base's newer version
 | `ghz` | `chip` `tiles` `stack` `sweep` `probe` `stackmap` `shor` `shormap` `shoralg` `dual` `dualmap` `dualplot` `plot` `selftest` |
 | `field` | `plan` `run` `linksearch` `layoutsearch` `selftest` |
 | `erepr` | `derive` `plan` `run` `ds` `pairs` `table` `aceprobe` `selftest` |
-| `lab` | options instead of commands: `--exp`, `--r3plan`, `--shor`, `--rounds`, `--bell`, `--list`, `--selftest` (section 3.7) |
 
-`-h` works per group (`ghz -h`, `field -h`, `erepr -h`, `lab -h`) and per command.
+`-h` works per group (`ghz -h`, `field -h`, `erepr -h`) and per command.
 
-## 3. Nighthawk r3
+## 3. Nighthawk fields: r3 and the six-chiplet model
 
 ### 3.1 Device presets (`field --device NAME`)
 
-| Preset | Chips | Grid | l-couplers per adjacent pair | Qubits | Stands for |
+| Preset | Chips | Grid | l-couplers | Qubits | Stands for |
 |---|---|---|---|---|---|
-| `r2` | `nighthawk120` | 1 x 1 | 0 | 120 | one Nighthawk chip |
-| `r1x2` | `nighthawk120*2` | 1 x 2 | 4 | 240 | IBM's two-module r1 demonstration |
-| `r3` | `nighthawk120*6` | 2 x 3 | 10 | 720 | one r3 processor as six chiplets |
-| `r3x2` | `nighthawk120*12` | 2 x 6 | 10 | 1,440 | two r3 processors side by side |
+| `r2` | `nighthawk120` | 1 x 1 | 0 | 120 | Nighthawk r2, one chip |
+| `r1x2` | `nighthawk120*2` | 1 x 2 | 4 | 240 | IBM's two-chip r1 l-coupler demonstration |
+| `r3` | `nighthawk520` | 1 x 1 | 0 | 520 | Nighthawk r3, one chip |
+| `r3x2` | `nighthawk520*2` | 1 x 2 | 10 | 1,040 | the system IBM plans for 2027 |
+| `r3x2s` | `nighthawk120*2` | 1 x 2 | 10 | 240 | `r3x2` scaled to 120-qubit chips: the same two chips and ten l-couplers, runs on a small host |
+| `clover6` | `nighthawk120*6` | 2 x 3 | 10 per pair | 720 | hypothetical, not an IBM device: six chiplets (this tool's r3 model before the announcement) |
+| `clover12` | `nighthawk120*12` | 2 x 6 | 10 per pair | 1,440 | hypothetical: two `clover6` fields side by side |
 
 `--chips`, `--arrangement` and `--links` still work and override the preset. Without `--device` the defaults are the cloverfield's own (`nighthawk88e*2`, 4 links).
 
 ```bash
-python3 nighthawk_qrack.py field plan --device r3 --png r3.png
-python3 nighthawk_qrack.py field run  --device r3 --family hamming --protocol nnqab --fold 1 3 \
-        --depths 4 6 8 --ace-gpu --gpus 0-5 --out r3.jsonl
-python3 nighthawk_qrack.py field run  --device r3 --cut-links --family hamming --protocol nnqab --fold 1 3 \
-        --depths 4 6 8 --ace-gpu --gpus 0-5 --out r3.jsonl          # matched baseline: same anchors, no links
-python3 nighthawk_qrack.py field run  --device r3 --chips nighthawk120w*6 --loom mean --ace-gpu --gpus 0-5 --out r3w.jsonl
+python3 nighthawk_qrack.py field plan --device r3x2 --backend exact --png r3x2.png      # geometry and l-couplers of the 1,040-qubit system
+python3 nighthawk_qrack.py field plan --device r3x2s --loom ghost
+python3 nighthawk_qrack.py field run  --device r3x2s --loom ghost --family hamming --protocol nnqab --fold 1 \
+        --depths 4 6 8 --ace-gpu --gpus 0-1 --out r3x2s.jsonl
+python3 nighthawk_qrack.py field run  --device r3x2s --loom mean --cut-links --family hamming --protocol nnqab --fold 1 \
+        --depths 4 6 8 --ace-gpu --gpus 0-1 --out r3x2s.jsonl     # matched baseline: same anchors, no links
+python3 nighthawk_qrack.py field run  --device clover6 --family hamming --protocol nnqab --fold 1 3 \
+        --depths 4 6 8 --ace-gpu --gpus 0-5 --out clover6.jsonl
 ```
 
-One chip worker per chiplet: `--gpus 0-5` puts each chiplet on its own die.
+One chip worker per chip: `--gpus 0-1` puts each chip of a two-chip field on its own die, `--gpus 0-5` each chiplet of `clover6`.
 
-### 3.2 IBM's figures against this model
+### 3.2 IBM's stated figures and what the presets do
 
-| Item | IBM (QDC 2026) | This model |
+Sources: IBM newsroom 11 Nov 2026 (Nighthawk r3), IBM Quantum blog 27 Oct 2026 and arXiv:2610.29986 (l-couplers between two r1 chips).
+
+| Item | IBM | In this tool |
 |---|---|---|
-| r2 qubits | 120 | 120 (`nighthawk120`) |
-| r2 two-qubit gates | over 7,500 | no limit; `plan` prints the cycle count that budget buys |
-| r3 qubits per processor | 520 | 720 (6 x 120) |
-| r3 lattice | square, as r2 | 12 x 10 square per chiplet |
-| r3 l-couplers | 10 per processor, chip to chip | 10 per adjacent chiplet pair, 7 pairs, up to 70 |
-| r3 two-qubit gates | 10,000 | as r2 |
-| Linked system | two processors, 1,040 qubits, 2027 | `r3x2`, 1,440 qubits |
-| On-chip reset | kept from r2 | not modelled (no mid-circuit reset in these circuits) |
-| Broken qubits | not published for r3 | none on a chiplet (17, 55, 62 are `ibm_phoenix`'s) |
+| r1, r2 qubits | 120 | 120 (`nighthawk120`, 12 x 10) |
+| r2 operations | over 7,500 on 120 qubits | no limit; `plan` prints the cycle count that budget buys |
+| r3 programmable qubits | 520 per chip (2,034 physical) | `nighthawk520`, 520 |
+| r3 lattice | square, as r2; dimensions not stated | 20 x 26, an assumption |
+| r3 l-couplers | ten chip-to-chip interconnects | ten between the two chips of `r3x2`, on facing border sites; where they attach is not stated |
+| r3 operations | 10,000 (design target, 2027) | the `plan` budget |
+| Linked system | two r3 chips, 1,040 qubits, 2027 | `r3x2` |
+| More than two chips | not stated | `clover6`, `clover12` and `--topology` are hypothetical |
+| l-coupler demonstration | two r1 chips, four l-couplers, 80 cm coax | `r1x2` |
+| l-coupler state transfer | 99.0 % mean, 99.29 % best, target 99.9 % | `LCOUPLER` in the script; the lab's Bell poster marks it |
+| l-coupler distant CZ | 94.75 % mean, 96.42 % best | `LCOUPLER`; the lab's Bell poster marks it |
+| l-coupler structure | point to point: two lattice qubits through two L-qubits, tunable couplers and coax | one link joins two qubits; `--link-port` (3.10) is not this hardware |
+| On-chip reset | r2 and r3 | not modelled (no mid-circuit reset in these circuits) |
+| Broken qubits | not published | none (17, 55, 62 are `ibm_phoenix`'s) |
 
-The six-chiplet reading and the chiplet lattice are the model's, not IBM's. For IBM's own numbers use `--chips` with a rectangle or a saved register: two 520-qubit processors need a lattice larger than the release's 12 x 10, which `rect:` cannot express yet.
+| Status of `nighthawk520` | |
+|---|---|
+| Plans, drawings, exact engines | work (`field plan --device r3x2 --backend exact`) |
+| QrackAceBackend | no placement stored; the built-in search (`--chip-ace 640:2:7`, CP-SAT) did not find one in its time limit |
+| Dense memory | 520 qubits need about 27 ACE patches at 0.5 GiB each in the worst case, more than one 8 GB die per chip |
+| What runs in its place | `r3x2s`: both chips on the stored `nighthawk120` placement, all ten l-couplers with a ghost at 1.3 to 1.8 GiB per chip |
 
 ### 3.3 The chiplet registers
 
@@ -107,9 +123,9 @@ Check of `nighthawk120` on PyQrack 2.30.6 from pip, CPU, outside the script: mir
 
 The NaN comes from `QrackAceBackend` with `is_error_detection=True` (first seen after a seam-to-bulk CZ in cycle 5; the same with `use_crossbars=False`; gone with error detection off). Until that is settled upstream, run chiplets deeper than about 4 cycles with `field ... --no-ace-error-detection`. Your own Qrack build may behave differently from the pip wheel.
 
-### 3.4 r3 measured: mean loom on the CPU
+### 3.4 clover6 measured: mean loom on the CPU
 
-`field run --device r3 --loom mean [--cut-links] --family hamming --protocol nnqab --fold 1 --cpu --no-ace-error-detection`, on 2 CPU cores with about 8 GB RAM (one loom peaked at 1.8 GB; the ghost loom does not fit). Signal is 1 - 2h; means over instances.
+`field run --device clover6 --loom mean [--cut-links] --family hamming --protocol nnqab --fold 1 --cpu --no-ace-error-detection`, on 2 CPU cores with about 8 GB RAM (one loom peaked at 1.8 GB; the ghost loom does not fit). Signal is 1 - 2h; means over instances.
 
 | Depth | Instances | Woven | Cut links | Bulk, woven / cut | Seam, woven / cut | Anchor, woven / cut | s per point |
 |---|---|---|---|---|---|---|---|
@@ -126,8 +142,8 @@ The NaN comes from `QrackAceBackend` with `is_error_detection=True` (first seen 
 The poster of these records, and of any other `field run` output:
 
 ```
-python3 nighthawk_graph.py --out r3_mean.jsonl --poster r3_poster.png --poster-note "Host: ..."
-python3 nighthawk_graph.py --out r3_mean.jsonl --save plots --figs 29      # view 29 alone
+python3 nighthawk_graph.py --out clover6_mean.jsonl --poster clover6_poster.png --poster-note "Host: ..."
+python3 nighthawk_graph.py --out clover6_mean.jsonl --save plots --figs 29      # view 29 alone
 ```
 
 | `--poster` option | Default | Effect |
@@ -138,9 +154,9 @@ python3 nighthawk_graph.py --out r3_mean.jsonl --save plots --figs 29      # vie
 | `--vram-gb G` | 8 | one die's memory, the line on the ghost-loom memory panel |
 | `--cfg TAG` | largest pair | which woven / cut-links pair to draw |
 
-### 3.5 GHZ on every r3 chiplet
+### 3.5 GHZ on every clover6 chiplet
 
-`ghz tiles --register nighthawk120` (3-qubit GHZ chains along rows and columns, 196 units, MQC readout, 1024 shots per setting) once per chiplet, each chiplet alone on its QrackAceBackend preset (9 patches: 57 and 8 x 31 qubits, 39 seam qubits). Layer 2 is the Walsh echo (`--layer2 dd`, 3 windows, T 4.4, J 0.065, sigma 0.015) with the chiplet's own drift draw (`--seed` = chip index); "no drift" is one `--layer2 none` run, the same circuit on every chiplet. Anchors are r3's link anchors on the chiplet (70 l-couplers). The exact reference (QrackSimulator, 120 qubits) is 1.00 on every unit.
+`ghz tiles --register nighthawk120` (3-qubit GHZ chains along rows and columns, 196 units, MQC readout, 1024 shots per setting) once per chiplet, each chiplet alone on its QrackAceBackend preset (9 patches: 57 and 8 x 31 qubits, 39 seam qubits). Layer 2 is the Walsh echo (`--layer2 dd`, 3 windows, T 4.4, J 0.065, sigma 0.015) with the chiplet's own drift draw (`--seed` = chip index); "no drift" is one `--layer2 none` run, the same circuit on every chiplet. Anchors are clover6's link anchors on the chiplet (70 l-couplers). The exact reference (QrackSimulator, 120 qubits) is 1.00 on every unit.
 
 | Chiplet | Anchors (on seam) | F all | F seam units | F off-seam units | Seam units at or below 1/2 | F anchor units / rest | s |
 |---|---|---|---|---|---|---|---|
@@ -164,8 +180,8 @@ for c in 0 1 2 3 4 5; do
   python3 nighthawk_qrack.py ghz tiles --register nighthawk120 --layer2 dd --seed $c --jobs 2 --out chip$c.jsonl > chip$c.log
 done
 python3 nighthawk_qrack.py ghz tiles --register nighthawk120 --jobs 2 --out layer1a.jsonl
-python3 nighthawk_graph.py --ghz-poster r3_ghz.png --ghz-chip chip0.jsonl ... --ghz-chip chip5.jsonl \
-        --ghz-base layer1a.jsonl --field-device r3
+python3 nighthawk_graph.py --ghz-poster clover6_ghz.png --ghz-chip chip0.jsonl ... --ghz-chip chip5.jsonl \
+        --ghz-base layer1a.jsonl --field-device clover6
 ```
 
 ### 3.6 Chip topologies: `--topology`, `--hub`, `--pairs`, `--long-links`
@@ -182,7 +198,7 @@ python3 nighthawk_graph.py --ghz-poster r3_ghz.png --ghz-chip chip0.jsonl ... --
 
 Grid neighbours are placed first, as before (facing borders, `--links` per pair); long-range pairs then take the sites nearest the other chip that still have a coupler colour free at both ends. `field plan` prints the pairs, the links per pair and the chip-to-chip hops; records of a non-grid field carry `topology`, `chip_pairs`, `hub` and `long_links`.
 
-r3, mean loom on the CPU, Hamming nnqab fold 1, signal 1 - 2h (grid: 3 instances; the others 2):
+clover6, mean loom on the CPU, Hamming nnqab fold 1, signal 1 - 2h (grid: 3 instances; the others 2):
 
 | Topology | Links (long) | Anchors | Hops mean / max | d4 woven / cut | d6 woven / cut | Cost per link, d4 | Lowest chip, d6 |
 |---|---|---|---|---|---|---|---|
@@ -217,19 +233,19 @@ Ghost-loom plan of the same topologies (`field plan --loom ghost`, per-chip caps
 | Next | the hop penalty itself needs the ghost loom (six 8 GB dies) and a cross-chip observable (GHZ or Bell pairs at 1, 2, 3 hops) |
 
 ```
-python3 nighthawk_qrack.py field run --device r3 --topology hub --links 8 --loom mean [--cut-links] \
-        --family hamming --protocol nnqab --fold 1 --depths 4 6 --instances 2 --cpu --no-ace-error-detection --out r3_topo.jsonl
-python3 nighthawk_graph.py --out r3_mean.jsonl --out r3_topo.jsonl --poster r3_hub1.png --poster-topology "hub 1"
+python3 nighthawk_qrack.py field run --device clover6 --topology hub --links 8 --loom mean [--cut-links] \
+        --family hamming --protocol nnqab --fold 1 --depths 4 6 --instances 2 --cpu --no-ace-error-detection --out clover6_topo.jsonl
+python3 nighthawk_graph.py --out clover6_mean.jsonl --out clover6_topo.jsonl --poster clover6_hub1.png --poster-topology "hub 1"
 ```
 
 The field poster names the topology in its title, tints every ACE patch inside the chips and outlines it in the patch's colour (labels p0, p1, ...; the seam qubits between the outlines stay untinted), rings the port qubits of a `--link-port` field, draws long-range l-couplers as dashed arcs, shows the chip-to-chip hops as a table and a tile, adds the hops of the ghost plan when it leaves pairs unconnected, and draws the other topologies of the same field as grey lines in the signal panel. `--poster-topology LABEL` (grid, ring, wheel, hub N, grid + I-J, ...) picks which one.
 
 ```
-python3 nighthawk_qrack.py field plan --device r3 --topology wheel --links 6 --loom ghost
+python3 nighthawk_qrack.py field plan --device clover6 --topology wheel --links 6 --loom ghost
 python3 nighthawk_qrack.py lab --exp wheel --instances 4 --out lab_wheel.jsonl
-python3 nighthawk_qrack.py lab --r3plan lab_r3.json
-python3 nighthawk_graph.py --lab lab_wheel.jsonl --lab-r3 lab_r3.json --lab-poster posters/lab     # posters/lab_wheel.png
-python3 nighthawk_graph.py --out r3_mean.jsonl --out r3_topo.jsonl --poster posters/r3_wheel.png --poster-topology wheel
+python3 nighthawk_qrack.py lab --fieldplan lab_clover6.json
+python3 nighthawk_graph.py --lab lab_wheel.jsonl --lab-plan lab_clover6.json --lab-poster posters/lab     # posters/lab_wheel.png
+python3 nighthawk_graph.py --out clover6_mean.jsonl --out clover6_topo.jsonl --poster posters/clover6_wheel.png --poster-topology wheel
 ```
 
 ### 3.7 Configuration lab: `lab`
@@ -246,13 +262,12 @@ python3 nighthawk_graph.py --out r3_mean.jsonl --out r3_topo.jsonl --poster post
 
 | Option | Effect |
 |---|---|
-| `--exp inter links rows inside mixed holes numa wheel port` | which experiments (table below; `wheel` 3.6, `port` 3.10) |
+| `--exp inter links rows inside mixed holes numa` | which experiments (table below) |
 | `--depths`, `--instances`, `--shots`, `--out` | defaults 4 6 8 12, 5, 4096, `lab.jsonl`; resumable |
 | `--only TEXT`, `--list` | select / list configurations |
-| `--r3plan JSON` | the full-size r3 ghost-loom plan, option by option |
-| `--shor JSONL`, `--rounds JSONL`, `--bell JSONL` | Shor's code across the link (3.8), syndrome rounds (3.9), Bell pairs (3.11) |
-| `--repeats` | sampling seeds per point: 3 for `--shor`, 2 for `--rounds`, 1 for `--bell` by default |
-| `--selftest` | 10 checks: 6 on 16 qubits (exact scores 1, bridge with spare bonds scores 1, cut keeps signal 1), then [7] Shor unit, [8] syndrome rounds, [9] Shor through the ghosts, [10] Bell pair |
+| `--fieldplan JSON` | the full-size clover6 ghost-loom plan, option by option |
+| `--shor JSONL`, `--repeats` | Shor's code across the link (section 3.8) |
+| `--selftest` | 8 checks: 6 on 16 qubits (exact scores 1, bridge with spare bonds scores 1, cut keeps signal 1) |
 
 Between two exact 3 x 4 chips, `fclass` (3 to 4 instances):
 
@@ -303,7 +318,7 @@ Placement, disabled qubits and topology, `fclass` at depth 8, exact chips:
 | six 2 x 2 chips, grid / ring / grid + 0-5 | 0.57 / 0.58 / 0.58 | 0.30 / 0.25 / 0.25 | chain 0.23 / 0.36 / 0.21 | chain 0.39 / 0.66 / 0.32 | 0.18 / 0.18 / 0.17 |
 | the same, bridge ring 0-1-2-5-4-3 | | | 0.35 / 0.65 / 0.29 | 0.71 / 1.00 / 0.50 | |
 
-r3 at full size on the ghost loom (`lab --r3plan`, six 8 GB dies):
+clover6 at full size on the ghost loom (`lab --fieldplan`, six 8 GB dies):
 
 | Option | Links with a ghost | Skipped | Ghosts per chip | Peak per chip (GiB) |
 |---|---|---|---|---|
@@ -326,13 +341,13 @@ r3 at full size on the ghost loom (`lab --r3plan`, six 8 GB dies):
 | Disabled qubits | no gain from placing them at the links; a ghost needs a free ACE site coupled to its anchor, which is the register's business |
 | Topology | ghost loom 0.57 to 0.58 on grid, ring and grid + long link; a bridge chain only wins where the chips form its chain or ring |
 | Mirror signal | 1.00 with the links cut and 0.27 for the mean-field loom at the same fidelity 0.49: it ranks chips, not interconnects |
-| Scale | 24 qubits, chips of 4 to 20 qubits: trends and mechanisms, not r3 numbers |
+| Scale | 24 qubits, chips of 4 to 20 qubits: trends and mechanisms, not clover6 numbers |
 
 ```
 python3 nighthawk_qrack.py lab --exp inter mixed links --instances 3 --shots 8192 --out lab_inter.jsonl
 python3 nighthawk_qrack.py lab --exp inside rows holes numa --instances 3 --shots 8192 --out lab_place.jsonl
-python3 nighthawk_qrack.py lab --r3plan lab_r3.json
-python3 nighthawk_graph.py --lab lab_inter.jsonl --lab lab_place.jsonl --lab-r3 lab_r3.json --lab-poster posters/lab
+python3 nighthawk_qrack.py lab --fieldplan lab_clover6.json
+python3 nighthawk_graph.py --lab lab_inter.jsonl --lab lab_place.jsonl --lab-plan lab_clover6.json --lab-poster posters/lab
 ```
 
 ### 3.8 Shor's code across a link: `lab --shor`
@@ -411,7 +426,7 @@ Every l-coupler of a chip on one qubit, one coupler per chip pair of `--topology
 
 `--cut-links` keeps the port layers (empty), so the baseline has the same single-qubit layers. On the ghost loom every chip holds a ghost of every partner port, and a port-to-port gate is applied on every chip that holds both ghosts.
 
-r3 as a wheel on the ghost loom (`field plan`, 8 GB dies):
+clover6 as a wheel on the ghost loom (`field plan`, 8 GB dies):
 
 | Link placement | l-couplers | Pairs linked | Link qubits | Ghosts per chip | GiB per chip |
 |---|---|---|---|---|---|
@@ -434,7 +449,7 @@ Exact chips on a wheel, classical fidelity of the output distribution against th
 | | port, mux | 2 | 10 | 6 | 0.75 | 0.58 | 0.49 |
 | | | 5 | 25 | 15 | 0.69 | 0.20 | 0.21 |
 
-r3 at full size, mean loom, Hamming family, nnqab, fold 1, CPU (`r3_port.jsonl`); signal woven / links cut:
+clover6 at full size, mean loom, Hamming family, nnqab, fold 1, CPU (`clover6_port.jsonl`); signal woven / links cut:
 
 | Schedule | Depth (rounds) | l-coupler gates | Instances | Signal | Port qubits | Cost per l-coupler gate |
 |---|---|---|---|---|---|---|
@@ -451,11 +466,11 @@ r3 at full size, mean loom, Hamming family, nnqab, fold 1, CPU (`r3_port.jsonl`)
 | Field signal | a port field loses 0.02 to 0.03 to its links where 90 dedicated links lose 0.26 (3.6, depth 6): it fires 15 link gates per round, not 90 per four layers. Compare fields at equal link gates |
 
 ```
-python3 nighthawk_qrack.py field plan --device r3 --topology wheel --link-port layers --loom ghost [--port-site centre]
-python3 nighthawk_qrack.py field run  --device r3 --topology wheel --link-port layers --loom mean [--cut-links] --family hamming --protocol nnqab --fold 1 --depths 9 18 --cpu --out r3_port.jsonl
+python3 nighthawk_qrack.py field plan --device clover6 --topology wheel --link-port layers --loom ghost [--port-site centre]
+python3 nighthawk_qrack.py field run  --device clover6 --topology wheel --link-port layers --loom mean [--cut-links] --family hamming --protocol nnqab --fold 1 --depths 9 18 --cpu --out clover6_port.jsonl
 python3 nighthawk_qrack.py lab --exp port --instances 3 --out lab_port.jsonl
-python3 nighthawk_graph.py --lab lab_port.jsonl --lab-r3 lab_r3.json --lab-poster posters/lab            # posters/lab_port.png
-python3 nighthawk_graph.py --out r3_port.jsonl --poster posters/r3_port.png --poster-topology "wheel, port layers"
+python3 nighthawk_graph.py --lab lab_port.jsonl --lab-plan lab_clover6.json --lab-poster posters/lab            # posters/lab_port.png
+python3 nighthawk_graph.py --out clover6_port.jsonl --poster posters/clover6_port.png --poster-topology "wheel, port layers"
 ```
 
 `field selftest` check [13] covers the placement and both schedules.
@@ -487,7 +502,8 @@ All 15 chip pairs per topology (ghost loom):
 | Loom reach | the ghost loom carries entanglement one hop: a chip holds a ghost of its link partners and of nothing further. Linked chips read the pair in either end chip; at 2 hops only the relay chip holds both ends; at 3 hops no simulator does |
 | Loom output | the loom's own output (chips read independently) is 0.25 at any distance; the pair is only visible inside one chip's simulator |
 | Mean-field loom | 0.50 at any distance: correlation without entanglement |
-| Not measured | the poster's survival curve is the grid's gate counts as (1 - p) per gate under assumed error rates, not a Nighthawk figure |
+| Hardware estimate | the poster's survival curve is the grid's gate counts as (1 - p) per gate; the l-coupler errors are IBM's r1 figures (3.2), the 0.3 % per on-chip CX is an assumption. At the measured distant CZ: about 0.95 at 1 hop, 0.83 at 2, 0.73 at 3 |
+| Scope | six chips are a hypothetical field; the planned r3 system is two chips, the 1-hop row |
 
 ```
 python3 nighthawk_qrack.py lab --bell lab_bell.jsonl [--shots 4096]
@@ -495,6 +511,35 @@ python3 nighthawk_graph.py --lab lab_bell.jsonl --lab-poster posters/lab        
 ```
 
 `lab --selftest` check [10] covers it.
+
+### 3.12 The planned two-chip system at 120-qubit scale: `--device r3x2s`
+
+Two `nighthawk120` chips joined by ten l-couplers, the shape of `r3x2` on chips that have a stored ACE placement. Hamming family, nnqab, fold 1, QrackAceBackend on 2 CPU cores, `--no-ace-error-detection`. Signal 1 - 2h.
+
+| Loom | Instances | Depth 4 | Depth 6 | Depth 8 |
+|---|---|---|---|---|
+| links cut (baseline) | 2 | 0.788 | 0.531 | 0.376 |
+| mean-field | 2 | 0.769 | 0.435 | 0.292 |
+| ghost | 1 (instance 0) | 0.808 | 0.537 | not run |
+| instance 0 alone: cut / mean-field / ghost | 1 | 0.808 / 0.795 / 0.808 | 0.549 / 0.421 / 0.537 | |
+
+| | |
+|---|---|
+| Ghost plan | all 10 l-couplers get a ghost; 10 ghosts per chip, patch widths up to 26, 1.3 to 1.8 GiB per chip, 3.1 GiB for the loom |
+| Ghost loom | on the same circuit it stays within 0.012 of the cut baseline at depth 6, where the mean-field loom is 0.128 below: the ten links cost the ghost loom almost nothing |
+| Link anchors, depth 4 | 0.93 woven on the ghost loom against 0.99 with the links cut |
+| Time per point | ghost 143 s (depth 4), 384 s (depth 6); mean-field 10 to 105 s |
+| Limits | one ghost instance, depths 4 and 6; the chips are 120 qubits, not 520 |
+
+```
+python3 nighthawk_qrack.py field plan --device r3x2s --loom ghost
+python3 nighthawk_qrack.py field run  --device r3x2s --loom mean [--cut-links] --family hamming --protocol nnqab --fold 1 --depths 4 6 8 --instances 2 --cpu --no-ace-error-detection --out r3x2s.jsonl
+python3 nighthawk_qrack.py field run  --device r3x2s --loom ghost --family hamming --protocol nnqab --fold 1 --depths 4 6 --instances 1 --cpu --no-ace-error-detection --out r3x2s.jsonl
+python3 nighthawk_graph.py --out r3x2s.jsonl --poster posters/r3x2s_ghost.png --poster-loom ghost
+python3 nighthawk_graph.py --out r3x2s.jsonl --poster posters/r3x2s_mean.png --poster-loom mean
+```
+
+`--poster-loom` picks one loom's records when a file holds several; a loom without its own `--cut-links` records is paired with another loom's, since the cut circuit is the same. `field selftest` check [14] covers the device presets.
 
 ## 4. Renamed names (for code that imported the old modules)
 
@@ -517,7 +562,7 @@ Every other name is unchanged. `import nighthawk_cloverfield` and `import nighth
 
 | Place | Change |
 |---|---|
-| `main()` | dispatches `_hbridge-server`, `ghz`, `field`, `erepr`, `lab`, `chipworker` before the main parser |
+| `main()` | dispatches `field`, `erepr`, `chipworker` before the main parser |
 | `cloverfield()` | returns this module instead of loading `nighthawk_cloverfield.py`; `--cloverfield` and `$NIGHTHAWK_CLOVERFIELD` are accepted and ignored |
 | chip workers | started as `nighthawk_qrack.py chipworker` |
 | `erepr` tile cache | `$NIGHTHAWK_TILE_CACHE` default set when `erepr` runs, not at import |
@@ -541,7 +586,7 @@ Run on CPU (OpenCL hidden), Python 3.13, PyQrack 2.30.6 from pip, Qiskit 2.6.2, 
 | `ghz selftest` | 20 / 20, 9 s |
 | `field selftest` | 12 / 12, 30 s ([12]: `--topology`, `--pairs`, hops) |
 | `erepr selftest` | all, 7 s |
-| `field plan --device r3` | 720 qubits, 64 l-couplers, every chiplet fits one 8 GB die (below) |
+| `field plan --device clover6` | 720 qubits, 64 l-couplers, every chiplet fits one 8 GB die (below) |
 
 ### 6.1 PyQrack 2.30 and `QrackBridge`
 
@@ -554,7 +599,7 @@ From PyQrack 2.30 `QrackBridge` wraps Qrack's native bridge (`init_qbridge`) ins
 
 Shots from bridge runs under PyQrack 2.30 are therefore a different draw from those of earlier versions, with the same distribution. `--bridge-truncation born` also draws from Qrack's RNG now, so its states are no longer reproducible against `HBridge` either.
 
-### 6.2 `field plan --device r3`
+### 6.2 `field plan --device clover6`
 
 | Chiplet pair | Grid direction | l-couplers placed of 10 |
 |---|---|---|
@@ -582,7 +627,7 @@ python3 nighthawk_qrack.py selftest
 python3 nighthawk_qrack.py ghz selftest
 python3 nighthawk_qrack.py field selftest
 python3 nighthawk_qrack.py erepr selftest
-python3 nighthawk_qrack.py field plan --device r3
+python3 nighthawk_qrack.py field plan --device clover6
 ```
 
-`field plan --device r3` lists every l-coupler and how many facing pairs were skipped for lack of ghost room; with `--loom mean` none are skipped.
+`field plan --device clover6` lists every l-coupler and how many facing pairs were skipped for lack of ghost room; with `--loom mean` none are skipped.
