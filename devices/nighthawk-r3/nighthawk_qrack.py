@@ -26,17 +26,17 @@ gate-for-gate with the paper and the BlueQubitDev/rcs-nighthawk release:
   combine    inverse-variance mean over instances; unweighted log10 exponential fit
              of the mirror points (analysis/fidelity_vs_depth.py).
 
-Consolidated tool. This one file holds every Nighthawk simulation that used to live in its own folder of
-thereminq-examples/devices/nighthawk:
-  rcs-, vqe-, shrs-nighthawk   nighthawk_qrack.py     the commands below (run, hwxeb, layoutsearch, shor9, ...)
-  ghz-, dual-nighthawk         nighthawk_ghz.py       the `ghz` command (its own parser: ghz -h)
-  rcs-nighthawk                nighthawk_cloverfield.py   the `field` command (its own parser: field -h)
-  erepr-nighthawk              nighthawk_erepr.py     the `erepr` command (its own parser: erepr -h)
+Consolidated tool. This one file holds every Nighthawk simulation of thereminq-examples/devices/nighthawk; it
+is the only entry point (the per-folder scripts and their forwarding wrappers are gone):
+  rcs-, vqe-, shrs-nighthawk   the commands below (run, hwxeb, layoutsearch, shor9, ...)
+  ghz-, dual-nighthawk         the `ghz` command (its own parser: ghz -h)
+  the cloverfield              the `field` command (its own parser: field -h)
+  erepr-nighthawk              the `erepr` command (its own parser: erepr -h)
+  the configuration lab        the `lab` command (its own parser: lab -h)
 and IBM's Nighthawk devices as fields of chips: `field --device r3x2` is the system planned for 2027, two
 Nighthawk r3 chips of 520 qubits joined by ten l-couplers; `--device r3x2s` is the same shape on two 120-qubit
 chips (register nighthawk120, the whole 12 x 10 square lattice), which runs here; `--device clover6` is a
-hypothetical six-chiplet field. One isolated chip worker per chip, woven by the loom. nighthawk_cloverfield.py, nighthawk_erepr.py and
-nighthawk_ghz.py next to this file are stubs that forward to it.
+hypothetical six-chiplet field. One isolated chip worker per chip, woven by the loom.
 
 Subcommands
   verify    regenerate all circuits and compare with data/circuits/*.qasm (no Qrack).
@@ -88,12 +88,12 @@ Subcommands
             a measured / Dan grid sorted by coupler load, and his Richardson extrapolation over
             the folds. Reads files only (no Qrack): safe beside running jobs.
   ghz       the formal proof's Layer 1a / 2 / 3, seam layers, the loom / bridge / box engines, Shor's code
-            across them and the dual Nighthawk R1 (formerly nighthawk_ghz.py): ghz -h.
-  field     the cloverfield (formerly nighthawk_cloverfield.py): chips in isolated workers woven by the loom
+            across them and the dual Nighthawk R1: ghz -h.
+  field     the cloverfield: chips in isolated workers woven by the loom
             into one virtual chip; plan, run, linksearch, layoutsearch, selftest. --device r2 | r1x2 | r3 |
             r3x2 picks a Nighthawk device (r3x2: two 520-qubit chips, ten l-couplers), r3x2s and clover6 a model:
             field -h.
-  erepr     ER=EPR on the cloverleaf and the cloverfield (formerly nighthawk_erepr.py): derive, plan, run,
+  erepr     ER=EPR on the cloverleaf and the cloverfield : derive, plan, run,
             ds, pairs, table, aceprobe, selftest: erepr -h.
 
 Backends
@@ -212,7 +212,7 @@ from pathlib import Path
 
 import numpy as np
 
-# ghz's loom imports nighthawk_cloverfield.py, which imports nighthawk_qrack: let that be this module
+# run as a script this file is __main__: let `import nighthawk_qrack` (chip workers, the viewers) be this module
 if __name__ in sys.modules:                 # (absent when a loader executes this file before registering it)
     sys.modules.setdefault("nighthawk_qrack", sys.modules[__name__])
 
@@ -7762,14 +7762,14 @@ def cmd_bridgebench(a):
         print(f"  appended to {a.out}")
 
 
-# ================================================================== ghz: the formal proof's layers, the seam engines, Layer 3 (formerly nighthawk_ghz.py)
+# ================================================================== ghz: the formal proof's layers, the seam engines, Layer 3
 GHZ_DOC = """
 nighthawk_qrack.py ghz -- Layer 1a (GHZ populations + MQC) and Layer 2 (idle-window refocusing) of
 "Exact Refocusing of Diagonal Crosstalk for Shor Order Finding on a 10 x 12 Square-Lattice Processor"
 (the formal proof; numpy reference shrs_nighthawk_stealth.py), run on Nighthawk registers under
 QrackAceBackend, so the paper's statements meet ACE's seams.
 
-The ghz command of nighthawk_qrack.py (formerly nighthawk_ghz.py, whose stub forwards here), on its
+The ghz command of nighthawk_qrack.py, on its
 registers, ACE presets and placement, coupler classes and worker pool. Gates are exact; the only
 departures from the paper's model are ACE's seam approximation and its sampler. An exact
 QrackSimulator reference runs beside every ACE run.
@@ -9362,7 +9362,7 @@ def cmd_stack(a):
             a.loom_chips, a.loom_link_rows = list(BOX_FACES), []
         else:
             a.loom_chips = a.loom_chips or list(LOOM_DEFAULT["chips"])
-            R = loom_register(a.repo, a.cloverfield, a.loom_chips, a.loom_link_rows, a.loom_chip_backend, a.loom_read)
+            R = loom_register(a.repo, None, a.loom_chips, a.loom_link_rows, a.loom_chip_backend, a.loom_read)
             a.loom_link_rows = list(R.link_rows)
         if R.read == "bridge":
             R.map["loom"]["bridge"] = dict(max_bonds=a.bridge_max_bonds, truncation=a.bridge_truncation,
@@ -9726,16 +9726,15 @@ def report_stack(R, rows, key, lams):
               f"{max(g):+.3f}")
 
 
-# ================================================================== the loom as the seam (nighthawk_cloverfield.py)
+# ================================================================== the loom as the seam (the cloverfield, command `field`)
 
 LOOM_DEFAULT = dict(chips=("rect:1-8,2-5", "rect:1-8,6-9"))
 _CF = {}
 
 
 def cloverfield(path=None):
-    """The cloverfield (chips, chip workers, the loom), formerly nighthawk_cloverfield.py and loaded from
-    its file: it is part of this file now (the `field` command), so this is the module itself. `path`
-    (--cloverfield, the spec's "cf") is accepted for old command lines and records and not used."""
+    """The cloverfield (chips, chip workers, the loom): part of this file (the `field` command), so this is the
+    module itself. `path` is the "cf" of old records' specs and is not used."""
     return _NH
 
 
@@ -10365,7 +10364,7 @@ def run_loom(a, R, groups, settings, label, l2, amp=None, with_exact=True, rep_o
     ex_reps = reps if l2["mode"] != "none" else 1
     no_exact = a.no_exact or not with_exact
     pol_name = "authority" if brep else "real"
-    base = dict(repo=a.repo, cf=a.cloverfield, chips=list(a.loom_chips), link_rows=list(a.loom_link_rows or ()),
+    base = dict(repo=a.repo, cf=None, chips=list(a.loom_chips), link_rows=list(a.loom_link_rows or ()),
                 box=([R.L, R.H] if isinstance(R, BoxRegister) else None), layer2=l2, backend=R.backend, read=R.read, brep=bool(brep),
                 authority=getattr(a, "code_authority", "lineage"),
                 **(dict(max_bonds=a.bridge_max_bonds, truncation=a.bridge_truncation, lazy_bonds=a.bridge_lazy,
@@ -10573,7 +10572,7 @@ def cmd_shor(a):
         a.loom_chips, a.loom_link_rows = list(BOX_FACES), []
     else:
         a.loom_chips = a.loom_chips or list(LOOM_DEFAULT["chips"])
-        R = loom_register(a.repo, a.cloverfield, a.loom_chips, a.loom_link_rows, "exact", "bridge")
+        R = loom_register(a.repo, None, a.loom_chips, a.loom_link_rows, "exact", "bridge")
         a.loom_link_rows = list(R.link_rows)
     R.map["loom"]["bridge"] = dict(max_bonds=a.bridge_max_bonds, truncation=a.bridge_truncation,
                                    lazy_bonds=a.bridge_lazy, source=QB_src)
@@ -10585,7 +10584,7 @@ def cmd_shor(a):
     infos = [shor_unit_info(R, u) for u, _ in cands]
     reps = max(1, int(a.repeats))
     states = SHOR9_STATES
-    base = dict(repo=a.repo, cf=a.cloverfield, chips=list(a.loom_chips), link_rows=list(a.loom_link_rows or ()),
+    base = dict(repo=a.repo, cf=None, chips=list(a.loom_chips), link_rows=list(a.loom_link_rows or ()),
                 box=([R.L, R.H] if isinstance(R, BoxRegister) else None), max_bonds=a.bridge_max_bonds,
                 truncation=a.bridge_truncation, lazy_bonds=a.bridge_lazy, qrack_bridge=a.qrack_bridge)
     calls, labels, keys = [], [], []
@@ -12048,7 +12047,7 @@ def cmd_shoralg(a):
             pairs = [p.split("/") for p in (a.faces or ["base/front", "base/right", "base/left"])]
         else:
             a.loom_chips = a.loom_chips or list(LOOM_DEFAULT["chips"])
-            R = loom_register(a.repo, a.cloverfield, a.loom_chips, a.loom_link_rows, "exact", "bridge")
+            R = loom_register(a.repo, None, a.loom_chips, a.loom_link_rows, "exact", "bridge")
             a.loom_link_rows = list(R.link_rows)
             pairs = [p.split("/") for p in (a.faces or [f"{a.loom_chips[0]}/{a.loom_chips[1]}"])]
         names = [sp["name"] for sp in R.specs]
@@ -12056,7 +12055,7 @@ def cmd_shoralg(a):
             if len(p) != 2 or any(x not in names for x in p):
                 raise SystemExit(f"shoralg --faces: {'/'.join(p)} (chips / faces: {', '.join(names)})")
         geo = dict(name=R.name)
-        base = dict(repo=a.repo, cf=a.cloverfield, chips=list(a.loom_chips), link_rows=list(a.loom_link_rows or ()),
+        base = dict(repo=a.repo, cf=None, chips=list(a.loom_chips), link_rows=list(a.loom_link_rows or ()),
                     box=([R.L, R.H] if isinstance(R, BoxRegister) else None), truncation=a.bridge_truncation,
                     lazy_bonds=a.bridge_lazy, qrack_bridge=a.qrack_bridge, shots=a.shots, ket_max=a.ket_max,
                     synth=a.synth)
@@ -13296,7 +13295,7 @@ def cmd_ghz_selftest(a):
         cloverfield(None)
         repo = str(find_repo(None))
     except (SystemExit, Exception) as err:
-        print(f"  [skip] the loom part needs nighthawk_cloverfield.py and the rcs-nighthawk release ({err})")
+        print(f"  [skip] the loom part needs the rcs-nighthawk release ({err})")
     else:
         Rl = loom_register(repo, None, ["rect:8-10,0-2", "rect:8-10,3-5"], None, "exact", "ghost")
         lr = list(Rl.link_rows)
@@ -13600,15 +13599,12 @@ def ghz_make_parser():
                         "block, six faces (base, four walls, lid) as six QrackBridge patches on a ring (base, front, "
                         "right, lid, back, left); chains along x, y and z, so units cross every box edge")
     bridge_opts.add_argument("--loom-chips", dest="loom_chips", nargs="+", default=None,
-                   help="loom: the chips, nighthawk_cloverfield.py --chips tokens (default rect:1-8,2-5 rect:1-8,6-9: "
+                   help="loom: the chips, `field --chips` tokens (default rect:1-8,2-5 rect:1-8,6-9: "
                         "nighthawk61r2's 61 qubits as two chips of 30 and 31, its two ACE patches' size)")
     bridge_opts.add_argument("--loom-link-rows", dest="loom_link_rows", type=int, nargs="+", default=None,
                    help="loom: the rows that get a link (default: every row whose facing border pair are lattice "
                         "neighbours once the chips sit side by side; the default chips: 1 2 3 4 6 7 8, every coupler "
                         "of nighthawk61r2 between columns 5 and 6)")
-    bridge_opts.add_argument("--cloverfield", default=None,
-                   help="loom: nighthawk_cloverfield.py (default: $NIGHTHAWK_CLOVERFIELD, next to this script, or "
-                        "../rcs-nighthawk)")
 
     s = sub.add_parser("stack", parents=[common, bridge_opts],
                        help="pass 1 Layer 1a, pass 2 Layer 2, Layer S (seam syndrome + repetition code), Layer V "
@@ -13632,7 +13628,7 @@ def ghz_make_parser():
                         "schedule)")
     s.add_argument("--engine", choices=["ace", "loom", "bridge"], default="ace",
                    help="ace: the register on ACE's patches (default). loom: two exact chips joined by "
-                        "nighthawk_cloverfield.py's ghost loom as the seam (--loom-chips, --loom-link-rows); Layer S's "
+                        "the cloverfield's ghost loom as the seam (--loom-chips, --loom-link-rows); Layer S's "
                         "code is then the loom's authority (a unit read on the chip that holds copies of all of it)")
     s.add_argument("--loom-read", dest="loom_read", choices=["cut", "ghost"], default="cut",
                    help="loom: cut (default) = a hard cut, chips independent, a link CZ as the mean-field phase on "
@@ -14184,16 +14180,16 @@ def make_parser():
 
     sub.add_parser("ghz", add_help=False,
                    help="the formal proof's Layer 1a / 2, seam layers, the loom / bridge / box engines, Shor's code "
-                        "and Layer 3 across them, the dual Nighthawk R1 (formerly nighthawk_ghz.py; "
+                        "and Layer 3 across them, the dual Nighthawk R1 ("
                         "nighthawk_qrack.py ghz -h)")
     sub.add_parser("field", add_help=False,
                    help="the cloverfield: chips in isolated workers woven by the loom into one virtual chip, and the "
-                        "Nighthawk r3 device presets (formerly nighthawk_cloverfield.py; nighthawk_qrack.py field -h)")
+                        "Nighthawk r3 device presets (nighthawk_qrack.py field -h)")
     sub.add_parser("lab", add_help=False,
                    help="configuration lab: small fields scored against their exact state, to choose between ACE, "
                         "QrackBridge and the looms inside and between chiplets (nighthawk_qrack.py lab -h)")
     sub.add_parser("erepr", add_help=False,
-                   help="ER=EPR on the cloverleaf and the cloverfield (formerly nighthawk_erepr.py; "
+                   help="ER=EPR on the cloverleaf and the cloverfield ("
                         "nighthawk_qrack.py erepr -h)")
 
     t = sub.add_parser("selftest", help="conventions and exactness checks")
@@ -14251,7 +14247,7 @@ help per command: python3 nighthawk_qrack.py <command> -h
 
 # ==================================================================================================
 # the cloverfield: several cloverleaf chips woven by the loom into one virtual chip
-# (formerly nighthawk_cloverfield.py; command `field`)
+# (command `field`)
 # ==================================================================================================
 import pickle
 import struct
@@ -14263,7 +14259,7 @@ HERE = Path(__file__).resolve().parent
 
 FIELD_DOC = """
 nighthawk_qrack.py field -- several cloverleaf chips woven by the loom into one virtual chip
-(the cloverfield, formerly nighthawk_cloverfield.py).
+(the cloverfield).
 
 The cloverleaf (nighthawk_qrack.py) emulates one IBM Nighthawk chip as a few ACE patches
 joined by seams. The cloverfield puts two or more of those chips side by side and connects
@@ -14605,7 +14601,8 @@ class Field:
 
     def __init__(self, repo, chip_specs, arrangement=None, links="all", link_rows=None, link_cols=None,
                  ghost=None, cut_links=False, topology="grid", hub=None, pairs=None, long_links=None, port=None,
-                 port_site="inner"):
+                 port_site="inner", stack=False):
+        self.stack = bool(stack)              # chips stacked face to face: links join the same site on both chips
         self.cut = bool(cut_links)            # links placed (same anchors, same tag base) but not in the circuit
         self.repo = find_repo(repo)
         L = json.loads((self.repo / "data/layout.json").read_text())
@@ -14652,9 +14649,11 @@ class Field:
         self.long = set()                     # links between chips that are not grid neighbours
         K_long = long_links if long_links is not None else (int(links) if str(links).isdigit() else 10)
         far = []
-        for c, d in ([] if self.port else self.chip_pairs):   # grid neighbours first, long-range pairs on what is left
+        for k_, (c, d) in enumerate([] if self.port else self.chip_pairs):   # grid neighbours first, then long-range
             (ci, cj), (di, dj) = divmod(c, gc), divmod(d, gc)
-            if ci == di and abs(cj - dj) == 1:
+            if self.stack:
+                self._link_stack(min(c, d), max(c, d), links, used, k_)
+            elif ci == di and abs(cj - dj) == 1:
                 lt, rt = (c, d) if cj < dj else (d, c)
                 self._link_pair(lt, rt, True, links, link_rows, used)
             elif cj == dj and abs(ci - di) == 1:
@@ -14843,6 +14842,41 @@ class Field:
             self.mux = {"P": [frozenset((min(self.ports[c], self.ports[d]), max(self.ports[c], self.ports[d]))
                                         for (c, d), y in placed.items() if y == x) for x in range(m)]}
 
+    def _link_stack(self, c, d, links, used, turn=0):
+        """--stack: chips c and d lie face to face, and an l-coupler joins the same site on both. A site takes a
+        link where a coupler colour is free, which on a full lattice is the border: the links go on all four
+        sides, K of them spread evenly round the border ring (all: every border site)."""
+        at_c = {cell: i for i, cell in enumerate(self.cells[c])}
+        at_d = {cell: i for i, cell in enumerate(self.cells[d])}
+        both = set(at_c) & set(at_d)
+        if not both:
+            raise SystemExit(f"--stack: chips {c} and {d} share no lattice site")
+        r0, r1 = min(r for r, _ in both), max(r for r, _ in both)
+        c0, c1 = min(x for _, x in both), max(x for _, x in both)
+        ring = [(r0, x) for x in range(c0, c1 + 1)] + [(r, c1) for r in range(r0 + 1, r1 + 1)] + \
+               [(r1, x) for x in range(c1 - 1, c0 - 1, -1)] + [(r, c0) for r in range(r1 - 1, r0, -1)]
+        ring = [cell for cell in dict.fromkeys(ring) if cell in both]
+        spec = str(links).strip().lower()
+        K = len(ring) if spec == "all" else (int(spec) if spec.isdigit() else None)
+        if K is None:
+            raise SystemExit(f"--stack: --links {links}: a number of l-couplers per chip pair, or all")
+        K = min(K, len(ring))
+        placed, taken = 0, set()
+        for i in range(K):
+            j0 = (int(round(i * len(ring) / K)) + turn) % len(ring)
+            for step in range(len(ring)):         # the even spot, else the next free border site round the ring
+                j = (j0 + step) % len(ring)
+                if j in taken:
+                    continue
+                u, v = self.off[c] + at_c[ring[j]], self.off[d] + at_d[ring[j]]
+                if self._try_link(c, d, j, u, v, COLOURS, used, quiet=True):
+                    taken.add(j)
+                    placed += 1
+                    break
+            else:
+                self.skipped.append((c, d, i, None, None))
+        return placed
+
     def _link_far(self, c, d, K, used):
         """K l-couplers between chips that are not grid neighbours (a long-range link): on each chip the sites
         nearest the other chip first (by projection on the line between the chip centres, the nearest border
@@ -14988,6 +15022,8 @@ class Field:
         topo = {} if self.topology == "grid" and not self.long else dict(
             topology=self.topology, chip_pairs=[list(p) for p in self.chip_pairs], hub=self.hub,
             long_links=[[u, v] for u, v in sorted(self.long)])
+        if self.stack:
+            topo["stack"] = True
         if self.port:
             topo.update(topology=self.topology, chip_pairs=[list(p) for p in self.chip_pairs], hub=self.hub,
                         long_links=[[u, v] for u, v in sorted(self.long)],
@@ -15557,7 +15593,7 @@ def build_field(a):
     return Field(a.repo, specs, arr, a.links, rows, cols, ghost=ghost, cut_links=getattr(a, "cut_links", False),
                  topology=getattr(a, "topology", "grid"), hub=getattr(a, "hub", None), pairs=pairs,
                  long_links=getattr(a, "long_links", None), port=getattr(a, "link_port", None),
-                 port_site=getattr(a, "port_site", "inner") or "inner")
+                 port_site=getattr(a, "port_site", "inner") or "inner", stack=getattr(a, "stack", False))
 
 
 def engine_opts(a):
@@ -16631,6 +16667,20 @@ def cmd_field_selftest(a):
            "mux one matching per round and every coupler once per 5 rounds, the cut baseline keeps the layers", good,
            f"ports {pl.ports}, a round is {' '.join(pl.schedule)} (layers) or {' '.join(pm.schedule)} (mux), "
            f"{len(pl.ghost_plan()[0])} ghosts per chip")
+    # [15] --stack: the same site on both chips, spread round all four sides of the border
+    sk = build_field(argparse.Namespace(**dict(ta, chips="nighthawk120*2", arrangement="1x2", links="10"), stack=True))
+    sa = build_field(argparse.Namespace(**dict(ta, chips="nighthawk120*2", arrangement="1x2", links="all"), stack=True))
+    s3 = build_field(argparse.Namespace(**dict(ta, chips="nighthawk120*3", arrangement="1x3", links="10"), stack=True))
+    cell = lambda f_, q: f_.cells[f_.chip_of[q]][f_.local[q]]
+    sides = {("top" if cell(sk, u)[0] == 0 else "bottom" if cell(sk, u)[0] == 11 else
+              "left" if cell(sk, u)[1] == 0 else "right") for u, _, _ in sk.links}
+    good = (len(sk.links) == 10 and all(cell(sk, u) == cell(sk, v) for u, v, _ in sk.links)
+            and all(cell(sk, u)[0] in (0, 11) or cell(sk, u)[1] in (0, 9) for u, _, _ in sk.links)
+            and sides == {"top", "bottom", "left", "right"} and len(sa.links) == 40 and not sa.skipped
+            and len(s3.links) == 20 and len(s3.anchor_set) == 40 and sk.describe().get("stack") is True)
+    report("[15] --stack: ten l-couplers join the same border site on both chips, on all four sides; all = the 40 "
+           "border sites; a stack of three links each neighbouring pair on different sites", good,
+           f"2 chips {len(sk.links)} links on {sorted(sides)}, all {len(sa.links)}, 3 chips {len(s3.links)}")
     # [14] device presets against IBM's stated figures
     def dev(name, **kw):
         d = DEVICES[name]
@@ -16748,6 +16798,11 @@ def add_field_args(p):
     p.add_argument("--hub", type=int, default=None, help="--topology hub: the router chip (default: nearest the centre)")
     p.add_argument("--pairs", default=None,
                    help="chip pairs to link as well, comma list of I-J, e.g. 0-5,2-3: long-range shortcuts")
+    p.add_argument("--stack", action="store_true",
+                   help="stack the chips face to face: every l-coupler of a chip pair joins the same lattice site on "
+                        "both chips, and the --links N of them are spread evenly round the border, on all four sides "
+                        "(all: every border site; only border sites have a coupler colour free). The chips are still "
+                        "drawn side by side. For two chips, e.g. --device r3x2s --stack")
     p.add_argument("--link-port", dest="link_port", choices=["layers", "mux"], default=None,
                    help="concentrate every l-coupler of a chip on one port qubit, one coupler per chip pair of "
                         "--topology / --pairs (--links and --long-links are not used). A qubit takes one two-qubit "
@@ -16813,7 +16868,7 @@ def add_family_args(p):
 
 
 def field_main(argv=None):
-    """`nighthawk_qrack.py field ...`: the cloverfield's commands (formerly nighthawk_cloverfield.py)."""
+    """`nighthawk_qrack.py field ...`: the cloverfield's commands."""
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["chipworker"]:
         return cmd_chipworker(None)
@@ -16870,18 +16925,18 @@ def field_main(argv=None):
 
 
 # ==================================================================================================
-# ER=EPR on the cloverleaf and the cloverfield (formerly nighthawk_erepr.py; command `erepr`)
+# ER=EPR on the cloverleaf and the cloverfield (command `erepr`)
 # ==================================================================================================
 import functools
 import itertools
 from collections import deque
 
 EREPR_DOC = """
-nighthawk_qrack.py erepr -- ER=EPR on the cloverleaf and the cloverfield (formerly nighthawk_erepr.py).
+nighthawk_qrack.py erepr -- ER=EPR on the cloverleaf and the cloverfield.
 
 The 2022 Sycamore wormhole (Jafferis et al., Nature 612, 51) re-derived from its stated learned
 Hamiltonian, then compiled onto Nighthawk lattice registers and run with nighthawk_qrack's engines
-(ExactEngine, AceEngine and its placement machinery) and nighthawk_cloverfield's chips, workers and
+(ExactEngine, AceEngine and its placement machinery) and the cloverfield's chips, workers and
 loom. The two sides of the wormhole become two chips; the thermofield double (TFD) that joins them is
 the EPR, and the loom is the only way it can cross.
 
@@ -18067,7 +18122,7 @@ def run_ace(enc, prep, mu, t0, t1, a, reg, site):
 
 # ---------------------------------------------------------------- cloverfield
 def er_start_chips(field, mode, repo):
-    """One isolated worker per chip (nighthawk_cloverfield's ChipProc, CPU, exact chips), ghosts as the
+    """One isolated worker per chip (the cloverfield's ChipProc, CPU, exact chips), ghosts as the
     field's ghost plan places them."""
     plan = field.ghost_plan() if mode == "ghost" else [[] for _ in field.specs]
     env = worker_env_for(argparse.Namespace(cpu=True), None, cpu=True)
@@ -18847,7 +18902,7 @@ def cmd_erepr_selftest(a):
 
 
 def erepr_main(argv=None):
-    """`nighthawk_qrack.py erepr ...`: the ER=EPR commands (formerly nighthawk_erepr.py)."""
+    """`nighthawk_qrack.py erepr ...`: the ER=EPR commands."""
     os.environ.setdefault("NIGHTHAWK_TILE_CACHE", str(HERE / "erepr" / "tiles.json"))
     ap = argparse.ArgumentParser(prog="nighthawk_qrack.py erepr", description=EREPR_DOC,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)

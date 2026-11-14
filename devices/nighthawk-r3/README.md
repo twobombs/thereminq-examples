@@ -4,9 +4,9 @@ One script for every Nighthawk simulation in `devices/nighthawk`, plus IBM Quant
 
 | | |
 |---|---|
-| Script | `nighthawk_qrack.py`, 20,247 lines |
+| Script | `nighthawk_qrack.py`, 20,302 lines |
 | Viewers | `nighthawk_graph.py` (the `dual-nighthawk` version plus view 29, `--poster` for `field run` records and `--ghz-poster` for GHZ per chiplet and `--lab-poster` for the configuration lab, sections 3.4, 3.5 and 3.7), `nighthawk_3dgraph.py` (unchanged) |
-| Stubs | `nighthawk_ghz.py`, `nighthawk_cloverfield.py`, `nighthawk_erepr.py`: forward to the script |
+| Entry point | `nighthawk_qrack.py` only. The per-folder scripts and their forwarding wrappers (`nighthawk_ghz.py`, `nighthawk_cloverfield.py`, `nighthawk_erepr.py`) are no longer used and can be deleted |
 | Data | [`BlueQubitDev/rcs-nighthawk`](https://github.com/BlueQubitDev/rcs-nighthawk) next to the script, `--repo`, or `$NIGHTHAWK_REPO` |
 | Simulator | PyQrack: `QrackSimulator`, `QrackAceBackend`, `QrackBridge` |
 | Acceleration | OpenCL or CPU. No CUDA. |
@@ -20,21 +20,16 @@ One script for every Nighthawk simulation in `devices/nighthawk`, plus IBM Quant
 | `rcs-nighthawk` | `nighthawk_qrack.py` | 5,476 | covered by the base: all 240 top-level names present |
 | `vqe-nighthawk` | `nighthawk_qrack.py` | 5,829 | covered by the base: all 251 present |
 | `shrs-nighthawk` | `nighthawk_qrack.py` | 6,741 | covered by the base: all 295 present |
-| `ghz-nighthawk`, `shrs-nighthawk` | `nighthawk_ghz.py` | 4,505 | covered by the base (`ghz` command): all 138 present |
-| `rcs-nighthawk` | `nighthawk_cloverfield.py` | 2,179 | merged in as the `field` command |
-| `erepr-nighthawk` | `nighthawk_erepr.py` | 2,068 | merged in as the `erepr` command |
+| `ghz-nighthawk`, `shrs-nighthawk` | the GHZ script | 4,505 | the `ghz` command: all 138 names present |
+| `rcs-nighthawk` | the cloverfield script | 2,179 | the `field` command |
+| `erepr-nighthawk` | the ER=EPR script | 2,068 | the `erepr` command |
 | new | | | device presets `r2`, `r1x2`, `r3`, `r3t`, `r3x2`, `r3x2s`, `clover6`, `clover12`; registers `nighthawk120`, `nighthawk120w`, `nighthawk120t`, `nighthawk140`, `nighthawk520`; `field --no-ace-error-detection` |
 
 Where an older folder's function differs from the base, the base's newer version is the one kept (16 functions against `rcs`, 11 against `vqe`, 3 against `shrs`). `bro-nighthawk` is a different toolkit (DCS XEB, `tnsweep.py`) and is not part of this file.
 
 ## 2. Commands
 
-| Old command line | New command line |
-|---|---|
-| `nighthawk_qrack.py <cmd> ...` | the same |
-| `nighthawk_ghz.py <cmd> ...` | `nighthawk_qrack.py ghz <cmd> ...` |
-| `nighthawk_cloverfield.py <cmd> ...` | `nighthawk_qrack.py field <cmd> ...` |
-| `nighthawk_erepr.py <cmd> ...` | `nighthawk_qrack.py erepr <cmd> ...` |
+Every command is `python3 nighthawk_qrack.py [GROUP] COMMAND ...`; each group has its own parser (`ghz -h`, `field -h`, `erepr -h`, `lab -h`).
 
 | Group | Commands |
 |---|---|
@@ -42,6 +37,7 @@ Where an older folder's function differs from the base, the base's newer version
 | `ghz` | `chip` `tiles` `stack` `sweep` `probe` `stackmap` `shor` `shormap` `shoralg` `dual` `dualmap` `dualplot` `plot` `selftest` |
 | `field` | `plan` `run` `linksearch` `layoutsearch` `selftest` |
 | `erepr` | `derive` `plan` `run` `ds` `pairs` `table` `aceprobe` `selftest` |
+| `lab` | `--exp` `--fieldplan` `--shor` `--rounds` `--bell` `--selftest` |
 
 `-h` works per group (`ghz -h`, `field -h`, `erepr -h`) and per command.
 
@@ -608,29 +604,63 @@ python3 nighthawk_graph.py --out r3t.jsonl --poster posters/r3t.png
 python3 lab/ring520.py 20 26 8 300        # the ring attempt; lab/tile140.py builds the 10 x 14 tile
 ```
 
-## 4. Renamed names (for code that imported the old modules)
+### 3.14 Two chips as a stack: `--stack`
 
-| Old module | Old name | Name in `nighthawk_qrack` |
-|---|---|---|
-| `nighthawk_cloverfield` | `cfg_tag` | `field_cfg_tag` |
-| | `cmd_run`, `cmd_plan`, `cmd_selftest` | `cmd_field_run`, `cmd_field_plan`, `cmd_field_selftest` |
-| | `summarize` | `field_summarize` |
-| | `main` | `field_main` |
-| `nighthawk_erepr` | `I2` | `ER_I2` |
-| | `circuit_couplers`, `run_loom` | `er_circuit_couplers`, `er_run_loom` |
-| | `build_field`, `start_chips` | `er_build_field`, `er_start_chips` |
-| | `cmd_run`, `cmd_plan`, `cmd_selftest` | `cmd_erepr_run`, `cmd_erepr_plan`, `cmd_erepr_selftest` |
-| | `main` | `erepr_main` |
-| `nighthawk_ghz` | `main`, `make_parser`, `cmd_selftest` | `ghz_main`, `ghz_make_parser`, `cmd_ghz_selftest` (as before) |
+The chips lie face to face and every l-coupler joins the same lattice site on both. A site takes a link where a coupler colour is free, which on a full lattice is the border, so the `--links N` couplers are spread evenly round all four sides (`all`: every border site). Works for any chip pair of `--topology` / `--pairs`; a chip in the middle of a taller stack gives each neighbour different sites. The chips are still drawn side by side, the links as arcs.
 
-Every other name is unchanged. `import nighthawk_cloverfield` and `import nighthawk_erepr` return the `nighthawk_qrack` module.
+`--device r3x2s --stack` (two `nighthawk120`), ghost-loom plan under the 8 GB caps:
+
+| Layout | l-couplers | With a ghost | Patch widths (incl. ancilla) | GiB per chip |
+|---|---|---|---|---|
+| side by side (3.12) | 10 on the facing border | 10 | up to 26 | 1.3 to 1.8 |
+| stack | 10 round the border | 10 | 17 to 24 | 0.6 |
+| stack | 20 | 20 | 18 to 25 | 1.4 |
+| stack | `all` (40 border sites) | 34 | 20 to 27 | 4.8 |
+
+Measured, instance 0, Hamming family, nnqab, fold 1, CPU; signal 1 - 2h:
+
+| Layout | Loom | Depth 4 | Depth 6 | Seconds per point |
+|---|---|---|---|---|
+| stack, 10 | links cut | 0.828 | 0.569 | 10, 60 |
+| stack, 10 | mean-field | 0.755 | 0.427 | 17, 61 |
+| stack, 10 | ghost | 0.835 | 0.532 | 49, 153 |
+| side by side, 10 | links cut | 0.808 | 0.549 | |
+| side by side, 10 | mean-field | 0.795 | 0.421 | |
+| side by side, 10 | ghost | 0.808 | 0.537 | 143, 384 |
+
+| | |
+|---|---|
+| Memory and time | the ten ghosts land on eight patches, not on the two or three along one border: a third of the memory and of the time on the ghost loom |
+| Signal | the ghost loom stays near the cut baseline in both layouts (0.037 below it at depth 6 in the stack, 0.012 side by side); one instance each, so the difference is not established |
+| Hardware | IBM's l-coupler cables mount perpendicular to the chip, which is what would allow links away from one edge; where r3's ten attach is not stated |
+
+```
+python3 nighthawk_qrack.py field plan --device r3x2s --stack [--links 20] --loom ghost
+python3 nighthawk_qrack.py field run  --device r3x2s --stack --loom ghost --family hamming --protocol nnqab --fold 1 --depths 4 6 --instances 1 --cpu --no-ace-error-detection --out r3x2s_stack.jsonl
+python3 nighthawk_graph.py --out r3x2s_stack.jsonl --poster posters/r3x2s_stack_ghost.png --poster-loom ghost
+```
+
+`field selftest` check [15] covers it.
+
+## 4. Names inside the script
+
+The merged commands keep their functions under prefixed names, for code that imports `nighthawk_qrack`:
+
+| Command | Names |
+|---|---|
+| `field` | `field_main`, `cmd_field_run`, `cmd_field_plan`, `cmd_field_selftest`, `field_cfg_tag`, `field_summarize` |
+| `erepr` | `erepr_main`, `cmd_erepr_run`, `cmd_erepr_plan`, `cmd_erepr_selftest`, `ER_I2`, `er_circuit_couplers`, `er_run_loom`, `er_build_field`, `er_start_chips` |
+| `ghz` | `ghz_main`, `ghz_make_parser`, `cmd_ghz_selftest` |
+| `lab` | `lab_main` and the `lab_` / `Lab` names |
+
+There are no `nighthawk_ghz`, `nighthawk_cloverfield` or `nighthawk_erepr` modules to import any more.
 
 ## 5. Changes to merged code
 
 | Place | Change |
 |---|---|
 | `main()` | dispatches `field`, `erepr`, `chipworker` before the main parser |
-| `cloverfield()` | returns this module instead of loading `nighthawk_cloverfield.py`; `--cloverfield` and `$NIGHTHAWK_CLOVERFIELD` are accepted and ignored |
+| `cloverfield()` | returns this module; the `ghz` option `--cloverfield` and `$NIGHTHAWK_CLOVERFIELD` are removed (old records' `cf` field is kept as null, so their tags still match) |
 | chip workers | started as `nighthawk_qrack.py chipworker` |
 | `erepr` tile cache | `$NIGHTHAWK_TILE_CACHE` default set when `erepr` runs, not at import |
 | `field` options | `--device`; `--no-ace-error-detection` (enters the config tag only when given); `--chips` and `--links` defaults applied after parsing |
@@ -651,7 +681,8 @@ Run on CPU (OpenCL hidden), Python 3.13, PyQrack 2.30.6 from pip, Qiskit 2.6.2, 
 | Placements `nighthawk120`, `nighthawk120w` | 120 distinct sites each, no coupler between patches without a seam |
 | `selftest` | 14 / 14, 70 s |
 | `ghz selftest` | 20 / 20, 9 s |
-| `field selftest` | 12 / 12, 30 s ([12]: `--topology`, `--pairs`, hops) |
+| `field selftest` | 15 / 15 ([12] topologies, [13] `--link-port`, [14] device presets, [15] `--stack`) |
+| `lab --selftest` | 10 / 10 |
 | `erepr selftest` | all, 7 s |
 | `field plan --device clover6` | 720 qubits, 64 l-couplers, every chiplet fits one 8 GB die (below) |
 
