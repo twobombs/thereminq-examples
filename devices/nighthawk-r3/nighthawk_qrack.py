@@ -592,13 +592,42 @@ REGISTERS = {
                        46, 97, 123, 15, 14, 11, 9, 60, 86, 136, 149, 16, 41, 40, 12, 13, 37, 10, 35, 112, 42, 67, 68,
                        66, 38, 39, 63, 36, 61, 62, 69, 70, 95, 94, 64, 65, 90, 89, 87, 88, 96, 121, 120, 91, 92, 93,
                        117, 113, 114, 115])),
+    "nighthawk120t": dict(
+        n=120, rows=(0, 9), cols=(0, 11), drop=[],
+        about="nighthawk120 transposed: the same placement on a 10 x 12 tile (cell (r, c) takes the site of the "
+              "chip's cell (c, r)); a tile of the Nighthawk r3 chip (--device r3t)",
+        ace=dict(width=184, lrc=2, lrr=7, torus=False, max_width=27, max_wide=2,
+                 site=[21, 22, 24, 50, 101, 48, 19, 46, 149, 42, 69, 96, 25, 23, 49, 75, 102, 74, 44, 97, 16, 67, 70,
+                       121, 0, 51, 77, 76, 127, 100, 45, 123, 41, 68, 95, 120, 1, 52, 78, 103, 20, 18, 43, 15, 40,
+                       66, 94, 91, 26, 53, 79, 105, 106, 17, 71, 14, 12, 38, 64, 92, 27, 28, 104, 80, 134, 109, 8,
+                       11, 13, 39, 65, 93, 2, 30, 54, 133, 83, 33, 34, 9, 37, 63, 90, 117, 3, 55, 82, 5, 6, 58, 85,
+                       60, 10, 36, 89, 113, 4, 56, 107, 31, 7, 59, 110, 86, 35, 61, 87, 114, 29, 81, 108, 57, 32, 84,
+                       111, 136, 112, 62, 88, 115])),
     "nighthawk520": dict(
         n=520, rows=(0, 19), cols=(0, 25), drop=[],
         about="one Nighthawk r3 chip: 520 programmable qubits on a square lattice (IBM, 11 Nov 2026). The 20 x 26 "
-              "shape is an assumption, IBM has not stated the lattice dimensions. No ACE placement is stored for it: "
-              "plans, the exact engines and --chip-ace SIZE:LRC:LRR work, a field run on QrackAceBackend needs a "
-              "placement first",
+              "shape follows from IBM's physical qubit count: r2's 458 = 120 qubits + 120 reset qubits + 218 "
+              "couplers (the edges of 12 x 10), and r3's 2,034 = 520 + 520 + 994, where 994 is the edge count "
+              "2RC - R - C of 20 x 26 alone among the factorings of 520 (13 x 40: 987, 10 x 52: 978). An inference "
+              "from IBM's totals, not an IBM statement; it also means every lattice coupler is present. No ACE "
+              "placement is stored: a ring of patches does not hold a lattice this size (README 3.13); on "
+              "QrackAceBackend run it as tiles woven by the loom, --device r3t",
         ace=None),
+    "nighthawk140": dict(
+        n=140, rows=(0, 9), cols=(0, 13), drop=[],
+        about="a 10 x 14 tile of the Nighthawk r3 chip (--device r3t: 20 x 26 as two 10 x 12 and two 10 x 14 "
+              "tiles): nighthawk120t with a column inserted before its columns 0 and 9, each new cell on a free "
+              "site of a patch's bulk or of a seam of that patch, so every new coupler is a register coupler",
+        # 184 sites, lrc 2 lrr 7, flat; eight patches 26/26/22/25/27/26/16/23 wide (incl. ancilla), 43 boundary
+        # qubits. Dense worst case about 3.6 GiB fp32; no room under the caps for ghosts on an 8 GB die.
+        ace=dict(width=184, lrc=2, lrr=7, torus=False, max_width=27, max_wide=2,
+                 site=[128, 21, 22, 24, 50, 101, 48, 19, 46, 149, 122, 42, 69, 96, 153, 25, 23, 49, 75, 102, 74, 44,
+                       97, 16, 147, 67, 70, 121, 129, 0, 51, 77, 76, 127, 100, 45, 123, 41, 146, 68, 95, 120, 130, 1,
+                       52, 78, 103, 20, 18, 43, 15, 40, 118, 66, 94, 91, 131, 26, 53, 79, 105, 106, 17, 71, 14, 12,
+                       119, 38, 64, 92, 156, 27, 28, 104, 80, 134, 109, 8, 11, 13, 144, 39, 65, 93, 157, 2, 30, 54,
+                       133, 83, 33, 34, 9, 37, 145, 63, 90, 117, 132, 3, 55, 82, 5, 6, 58, 85, 60, 10, 143, 36, 89,
+                       113, 159, 4, 56, 107, 31, 7, 59, 110, 86, 35, 116, 61, 87, 114, 160, 29, 81, 108, 57, 32, 84,
+                       111, 136, 112, 141, 62, 88, 115])),
     "nighthawk120w": dict(
         n=120, rows=(0, 11), cols=(0, 9), drop=[],
         about="the same 120 sites as six patches filling one 8 GB die: fewer boundary qubits than nighthawk120, "
@@ -14303,6 +14332,9 @@ Devices (--device NAME sets --chips, --arrangement and --links; giving any of th
   r1x2    IBM's two-module Nighthawk r1 demonstration: nighthawk120*2, 1 x 2, four l-couplers
           (arXiv:2610.29986: state transfer 99.0 % mean, distant CZ 94.75 % mean; LCOUPLER in this file)
   r3      Nighthawk r3, one chip: nighthawk520, 520 programmable qubits on a square lattice, 10,000 operations
+  r3t     the r3 chip as four tiles woven by the loom (nighthawk120t, nighthawk140, twice; 2 x 2; --links all):
+          the 520 qubits and all 994 couplers of the 20 x 26 lattice, 46 of them carried by the loom. The way
+          to run r3 on QrackAceBackend: a ring of patches does not hold a 20 x 26 lattice
   r3x2    the system IBM plans for 2027: nighthawk520*2, 1 x 2, ten l-couplers, 1,040 qubits
   r3x2s   r3x2 scaled to what runs here: nighthawk120*2, 1 x 2, ten l-couplers
   clover6   hypothetical, not an IBM device: nighthawk120*6, 2 x 3, ten l-couplers per pair (720 qubits; this
@@ -16604,7 +16636,9 @@ def cmd_field_selftest(a):
         d = DEVICES[name]
         return build_field(argparse.Namespace(**dict(ta, chips=d["chips"], arrangement=d["arrangement"], links=d["links"],
                                                      **kw)))
-    d2, ds, d6, d1 = dev("r3x2"), dev("r3x2s"), dev("clover6"), dev("r1x2")
+    d2, ds, d6, d1, dt = dev("r3x2"), dev("r3x2s"), dev("clover6"), dev("r1x2"), dev("r3t")
+    at = lambda q: (10 * (dt.chip_of[q] // 2) + dt.cells[dt.chip_of[q]][dt.local[q]][0],
+                    12 * (dt.chip_of[q] % 2) + dt.cells[dt.chip_of[q]][dt.local[q]][1])   # r3t: site on the 20 x 26 lattice
     rows3 = {r for r, _ in d2.cells[0]}
     cols3 = {x for _, x in d2.cells[0]}
     good = (d2.n == 1040 and d2.chip_n == [520, 520] and len(d2.links) == 10 and len(d2.chip_pairs) == 1
@@ -16612,9 +16646,14 @@ def cmd_field_selftest(a):
             and sum(len(es) for es in d2.lays[0].matchings.values()) == 2 * 20 * 26 - 20 - 26
             and ds.n == 240 and len(ds.links) == 10 and d1.n == 240 and len(d1.links) == 4
             and d6.n == 720 and len(d6.chip_pairs) == 7 and DEVICES["r3"]["chips"] == "nighthawk520"
+            and dt.n == 520 and len(dt.links) == 46 and not dt.skipped
+            and {tuple(sorted((at(u), at(v)))) for es in dt.matchings.values() for u, v in es}
+            == {((r_, x_), (r_ + dr, x_ + dx)) for r_ in range(20) for x_ in range(26) for dr, dx in ((0, 1), (1, 0))
+                if r_ + dr < 20 and x_ + dx < 26}
             and LCOUPLER["cz"] < LCOUPLER["transfer"] < LCOUPLER["transfer_target"])
     report("[14] devices: r3x2 is two 520-qubit chips (20 x 26) with ten l-couplers, 1,040 qubits; r3x2s the same "
-           "shape on 120-qubit chips; r1x2 four l-couplers; clover6 the six-chiplet model", good,
+           "shape on 120-qubit chips; r1x2 four l-couplers; clover6 the six-chiplet model; r3t four tiles with exactly "
+           "the couplers of the 20 x 26 lattice", good,
            f"r3x2 {d2.n} qubits, {len(d2.links)} links; r3x2s {ds.n}, {len(ds.links)}; clover6 {d6.n}, "
            f"{len(d6.links)}; l-coupler CZ {LCOUPLER['cz']}")
     print("ALL OK" if ok else "SOME CHECKS FAILED")
@@ -16636,6 +16675,10 @@ DEVICES = {
     "r3": dict(chips="nighthawk520", arrangement="1x1", links="0", gates=10000,
                about="Nighthawk r3, one chip of 520 programmable qubits on a square lattice (20 x 26 assumed), "
                      "designed for 10,000 operations (IBM, 11 Nov 2026)"),
+    "r3t": dict(chips="nighthawk120t,nighthawk140,nighthawk120t,nighthawk140", arrangement="2x2", links="all",
+                gates=10000,
+                about="Nighthawk r3 as four tiles woven by the loom: 10 x 12 and 10 x 14, all 46 couplers across "
+                      "the two cuts linked, so the field has the 520 qubits and 994 couplers of the 20 x 26 chip"),
     "r3x2": dict(chips="nighthawk520*2", arrangement="1x2", links="10", gates=10000,
                  about="the system IBM plans for 2027: two Nighthawk r3 chips, 1,040 qubits, ten l-couplers"),
     "r3x2s": dict(chips="nighthawk120*2", arrangement="1x2", links="10", gates=10000,

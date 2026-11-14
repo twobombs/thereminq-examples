@@ -4,7 +4,7 @@ One script for every Nighthawk simulation in `devices/nighthawk`, plus IBM Quant
 
 | | |
 |---|---|
-| Script | `nighthawk_qrack.py`, 20,204 lines |
+| Script | `nighthawk_qrack.py`, 20,247 lines |
 | Viewers | `nighthawk_graph.py` (the `dual-nighthawk` version plus view 29, `--poster` for `field run` records and `--ghz-poster` for GHZ per chiplet and `--lab-poster` for the configuration lab, sections 3.4, 3.5 and 3.7), `nighthawk_3dgraph.py` (unchanged) |
 | Stubs | `nighthawk_ghz.py`, `nighthawk_cloverfield.py`, `nighthawk_erepr.py`: forward to the script |
 | Data | [`BlueQubitDev/rcs-nighthawk`](https://github.com/BlueQubitDev/rcs-nighthawk) next to the script, `--repo`, or `$NIGHTHAWK_REPO` |
@@ -23,7 +23,7 @@ One script for every Nighthawk simulation in `devices/nighthawk`, plus IBM Quant
 | `ghz-nighthawk`, `shrs-nighthawk` | `nighthawk_ghz.py` | 4,505 | covered by the base (`ghz` command): all 138 present |
 | `rcs-nighthawk` | `nighthawk_cloverfield.py` | 2,179 | merged in as the `field` command |
 | `erepr-nighthawk` | `nighthawk_erepr.py` | 2,068 | merged in as the `erepr` command |
-| new | | | device presets `r2`, `r1x2`, `r3`, `r3x2`, `r3x2s`, `clover6`, `clover12`; registers `nighthawk120`, `nighthawk120w`, `nighthawk520`; `field --no-ace-error-detection` |
+| new | | | device presets `r2`, `r1x2`, `r3`, `r3t`, `r3x2`, `r3x2s`, `clover6`, `clover12`; registers `nighthawk120`, `nighthawk120w`, `nighthawk120t`, `nighthawk140`, `nighthawk520`; `field --no-ace-error-detection` |
 
 Where an older folder's function differs from the base, the base's newer version is the one kept (16 functions against `rcs`, 11 against `vqe`, 3 against `shrs`). `bro-nighthawk` is a different toolkit (DCS XEB, `tnsweep.py`) and is not part of this file.
 
@@ -54,6 +54,7 @@ Where an older folder's function differs from the base, the base's newer version
 | `r2` | `nighthawk120` | 1 x 1 | 0 | 120 | Nighthawk r2, one chip |
 | `r1x2` | `nighthawk120*2` | 1 x 2 | 4 | 240 | IBM's two-chip r1 l-coupler demonstration |
 | `r3` | `nighthawk520` | 1 x 1 | 0 | 520 | Nighthawk r3, one chip |
+| `r3t` | `nighthawk120t`, `nighthawk140`, twice | 2 x 2 | all 46 across the cuts | 520 | Nighthawk r3 as four tiles woven by the loom: the same 520 qubits and 994 couplers (3.13) |
 | `r3x2` | `nighthawk520*2` | 1 x 2 | 10 | 1,040 | the system IBM plans for 2027 |
 | `r3x2s` | `nighthawk120*2` | 1 x 2 | 10 | 240 | `r3x2` scaled to 120-qubit chips: the same two chips and ten l-couplers, runs on a small host |
 | `clover6` | `nighthawk120*6` | 2 x 3 | 10 per pair | 720 | hypothetical, not an IBM device: six chiplets (this tool's r3 model before the announcement) |
@@ -83,7 +84,7 @@ Sources: IBM newsroom 11 Nov 2026 (Nighthawk r3), IBM Quantum blog 27 Oct 2026 a
 | r1, r2 qubits | 120 | 120 (`nighthawk120`, 12 x 10) |
 | r2 operations | over 7,500 on 120 qubits | no limit; `plan` prints the cycle count that budget buys |
 | r3 programmable qubits | 520 per chip (2,034 physical) | `nighthawk520`, 520 |
-| r3 lattice | square, as r2; dimensions not stated | 20 x 26, an assumption |
+| r3 lattice | square, as r2; dimensions not stated | 20 x 26, inferred from the physical qubit count (below) |
 | r3 l-couplers | ten chip-to-chip interconnects | ten between the two chips of `r3x2`, on facing border sites; where they attach is not stated |
 | r3 operations | 10,000 (design target, 2027) | the `plan` budget |
 | Linked system | two r3 chips, 1,040 qubits, 2027 | `r3x2` |
@@ -95,12 +96,24 @@ Sources: IBM newsroom 11 Nov 2026 (Nighthawk r3), IBM Quantum blog 27 Oct 2026 a
 | On-chip reset | r2 and r3 | not modelled (no mid-circuit reset in these circuits) |
 | Broken qubits | not published | none (17, 55, 62 are `ibm_phoenix`'s) |
 
+The lattice from IBM's physical qubit counts (an inference from the totals, not an IBM statement):
+
+| | r2, 12 x 10 | r3, if 20 x 26 |
+|---|---|---|
+| Programmable qubits | 120 | 520 |
+| Reset qubits, one per programmable qubit | 120 | 520 |
+| Tunable couplers, one per lattice edge (2RC - R - C) | 218 | 994 |
+| Sum | 458 | 2,034 |
+| IBM's stated physical qubits | 458 | 2,034 |
+
+Of the factorings of 520 only 20 x 26 has 994 edges (13 x 40: 987, 10 x 52: 978). The count leaves no coupler missing, so r3 is a complete 20 x 26 lattice to a circuit, whether it is one die or tiles stitched on every edge; it also leaves no room for the l-coupler elements, which are therefore not in the 2,034.
+
 | Status of `nighthawk520` | |
 |---|---|
 | Plans, drawings, exact engines | work (`field plan --device r3x2 --backend exact`) |
-| QrackAceBackend | no placement stored; the built-in search (`--chip-ace 640:2:7`, CP-SAT) did not find one in its time limit |
-| Dense memory | 520 qubits need about 27 ACE patches at 0.5 GiB each in the worst case, more than one 8 GB die per chip |
-| What runs in its place | `r3x2s`: both chips on the stored `nighthawk120` placement, all ten l-couplers with a ghost at 1.3 to 1.8 GiB per chip |
+| QrackAceBackend, one register | no placement: a ring of patches does not hold a 20 x 26 lattice (3.13) |
+| QrackAceBackend, tiles | `--device r3t`: the same 520 qubits and 994 couplers as four tiles woven by the loom (3.13) |
+| The two-chip shape | `r3x2s`: both chips on the stored `nighthawk120` placement, all ten l-couplers with a ghost at 1.3 to 1.8 GiB per chip (3.12) |
 
 ### 3.3 The chiplet registers
 
@@ -108,6 +121,11 @@ Sources: IBM newsroom 11 Nov 2026 (Nighthawk r3), IBM Quantum blog 27 Oct 2026 a
 |---|---|---|---|---|---|---|---|
 | `nighthawk120` | 184, 2, 7, flat | 8 | 20 / 23 / 22 / 22 / 21 / 23 / 16 / 20 | 39 | 92 / 126 / 0 | 0.3 GiB | caps 27 x 2: yes |
 | `nighthawk120w` | 170, 2, 9, flat | 6 | 26 / 27 / 26 / 27 / 25 / 26 | 31 | 118 / 100 / 0 | 4.75 GiB | none |
+| `nighthawk120t` | 184, 2, 7, flat | 8 | as `nighthawk120` | 39 | as `nighthawk120` | 0.3 GiB | caps 27 x 2: yes |
+| `nighthawk140` | 184, 2, 7, flat | 8 | 26 / 26 / 22 / 25 / 27 / 26 / 16 / 23 | 43 | | 3.8 GiB | none |
+| `nighthawk520` | none stored | | | | | | |
+
+`nighthawk120t` is `nighthawk120` transposed (a 10 x 12 tile). `nighthawk140` (a 10 x 14 tile) is `nighthawk120t` with a column inserted before its columns 0 and 9: each new cell sits on a free site of a patch's bulk or of one of that patch's seams, so every new coupler is a register coupler. Both are the tiles of `--device r3t` (3.13).
 
 Both were found by annealing the seams on the lattice for an ACE ring of patches and assigning sites from `QrackAceBackend._unpack` (PyQrack 2.30.6). They were not searched with `layoutsearch`: a CP-SAT search (`layoutsearch --n 120 --region fixed`) may find a shorter boundary, and its result can be saved over these names.
 
@@ -540,6 +558,55 @@ python3 nighthawk_graph.py --out r3x2s.jsonl --poster posters/r3x2s_mean.png --p
 ```
 
 `--poster-loom` picks one loom's records when a file holds several; a loom without its own `--cut-links` records is paired with another loom's, since the cut circuit is the same. `field selftest` check [14] covers the device presets.
+
+### 3.13 The r3 chip on QrackAceBackend: one ring of patches against tiles (`--device r3t`)
+
+One register. `nighthawk120` is a ring of eight patches meeting at the centre of the chip. The same approach on the 20 x 26 lattice (`lab/ring520.py`, a CP-SAT model of the ring register: bulk couplers inside one patch, a seam with its two patches, seam to seam only at the centre):
+
+| Attempt | Patches | Widest patch (qubits incl. ancilla) | Result |
+|---|---|---|---|
+| ring, 8 patches, CP-SAT 300 s | 8 | 140 found; none below 66 exists (solver bound) | far over any dense simulator |
+| ring, 16 patches, CP-SAT 300 s | 16 | | no placement found |
+| diagonal stripes by hand (a chain: seam diagonal, bulk diagonal, seam diagonal, ...) | 23 | 61 | valid, far over |
+| built-in search, `--chip-ace 640:2:7` | 33 | | no placement found in its time limit |
+| for comparison: `nighthawk120` | 8 | 23 | stored |
+
+Why it does not scale: in a ring every patch must keep its two neighbours apart all the way from the centre to the border, so each seam is about half the chip across (10 to 13 qubits here) and a patch carries two of them; only as many patches as fit around one centre can be used, about eight. Eight patches for 520 qubits are 65 qubits each before their seams.
+
+Tiles. `--device r3t` cuts the lattice into four tiles, each on its own ring register in its own worker, and gives the loom every coupler across the two cuts:
+
+| | |
+|---|---|
+| Tiles | 10 x 12 (`nighthawk120t`) and 10 x 14 (`nighthawk140`), twice, on a 2 x 2 grid |
+| Couplers | 948 inside the tiles + 46 across the cuts (10, 12, 14, 10 per tile pair) = 994, the full 20 x 26 lattice (`field selftest` check [14] compares the coupler sets) |
+| Tile sizes | the cuts need even tile widths and heights for a coupler colour to be free on both sides, hence 12 + 14 columns and 10 + 10 rows |
+| Schedule | the same couplers, each once per round A B C D, in a different but valid four-colouring than one 20 x 26 chip |
+| Mean-field loom | all 46 links; 0.3 and 3.8 GiB dense worst case per tile, 8.3 GiB for the loom |
+| Ghost loom, 8 GB caps | 23 of the 46 links get a ghost, 16 GiB for the loom |
+| Ghost loom, `--ghost-max-width 30 --ghost-max-wide 8` | 41 of 46, 105 GiB (CPU host) |
+| Ghost loom, `--ghost-max-width 32 --ghost-max-wide 8` | 43 of 46, 151 GiB (CPU host) |
+
+Measured: Hamming family, nnqab, fold 1, mean-field loom, 2 CPU cores and 8 GB RAM, one instance, `--no-ace-error-detection`; signal 1 - 2h:
+
+| Depth | Woven (46 links) | Links cut | Seconds per point | Peak host memory seen |
+|---|---|---|---|---|
+| 4 | 0.750 | 0.863 | 290 to 334 | 1.7 GB |
+| 6 | 0.462 | 0.668 | 912 to 1,014 | 5 GB |
+
+| | |
+|---|---|
+| What this shows | the 520-qubit r3 lattice runs on QrackAceBackend on a small host, at the cost the mean-field loom puts on 46 internal links (0.11 at depth 4, 0.21 at depth 6) |
+| What it does not show | the ghost loom on these links (the plan above; not run), and more than one instance |
+| Two r3 chips | `r3x2` as eight tiles needs two link counts in one field (all across a tile cut, ten across the chip gap), which `--links` does not take yet |
+| The 10 x 14 tile | its widest patches are 26 to 27; a placement of its own (annealed like `nighthawk120`) would be lighter than the two inserted columns |
+
+```
+python3 nighthawk_qrack.py field plan --device r3t --loom mean
+python3 nighthawk_qrack.py field plan --device r3t --loom ghost [--ghost-max-width 30 --ghost-max-wide 8]
+python3 nighthawk_qrack.py field run  --device r3t --loom mean [--cut-links] --family hamming --protocol nnqab --fold 1 --depths 4 6 --instances 1 --cpu --no-ace-error-detection --out r3t.jsonl
+python3 nighthawk_graph.py --out r3t.jsonl --poster posters/r3t.png
+python3 lab/ring520.py 20 26 8 300        # the ring attempt; lab/tile140.py builds the 10 x 14 tile
+```
 
 ## 4. Renamed names (for code that imported the old modules)
 
