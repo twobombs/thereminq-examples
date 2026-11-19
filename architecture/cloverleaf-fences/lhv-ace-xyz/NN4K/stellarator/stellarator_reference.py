@@ -133,12 +133,14 @@ class MajoranaFlowPropagator(object):
         return out
 
     def bond_energies_above_ground(self, g_ref=None):
-        """Return per-bond excitation energy delta_E_b >= 0 relative to g_ref (default G0)."""
+        """Return signed per-bond excitation energy delta_E_b = -w_b u_b (G_ij - ref_ij)
+        relative to g_ref (default G0). Summing over all bonds equals the exact
+        Hamiltonian energy change E(G) - E(ref) = (1/4) Tr(A (G - ref)), which is
+        strictly conserved under unitary evolution (`R4`)."""
         ref = self.G0 if g_ref is None else g_ref
         out = np.empty(len(self.bonds), dtype=float)
         for b_idx, (i, j, _) in enumerate(self.bonds):
-            de = -self.weights[b_idx] * self.u[b_idx] * (self.G[i, j] - ref[i, j])
-            out[b_idx] = max(0.0, float(de))
+            out[b_idx] = -self.weights[b_idx] * self.u[b_idx] * (self.G[i, j] - ref[i, j])
         return out
 
 
@@ -504,8 +506,8 @@ class BlockDecomposedFlowPropagator(object):
         return np.concatenate(parts) if parts else np.array([], dtype=float)
 
     def internal_bond_energies(self, g_ref_blocks=None):
-        """Return list of (global_i, global_j, delta_E_b) for all internal bonds
-        relative to `g_ref_blocks` (default `self.G0_blocks`)."""
+        """Return list of (global_i, global_j, signed delta_E_b) for all internal
+        bonds relative to `g_ref_blocks` (default `self.G0_blocks`, `R4`)."""
         ref_map = self.G0_blocks if g_ref_blocks is None else g_ref_blocks
         out = []
         for bid in self.block_ids:
@@ -517,12 +519,12 @@ class BlockDecomposedFlowPropagator(object):
             w_loc = self.block_w[bid]
             for idx_b, (qa, qb, _) in enumerate(bonds_loc):
                 de = -w_loc[idx_b] * u_loc[idx_b] * (G[qa, qb] - Gref[qa, qb])
-                out.append((sites[qa], sites[qb], max(0.0, float(de))))
+                out.append((sites[qa], sites[qb], float(de)))
         return out
 
     def all_bond_energies(self, ref_prop=None):
-        """Return list of (global_i, global_j, delta_E_b) across ALL internal
-        bonds AND stored seam bonds relative to `ref_prop` (or initial state)."""
+        """Return list of (global_i, global_j, signed delta_E_b) across ALL internal
+        bonds AND stored seam bonds relative to `ref_prop` (or initial state, `R4`)."""
         g_ref = self.G0_blocks if ref_prop is None else ref_prop.G_blocks
         c_ref = self.C0_seams if ref_prop is None else ref_prop.C_seams
         out = self.internal_bond_energies(g_ref_blocks=g_ref)
@@ -531,7 +533,7 @@ class BlockDecomposedFlowPropagator(object):
                 gi = self.block_sites[a][qa]
                 gj = self.block_sites[b][qb]
                 de = -w_b * u_ab * (self.C_seams[(a, b)][qa, qb] - c_ref[(a, b)][qa, qb])
-                out.append((gi, gj, max(0.0, float(de))))
+                out.append((gi, gj, float(de)))
         return out
 
 
@@ -652,11 +654,12 @@ def rung_f1_single_manifold(manifest, steps=10, dt=0.04):
     w16_final = SPD.read_pauli_word_inplace(
         sim16, sub_blk["internal_loops"][0]["pauli_local"], q_counts=qc16)
 
-    # 3. Full 27-qubit manifold (all 27 qubits non-Clifford, sdrp=0, step 1
-    #    before CPU ACE shard clamping triggers at step 2+)
-    steps_27 = 1
+    # 3. Full 27-qubit Block 1 manifold over 6 full steps (`N11`) using
+    #    `max_dimers=4` (covering all 4 degree-3 vertices + exact missing-colour
+    #    eigenstates on remaining 19 vertices; ace_max_qb=21, sdrp=0.0).
+    steps_27 = 6
     sim27 = QrackSimulator(27, is_gpu=SPD.HAS_OPENCL_SO, is_stabilizer_hybrid=False)
-    qc27, G0_27, _ = SPD.prepare_shared_dimer_state(sim27, blk)
+    qc27, G0_27, _ = SPD.prepare_shared_dimer_state(sim27, blk, max_dimers=4)
     SPD.configure_simulator_27q(sim27, ace_max_qb=21, sdrp=0.0)
     prop27 = MajoranaFlowPropagator(n_q, bonds_loc, u_loc, w_loc, dt=dt, g0_init=G0_27)
 
@@ -678,16 +681,19 @@ def rung_f1_single_manifold(manifest, steps=10, dt=0.04):
 
     max_exact16 = float(max(exact16_step_rms))
     mean_27 = float(np.mean(qrack27_step_rms))
+    max_27 = float(max(qrack27_step_rms))
     return {
         "rung": "F1",
-        "system": "27-qubit manifold (exact 16q + 27q PyQrack vs Majorana)",
+        "system": "27-qubit manifold (exact 16q + 6-step 27q PyQrack vs Majorana)",
         "steps": steps,
+        "steps_27q": steps_27,
         "dt": dt,
         "max_bond_err": max_diff,
         "pyqrack_exact16_step_rms": exact16_step_rms,
         "pyqrack_exact16_max_rms": max_exact16,
         "pyqrack_exact16_w0": float(w16_final),
         "pyqrack_27q_step_rms": qrack27_step_rms,
+        "pyqrack_27q_max_rms": max_27,
         "pyqrack_rms_bond_err": max_exact16,
         "pyqrack_27q_ace_mean_rms": mean_27,
         "pyqrack_step1_rms_err": float(exact16_step_rms[0]),
@@ -697,7 +703,8 @@ def rung_f1_single_manifold(manifest, steps=10, dt=0.04):
             and (max_exact16 < 5e-4)
             and (abs(w16_final - 1.0) < 1e-5)
             and (abs(w27_final - 1.0) < 1e-4)
-            and (mean_27 < 0.01)
+            and (mean_27 < 0.015)
+            and (max_27 < 0.025)
         ),
     }
 
@@ -982,16 +989,16 @@ def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
 
         de_ex = prop_exact.bond_energies_above_ground()
         de_ki = prop_kick.bond_energies_above_ground(g_ref=prop_vac.G)
-        e5_ex = float(sum(de_ex[b] for b, (si, _, _) in enumerate(bonds_s0) if mod_of_s0[si] == 5))
-        e5_ki = float(sum(de_ki[b] for b, (si, _, _) in enumerate(bonds_s0) if mod_of_s0[si] == 5))
-        e5_bk = float(sum(
+        e1_ex = float(sum(de_ex[b] for b, (si, _, _) in enumerate(bonds_s0) if mod_of_s0[si] == 1))
+        e1_ki = float(sum(de_ki[b] for b, (si, _, _) in enumerate(bonds_s0) if mod_of_s0[si] == 1))
+        e1_bk = float(sum(
             de_b for gi, gj, de_b in prop_mod_rep.internal_bond_energies(
                 g_ref_blocks=prop_mod_rep_vac.G_blocks)
-            if mod_of_s0[gi] == 5
+            if mod_of_s0[gi] == 1
         ))
-        opp_energy_exact.append(e5_ex)
-        opp_energy_kick.append(e5_ki)
-        opp_energy_blocks.append(e5_bk)
+        opp_energy_exact.append(e1_ex)
+        opp_energy_kick.append(e1_ki)
+        opp_energy_blocks.append(e1_bk)
 
         ex_int = np.array([
             u_b * prop_exact.G[si, sj] for si, sj, u_b in int_ring_pairs
@@ -1015,6 +1022,8 @@ def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
     t_peak_exact = int(np.argmax(opp_energy_exact)) + 1
     t_peak_kick = int(np.argmax(opp_energy_kick)) + 1
     t_peak_blocks = int(np.argmax(opp_energy_blocks)) + 1
+    peak_val_exact = float(max(opp_energy_exact))
+    peak_val_blocks = float(max(opp_energy_blocks))
     transit_diff_blocks = abs(t_peak_exact - t_peak_blocks)
     transit_diff_strang = abs(t_peak_exact - t_peak_kick)
     mean_bare = float(np.mean(rms_bare_ring))
@@ -1029,13 +1038,17 @@ def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
         "t_peak_exact": t_peak_exact,
         "t_peak_kick": t_peak_blocks,
         "t_peak_strang": t_peak_kick,
+        "peak_energy_exact": peak_val_exact,
+        "peak_energy_blocks": peak_val_blocks,
         "transit_step_diff": transit_diff_blocks,
         "rms_bond_err_bare": mean_bare,
         "rms_bond_err_repaired": mean_rep,
         "kick_rel_err_bare": mean_kick_bare,
         "kick_rel_err_repaired": mean_kick_rep,
         "pass": (
-            (transit_diff_blocks <= 1)
+            (peak_val_exact > 0.1)
+            and (peak_val_blocks > 0.1)
+            and (transit_diff_blocks <= 1)
             and (transit_diff_strang <= 1)
             and (mean_kick_rep < 0.50 * mean_kick_bare)
             and (mean_rep < mean_bare)
@@ -1103,6 +1116,8 @@ def rung_f4_full_machine(manifest, steps=10, dt=0.06):
             prop_bare_40.apply_global_bond_kick(i, j, kick)
             prop_rep_40.apply_global_bond_kick(i, j, kick)
 
+    e_ex_init = float(np.sum(prop_exact.bond_energies_above_ground()))
+    max_unitary_drift = 0.0
     rms_bare_list = []
     rms_rep_list = []
     kick_err_bare_list = []
@@ -1116,6 +1131,9 @@ def rung_f4_full_machine(manifest, steps=10, dt=0.06):
         prop_bare_40_vac.step()
         prop_rep_40.step()
         prop_rep_40_vac.step()
+
+        e_ex_now = float(np.sum(prop_exact.bond_energies_above_ground()))
+        max_unitary_drift = max(max_unitary_drift, abs(e_ex_now - e_ex_init))
 
         ex_int = np.array([
             u_b * prop_exact.G[gi, gj] for gi, gj, u_b in int_pairs_40
@@ -1168,6 +1186,8 @@ def rung_f4_full_machine(manifest, steps=10, dt=0.06):
         "rung": "F4",
         "system": "1080-qubit full stellarator (40x27 sparse block-pair)",
         "steps": steps,
+        "unitary_energy_init": e_ex_init,
+        "unitary_energy_drift": float(max_unitary_drift),
         "sparse_seam_pairs_stored": int(prop_rep_40.n_seam_pairs_stored),
         "sparse_block_pairs_total": int(prop_rep_40.n_block_pairs_total),
         "sparse_storage_fraction": float(prop_rep_40.sparse_storage_fraction),
@@ -1183,7 +1203,8 @@ def rung_f4_full_machine(manifest, steps=10, dt=0.06):
         "kick_rel_err_repaired": final_kick_rep,
         "outer_leakage_fraction": float(prof_ex[3] + prof_ex[4]),
         "pass": (
-            (max_shell_dev_blocks40 < 0.05)
+            (max_unitary_drift < 1e-11)
+            and (max_shell_dev_blocks40 < 0.05)
             and (final_kick_rep < 0.30)
             and (final_kick_rep < 0.40 * final_kick_bare)
             and (mean_rep < 0.035)
@@ -1197,9 +1218,9 @@ def run_reference_ladder(manifest):
     print("PHASE 5 GATE (REFERENCE FLOW LADDER) -- EXACT & SPARSE BLOCK-PAIR RUNGS F1-F4")
     print("=" * 78)
     r1 = rung_f1_single_manifold(manifest)
-    print("  [F1] %-42s givens=%.2e  16q_10st=%.2e  27q_ace=%.4f (<W0>=%+.4f) %s"
+    print("  [F1] %-42s givens=%.2e  16q_10st=%.2e  27q_6st=%.4f (max=%.4f, <W0>=%+.4f) %s"
           % (r1["system"][:42], r1["max_bond_err"], r1["pyqrack_exact16_max_rms"],
-             r1["pyqrack_27q_ace_mean_rms"], r1["pyqrack_w0"],
+             r1["pyqrack_27q_ace_mean_rms"], r1["pyqrack_27q_max_rms"], r1["pyqrack_w0"],
              "PASS" if r1["pass"] else "FAIL"))
 
     r2 = rung_f2_single_module(manifest)
@@ -1215,10 +1236,10 @@ def run_reference_ladder(manifest):
              "PASS" if r3["pass"] else "FAIL"))
 
     r4 = rung_f4_full_machine(manifest)
-    print("  [F4] %-42s blk40_dev=%.4f  kick_err=%.1f%% (bare %.1f%%)  %s"
+    print("  [F4] %-42s blk40_dev=%.4f  kick_err=%.1f%% (bare %.1f%%)  E_drift=%.1e %s"
           % (r4["system"][:42], r4["max_shell_deviation_blocks40"],
              100.0 * r4["kick_rel_err_repaired"], 100.0 * r4["kick_rel_err_bare"],
-             "PASS" if r4["pass"] else "FAIL"))
+             r4["unitary_energy_drift"], "PASS" if r4["pass"] else "FAIL"))
     print("       sparse block pairs stored: %d / %d (%.1f%%; %.1f%% unstored/zero)"
           % (r4["sparse_seam_pairs_stored"], r4["sparse_block_pairs_total"],
              100.0 * r4["sparse_storage_fraction"],

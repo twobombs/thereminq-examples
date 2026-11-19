@@ -266,12 +266,15 @@ def prepare_all_internal_loops(sim, block_spec):
     return q_counts
 
 
-def prepare_shared_dimer_state(sim, block_spec):
+def prepare_shared_dimer_state(sim, block_spec, max_dimers=None):
     """Prepare an exact gauge-fixed Gaussian stabilizer state shared between
     QrackSimulator `sim` and a Majorana correlation matrix `G0` (`N11`):
-      1. Build a maximal vertex-disjoint matching of internal bonds, matching
+      1. Build a vertex-disjoint matching of internal bonds, matching
          degree-3 vertices first so every unmatched vertex has degree <= 2
-         (and therefore has at least one missing bond colour).
+         (and therefore has at least one missing bond colour). When
+         `max_dimers` is set, stop once `len(matched_bonds) >= max_dimers`
+         and all degree-3 vertices are covered (keeps 27-qubit ACE shards
+         exact across multi-step evolution).
       2. Prepare a maximally entangled Bell pair on each matched dimer
          `(qa, qb, col, u_b)` with `<sigma^col_qa sigma^col_qb> = u_b` and
          zero single-qubit Pauli expectations (`<sigma^a_q> = 0`), giving
@@ -300,15 +303,24 @@ def prepare_shared_dimer_state(sim, block_spec):
         adj[qa].append((qb, col, u_b))
         adj[qb].append((qa, col, -u_b))
     deg = {q: len(adj[q]) for q in range(n_q)}
+    deg3_qs = {q for q, d in deg.items() if d >= 3}
 
     order_b = sorted(
         range(len(ibs)),
-        key=lambda idx_b: -(deg[int(ibs[idx_b]["qa"])] + deg[int(ibs[idx_b]["qb"])])
+        key=lambda idx_b: (
+            -(1 if int(ibs[idx_b]["qa"]) in deg3_qs else 0)
+            - (1 if int(ibs[idx_b]["qb"]) in deg3_qs else 0),
+            -(deg[int(ibs[idx_b]["qa"])] + deg[int(ibs[idx_b]["qb"])]),
+        ),
     )
     used_qs = set()
     matched_bonds = []
     dimer_col_of = {}
     for idx_b in order_b:
+        if (max_dimers is not None
+                and len(matched_bonds) >= int(max_dimers)
+                and deg3_qs.issubset(used_qs)):
+            break
         ib = ibs[idx_b]
         qa, qb, col = int(ib["qa"]), int(ib["qb"]), int(ib["colour"])
         u_b = float(ib["u"])
