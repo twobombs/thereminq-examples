@@ -41,7 +41,7 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
 
     fig = plt.figure(figsize=(18, 11), dpi=140, facecolor="#0d1117")
     fig.suptitle(
-        "W7-X Stellarator Kitaev Z2 Lattice Gauge Emulation  |  1080 Qubits (40 x 27-Qubit Manifolds + 1 Ancilla)",
+        "W7-X Stellarator Kitaev Z2 Lattice Gauge Emulation  |  1080 Qubits (40 x 27-Qubit Manifolds, Ancilla-Free)",
         color="#e6edf3", fontsize=14, fontweight="bold", y=0.975
     )
 

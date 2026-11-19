@@ -93,6 +93,163 @@ def build_coil_windings(idx, bonds, meta):
     }
 
 
+def find_block_internal_cycles(sites_g, internal_bonds, primary_loop_g,
+                               colmap, u_ground, eid):
+    """Find the minimum-length GF(2)-independent cycle basis of the 27-qubit
+    block (exact cycle rank = len(internal_bonds) - 26), seeded with the
+    canonical 8-cycle primary_loop_g."""
+    g_to_q = {g: q for q, g in enumerate(sites_g)}
+    adj = collections.defaultdict(list)
+    edge_list = []
+    edge_to_idx = {}
+    for idx_e, ib in enumerate(internal_bonds):
+        u, v = int(ib["ga"]), int(ib["gb"])
+        adj[u].append(v)
+        adj[v].append(u)
+        e_key = (min(u, v), max(u, v))
+        edge_list.append(e_key)
+        edge_to_idx[e_key] = idx_e
+
+    cycle_rank = max(1, len(internal_bonds) - (len(sites_g) - 1))
+
+    # Enumerate all simple cycles in the 27-vertex induced subgraph (cycle rank <= 6)
+    all_cycles = [list(primary_loop_g)]
+
+    def dfs_cycles(start, cur, visited, path):
+        for nxt in sorted(adj[cur]):
+            if nxt == start and len(path) >= 4:
+                all_cycles.append(list(path))
+            elif nxt > start and nxt not in visited and len(path) < 14:
+                visited.add(nxt)
+                path.append(nxt)
+                dfs_cycles(start, nxt, visited, path)
+                path.pop()
+                visited.remove(nxt)
+
+    for v_start in sorted(sites_g):
+        dfs_cycles(v_start, v_start, {v_start}, [v_start])
+
+    # Sort candidate cycles after primary_loop_g by length so we get the shortest basis
+    primary_cyc = all_cycles[0]
+    other_cycs = sorted(all_cycles[1:], key=len)
+    candidates = [primary_cyc] + other_cycs
+
+    basis_vecs = []
+    cycles_g = []
+    for cyc in candidates:
+        ell = len(cyc)
+        mask = 0
+        valid = True
+        for r in range(ell):
+            e_key = (min(cyc[r], cyc[(r + 1) % ell]),
+                     max(cyc[r], cyc[(r + 1) % ell]))
+            if e_key not in edge_to_idx:
+                valid = False
+                break
+            mask ^= (1 << edge_to_idx[e_key])
+        if not valid or mask == 0:
+            continue
+        # Reduce mask against current GF(2) basis
+        rem = mask
+        for piv_bit, b_vec in basis_vecs:
+            if (rem >> piv_bit) & 1:
+                rem ^= b_vec
+        if rem != 0:
+            piv = rem.bit_length() - 1
+            basis_vecs.append((piv, rem))
+            basis_vecs.sort(reverse=True)
+            cycles_g.append(cyc)
+            if len(cycles_g) >= cycle_rank:
+                break
+
+    loops_out = []
+    for cyc_id, cyc_g in enumerate(cycles_g):
+        pstr_glob = SF.pauli_string(cyc_g, colmap)
+        pstr_loc = [[int(g_to_q[g]), int(col)] for g, col in pstr_glob]
+        s_loop = int(SF.loop_sign(cyc_g, colmap))
+        f_loop = int(SF.loop_flux(cyc_g, u_ground, eid))
+        tgt_loop = float(s_loop * f_loop)
+        pword = "".join("XYZ"[col] for _, col in pstr_loc)
+        loops_out.append({
+            "cycle_index": cyc_id,
+            "sites": [int(g) for g in cyc_g],
+            "qubits": [int(g_to_q[g]) for g in cyc_g],
+            "length": len(cyc_g),
+            "pauli_local": pstr_loc,
+            "pauli_word": pword,
+            "sign": s_loop,
+            "flux": f_loop,
+            "target": tgt_loop,
+        })
+    return loops_out
+
+
+def compute_sigma_repair_bonds(sites_g, internal_bonds, A_full, G_full,
+                               seam_qubits_set, max_terms=45):
+    """Compute the Gaussian seam self-energy Sigma_B = A_ent,B - A_int,B on a
+    27-qubit block and extract the leading boundary repair terms."""
+    A_int = A_full[np.ix_(sites_g, sites_g)]
+    G_blk = G_full[np.ix_(sites_g, sites_g)]
+    A_ent = SK.entanglement_hamiltonian(G_blk)
+    Sigma = A_ent - A_int
+
+    ib_map = {}
+    for ib in internal_bonds:
+        qa, qb = int(ib["qa"]), int(ib["qb"])
+        ib_map[(min(qa, qb), max(qa, qb))] = ib
+
+    candidates = []
+    n_loc = len(sites_g)
+    for qa in range(n_loc):
+        for qb in range(qa + 1, n_loc):
+            sig_val = float(Sigma[qa, qb])
+            if abs(sig_val) < 1e-6:
+                continue
+            ib = ib_map.get((qa, qb))
+            if ib is not None:
+                col = int(ib["colour"])
+                pauli = ib["pauli"]
+                is_bond = True
+            else:
+                # Assign effective colour by parity of (qa + qb) for non-adjacent boundary pairs
+                col = (qa + qb) % 3
+                pauli = SK.COLOR_NAME[col]
+                is_bond = False
+            touches_seam = (qa in seam_qubits_set) or (qb in seam_qubits_set)
+            candidates.append({
+                "qa": int(qa),
+                "qb": int(qb),
+                "ga": int(sites_g[qa]),
+                "gb": int(sites_g[qb]),
+                "colour": int(col),
+                "pauli": pauli,
+                "sigma_ab": sig_val,
+                "abs_sigma": abs(sig_val),
+                "is_internal_bond": bool(is_bond),
+                "touches_seam": bool(touches_seam),
+            })
+
+    candidates.sort(key=lambda d: d["abs_sigma"], reverse=True)
+    kept = candidates[:max_terms]
+    for item in kept:
+        item.pop("abs_sigma", None)
+
+    frob_total = float(np.linalg.norm(Sigma, "fro"))
+    Sigma_keep = np.zeros_like(Sigma)
+    for item in kept:
+        qa, qb, sv = item["qa"], item["qb"], item["sigma_ab"]
+        Sigma_keep[qa, qb] = sv
+        Sigma_keep[qb, qa] = -sv
+    frob_res = float(np.linalg.norm(Sigma - Sigma_keep, "fro"))
+    captured = 1.0 - (frob_res / max(1e-12, frob_total))
+    return kept, {
+        "sigma_frob": frob_total,
+        "residual_frob": frob_res,
+        "captured_fraction": float(captured),
+        "n_keep": len(kept),
+    }
+
+
 def generate_manifest(equiv_path="equiv.json", preset_override=None):
     with open(equiv_path, "r") as fh:
         eq = json.load(fh)
@@ -106,10 +263,15 @@ def generate_manifest(equiv_path="equiv.json", preset_override=None):
         core=True, divertor=True, preset=preset)
     colmap, eid = SF.colour_map_and_eid(bonds)
     u_ground = meta["u_ground"]
+    u_vortex_free = meta["u_vortex_free"]
     p_cfg = SG.PRESETS[preset]
     npc_k = tuple(x - 1.0 for x in p_cfg["nonplanar_currents"])
     pl_k = (p_cfg["planar_currents"][0], p_cfg["mirror_mod"])
     weights = SK.evaluate_coil_weights(bonds, meta, nonplanar_knobs=npc_k, planar_knobs=pl_k)
+
+    # Precompute global Majorana matrix and ground-state correlator for Sigma_keep repair
+    A_full = SK.majorana_matrix(len(idx), bonds, u=u_ground, bond_weights=weights)
+    G_full = SK.correlation_matrix(A_full)
 
     # Map global site -> (block_id, local_qubit_idx)
     site_to_bq = {}
@@ -130,6 +292,7 @@ def generate_manifest(equiv_path="equiv.json", preset_override=None):
 
     # Classify all 1620 bonds into internal, intra-module K4 junction, or toroidal seam
     internal_by_block = collections.defaultdict(list)
+    seam_qubits_by_block = collections.defaultdict(set)
     k4_junctions = []
     toroidal_seams = []
     radial_bonds_info = []
@@ -156,6 +319,8 @@ def generate_manifest(equiv_path="equiv.json", preset_override=None):
                 "kind": bm["kind"],
             })
         elif mi == mj:
+            seam_qubits_by_block[bi].add(int(qi))
+            seam_qubits_by_block[bj].add(int(qj))
             k4_junctions.append({
                 "module": int(mi),
                 "block_a": int(bi),
@@ -172,6 +337,8 @@ def generate_manifest(equiv_path="equiv.json", preset_override=None):
                 "kind": bm["kind"],
             })
         else:
+            seam_qubits_by_block[bi].add(int(qi))
+            seam_qubits_by_block[bj].add(int(qj))
             toroidal_seams.append({
                 "module_a": int(mi),
                 "block_a": int(bi),
@@ -203,24 +370,59 @@ def generate_manifest(equiv_path="equiv.json", preset_override=None):
                 "internal": bool(bi == bj),
             })
 
-    # Build per-block manifest entries including canonical loop stabiliser words
+    # Build per-block manifest entries including all internal cycles and Sigma_keep repair
     for b in eq["blocks"]:
         bid = int(b["block_id"])
         loop_g = [int(s) for s in b["loop"]]
         tree_g = [int(s) for s in b["tree"]]
         sites_g = loop_g + tree_g
-        g_to_q = {g: q for q, g in enumerate(sites_g)}
 
-        pstr_glob = SF.pauli_string(loop_g, colmap)
-        pstr_loc = [[int(g_to_q[g]), int(col)] for g, col in pstr_glob]
-        s_loop = int(SF.loop_sign(loop_g, colmap))
-        f_loop = int(SF.loop_flux(loop_g, u_ground, eid))
-        tgt_loop = float(s_loop * f_loop)
-        pword = "".join("XYZ"[col] for _, col in pstr_loc)
+        internal_loops = find_block_internal_cycles(
+            sites_g, internal_by_block[bid], loop_g, colmap, u_ground, eid)
+        primary_lp = internal_loops[0]
 
         div_qs = [q for q, g in enumerate(sites_g) if meta["site_kind"][g] == "divertor"]
+        div_q_set = set(div_qs)
         core_qs = [q for q, g in enumerate(sites_g) if meta["site_kind"][g] == "core"]
         shell_by_q = [int(meta["site_shell"][g]) for g in sites_g]
+        seam_qs = sorted(seam_qubits_by_block[bid])
+        seam_q_set = set(seam_qs)
+
+        # 2-qubit internal bonds incident on divertor qubits (or edge shell 4) for bond-parity sinks
+        div_bonds = [
+            {
+                "qa": int(ib["qa"]),
+                "qb": int(ib["qb"]),
+                "colour": int(ib["colour"]),
+                "pauli": ib["pauli"],
+                "bond_id": int(ib["bond_id"]),
+                "u": float(ib["u"]),
+                "kind": ib["kind"],
+            }
+            for ib in internal_by_block[bid]
+            if (ib["qa"] in div_q_set or ib["qb"] in div_q_set
+                or ib["kind"] in ("divertor_rad", "divertor_plate")
+                or shell_by_q[ib["qa"]] == nshell - 1
+                or shell_by_q[ib["qb"]] == nshell - 1)
+        ]
+
+        # 2-qubit internal bonds incident on seam boundary qubits for bond-type seam kicks
+        seam_boundary_bonds = [
+            {
+                "qa": int(ib["qa"]),
+                "qb": int(ib["qb"]),
+                "colour": int(ib["colour"]),
+                "pauli": ib["pauli"],
+                "bond_id": int(ib["bond_id"]),
+                "u": float(ib["u"]),
+                "weight": float(ib["weight"]),
+            }
+            for ib in internal_by_block[bid]
+            if (ib["qa"] in seam_q_set or ib["qb"] in seam_q_set)
+        ]
+
+        sigma_bonds, sigma_stats = compute_sigma_repair_bonds(
+            sites_g, internal_by_block[bid], A_full, G_full, seam_q_set, max_terms=45)
 
         blocks_out.append({
             "block_id": bid,
@@ -234,11 +436,17 @@ def generate_manifest(equiv_path="equiv.json", preset_override=None):
             "shells": shell_by_q,
             "core_qubits": core_qs,
             "divertor_qubits": div_qs,
+            "seam_qubits": seam_qs,
             "internal_bonds": internal_by_block[bid],
-            "loop_pauli_local": pstr_loc,
-            "loop_pauli_word": pword,
-            "loop_sign": s_loop,
-            "loop_target": tgt_loop,
+            "seam_boundary_bonds": seam_boundary_bonds,
+            "divertor_bonds": div_bonds,
+            "sigma_repair_bonds": sigma_bonds,
+            "sigma_repair_stats": sigma_stats,
+            "internal_loops": internal_loops,
+            "loop_pauli_local": primary_lp["pauli_local"],
+            "loop_pauli_word": primary_lp["pauli_word"],
+            "loop_sign": primary_lp["sign"],
+            "loop_target": primary_lp["target"],
         })
 
     # Canonical 4 block types (from module 0's 4 blocks: block_id = 0, 1, 2, 3)
@@ -250,17 +458,25 @@ def generate_manifest(equiv_path="equiv.json", preset_override=None):
             "loop_len": len(b0["loop"]),
             "tree_len": len(b0["tree"]),
             "n_internal_bonds": len(b0["internal_bonds"]),
+            "n_internal_loops": len(b0["internal_loops"]),
             "internal_bonds": [
                 {"qa": ib["qa"], "qb": ib["qb"], "colour": ib["colour"],
-                 "pauli": ib["pauli"], "u": ib["u"], "weight": ib["weight"]}
+                 "pauli": ib["pauli"], "u": ib["u"], "weight": ib["weight"],
+                 "kind": ib["kind"]}
                 for ib in b0["internal_bonds"]
             ],
+            "sigma_repair_bonds": b0["sigma_repair_bonds"],
+            "sigma_repair_stats": b0["sigma_repair_stats"],
+            "divertor_bonds": b0["divertor_bonds"],
+            "seam_boundary_bonds": b0["seam_boundary_bonds"],
+            "internal_loops": b0["internal_loops"],
             "loop_pauli_local": b0["loop_pauli_local"],
             "loop_pauli_word": b0["loop_pauli_word"],
             "loop_sign": b0["loop_sign"],
             "loop_target": b0["loop_target"],
             "core_qubits": b0["core_qubits"],
             "divertor_qubits": b0["divertor_qubits"],
+            "seam_qubits": b0["seam_qubits"],
         })
 
     coils = build_coil_windings(idx, bonds, meta)
@@ -278,6 +494,7 @@ def generate_manifest(equiv_path="equiv.json", preset_override=None):
         "pauli_by_colour": SK.COLOR_NAME,
         "bonds": [[int(i), int(j), int(c)] for i, j, c in bonds],
         "gauge": [float(x) for x in u_ground],
+        "vortex_free_gauge": [float(x) for x in u_vortex_free],
         "weights": [float(x) for x in weights],
         "in_shell_loops": [
             {"path": [int(v) for v in lm["path"]],
@@ -304,24 +521,31 @@ def validate_manifest(manifest, coils_only=False):
     n_k4 = len(manifest["k4_junctions"])
     n_tor = len(manifest["toroidal_seams"])
     tot_bonds = n_int + n_k4 + n_tor
+    tot_int_loops = sum(len(b["internal_loops"]) for b in manifest["blocks"])
+    expected_int_loops = n_int - manifest["n_blocks"] * (manifest["block_size"] - 1)
 
     print("  candidate: %s   preset: %s   shells: %d"
           % (manifest["candidate"], manifest["preset"], manifest["shells"]))
-    print("  blocks: %d x %d sites = %d sites"
-          % (manifest["n_blocks"], manifest["block_size"], manifest["n_sites"]))
+    print("  blocks: %d x %d sites = %d sites   (total internal cycles: %d / %d cycle rank)"
+          % (manifest["n_blocks"], manifest["block_size"],
+             manifest["n_sites"], tot_int_loops, expected_int_loops))
     print("  bonds: %d total = %d internal + %d K4 junction + %d toroidal seam"
           % (tot_bonds, n_int, n_k4, n_tor))
     for bt in manifest["block_types"]:
-        print("  block type %d: %2d-loop (%s, target %+d) + %2d tree | %2d internal bonds | core=%s div=%s"
+        print("  block type %d: %2d-loop (%s, target %+d) | %d internal cycles | %2d bonds | Sigma_keep=%d (%.1f%%) | div_bonds=%d"
               % (bt["type_id"], bt["loop_len"], bt["loop_pauli_word"],
-                 int(bt["loop_target"]), bt["tree_len"], bt["n_internal_bonds"],
-                 bt["core_qubits"], bt["divertor_qubits"]))
+                 int(bt["loop_target"]), bt["n_internal_loops"],
+                 bt["n_internal_bonds"],
+                 bt["sigma_repair_stats"]["n_keep"],
+                 100.0 * bt["sigma_repair_stats"]["captured_fraction"],
+                 len(bt["divertor_bonds"])))
     c = manifest["coils"]
     print("  coil windings: %d non-planar | %d planar | %d trim | %d divertor control"
           % (len(c["nonplanar"]), len(c["planar"]), len(c["trim"]), len(c["control"])))
     ok = (tot_bonds == manifest["n_bonds"]
           and manifest["n_blocks"] == 40
-          and manifest["n_sites"] == 1080)
+          and manifest["n_sites"] == 1080
+          and tot_int_loops == expected_int_loops)
     print("  MANIFEST GATE VERDICT: %s" % ("PASS" if ok else "FAIL"))
     print("=" * 78)
     return ok

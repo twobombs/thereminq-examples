@@ -21,11 +21,11 @@ python3 stellarator_kitaev.py --sizing --hyperoctagon --check --candidate both -
 echo "[4/8] Phase 4a Gate: 40 x 27-Qubit Manifold Partition & 4 Block Equivalence Classes..."
 python3 stellarator-equiv.py --check --prune -o equiv.json
 
-echo "[5/8] Phase 4b & 4c Gate: Manifest Compiler & OpenQASM 2.0 Emitter..."
+echo "[5/8] Phase 4b & 4c Gate: Manifest Compiler & OpenQASM 3.0 Emitter..."
 python3 stellarator-manifest.py --equiv equiv.json -o manifest.json
 python3 stellarator-qasm.py --manifest manifest.json -o qasm
 
-echo "[6/8] Phase 4d Gate: PyQrack 28-Qubit Manifold Driver & Seam-Repair Budget..."
+echo "[6/8] Phase 4d Gate: PyQrack 27-Qubit Manifold Driver & Seam-Repair Budget..."
 python3 stellarator_pyqrack_driver.py --manifest manifest.json --check
 
 echo "[7/8] Phase 5 & 6 Gate: Worker Self-Test, Rungs F1-F5 & W7-X 7-Criteria Scoreboard..."
