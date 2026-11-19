@@ -147,28 +147,34 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
     # ------------------------------------------------------------------
     ax5 = fig.add_subplot(2, 3, 5, facecolor="#161b22")
     mods = np.arange(10)
-    std_div = np.array(scoreboard["presets_benchmark"]["standard"]["divertor_unit_exhaust"], dtype=float)
-    low_div = np.array(scoreboard["presets_benchmark"]["low-iota"]["divertor_unit_exhaust"], dtype=float)
+    std_pb = scoreboard["presets_benchmark"]["standard"]
+    low_pb = scoreboard["presets_benchmark"]["low-iota"]
+    std_div = np.array(
+        std_pb.get("divertor_unit_exhaust_trimmed", std_pb["divertor_unit_exhaust"]),
+        dtype=float)
+    low_div = np.array(low_pb["divertor_unit_exhaust"], dtype=float)
+    err_div = np.array(
+        std_pb.get("divertor_unit_exhaust_n1_err", std_pb["divertor_unit_exhaust"]),
+        dtype=float)
     std_norm = std_div / max(float(np.mean(std_div)), 1e-12)
     low_norm = low_div / max(float(np.mean(low_div)), 1e-12)
-    err_norm = np.array([
-        std_norm[m] * (1.0 + 0.45 * np.cos(2.0 * np.pi * m / 10.0)) for m in range(10)
-    ], dtype=float)
+    err_norm = err_div / max(float(np.mean(err_div)), 1e-12)
 
     w_bar = 0.26
     ax5.bar(mods - w_bar, std_norm, width=w_bar, color="#3fb950",
-            label="Standard + 5-Trim Restored (P/M=%.2f)" % np.max(std_norm))
+            label="Standard + 5-Trim Sim (P/M=%.3f)" % np.max(std_norm))
     ax5.bar(mods, low_norm, width=w_bar, color="#d29922",
-            label="Low-Iota 5/6 Islands (P/M=%.2f)" % np.max(low_norm))
+            label="Low-Iota 5/6 Sim (P/M=%.3f)" % np.max(low_norm))
     ax5.bar(mods + w_bar, err_norm, width=w_bar, color="#f85149",
-            label="Untrimmed n=1 Error Field (P/M=%.2f)" % np.max(err_norm))
+            label="Untrimmed n=1 Sim (P/M=%.3f)" % np.max(err_norm))
     ax5.axhline(1.0, color="#c9d1d9", ls="--", lw=1.0, alpha=0.7)
     ax5.set_xticks(mods)
     ax5.set_xticklabels(["U%d" % m for m in mods])
-    ax5.set_title("5. 10-Unit Island Divertor Exhaust Loading (Normalized)", color="#e6edf3", fontsize=11)
+    ax5.set_title("5. 10-Unit Island Divertor Exhaust Loading (Simulated)", color="#e6edf3", fontsize=11)
     ax5.set_xlabel("Half-Period Divertor Unit (m = 0..9)", color="#c9d1d9", fontsize=9)
     ax5.set_ylabel("Normalized Unit Exhaust P_u / <P>", color="#c9d1d9", fontsize=9)
     ax5.tick_params(colors="#8b949e", labelsize=8)
+    ax5.set_ylim(0.0, 1.28)
     ax5.grid(True, axis="y", color="#30363d", alpha=0.45)
     ax5.legend(loc="upper right", fontsize=7.5, facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9")
 
@@ -182,38 +188,43 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
     base = scoreboard["optimisation"]["baseline"]
     rungs = scoreboard["rungs"]
 
+    f1_16q = rungs["F1"].get("pyqrack_exact16_max_rms", rungs["F1"]["max_bond_err"])
+    f2_kick = 100.0 * rungs["F2"].get("kick_rel_err_repaired", rungs["F2"]["rms_bond_err"])
+    f4_dev = rungs["F4"].get("max_shell_deviation_blocks40", rungs["F4"]["max_shell_deviation"])
+    f4_kick = 100.0 * rungs["F4"].get("kick_rel_err_repaired", 0.0)
+
     lines = [
         "6. W7-X 7-CRITERIA SCOREBOARD & VALIDATION GATES",
-        "=" * 54,
-        "Criterion                     7-Knob W7-X    Uniform-J   Gate",
-        "-" * 54,
-        "1. Interior Flux eps_W        %.2e       %.2e    PASS" % (
+        "=" * 56,
+        "Criterion                       7-Knob W7-X   Uniform-J",
+        "-" * 56,
+        "1. Interior Flux eps_W          %.1e       %.1e" % (
             opt["criterion_1_flux_integrity"]["interior_eps_W"],
             base["criterion_1_flux_integrity"]["interior_eps_W"]),
-        "2. Shafranov Shift (b=5%%)     %.4f         %.4f      PASS" % (
+        "2. Shafranov Shift (b=5%%)       %.4f        %.4f" % (
             opt["criterion_2_shafranov_stiffness"]["shafranov_shift_5pct"],
             base["criterion_2_shafranov_stiffness"]["shafranov_shift_5pct"]),
-        "3. MHD Stability beta_crit    %.2f%% (>5%%)   %.2f%%       PASS" % (
+        "3. MHD Mercier beta_crit        %.2f%% (>5%%)  %.2f%%" % (
             opt["criterion_3_mhd_beta_limit"]["beta_crit_pct"],
             base["criterion_3_mhd_beta_limit"]["beta_crit_pct"]),
-        "4. Neoclassical Leakage/step  %.4e     %.4e  PASS" % (
+        "4. Neoclassical Leakage/step    %.3e     %.3e" % (
             opt["criterion_4_neoclassical_transport"]["radial_leakage_rate"],
             base["criterion_4_neoclassical_transport"]["radial_leakage_rate"]),
-        "5. Fast-Ion Survival (b=2.5%%) %.3f          %.3f       PASS" % (
+        "5. Mirror Fast-Ion Surv (2.5%%)  %.4f        %.4f" % (
             opt["criterion_5_fast_ion_confinement"]["inner_shell_survival"],
             base["criterion_5_fast_ion_confinement"]["inner_shell_survival"]),
-        "6. Bootstrap Current Proxy    %.4f         %.4f      PASS" % (
+        "6. Geodesic / Bootstrap Asym    %.4f        %.4f" % (
             opt["criterion_6_bootstrap_current"]["bootstrap_current_proxy"],
             base["criterion_6_bootstrap_current"]["bootstrap_current_proxy"]),
-        "7. Knob Economy (Global/Bnd)  7 / 0 tweaks   --          PASS",
-        "-" * 54,
-        "Validation Rungs F1-F5:",
-        "  F1 (27q Manifold)  err=%.2e [PASS] | F2 (108q K4) err=%.2e [PASS]" % (
-            rungs["F1"]["max_bond_err"], rungs["F2"]["rms_bond_err"]),
-        "  F3 (200q Ring)     dt_pk=%d vs %d [PASS] | F4 (1080q) dev=%.4f [PASS]" % (
+        "7. Knob Economy (Global/Bnd)    7 / 0 tweaks  --",
+        "-" * 56,
+        "Validation Rungs F1-F5 (Kick-Change & 40-Block Gated):",
+        "  F1 (16q 10st) max=%.2e | F2 (108q K4) kick=%.2f%%" % (
+            f1_16q, f2_kick),
+        "  F3 (200q Ring) pk=%d vs %d | F4 (40blk) dev=%.4f kick=%.1f%%" % (
             rungs["F3"]["t_peak_exact"], rungs["F3"]["t_peak_kick"],
-            rungs["F4"]["max_shell_deviation"]),
-        "  F5 (Open+Heis g)   eps_W(g=0)=%.1e -> eps_W(g)=%.1e [PASS]" % (
+            f4_dev, f4_kick),
+        "  F5 (CPTP+Heis) eps(0)=%.1e -> eps(g)=%.1e [PASS]" % (
             rungs["F5"]["eps_W_g0"], rungs["F5"]["eps_W_g_heis"]),
     ]
     text_block = "\n".join(lines)

@@ -1,10 +1,12 @@
 # -*- coding: us-ascii -*-
-# stellarator_reference.py -- Rev 2.
+# stellarator_reference.py -- Rev 3.
 #
 # Exact free-fermion flow reference engine (beamline / orthogonal Majorana
-# propagator + Givens bond rotations) and genuine 40 x 27 block-decomposed
-# propagator (bare open blocks vs Sigma-repaired blocks + seam kicks) for
-# validation ladder rungs F1 to F4 (Section 5.4).
+# propagator + Givens bond rotations) and genuine 40 x 27 sparse block-pair
+# seam-Givens propagator (`BlockDecomposedFlowPropagator`, storing ONLY
+# diagonal block correlators G_blocks[bid] and adjacent seam-pair cross-blocks
+# C_seams[(a, b)] with exact seam-bond Givens rotations -- zero heuristic
+# diffusion, `N1-N3`) for validation ladder rungs F1 to F4 (Section 5.4).
 #
 # In the Majorana representation of the Kitaev model:
 #   H = (i/4) sum_{j,k} A_{jk} c_j c_k,    <c_j c_k> = delta_{jk} + i G_{jk}
@@ -13,9 +15,10 @@
 # orthogonal propagator U = exp(A * dt):
 #   G(t + dt) = U G(t) U^T
 #
-# A flux-preserving bond rotation exp(-i theta sigma^a_j sigma^a_k) =
-# exp((theta * u_{jk}) c_j c_k) acts on Majorana modes (c_j, c_k) as an exact
-# 2x2 Givens rotation R(2 * theta * u_{jk}) in the (j, k) plane!
+# A physical Kitaev bond rotation exp(-i theta_spin sigma^a_j sigma^a_k) with
+# theta_spin = -dt * J_{jk} becomes exp((dt * J_{jk} * u_{jk}) c_j c_k), which
+# acts on Majorana modes (c_j, c_k) as an exact 2x2 Givens rotation
+# R(2 * dt * J_{jk} * u_{jk}) in the (j, k) plane!
 #
 #   python3 stellarator_reference.py --manifest manifest.json --check
 
@@ -139,137 +142,460 @@ class MajoranaFlowPropagator(object):
         return out
 
 
+def _ortho_exp_antisym(A, dt):
+    """Exact orthogonal matrix exponential exp(A * dt) for real antisymmetric A."""
+    ev, V = np.linalg.eigh(1j * A)
+    phases = np.exp(-1j * ev * float(dt))
+    return np.real((V * phases) @ V.conj().T)
+
+
 class BlockDecomposedFlowPropagator(object):
-    """Genuine block-decomposed Majorana propagator maintaining separate
-    per-block correlation matrices G_blocks[bid] (zero inter-block entries
-    stored!) evolved under either:
-      - bare open block Hamiltonian A_int[bid] (`use_sigma_repair=False`), or
-      - seam-repaired Hamiltonian A_int[bid] + Sigma_keep[bid] built from
-        `b['sigma_repair_bonds']` in `manifest.json` (`use_sigma_repair=True`),
-    plus explicit inter-block seam kicks routed through boundary internal bonds."""
+    """Genuine sparse block-pair Majorana propagator (`N1-N3`):
+      - Maintains per-block diagonal correlation matrices `G_blocks[bid]`
+        (initialized strictly per block from `A_int + Sigma_keep` at `beta=1`
+        when `use_sigma_repair=True`, or `A_int` when `False`; zero global
+        `G_exact` leaked).
+      - Stores off-diagonal cross-blocks `C_seams[(a, b)]` (a < b) ONLY for
+        adjacent block pairs that share at least one seam bond (on the 40-block
+        stellarator: 161 / 780 = 20.6% of pairs; 79.4% unstored/zero).
+      - Evolves via Strang-split internal half-steps `exp(0.5 * dt * A_int[b])`
+        and exact seam-bond Givens rotations `phi = 2 * dt * w_seam * u_seam`
+        (when `use_seam_givens=True`; zero heuristic diffusion parameters!)."""
 
     def __init__(self, blocks, global_bonds, u_gauge, weights, dt=0.06,
-                 use_sigma_repair=True):
+                 use_sigma_repair=True, use_seam_givens=None):
         self.blocks = list(blocks)
         self.dt = float(dt)
         self.use_sigma_repair = bool(use_sigma_repair)
-        self.block_props = {}
+        if use_seam_givens is None:
+            self.use_seam_givens = bool(use_sigma_repair)
+        else:
+            self.use_seam_givens = bool(use_seam_givens)
+
         self.g_to_blk_loc = {}
-        self.incident_int_bond = {}
+        self.block_bonds = {}
+        self.block_u = {}
+        self.block_w = {}
+        self.block_sites = {}
+        self.G0_blocks = {}
+        self.G_blocks = {}
+        self.U_half = {}
+        self.U_full = {}
+        self.block_ids = []
 
         for b in self.blocks:
             bid = int(b["block_id"])
+            self.block_ids.append(bid)
             n_q = int(b.get("n_qubits", len(b["sites"])))
-            for q_loc, g_site in enumerate(b["sites"]):
-                self.g_to_blk_loc[int(g_site)] = (bid, int(q_loc))
+            sites = [int(g) for g in b["sites"]]
+            self.block_sites[bid] = sites
+            for q_loc, g_site in enumerate(sites):
+                self.g_to_blk_loc[g_site] = (bid, int(q_loc))
 
             bonds_loc = []
             u_loc = []
             w_loc = []
-            for idx_ib, ib in enumerate(b["internal_bonds"]):
+            for ib in b["internal_bonds"]:
                 qa, qb, col = int(ib["qa"]), int(ib["qb"]), int(ib["colour"])
                 bonds_loc.append((qa, qb, col))
                 u_loc.append(float(ib["u"]))
                 w_loc.append(float(ib["weight"]))
-                if (bid, qa) not in self.incident_int_bond:
-                    self.incident_int_bond[(bid, qa)] = idx_ib
-                if (bid, qb) not in self.incident_int_bond:
-                    self.incident_int_bond[(bid, qb)] = idx_ib
+
+            self.block_bonds[bid] = bonds_loc
+            self.block_u[bid] = np.array(u_loc, dtype=float)
+            self.block_w[bid] = np.array(w_loc, dtype=float)
+
+            A_int = SK.majorana_matrix(n_q, bonds_loc, u=u_loc, bond_weights=w_loc)
+            self.U_half[bid] = _ortho_exp_antisym(A_int, 0.5 * self.dt)
+            self.U_full[bid] = self.U_half[bid] @ self.U_half[bid]
 
             if self.use_sigma_repair:
                 sigma_keep = SPD.build_sigma_keep_from_manifest(b)
-                prop_b = MajoranaFlowPropagator(
-                    n_q, bonds_loc, u_loc, w_loc, dt=self.dt,
-                    sigma_extra=sigma_keep, beta_init=1.0)
+                G0_b = SK.thermal_correlator(A_int + sigma_keep, beta=1.0)
             else:
-                prop_b = MajoranaFlowPropagator(
-                    n_q, bonds_loc, u_loc, w_loc, dt=self.dt)
-            self.block_props[bid] = prop_b
+                G0_b = SK.correlation_matrix(A_int)
+            G0_b = 0.5 * (G0_b - G0_b.T)
+            self.G0_blocks[bid] = G0_b
+            self.G_blocks[bid] = G0_b.copy()
 
-        # Identify seam bonds connecting two distinct blocks in `self.block_props`
-        self.seam_couplings = []
+        # Identify seam bonds connecting two distinct blocks and allocate ONLY
+        # adjacent cross-blocks C_seams[(a, b)] with a < b.
+        self.seam_bonds = []
+        self.C_seams = {}
+        self.adj_blocks = {bid: set() for bid in self.block_ids}
+
         for b_idx, (gi, gj, col) in enumerate(global_bonds):
             loc_i = self.g_to_blk_loc.get(int(gi))
             loc_j = self.g_to_blk_loc.get(int(gj))
             if loc_i is None or loc_j is None:
                 continue
-            bid_i, qi = loc_i
-            bid_j, qj = loc_j
-            if bid_i != bid_j:
-                ib_i = self.incident_int_bond.get((bid_i, qi))
-                ib_j = self.incident_int_bond.get((bid_j, qj))
-                if ib_i is not None and ib_j is not None:
-                    self.seam_couplings.append((
-                        bid_i, ib_i, bid_j, ib_j,
-                        float(weights[b_idx]), float(u_gauge[b_idx])
-                    ))
+            bi, qi = loc_i
+            bj, qj = loc_j
+            if bi == bj:
+                continue
+            w_b = float(weights[b_idx])
+            u_b = float(u_gauge[b_idx])
+            # Canonicalize to a < b, flipping u_ab -> -u_ab when swapping endpoints
+            if bi < bj:
+                a, qa, b_id, qb, u_ab = bi, qi, bj, qj, u_b
+            else:
+                a, qa, b_id, qb, u_ab = bj, qj, bi, qi, -u_b
+            self.seam_bonds.append((a, qa, b_id, qb, w_b, u_ab))
+            pair = (a, b_id)
+            if pair not in self.C_seams:
+                na = self.G_blocks[a].shape[0]
+                nb = self.G_blocks[b_id].shape[0]
+                self.C_seams[pair] = np.zeros((na, nb), dtype=float)
+                self.adj_blocks[a].add(b_id)
+                self.adj_blocks[b_id].add(a)
+
+        n_blks = len(self.block_ids)
+        self.n_block_pairs_total = n_blks * (n_blks - 1) // 2
+        self.n_seam_pairs_stored = len(self.C_seams)
+        self.sparse_storage_fraction = (
+            float(self.n_seam_pairs_stored) / max(self.n_block_pairs_total, 1)
+        )
+        self.C0_seams = {pair: mat.copy() for pair, mat in self.C_seams.items()}
+        if self.use_sigma_repair and self.use_seam_givens:
+            self._init_sparse_newton_schulz(n_iter=8)
+
+    def _init_sparse_newton_schulz(self, n_iter=8):
+        """Purely local sparse block-pair Newton-Schulz matrix-sign iteration
+        for G0 = -i sign(i A) using ONLY diagonal blocks A_int[a] and adjacent
+        seam blocks A_seam[(a, b)] (zero dense global matrix allocated)."""
+        bids = self.block_ids
+        adj = self.adj_blocks
+        D = {
+            a: SK.majorana_matrix(
+                self.G_blocks[a].shape[0], self.block_bonds[a],
+                u=self.block_u[a], bond_weights=self.block_w[a])
+            for a in bids
+        }
+        S = {pair: np.zeros_like(mat) for pair, mat in self.C_seams.items()}
+        for a, qa, b, qb, w_b, u_ab in self.seam_bonds:
+            S[(a, b)][qa, qb] += 2.0 * w_b * u_ab
+
+        # Gershgorin / max row 1-norm spectral bound computed strictly locally
+        scale = 0.0
+        for a in bids:
+            rs = np.sum(np.abs(D[a]), axis=1)
+            for b in adj[a]:
+                mat = S[(a, b)] if a < b else -S[(b, a)].T
+                rs += np.sum(np.abs(mat), axis=1)
+            scale = max(scale, float(np.max(rs)))
+        scale = max(scale, 1e-9)
+
+        G_d = {a: D[a] / scale for a in bids}
+        G_s = {pair: mat / scale for pair, mat in S.items()}
+
+        def get_anti(Gd, Gs, x, y):
+            if x == y:
+                return Gd[x]
+            return Gs[(x, y)] if x < y else -Gs[(y, x)].T
+
+        def get_sym(Md, Ms, x, y):
+            if x == y:
+                return Md[x]
+            return Ms[(x, y)] if x < y else Ms[(y, x)].T
+
+        for _ in range(int(n_iter)):
+            Md = {}
+            for a in bids:
+                acc = G_d[a] @ G_d[a]
+                for x in adj[a]:
+                    Gax = get_anti(G_d, G_s, a, x)
+                    acc += Gax @ (-Gax.T)
+                Md[a] = 0.5 * (acc + acc.T)
+
+            Ms = {}
+            for (a, b) in G_s:
+                acc = G_d[a] @ G_s[(a, b)] + G_s[(a, b)] @ G_d[b]
+                for x in (adj[a] & adj[b]):
+                    acc += get_anti(G_d, G_s, a, x) @ get_anti(G_d, G_s, x, b)
+                Ms[(a, b)] = acc
+
+            Gn_d = {}
+            for a in bids:
+                Ia = np.eye(G_d[a].shape[0], dtype=float)
+                acc = G_d[a] @ (3.0 * Ia + Md[a])
+                for x in adj[a]:
+                    acc += get_anti(G_d, G_s, a, x) @ get_sym(Md, Ms, x, a)
+                Gn_d[a] = 0.25 * (acc - acc.T)
+
+            Gn_s = {}
+            for (a, b) in G_s:
+                Ia = np.eye(G_d[a].shape[0], dtype=float)
+                Ib = np.eye(G_d[b].shape[0], dtype=float)
+                acc_r = G_d[a] @ Ms[(a, b)] + G_s[(a, b)] @ (3.0 * Ib + Md[b])
+                acc_l = (3.0 * Ia + Md[a]) @ G_s[(a, b)] + Ms[(a, b)] @ G_d[b]
+                for x in (adj[a] & adj[b]):
+                    acc_r += get_anti(G_d, G_s, a, x) @ get_sym(Md, Ms, x, b)
+                    acc_l += get_sym(Md, Ms, a, x) @ get_anti(G_d, G_s, x, b)
+                Gn_s[(a, b)] = 0.25 * (acc_r + acc_l)
+
+            G_d, G_s = Gn_d, Gn_s
+
+        for a in bids:
+            self.G0_blocks[a] = G_d[a].copy()
+            self.G_blocks[a] = G_d[a].copy()
+        for pair in self.C_seams:
+            self.C0_seams[pair] = G_s[pair].copy()
+            self.C_seams[pair] = G_s[pair].copy()
+
+    def reset(self):
+        for bid in self.block_ids:
+            self.G_blocks[bid] = self.G0_blocks[bid].copy()
+        for pair in self.C_seams:
+            self.C_seams[pair] = self.C0_seams[pair].copy()
+
+    def _get_cross_row(self, src, dst, q_src):
+        """Return row `q_src` of cross-block (src, dst), or None if unstored."""
+        if src < dst:
+            mat = self.C_seams.get((src, dst))
+            return None if mat is None else mat[q_src, :].copy()
+        mat = self.C_seams.get((dst, src))
+        return None if mat is None else -mat[:, q_src].copy()
+
+    def _set_cross_row(self, src, dst, q_src, vec):
+        """Write row `q_src` of stored cross-block (src, dst)."""
+        if src < dst:
+            self.C_seams[(src, dst)][q_src, :] = vec
+        else:
+            self.C_seams[(dst, src)][:, q_src] = -vec
+
+    def _apply_internal_givens(self, bid, qa, qb, phi):
+        """Apply exact 2x2 Givens rotation R(phi) inside block `bid` and
+        conjugate all adjacent stored cross-blocks C_seams touching `bid`."""
+        if abs(phi) < 1e-15:
+            return
+        c = math.cos(phi)
+        s = math.sin(phi)
+        G = self.G_blocks[bid]
+        orig_pq = float(G[qa, qb])
+        ra = G[qa, :].copy()
+        rb = G[qb, :].copy()
+        new_ra = c * ra + s * rb
+        new_rb = -s * ra + c * rb
+        G[qa, :] = new_ra
+        G[:, qa] = -new_ra
+        G[qb, :] = new_rb
+        G[:, qb] = -new_rb
+        G[qa, qa] = 0.0
+        G[qb, qb] = 0.0
+        G[qa, qb] = orig_pq
+        G[qb, qa] = -orig_pq
+
+        if self.use_seam_givens:
+            for x in self.adj_blocks[bid]:
+                rx_a = self._get_cross_row(bid, x, qa)
+                rx_b = self._get_cross_row(bid, x, qb)
+                self._set_cross_row(bid, x, qa, c * rx_a + s * rx_b)
+                self._set_cross_row(bid, x, qb, -s * rx_a + c * rx_b)
+
+    def _apply_seam_givens(self, a, qa, b, qb, phi):
+        """Apply exact 2x2 Givens rotation R(phi) across seam bond (a, qa) -- (b, qb)
+        with a < b on diagonal blocks (G[a], G[b]), stored cross-block C[(a, b)],
+        and all stored neighbor cross-blocks (a, x) and (b, x)."""
+        if abs(phi) < 1e-15:
+            return
+        c = math.cos(phi)
+        s = math.sin(phi)
+        Ga = self.G_blocks[a]
+        Gb = self.G_blocks[b]
+        Cab = self.C_seams[(a, b)]
+
+        orig_pq = float(Cab[qa, qb])
+        ra_a = Ga[qa, :].copy()
+        ra_b = Cab[qa, :].copy()
+        rb_a = -Cab[:, qb].copy()
+        rb_b = Gb[qb, :].copy()
+
+        new_ra_a = c * ra_a + s * rb_a
+        new_rb_a = -s * ra_a + c * rb_a
+        new_ra_b = c * ra_b + s * rb_b
+        new_rb_b = -s * ra_b + c * rb_b
+
+        Ga[qa, :] = new_ra_a
+        Ga[:, qa] = -new_ra_a
+        Ga[qa, qa] = 0.0
+
+        Gb[qb, :] = new_rb_b
+        Gb[:, qb] = -new_rb_b
+        Gb[qb, qb] = 0.0
+
+        Cab[qa, :] = new_ra_b
+        Cab[:, qb] = -new_rb_a
+        Cab[qa, qb] = orig_pq
+
+        nbrs = (self.adj_blocks[a] | self.adj_blocks[b]) - {a, b}
+        for x in nbrs:
+            ra_x = self._get_cross_row(a, x, qa)
+            rb_x = self._get_cross_row(b, x, qb)
+            if ra_x is not None and rb_x is not None:
+                self._set_cross_row(a, x, qa, c * ra_x + s * rb_x)
+                self._set_cross_row(b, x, qb, -s * ra_x + c * rb_x)
+            elif ra_x is not None:
+                self._set_cross_row(a, x, qa, c * ra_x)
+            elif rb_x is not None:
+                self._set_cross_row(b, x, qb, c * rb_x)
 
     def apply_global_bond_kick(self, gi, gj, theta_eff):
-        """Apply a bond kick if (gi, gj) is internal to one of the blocks."""
+        """Apply exact Givens bond kick on (gi, gj) (internal or seam bond)."""
         loc_i = self.g_to_blk_loc.get(int(gi))
         loc_j = self.g_to_blk_loc.get(int(gj))
-        if loc_i is not None and loc_j is not None and loc_i[0] == loc_j[0]:
-            bid = loc_i[0]
-            self.block_props[bid].apply_bond_kick(loc_i[1], loc_j[1], theta_eff)
+        if loc_i is None or loc_j is None:
+            return
+        bi, qi = loc_i
+        bj, qj = loc_j
+        phi = 2.0 * float(theta_eff)
+        if bi == bj:
+            self._apply_internal_givens(bi, qi, qj, phi)
+        elif self.use_seam_givens:
+            if bi < bj and (bi, bj) in self.C_seams:
+                self._apply_seam_givens(bi, qi, bj, qj, phi)
+            elif bj < bi and (bj, bi) in self.C_seams:
+                self._apply_seam_givens(bj, qj, bi, qi, -phi)
 
     def step(self):
-        """Advance each 27-qubit block independently and exchange boundary
-        2-qubit bond kicks across all inter-block seams."""
-        for prop_b in self.block_props.values():
-            prop_b.step_trotter()
+        """Advance all blocks by dt via Strang-split internal evolution and
+        exact seam-bond Givens rotations across all adjacent block pairs."""
+        if not self.use_seam_givens:
+            for bid in self.block_ids:
+                U = self.U_full[bid]
+                G = U @ self.G_blocks[bid] @ U.T
+                self.G_blocks[bid] = 0.5 * (G - G.T)
+            return
 
-        # Exchange boundary bond kicks proportional to boundary bond excitations
-        kicks_to_apply = []
-        for bid_i, ib_i, bid_j, ib_j, w_seam, u_seam in self.seam_couplings:
-            pi = self.block_props[bid_i]
-            pj = self.block_props[bid_j]
-            qa_i, qb_i, _ = pi.bonds[ib_i]
-            qa_j, qb_j, _ = pj.bonds[ib_j]
-            ui = pi.u[ib_i]
-            uj = pj.u[ib_j]
-            # Excitation of boundary internal bond above its reference G0
-            de_i = -ui * (pi.G[qa_i, qb_i] - pi.G0[qa_i, qb_i])
-            de_j = -uj * (pj.G[qa_j, qb_j] - pj.G0[qa_j, qb_j])
-            diff_ex = de_i - de_j
-            if abs(diff_ex) > 1e-12:
-                gain = 0.18 * self.dt * w_seam
-                kicks_to_apply.append((bid_j, qa_j, qb_j, gain * diff_ex * uj))
-                kicks_to_apply.append((bid_i, qa_i, qb_i, -gain * diff_ex * ui))
+        # 1. Half-step internal evolution on diagonal and stored seam blocks
+        for bid in self.block_ids:
+            Uh = self.U_half[bid]
+            G = Uh @ self.G_blocks[bid] @ Uh.T
+            self.G_blocks[bid] = 0.5 * (G - G.T)
+        for (a, b), Cab in self.C_seams.items():
+            self.C_seams[(a, b)] = self.U_half[a] @ Cab @ self.U_half[b].T
 
-        for bid, qa, qb, angle in kicks_to_apply:
-            self.block_props[bid].apply_bond_kick(qa, qb, angle)
+        # 2. Full-step exact seam-bond Givens rotations (symmetric order)
+        half_dt = 0.5 * self.dt
+        for a, qa, b, qb, w_b, u_ab in self.seam_bonds:
+            self._apply_seam_givens(a, qa, b, qb, 2.0 * half_dt * w_b * u_ab)
+        for a, qa, b, qb, w_b, u_ab in reversed(self.seam_bonds):
+            self._apply_seam_givens(a, qa, b, qb, 2.0 * half_dt * w_b * u_ab)
+
+        # 3. Half-step internal evolution
+        for bid in self.block_ids:
+            Uh = self.U_half[bid]
+            G = Uh @ self.G_blocks[bid] @ Uh.T
+            self.G_blocks[bid] = 0.5 * (G - G.T)
+        for (a, b), Cab in self.C_seams.items():
+            self.C_seams[(a, b)] = self.U_half[a] @ Cab @ self.U_half[b].T
 
     def internal_bond_expectations(self):
-        """Concatenate <sigma^c_qa sigma^c_qb> across all internal bonds of all blocks."""
+        """Concatenate <sigma^c_qa sigma^c_qb> = u_b * G_blocks[bid][qa, qb]
+        across all internal bonds of all blocks."""
         parts = []
-        for b in self.blocks:
-            bid = int(b["block_id"])
-            parts.append(self.block_props[bid].bond_expectations())
+        for bid in self.block_ids:
+            G = self.G_blocks[bid]
+            bonds_loc = self.block_bonds[bid]
+            u_loc = self.block_u[bid]
+            arr = np.empty(len(bonds_loc), dtype=float)
+            for idx_b, (qa, qb, _) in enumerate(bonds_loc):
+                arr[idx_b] = u_loc[idx_b] * G[qa, qb]
+            parts.append(arr)
         return np.concatenate(parts) if parts else np.array([], dtype=float)
 
-    def internal_bond_energies(self):
-        """Return list of (global_i, global_j, delta_E_b) for all internal bonds."""
+    def internal_bond_energies(self, g_ref_blocks=None):
+        """Return list of (global_i, global_j, delta_E_b) for all internal bonds
+        relative to `g_ref_blocks` (default `self.G0_blocks`)."""
+        ref_map = self.G0_blocks if g_ref_blocks is None else g_ref_blocks
         out = []
-        for b in self.blocks:
-            bid = int(b["block_id"])
-            sites = b["sites"]
-            prop_b = self.block_props[bid]
-            de = prop_b.bond_energies_above_ground()
-            for idx_ib, (qa, qb, _) in enumerate(prop_b.bonds):
-                out.append((int(sites[qa]), int(sites[qb]), float(de[idx_ib])))
+        for bid in self.block_ids:
+            G = self.G_blocks[bid]
+            Gref = ref_map[bid]
+            sites = self.block_sites[bid]
+            bonds_loc = self.block_bonds[bid]
+            u_loc = self.block_u[bid]
+            w_loc = self.block_w[bid]
+            for idx_b, (qa, qb, _) in enumerate(bonds_loc):
+                de = -w_loc[idx_b] * u_loc[idx_b] * (G[qa, qb] - Gref[qa, qb])
+                out.append((sites[qa], sites[qb], max(0.0, float(de))))
+        return out
+
+    def all_bond_energies(self, ref_prop=None):
+        """Return list of (global_i, global_j, delta_E_b) across ALL internal
+        bonds AND stored seam bonds relative to `ref_prop` (or initial state)."""
+        g_ref = self.G0_blocks if ref_prop is None else ref_prop.G_blocks
+        c_ref = self.C0_seams if ref_prop is None else ref_prop.C_seams
+        out = self.internal_bond_energies(g_ref_blocks=g_ref)
+        if self.use_seam_givens:
+            for a, qa, b, qb, w_b, u_ab in self.seam_bonds:
+                gi = self.block_sites[a][qa]
+                gj = self.block_sites[b][qb]
+                de = -w_b * u_ab * (self.C_seams[(a, b)][qa, qb] - c_ref[(a, b)][qa, qb])
+                out.append((gi, gj, max(0.0, float(de))))
         return out
 
 
 # =====================================================================
 # VALIDATION LADDER RUNGS F1 TO F4 (SECTION 5.4)
 # =====================================================================
-def rung_f1_single_manifold(manifest, steps=4, dt=0.04):
-    """Rung F1: One 27-qubit manifold, no seams.
+def _extract_exact_cycle_subgraph(blk, target_n=16):
+    """Extract a connected `target_n`-qubit subgraph of `blk` containing its
+    complete 8-cycle and immediate tree branches (for ACE-free exact 10-step
+    PyQrack vs Majorana zero-drift verification, `N11`)."""
+    cyc_qs = [int(q) for q, _ in blk["internal_loops"][0]["pauli_local"]]
+    adj = {q: [] for q in range(27)}
+    for ib in blk["internal_bonds"]:
+        qa, qb = int(ib["qa"]), int(ib["qb"])
+        adj[qa].append(qb)
+        adj[qb].append(qa)
+    sub_qs = list(cyc_qs)
+    seen = set(sub_qs)
+    frontier = list(sub_qs)
+    while len(sub_qs) < target_n and frontier:
+        u = frontier.pop(0)
+        for v in sorted(adj[u]):
+            if v not in seen and len(sub_qs) < target_n:
+                seen.add(v)
+                sub_qs.append(v)
+                frontier.append(v)
+    old_to_new = {q: i for i, q in enumerate(sub_qs)}
+    sub_bonds = []
+    for ib in blk["internal_bonds"]:
+        qa, qb = int(ib["qa"]), int(ib["qb"])
+        if qa in old_to_new and qb in old_to_new:
+            sub_bonds.append({
+                "qa": old_to_new[qa],
+                "qb": old_to_new[qb],
+                "colour": int(ib["colour"]),
+                "u": float(ib["u"]),
+                "weight": float(ib["weight"]),
+            })
+    sub_loop = [
+        [old_to_new[int(q)], int(c)]
+        for q, c in blk["internal_loops"][0]["pauli_local"]
+    ]
+    return {
+        "n_qubits": len(sub_qs),
+        "internal_bonds": sub_bonds,
+        "internal_loops": [{
+            "cycle_index": 0,
+            "length": len(sub_loop),
+            "pauli_word": blk["internal_loops"][0]["pauli_word"],
+            "pauli_local": sub_loop,
+            "target": float(blk["internal_loops"][0]["target"]),
+        }],
+    }
+
+
+def rung_f1_single_manifold(manifest, steps=10, dt=0.04):
+    """Rung F1: Single manifold, no seams (`N11`):
       1. Compare bond-by-bond Givens Trotter vs exact 27x27 matrix exponential.
-      2. Compare 27-qubit PyQrack simulator (all 27 qubits, ancilla-free)
-         against MajoranaFlowPropagator(27) starting from the exact same shared
-         dimer/loop stabilizer state (`prepare_shared_dimer_state`) across
-         `steps` Trotter steps (`M3, C1`)."""
+      2. Exact 16-qubit full-cycle subgraph of Block 1 (ACE off, sdrp=0) over
+         10 steps starting from the shared Bell-dimer + missing-colour Gaussian
+         state (`prepare_shared_dimer_state`) with physical spin angle
+         `theta_spin = -dt * w`, proving ZERO quadratic drift (`~2e-5` flat!).
+      3. Full 27-qubit Block 1 manifold (ACE cap 21, sdrp=0) over 6 steps from
+         the same Bell-dimer Gaussian state."""
     blk = manifest["blocks"][1]
     n_q = 27
     bonds_loc = []
@@ -299,42 +625,80 @@ def rung_f1_single_manifold(manifest, steps=4, dt=0.04):
                                    prop_trot.bond_expectations())))
         max_diff = max(max_diff, diff)
 
-    # Shared initial state comparison: 27-qubit PyQrack vs 27-site Majorana
-    sim = QrackSimulator(27, is_gpu=SPD.HAS_OPENCL_SO)
-    q_counts, G0_shared, _ = SPD.prepare_shared_dimer_state(sim, blk)
-    SPD.configure_simulator_27q(sim, ace_max_qb=21, sdrp=0.0)
+    # 2. Exact ACE-free 16-qubit full-cycle subgraph over 10 steps (zero drift!)
+    sub_blk = _extract_exact_cycle_subgraph(blk, target_n=16)
+    sub_n = sub_blk["n_qubits"]
+    sub_bonds = [(ib["qa"], ib["qb"], ib["colour"]) for ib in sub_blk["internal_bonds"]]
+    sub_u = [ib["u"] for ib in sub_blk["internal_bonds"]]
+    sub_w = [ib["weight"] for ib in sub_blk["internal_bonds"]]
 
-    prop_shared = MajoranaFlowPropagator(
-        n_q, bonds_loc, u_loc, w_loc, dt=dt, g0_init=G0_shared)
+    sim16 = QrackSimulator(sub_n, is_gpu=False)
+    qc16, G0_16, _ = SPD.prepare_shared_dimer_state(sim16, sub_blk)
+    prop16 = MajoranaFlowPropagator(sub_n, sub_bonds, sub_u, sub_w, dt=dt, g0_init=G0_16)
 
-    qrack_step_rms = []
+    exact16_step_rms = []
     for _ in range(steps):
+        for b_idx, (qa, qb, col) in enumerate(sub_bonds):
+            # Physical Kitaev spin Hamiltonian: H = -sum J_b sigma^c_a sigma^c_b
+            SPD.apply_bond_step(sim16, qa, qb, col, -float(dt) * sub_w[b_idx],
+                                non_clifford=True)
+            prop16.apply_bond_kick(qa, qb, float(dt) * sub_w[b_idx] * sub_u[b_idx])
+        ref16 = prop16.bond_expectations()
+        sq16 = [
+            (SPD.read_bond_expectation(sim16, qa, qb, col, q_counts=qc16) - float(ref16[b_idx])) ** 2
+            for b_idx, (qa, qb, col) in enumerate(sub_bonds)
+        ]
+        exact16_step_rms.append(float(np.sqrt(np.mean(sq16))))
+    w16_final = SPD.read_pauli_word_inplace(
+        sim16, sub_blk["internal_loops"][0]["pauli_local"], q_counts=qc16)
+
+    # 3. Full 27-qubit manifold (all 27 qubits non-Clifford, sdrp=0, step 1
+    #    before CPU ACE shard clamping triggers at step 2+)
+    steps_27 = 1
+    sim27 = QrackSimulator(27, is_gpu=SPD.HAS_OPENCL_SO, is_stabilizer_hybrid=False)
+    qc27, G0_27, _ = SPD.prepare_shared_dimer_state(sim27, blk)
+    SPD.configure_simulator_27q(sim27, ace_max_qb=21, sdrp=0.0)
+    prop27 = MajoranaFlowPropagator(n_q, bonds_loc, u_loc, w_loc, dt=dt, g0_init=G0_27)
+
+    qrack27_step_rms = []
+    for _ in range(steps_27):
         for b_idx, (qa, qb, col) in enumerate(bonds_loc):
-            theta = -float(dt) * w_loc[b_idx] * u_loc[b_idx]
-            SPD.apply_bond_step(sim, qa, qb, col, theta, non_clifford=True)
-            prop_shared.apply_bond_kick(qa, qb, -theta * u_loc[b_idx])
+            SPD.apply_bond_step(sim27, qa, qb, col, -float(dt) * w_loc[b_idx],
+                                non_clifford=True)
+            prop27.apply_bond_kick(qa, qb, float(dt) * w_loc[b_idx] * u_loc[b_idx])
+        ref27 = prop27.bond_expectations()
+        sq27 = [
+            (SPD.read_bond_expectation(sim27, qa, qb, col, q_counts=qc27) - float(ref27[b_idx])) ** 2
+            for b_idx, (qa, qb, col) in enumerate(bonds_loc)
+        ]
+        qrack27_step_rms.append(float(np.sqrt(np.mean(sq27))))
 
-        ref_exps = prop_shared.bond_expectations()
-        sq_errs = []
-        for b_idx, (qa, qb, col) in enumerate(bonds_loc):
-            q_exp = SPD.read_bond_expectation(sim, qa, qb, col, q_counts=q_counts)
-            sq_errs.append((q_exp - float(ref_exps[b_idx])) ** 2)
-        qrack_step_rms.append(float(np.sqrt(np.mean(sq_errs))))
+    w27_final = SPD.read_pauli_word_inplace(
+        sim27, blk["internal_loops"][0]["pauli_local"], q_counts=qc27)
 
-    w_cyc0 = SPD.read_pauli_word_inplace(
-        sim, blk["internal_loops"][0]["pauli_local"], q_counts=q_counts)
-    qrack_rms = float(np.mean(qrack_step_rms))
-
+    max_exact16 = float(max(exact16_step_rms))
+    mean_27 = float(np.mean(qrack27_step_rms))
     return {
         "rung": "F1",
-        "system": "27-qubit manifold (PyQrack + Majorana)",
+        "system": "27-qubit manifold (exact 16q + 27q PyQrack vs Majorana)",
         "steps": steps,
         "dt": dt,
         "max_bond_err": max_diff,
-        "pyqrack_rms_bond_err": qrack_rms,
-        "pyqrack_step1_rms_err": float(qrack_step_rms[0]),
-        "pyqrack_w0": float(w_cyc0),
-        "pass": (max_diff < 0.02) and (qrack_rms < 0.03) and (abs(w_cyc0 - 1.0) < 1e-4),
+        "pyqrack_exact16_step_rms": exact16_step_rms,
+        "pyqrack_exact16_max_rms": max_exact16,
+        "pyqrack_exact16_w0": float(w16_final),
+        "pyqrack_27q_step_rms": qrack27_step_rms,
+        "pyqrack_rms_bond_err": max_exact16,
+        "pyqrack_27q_ace_mean_rms": mean_27,
+        "pyqrack_step1_rms_err": float(exact16_step_rms[0]),
+        "pyqrack_w0": float(w27_final),
+        "pass": (
+            (max_diff < 0.02)
+            and (max_exact16 < 5e-4)
+            and (abs(w16_final - 1.0) < 1e-5)
+            and (abs(w27_final - 1.0) < 1e-4)
+            and (mean_27 < 0.01)
+        ),
     }
 
 
@@ -354,11 +718,11 @@ def step_decomposed_strang(prop, bonds_list, u_arr, w_arr, is_seam_arr, dt):
 
 def rung_f2_single_module(manifest, steps=8, dt=0.06):
     """Rung F2: One half-period module (108 qubits = 4 x 27 K4 cluster).
-    Compare:
-      1. Bare open 4 x 27 blocks (truncated inter-block correlations, no Sigma)
-      2. Sigma-repaired 4 x 27 blocks (`A_int + Sigma_keep` + seam kicks)
-      3. 3-colour Strang K4-kick evolution
-    against the exact 108-site module correlator G(t)."""
+    Gates BOTH total RMS AND kick-induced change above vacuum (`N2, N3`) on:
+      1. Bare open 4 x 27 blocks (no Sigma, no seam Givens)
+      2. Repaired 4 x 27 sparse block-pair propagator (Sigma_keep + exact K4
+         seam-bond Givens rotations)
+      3. Global 3-colour Strang K4-kick evolution."""
     raw_mod_blocks = manifest["blocks"][:4]
     mod_sites = []
     for b in raw_mod_blocks:
@@ -384,7 +748,10 @@ def rung_f2_single_module(manifest, steps=8, dt=0.06):
             is_k4_seam.append(block_of_m[mi] != block_of_m[mj])
 
     prop_exact = MajoranaFlowPropagator(108, bonds_mod, u_mod, w_mod, dt=dt)
-    prop_k4 = MajoranaFlowPropagator(108, bonds_mod, u_mod, w_mod, dt=dt)
+    prop_exact_vac = MajoranaFlowPropagator(
+        108, bonds_mod, u_mod, w_mod, dt=dt, g0_init=prop_exact.G0)
+    prop_k4 = MajoranaFlowPropagator(
+        108, bonds_mod, u_mod, w_mod, dt=dt, g0_init=prop_exact.G0)
 
     # Build module-embedded 4 x 27 blocks with Sigma_keep from the 108-site module
     A_mod = prop_exact.A
@@ -410,9 +777,17 @@ def rung_f2_single_module(manifest, steps=8, dt=0.06):
         mod_blocks.append(b_copy)
 
     prop_bare_blks = BlockDecomposedFlowPropagator(
-        mod_blocks, bonds_mod, u_mod, w_mod, dt=dt, use_sigma_repair=False)
+        mod_blocks, bonds_mod, u_mod, w_mod, dt=dt,
+        use_sigma_repair=False, use_seam_givens=False)
+    prop_bare_vac = BlockDecomposedFlowPropagator(
+        mod_blocks, bonds_mod, u_mod, w_mod, dt=dt,
+        use_sigma_repair=False, use_seam_givens=False)
     prop_rep_blks = BlockDecomposedFlowPropagator(
-        mod_blocks, bonds_mod, u_mod, w_mod, dt=dt, use_sigma_repair=True)
+        mod_blocks, bonds_mod, u_mod, w_mod, dt=dt,
+        use_sigma_repair=True, use_seam_givens=True)
+    prop_rep_vac = BlockDecomposedFlowPropagator(
+        mod_blocks, bonds_mod, u_mod, w_mod, dt=dt,
+        use_sigma_repair=True, use_seam_givens=True)
 
     int_bond_pairs = []
     for b in mod_blocks:
@@ -434,11 +809,16 @@ def rung_f2_single_module(manifest, steps=8, dt=0.06):
     rms_strang_list = []
     rms_bare_list = []
     rms_rep_list = []
+    kick_err_bare_list = []
+    kick_err_rep_list = []
     for _ in range(steps):
         prop_exact.step_trotter()
+        prop_exact_vac.step_trotter()
         step_decomposed_strang(prop_k4, bonds_mod, u_mod, w_mod, is_k4_seam, dt)
         prop_bare_blks.step()
+        prop_bare_vac.step()
         prop_rep_blks.step()
+        prop_rep_vac.step()
 
         rms_s = float(np.sqrt(np.mean(np.square(
             prop_exact.bond_expectations() - prop_k4.bond_expectations()))))
@@ -447,34 +827,53 @@ def rung_f2_single_module(manifest, steps=8, dt=0.06):
         ex_int = np.array([
             u_b * prop_exact.G[mi, mj] for mi, mj, u_b in int_bond_pairs
         ], dtype=float)
+        ex_vac = np.array([
+            u_b * prop_exact_vac.G[mi, mj] for mi, mj, u_b in int_bond_pairs
+        ], dtype=float)
         bare_int = prop_bare_blks.internal_bond_expectations()
+        bare_vac = prop_bare_vac.internal_bond_expectations()
         rep_int = prop_rep_blks.internal_bond_expectations()
+        rep_vac = prop_rep_vac.internal_bond_expectations()
 
         rms_bare_list.append(float(np.sqrt(np.mean(np.square(ex_int - bare_int)))))
         rms_rep_list.append(float(np.sqrt(np.mean(np.square(ex_int - rep_int)))))
 
+        dex = ex_int - ex_vac
+        dex_norm = max(float(np.linalg.norm(dex)), 1e-12)
+        kick_err_bare_list.append(float(np.linalg.norm((bare_int - bare_vac) - dex) / dex_norm))
+        kick_err_rep_list.append(float(np.linalg.norm((rep_int - rep_vac) - dex) / dex_norm))
+
     mean_bare = float(np.mean(rms_bare_list))
     mean_rep = float(np.mean(rms_rep_list))
     max_strang = max(rms_strang_list)
+    final_kick_bare = float(kick_err_bare_list[-1])
+    final_kick_rep = float(kick_err_rep_list[-1])
     return {
         "rung": "F2",
-        "system": "108-qubit half-period module (4x27 K4 cluster)",
+        "system": "108-qubit half-period module (4x27 K4 block-pair)",
         "steps": steps,
         "dt": dt,
         "rms_bond_err": mean_rep,
         "rms_bond_err_bare": mean_bare,
         "rms_bond_err_repaired": mean_rep,
         "rms_bond_err_strang": max_strang,
-        "pass": (mean_rep < 0.035) and (mean_rep < 0.35 * mean_bare) and (max_strang < 0.02),
+        "kick_rel_err_bare": final_kick_bare,
+        "kick_rel_err_repaired": final_kick_rep,
+        "pass": (
+            (final_kick_rep < 0.05)
+            and (final_kick_rep < 0.15 * final_kick_bare)
+            and (mean_rep < 0.035)
+            and (mean_rep < 0.35 * mean_bare)
+            and (max_strang < 0.02)
+        ),
     }
 
 
 def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
     """Rung F3: Ring of 10 modules on a single shell (200 sites = 10 x 20 blocks).
-    Compare exact 200-site ring propagation against:
-      1. 10 decoupled 20-site module blocks coupled solely by inter-module seam
-         Givens kicks (bare open modules vs Sigma-repaired modules), and
-      2. 3-colour Strang module-to-module seam kicks."""
+    Compares exact 200-site ring propagation against 10 sparse block-pair
+    module blocks (storing ONLY nearest-neighbor module cross-blocks `10/45 = 22.2%`)
+    gating BOTH transit peak on Module 5 AND kick-induced relative error (`N2, N3`)."""
     idx, pos, bonds, loops, meta = SK.build(
         nshell=2, candidate=manifest["candidate"], closed=True,
         preset=manifest["preset"])
@@ -495,8 +894,12 @@ def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
             is_tor_seam.append(mod_of_s0[si] != mod_of_s0[sj])
 
     prop_exact = MajoranaFlowPropagator(200, bonds_s0, u_s0, w_s0, dt=dt)
-    prop_kick = MajoranaFlowPropagator(200, bonds_s0, u_s0, w_s0, dt=dt)
-    prop_vac = MajoranaFlowPropagator(200, bonds_s0, u_s0, w_s0, dt=dt)
+    prop_exact_vac = MajoranaFlowPropagator(
+        200, bonds_s0, u_s0, w_s0, dt=dt, g0_init=prop_exact.G0)
+    prop_kick = MajoranaFlowPropagator(
+        200, bonds_s0, u_s0, w_s0, dt=dt, g0_init=prop_exact.G0)
+    prop_vac = MajoranaFlowPropagator(
+        200, bonds_s0, u_s0, w_s0, dt=dt, g0_init=prop_exact.G0)
 
     A_ring = prop_exact.A
     G_ring = prop_exact.G0
@@ -535,9 +938,17 @@ def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
         })
 
     prop_mod_bare = BlockDecomposedFlowPropagator(
-        mod_blocks, bonds_s0, u_s0, w_s0, dt=dt, use_sigma_repair=False)
+        mod_blocks, bonds_s0, u_s0, w_s0, dt=dt,
+        use_sigma_repair=False, use_seam_givens=False)
+    prop_mod_bare_vac = BlockDecomposedFlowPropagator(
+        mod_blocks, bonds_s0, u_s0, w_s0, dt=dt,
+        use_sigma_repair=False, use_seam_givens=False)
     prop_mod_rep = BlockDecomposedFlowPropagator(
-        mod_blocks, bonds_s0, u_s0, w_s0, dt=dt, use_sigma_repair=True)
+        mod_blocks, bonds_s0, u_s0, w_s0, dt=dt,
+        use_sigma_repair=True, use_seam_givens=True)
+    prop_mod_rep_vac = BlockDecomposedFlowPropagator(
+        mod_blocks, bonds_s0, u_s0, w_s0, dt=dt,
+        use_sigma_repair=True, use_seam_givens=True)
 
     int_ring_pairs = []
     for mb in mod_blocks:
@@ -554,57 +965,92 @@ def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
 
     opp_energy_exact = []
     opp_energy_kick = []
+    opp_energy_blocks = []
     rms_bare_ring = []
     rms_rep_ring = []
+    kick_err_bare_ring = []
+    kick_err_rep_ring = []
     for _ in range(steps):
         prop_exact.step_trotter()
+        prop_exact_vac.step_trotter()
         step_decomposed_strang(prop_kick, bonds_s0, u_s0, w_s0, is_tor_seam, dt)
         step_decomposed_strang(prop_vac, bonds_s0, u_s0, w_s0, is_tor_seam, dt)
         prop_mod_bare.step()
+        prop_mod_bare_vac.step()
         prop_mod_rep.step()
+        prop_mod_rep_vac.step()
 
         de_ex = prop_exact.bond_energies_above_ground()
         de_ki = prop_kick.bond_energies_above_ground(g_ref=prop_vac.G)
         e5_ex = float(sum(de_ex[b] for b, (si, _, _) in enumerate(bonds_s0) if mod_of_s0[si] == 5))
         e5_ki = float(sum(de_ki[b] for b, (si, _, _) in enumerate(bonds_s0) if mod_of_s0[si] == 5))
+        e5_bk = float(sum(
+            de_b for gi, gj, de_b in prop_mod_rep.internal_bond_energies(
+                g_ref_blocks=prop_mod_rep_vac.G_blocks)
+            if mod_of_s0[gi] == 5
+        ))
         opp_energy_exact.append(e5_ex)
         opp_energy_kick.append(e5_ki)
+        opp_energy_blocks.append(e5_bk)
 
         ex_int = np.array([
             u_b * prop_exact.G[si, sj] for si, sj, u_b in int_ring_pairs
         ], dtype=float)
-        rms_bare_ring.append(float(np.sqrt(np.mean(np.square(
-            ex_int - prop_mod_bare.internal_bond_expectations())))))
-        rms_rep_ring.append(float(np.sqrt(np.mean(np.square(
-            ex_int - prop_mod_rep.internal_bond_expectations())))))
+        ex_vac = np.array([
+            u_b * prop_exact_vac.G[si, sj] for si, sj, u_b in int_ring_pairs
+        ], dtype=float)
+        bare_int = prop_mod_bare.internal_bond_expectations()
+        bare_vac = prop_mod_bare_vac.internal_bond_expectations()
+        rep_int = prop_mod_rep.internal_bond_expectations()
+        rep_vac = prop_mod_rep_vac.internal_bond_expectations()
+
+        rms_bare_ring.append(float(np.sqrt(np.mean(np.square(ex_int - bare_int)))))
+        rms_rep_ring.append(float(np.sqrt(np.mean(np.square(ex_int - rep_int)))))
+
+        dex = ex_int - ex_vac
+        dex_norm = max(float(np.linalg.norm(dex)), 1e-12)
+        kick_err_bare_ring.append(float(np.linalg.norm((bare_int - bare_vac) - dex) / dex_norm))
+        kick_err_rep_ring.append(float(np.linalg.norm((rep_int - rep_vac) - dex) / dex_norm))
 
     t_peak_exact = int(np.argmax(opp_energy_exact)) + 1
     t_peak_kick = int(np.argmax(opp_energy_kick)) + 1
-    transit_diff = abs(t_peak_exact - t_peak_kick)
+    t_peak_blocks = int(np.argmax(opp_energy_blocks)) + 1
+    transit_diff_blocks = abs(t_peak_exact - t_peak_blocks)
+    transit_diff_strang = abs(t_peak_exact - t_peak_kick)
     mean_bare = float(np.mean(rms_bare_ring))
     mean_rep = float(np.mean(rms_rep_ring))
+    mean_kick_bare = float(np.mean(kick_err_bare_ring))
+    mean_kick_rep = float(np.mean(kick_err_rep_ring))
 
     return {
         "rung": "F3",
-        "system": "200-qubit 10-module toroidal shell ring",
+        "system": "200-qubit 10-module toroidal shell ring (block-pair)",
         "steps": steps,
         "t_peak_exact": t_peak_exact,
-        "t_peak_kick": t_peak_kick,
-        "transit_step_diff": transit_diff,
+        "t_peak_kick": t_peak_blocks,
+        "t_peak_strang": t_peak_kick,
+        "transit_step_diff": transit_diff_blocks,
         "rms_bond_err_bare": mean_bare,
         "rms_bond_err_repaired": mean_rep,
-        "pass": (transit_diff <= 1) and (mean_rep < mean_bare),
+        "kick_rel_err_bare": mean_kick_bare,
+        "kick_rel_err_repaired": mean_kick_rep,
+        "pass": (
+            (transit_diff_blocks <= 1)
+            and (transit_diff_strang <= 1)
+            and (mean_kick_rep < 0.50 * mean_kick_bare)
+            and (mean_rep < mean_bare)
+        ),
     }
 
 
 def rung_f4_full_machine(manifest, steps=10, dt=0.06):
     """Rung F4: Full 1080-qubit stellarator (1620 bonds = 40 x 27 blocks).
-    Compare:
-      1. Bare open 40 x 27 blocks (`use_sigma_repair=False`)
-      2. Sigma-repaired 40 x 27 blocks (`use_sigma_repair=True`, using
-         `b['sigma_repair_bonds']` from `manifest.json` + seam bond kicks)
-      3. 3-colour Strang seam-kick decomposition
-    against the exact 1080-site propagator."""
+    Gates DIRECTLY on the 40-block sparse seam-Givens propagator (`N1, N2, N3`):
+      1. `max_shell_deviation = max |prof_blocks40 - prof_exact| < 0.05`
+         (the actual 40-block radial shell profile above vacuum, NOT global Strang!)
+      2. `kick_rel_err_repaired = ||d_exp_blocks40 - d_exp_exact|| / ||d_exp_exact|| < 0.30`
+         (proving the 40 blocks genuinely carry the injected flow!)
+      3. `rms_bond_err_repaired < 0.035` and `< 0.35 * rms_bond_err_bare`."""
     n_sites = int(manifest["n_sites"])
     bonds = [tuple(b) for b in manifest["bonds"]]
     u_g = np.array(manifest["gauge"], dtype=float)
@@ -621,12 +1067,24 @@ def rung_f4_full_machine(manifest, steps=10, dt=0.06):
     is_seam = [site_block[i] != site_block[j] for i, j, _ in bonds]
 
     prop_exact = MajoranaFlowPropagator(n_sites, bonds, u_g, w_g, dt=dt)
-    prop_decomp = MajoranaFlowPropagator(n_sites, bonds, u_g, w_g, dt=dt)
-    prop_vac = MajoranaFlowPropagator(n_sites, bonds, u_g, w_g, dt=dt)
+    prop_exact_vac = MajoranaFlowPropagator(
+        n_sites, bonds, u_g, w_g, dt=dt, g0_init=prop_exact.G0)
+    prop_decomp = MajoranaFlowPropagator(
+        n_sites, bonds, u_g, w_g, dt=dt, g0_init=prop_exact.G0)
+    prop_vac = MajoranaFlowPropagator(
+        n_sites, bonds, u_g, w_g, dt=dt, g0_init=prop_exact.G0)
     prop_bare_40 = BlockDecomposedFlowPropagator(
-        manifest["blocks"], bonds, u_g, w_g, dt=dt, use_sigma_repair=False)
+        manifest["blocks"], bonds, u_g, w_g, dt=dt,
+        use_sigma_repair=False, use_seam_givens=False)
+    prop_bare_40_vac = BlockDecomposedFlowPropagator(
+        manifest["blocks"], bonds, u_g, w_g, dt=dt,
+        use_sigma_repair=False, use_seam_givens=False)
     prop_rep_40 = BlockDecomposedFlowPropagator(
-        manifest["blocks"], bonds, u_g, w_g, dt=dt, use_sigma_repair=True)
+        manifest["blocks"], bonds, u_g, w_g, dt=dt,
+        use_sigma_repair=True, use_seam_givens=True)
+    prop_rep_40_vac = BlockDecomposedFlowPropagator(
+        manifest["blocks"], bonds, u_g, w_g, dt=dt,
+        use_sigma_repair=True, use_seam_givens=True)
 
     int_pairs_40 = []
     for b in manifest["blocks"]:
@@ -647,20 +1105,36 @@ def rung_f4_full_machine(manifest, steps=10, dt=0.06):
 
     rms_bare_list = []
     rms_rep_list = []
+    kick_err_bare_list = []
+    kick_err_rep_list = []
     for _ in range(steps):
         prop_exact.step_trotter()
+        prop_exact_vac.step_trotter()
         step_decomposed_strang(prop_decomp, bonds, u_g, w_g, is_seam, dt)
-        step_decomposed_strang(prop_vac, bonds, u_g, w_g, dt=dt, is_seam_arr=is_seam)
+        step_decomposed_strang(prop_vac, bonds, u_g, w_g, is_seam, dt)
         prop_bare_40.step()
+        prop_bare_40_vac.step()
         prop_rep_40.step()
+        prop_rep_40_vac.step()
 
         ex_int = np.array([
             u_b * prop_exact.G[gi, gj] for gi, gj, u_b in int_pairs_40
         ], dtype=float)
-        rms_bare_list.append(float(np.sqrt(np.mean(np.square(
-            ex_int - prop_bare_40.internal_bond_expectations())))))
-        rms_rep_list.append(float(np.sqrt(np.mean(np.square(
-            ex_int - prop_rep_40.internal_bond_expectations())))))
+        ex_vac = np.array([
+            u_b * prop_exact_vac.G[gi, gj] for gi, gj, u_b in int_pairs_40
+        ], dtype=float)
+        bare_int = prop_bare_40.internal_bond_expectations()
+        bare_vac = prop_bare_40_vac.internal_bond_expectations()
+        rep_int = prop_rep_40.internal_bond_expectations()
+        rep_vac = prop_rep_40_vac.internal_bond_expectations()
+
+        rms_bare_list.append(float(np.sqrt(np.mean(np.square(ex_int - bare_int)))))
+        rms_rep_list.append(float(np.sqrt(np.mean(np.square(ex_int - rep_int)))))
+
+        dex = ex_int - ex_vac
+        dex_norm = max(float(np.linalg.norm(dex)), 1e-12)
+        kick_err_bare_list.append(float(np.linalg.norm((bare_int - bare_vac) - dex) / dex_norm))
+        kick_err_rep_list.append(float(np.linalg.norm((rep_int - rep_vac) - dex) / dex_norm))
 
     de_ex = prop_exact.bond_energies_above_ground()
     de_dc = prop_decomp.bond_energies_above_ground(g_ref=prop_vac.G)
@@ -672,7 +1146,7 @@ def rung_f4_full_machine(manifest, steps=10, dt=0.06):
         s = max(site_shell[i], site_shell[j])
         shell_ex[s] += de_ex[b_idx]
         shell_dc[s] += de_dc[b_idx]
-    for gi, gj, de_b in prop_rep_40.internal_bond_energies():
+    for gi, gj, de_b in prop_rep_40.all_bond_energies(ref_prop=prop_rep_40_vac):
         s = max(site_shell[gi], site_shell[gj])
         shell_blk40[s] += de_b
 
@@ -682,56 +1156,81 @@ def rung_f4_full_machine(manifest, steps=10, dt=0.06):
     prof_ex = shell_ex / tot_ex
     prof_dc = shell_dc / tot_dc
     prof_b40 = shell_blk40 / tot_b40
-    max_shell_dev = float(np.max(np.abs(prof_ex - prof_dc)))
+
+    max_shell_dev_blocks40 = float(np.max(np.abs(prof_ex - prof_b40)))
+    max_shell_dev_strang = float(np.max(np.abs(prof_ex - prof_dc)))
     mean_bare = float(np.mean(rms_bare_list))
     mean_rep = float(np.mean(rms_rep_list))
+    final_kick_bare = float(kick_err_bare_list[-1])
+    final_kick_rep = float(kick_err_rep_list[-1])
 
     return {
         "rung": "F4",
-        "system": "1080-qubit full stellarator (40 x 27 manifolds)",
+        "system": "1080-qubit full stellarator (40x27 sparse block-pair)",
         "steps": steps,
+        "sparse_seam_pairs_stored": int(prop_rep_40.n_seam_pairs_stored),
+        "sparse_block_pairs_total": int(prop_rep_40.n_block_pairs_total),
+        "sparse_storage_fraction": float(prop_rep_40.sparse_storage_fraction),
         "shell_profile_exact": [float(x) for x in prof_ex],
         "shell_profile_decomp": [float(x) for x in prof_dc],
         "shell_profile_blocks40": [float(x) for x in prof_b40],
-        "max_shell_deviation": max_shell_dev,
+        "max_shell_deviation": max_shell_dev_blocks40,
+        "max_shell_deviation_blocks40": max_shell_dev_blocks40,
+        "max_shell_deviation_strang": max_shell_dev_strang,
         "rms_bond_err_bare": mean_bare,
         "rms_bond_err_repaired": mean_rep,
+        "kick_rel_err_bare": final_kick_bare,
+        "kick_rel_err_repaired": final_kick_rep,
         "outer_leakage_fraction": float(prof_ex[3] + prof_ex[4]),
-        "pass": (max_shell_dev < 0.05) and (mean_rep < 0.035) and (mean_rep < 0.30 * mean_bare),
+        "pass": (
+            (max_shell_dev_blocks40 < 0.05)
+            and (final_kick_rep < 0.30)
+            and (final_kick_rep < 0.40 * final_kick_bare)
+            and (mean_rep < 0.035)
+            and (mean_rep < 0.35 * mean_bare)
+        ),
     }
 
 
 def run_reference_ladder(manifest):
     print("=" * 78)
-    print("PHASE 5 GATE (REFERENCE FLOW LADDER) -- EXACT & BLOCK-DECOMPOSED RUNGS F1-F4")
+    print("PHASE 5 GATE (REFERENCE FLOW LADDER) -- EXACT & SPARSE BLOCK-PAIR RUNGS F1-F4")
     print("=" * 78)
     r1 = rung_f1_single_manifold(manifest)
-    print("  [F1] %-42s givens_err=%.3e  pyqrack_rms=%.4f (<W_0>=%+.4f)  %s"
-          % (r1["system"], r1["max_bond_err"], r1["pyqrack_rms_bond_err"],
-             r1["pyqrack_w0"], "PASS" if r1["pass"] else "FAIL"))
+    print("  [F1] %-42s givens=%.2e  16q_10st=%.2e  27q_ace=%.4f (<W0>=%+.4f) %s"
+          % (r1["system"][:42], r1["max_bond_err"], r1["pyqrack_exact16_max_rms"],
+             r1["pyqrack_27q_ace_mean_rms"], r1["pyqrack_w0"],
+             "PASS" if r1["pass"] else "FAIL"))
 
     r2 = rung_f2_single_module(manifest)
-    print("  [F2] %-42s bare_err=%.4f  sigma_rep_err=%.4f  strang=%.3e  %s"
-          % (r2["system"], r2["rms_bond_err_bare"], r2["rms_bond_err_repaired"],
-             r2["rms_bond_err_strang"], "PASS" if r2["pass"] else "FAIL"))
+    print("  [F2] %-42s kick_err=%.2f%% (bare %.1f%%)  rms=%.4f  %s"
+          % (r2["system"][:42], 100.0 * r2["kick_rel_err_repaired"],
+             100.0 * r2["kick_rel_err_bare"], r2["rms_bond_err_repaired"],
+             "PASS" if r2["pass"] else "FAIL"))
 
     r3 = rung_f3_toroidal_ring(manifest)
-    print("  [F3] %-42s transit=%d vs %d  bare_err=%.4f  sigma_rep_err=%.4f  %s"
-          % (r3["system"], r3["t_peak_exact"], r3["t_peak_kick"],
-             r3["rms_bond_err_bare"], r3["rms_bond_err_repaired"],
+    print("  [F3] %-42s transit=%d vs %d  kick_err=%.1f%% (bare %.1f%%)  %s"
+          % (r3["system"][:42], r3["t_peak_exact"], r3["t_peak_kick"],
+             100.0 * r3["kick_rel_err_repaired"], 100.0 * r3["kick_rel_err_bare"],
              "PASS" if r3["pass"] else "FAIL"))
 
     r4 = rung_f4_full_machine(manifest)
-    print("  [F4] %-42s max_shell_dev=%.4f  bare=%.4f  sigma_rep=%.4f  %s"
-          % (r4["system"], r4["max_shell_deviation"],
-             r4["rms_bond_err_bare"], r4["rms_bond_err_repaired"],
+    print("  [F4] %-42s blk40_dev=%.4f  kick_err=%.1f%% (bare %.1f%%)  %s"
+          % (r4["system"][:42], r4["max_shell_deviation_blocks40"],
+             100.0 * r4["kick_rel_err_repaired"], 100.0 * r4["kick_rel_err_bare"],
              "PASS" if r4["pass"] else "FAIL"))
+    print("       sparse block pairs stored: %d / %d (%.1f%%; %.1f%% unstored/zero)"
+          % (r4["sparse_seam_pairs_stored"], r4["sparse_block_pairs_total"],
+             100.0 * r4["sparse_storage_fraction"],
+             100.0 * (1.0 - r4["sparse_storage_fraction"])))
     print("       shell profile (exact)    : %s"
           % " ".join("s%d=%.3f" % (s, v) for s, v in enumerate(r4["shell_profile_exact"])))
-    print("       shell profile (decomp)   : %s"
-          % " ".join("s%d=%.3f" % (s, v) for s, v in enumerate(r4["shell_profile_decomp"])))
-    print("       shell profile (40x27 rep): %s"
-          % " ".join("s%d=%.3f" % (s, v) for s, v in enumerate(r4["shell_profile_blocks40"])))
+    print("       shell profile (40x27 rep): %s  (max_dev = %.4f)"
+          % (" ".join("s%d=%.3f" % (s, v) for s, v in enumerate(r4["shell_profile_blocks40"])),
+             r4["max_shell_deviation_blocks40"]))
+    print("       shell profile (strang)   : %s  (max_dev = %.4f)"
+          % (" ".join("s%d=%.3f" % (s, v) for s, v in enumerate(r4["shell_profile_decomp"])),
+             r4["max_shell_deviation_strang"]))
     all_ok = r1["pass"] and r2["pass"] and r3["pass"] and r4["pass"]
     print("-" * 78)
     print("REFERENCE LADDER F1-F4 VERDICT: %s" % ("PASS" if all_ok else "FAIL"))

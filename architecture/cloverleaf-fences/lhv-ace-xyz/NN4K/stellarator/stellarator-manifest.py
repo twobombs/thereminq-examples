@@ -184,36 +184,84 @@ def find_block_internal_cycles(sites_g, internal_bonds, primary_loop_g,
     return loops_out
 
 
+def _pauli_eps(c1, c2):
+    """Levi-Civita sign for sigma^{c1} sigma^{c2} = i * eps * sigma^{c3}."""
+    return +1.0 if (c1, c2) in ((0, 1), (1, 2), (2, 0)) else -1.0
+
+
+def _shortest_path_pauli_string(qa, qb, adj):
+    """Find shortest internal Kitaev path qa -> ... -> qb inside a 27-qubit
+    block and return `(pauli_string, string_sign, path_len)` satisfying:
+      i * c_qa * c_qb = string_sign * prod_{(q, c) in pauli_string} sigma^c_q
+    so H_Sigma = (i/2) * Sigma_{qa,qb} * c_qa * c_qb = 0.5 * Sigma_{qa,qb} * string_sign * P."""
+    q = collections.deque([(int(qa), [])])
+    vis = {int(qa)}
+    found = None
+    while q:
+        curr, path = q.popleft()
+        if curr == int(qb):
+            found = path
+            break
+        for nxt, col, u_dir in adj[curr]:
+            if nxt not in vis:
+                vis.add(nxt)
+                q.append((nxt, path + [(curr, nxt, col, u_dir)]))
+    if not found:
+        return [], 1.0, 0
+    k = len(found)
+    u_prod = 1.0
+    eps_prod = 1.0
+    p_list = [[int(found[0][0]), int(found[0][2])]]
+    for r in range(k):
+        u_prod *= float(found[r][3])
+        if r >= 1:
+            c_prev = int(found[r - 1][2])
+            c_curr = int(found[r][2])
+            eps_prod *= _pauli_eps(c_prev, c_curr)
+            p_list.append([int(found[r][0]), int(3 - c_prev - c_curr)])
+    p_list.append([int(found[-1][1]), int(found[-1][2])])
+    s_str = float(((-1) ** k) * eps_prod * u_prod)
+    return p_list, s_str, k
+
+
 def compute_sigma_repair_bonds(sites_g, internal_bonds, A_full, G_full,
                                seam_qubits_set, max_terms=45):
     """Compute the Gaussian seam self-energy Sigma_B = A_ent,B - A_int,B on a
-    27-qubit block and extract the leading boundary repair terms."""
+    27-qubit block and extract the leading boundary repair terms together with
+    their exact internal Kitaev Pauli strings (`N9`)."""
     A_int = A_full[np.ix_(sites_g, sites_g)]
     G_blk = G_full[np.ix_(sites_g, sites_g)]
     A_ent = SK.entanglement_hamiltonian(G_blk)
     Sigma = A_ent - A_int
 
     ib_map = {}
+    n_loc = len(sites_g)
+    adj = {q: [] for q in range(n_loc)}
     for ib in internal_bonds:
         qa, qb = int(ib["qa"]), int(ib["qb"])
+        col = int(ib["colour"])
+        u_dir = float(ib["u"])
         ib_map[(min(qa, qb), max(qa, qb))] = ib
+        adj[qa].append((qb, col, u_dir))
+        adj[qb].append((qa, col, -u_dir))
 
     candidates = []
-    n_loc = len(sites_g)
     for qa in range(n_loc):
         for qb in range(qa + 1, n_loc):
             sig_val = float(Sigma[qa, qb])
             if abs(sig_val) < 1e-6:
                 continue
             ib = ib_map.get((qa, qb))
+            p_str, s_str, path_len = _shortest_path_pauli_string(qa, qb, adj)
+            if not p_str or path_len > 3:
+                continue
             if ib is not None:
                 col = int(ib["colour"])
                 pauli = ib["pauli"]
                 is_bond = True
             else:
-                # Assign effective colour by parity of (qa + qb) for non-adjacent boundary pairs
-                col = (qa + qb) % 3
-                pauli = SK.COLOR_NAME[col]
+                col = int(p_str[0][1])
+                pauli = "".join(SK.COLOR_NAME[c] for _, c in p_str)
                 is_bond = False
             touches_seam = (qa in seam_qubits_set) or (qb in seam_qubits_set)
             candidates.append({
@@ -224,6 +272,9 @@ def compute_sigma_repair_bonds(sites_g, internal_bonds, A_full, G_full,
                 "colour": int(col),
                 "pauli": pauli,
                 "sigma_ab": sig_val,
+                "string_sign": float(s_str),
+                "pauli_string": p_str,
+                "path_length": int(path_len),
                 "abs_sigma": abs(sig_val),
                 "is_internal_bond": bool(is_bond),
                 "touches_seam": bool(touches_seam),

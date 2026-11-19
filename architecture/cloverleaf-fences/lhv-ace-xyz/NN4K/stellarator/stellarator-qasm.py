@@ -62,6 +62,53 @@ def bond_step_qasm(qa, qb, pauli_char, theta):
     return lines
 
 
+def pauli_string_step_qasm(pauli_pairs, theta):
+    """Ancilla-free OpenQASM 3 decomposition of exp(-i * theta * prod sigma^c_q)."""
+    if not pauli_pairs or abs(float(theta)) < 1e-15:
+        return []
+    q0 = int(pauli_pairs[0][0])
+    other = [int(q) for q, _ in pauli_pairs[1:]]
+    lines = []
+    for q_loc, col in pauli_pairs:
+        lines.extend(single_basis_qasm(col, int(q_loc), inverse=False))
+    for q_loc in other:
+        lines.append("cx q[%d], q[%d];" % (q_loc, q0))
+    lines.append("rz(%.12f) q[%d];" % (2.0 * float(theta), q0))
+    for q_loc in reversed(other):
+        lines.append("cx q[%d], q[%d];" % (q_loc, q0))
+    for q_loc, col in reversed(pauli_pairs):
+        lines.extend(single_basis_qasm(col, int(q_loc), inverse=True))
+    return lines
+
+
+def _emit_trotter_layer_qasm(bt, dt):
+    """Emit one Kitaev Trotter layer (internal bonds + all 45 Sigma_keep terms
+    at exact 0.5 * Sigma * string_sign units)."""
+    lines = []
+    sig_bond_theta = {}
+    sig_nonlocal = []
+    for sb in bt.get("sigma_repair_bonds", []):
+        sig_ab = float(sb.get("sigma_ab", 0.0))
+        if abs(sig_ab) < 1e-12:
+            continue
+        s_str = float(sb.get("string_sign", -1.0))
+        p_str = sb.get("pauli_string", [])
+        if sb.get("is_internal_bond", False):
+            qa, qb = int(sb["qa"]), int(sb["qb"])
+            sig_bond_theta[(min(qa, qb), max(qa, qb))] = 0.5 * sig_ab * s_str
+        elif p_str:
+            sig_nonlocal.append((p_str, 0.5 * sig_ab * s_str))
+
+    for ib in bt["internal_bonds"]:
+        qa, qb = int(ib["qa"]), int(ib["qb"])
+        d_sig = sig_bond_theta.get((min(qa, qb), max(qa, qb)), 0.0)
+        theta = float(dt) * (-float(ib["weight"]) + d_sig)
+        lines.extend(bond_step_qasm(qa, qb, ib["pauli"], theta))
+    for p_str, coeff in sig_nonlocal:
+        lines.extend(pauli_string_step_qasm(p_str, float(dt) * coeff))
+    return lines
+
+
 def flux_readout_inplace_qasm(loop_pauli_local, bit_idx=0, uncompute=True):
     """Ancilla-free in-place parity fold for W_p = prod (q_loc, colour) on 27 qubits."""
     q0 = int(loop_pauli_local[0][0])
@@ -89,24 +136,14 @@ def emit_qasm_for_type(bt, steps=2, dt=0.1, out_dir="qasm"):
     }]
     n_loops = len(int_loops)
 
-    # 1. Single Trotter step (internal bonds + Sigma_keep seam repair)
+    # 1. Single Trotter step (internal bonds + all 45 Sigma_keep seam-repair terms)
     trotter_lines = [
         "OPENQASM 3.0;",
         'include "stdgates.inc";',
-        "// Stellarator 27-qubit manifold Type %d -- 1 Trotter step + Sigma_keep (dt=%.4f)" % (k, dt),
+        "// Stellarator 27-qubit manifold Type %d -- 1 Trotter step + 45 Sigma_keep (dt=%.4f)" % (k, dt),
         "qubit[27] q;",
     ]
-    for ib in bt["internal_bonds"]:
-        theta = -float(dt) * float(ib["weight"]) * float(ib["u"])
-        trotter_lines.extend(
-            bond_step_qasm(int(ib["qa"]), int(ib["qb"]), ib["pauli"], theta)
-        )
-    for sb in bt.get("sigma_repair_bonds", []):
-        if sb.get("is_internal_bond", False):
-            theta_s = -0.25 * float(dt) * float(sb["sigma_ab"])
-            trotter_lines.extend(
-                bond_step_qasm(int(sb["qa"]), int(sb["qb"]), sb["pauli"], theta_s)
-            )
+    trotter_lines.extend(_emit_trotter_layer_qasm(bt, dt))
     trotter_path = os.path.join(out_dir, "type%d-trotter.qasm" % k)
     with open(trotter_path, "w") as fh:
         fh.write("\n".join(trotter_lines) + "\n")
@@ -139,17 +176,7 @@ def emit_qasm_for_type(bt, steps=2, dt=0.1, out_dir="qasm"):
         "bit[%d] c;" % n_loops,
     ]
     for _ in range(steps):
-        for ib in bt["internal_bonds"]:
-            theta = -float(dt) * float(ib["weight"]) * float(ib["u"])
-            full_lines.extend(
-                bond_step_qasm(int(ib["qa"]), int(ib["qb"]), ib["pauli"], theta)
-            )
-        for sb in bt.get("sigma_repair_bonds", []):
-            if sb.get("is_internal_bond", False):
-                theta_s = -0.25 * float(dt) * float(sb["sigma_ab"])
-                full_lines.extend(
-                    bond_step_qasm(int(sb["qa"]), int(sb["qb"]), sb["pauli"], theta_s)
-                )
+        full_lines.extend(_emit_trotter_layer_qasm(bt, dt))
     for c_idx, lp in enumerate(int_loops):
         full_lines.extend(
             flux_readout_inplace_qasm(lp["pauli_local"], bit_idx=c_idx, uncompute=True)

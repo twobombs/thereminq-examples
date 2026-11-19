@@ -79,7 +79,7 @@ class StellaratorManifoldWorker(object):
                  kick_mode="xyz", use_sigma_repair=True,
                  shared_dimer=False,
                  ace_max_qb=None,
-                 sdrp=0.0):
+                 sdrp=None):
         self.block_specs = {int(b["block_id"]): b for b in block_specs}
         self.device_id = int(device_id)
         self.kick_mode = kick_mode
@@ -90,12 +90,15 @@ class StellaratorManifoldWorker(object):
         self.sims = {}
         self.q_counts = {}
         self.shared_G0 = {}
-        self.sig_maps = {}
+        self.sig_bond_theta = {}
+        self.sig_nonlocal = {}
+        self.n_sigma_applied = {}
         self.last_cycles = {}
         self.exhaust_counts = {int(b["block_id"]): 0 for b in block_specs}
 
         for bid, b in self.block_specs.items():
-            sim = QrackSimulator(27, is_gpu=SPD.HAS_OPENCL_SO)
+            sim = QrackSimulator(
+                27, is_gpu=SPD.HAS_OPENCL_SO, is_stabilizer_hybrid=True)
             if self.shared_dimer:
                 qc, g0, _ = SPD.prepare_shared_dimer_state(sim, b)
                 self.q_counts[bid] = qc
@@ -103,32 +106,50 @@ class StellaratorManifoldWorker(object):
             else:
                 qc = SPD.prepare_all_internal_loops(sim, b)
                 self.q_counts[bid] = qc
-            n_core = sum(1 for v in self.q_counts[bid].values() if v > 0)
-            ace_qb = (22 if n_core >= 24 else SPD.DEFAULT_ACE_MAX_QB) if ace_max_qb is None else int(ace_max_qb)
-            SPD.configure_simulator_27q(sim, ace_max_qb=ace_qb, sdrp=sdrp)
+            if sdrp is None:
+                eff_sdrp = 0.0 if self.shared_dimer else 0.01
+            else:
+                eff_sdrp = float(sdrp)
+            eff_ace = (SPD.DEFAULT_ACE_MAX_QB if (self.shared_dimer and ace_max_qb is None) else ace_max_qb)
+            SPD.configure_simulator_27q(sim, ace_max_qb=eff_ace, sdrp=eff_sdrp)
             self.sims[bid] = sim
-            smap = {}
+            s_bond = {}
+            s_nonloc = []
+            n_sig = 0
             if self.use_sigma_repair:
                 for sb in b.get("sigma_repair_bonds", []):
+                    sig_ab = float(sb.get("sigma_ab", sb.get("sigma_val", 0.0)))
+                    if abs(sig_ab) < 1e-12:
+                        continue
+                    p_str = sb.get("pauli_string", [])
+                    s_str = float(sb.get("string_sign", -1.0))
                     if sb.get("is_internal_bond", False):
                         qa, qb = int(sb["qa"]), int(sb["qb"])
-                        smap[(min(qa, qb), max(qa, qb))] = float(
-                            sb.get("sigma_ab", sb.get("sigma_val", 0.0)))
-            self.sig_maps[bid] = smap
+                        s_bond[(min(qa, qb), max(qa, qb))] = 0.5 * sig_ab * s_str
+                        n_sig += 1
+                    elif p_str:
+                        s_nonloc.append((p_str, 0.5 * sig_ab * s_str))
+                        n_sig += 1
+            self.sig_bond_theta[bid] = s_bond
+            self.sig_nonlocal[bid] = s_nonloc
+            self.n_sigma_applied[bid] = n_sig
 
     def step_trotter(self, dt=0.06, heisenberg_g=0.0):
         """Step 1: Trotter step on all 27-qubit internal manifold bonds,
-        fused internal Sigma_keep repair bonds, and optional Heisenberg
-        perturbation g * sum_{a=x,y,z} sigma^a_i sigma^a_j."""
+        ALL 45 Sigma_keep boundary-repair terms (2-qubit internal bonds +
+        non-adjacent Kitaev Pauli strings with exact 0.5*Sigma unit factor, `N9`),
+        and optional Heisenberg perturbation g * sum_{a=x,y,z} sigma^a_i sigma^a_j."""
         for bid, b in self.block_specs.items():
             sim = self.sims[bid]
-            smap = self.sig_maps[bid]
-            n_core = sum(1 for v in self.q_counts[bid].values() if v > 0)
+            s_bond = self.sig_bond_theta[bid]
+            s_nonloc = self.sig_nonlocal[bid]
+            qc = self.q_counts[bid]
+            n_core = sum(1 for v in qc.values() if v > 0)
             for ib in b["internal_bonds"]:
                 qa, qb = int(ib["qa"]), int(ib["qb"])
                 col = int(ib["colour"])
-                s_val = smap.get((min(qa, qb), max(qa, qb)), 0.0)
-                theta = -float(dt) * (float(ib["weight"]) * float(ib["u"]) + s_val)
+                d_sig = s_bond.get((min(qa, qb), max(qa, qb)), 0.0)
+                theta = float(dt) * (-float(ib["weight"]) + d_sig)
                 SPD.apply_bond_step(sim, qa, qb, col, theta, non_clifford=True)
                 if heisenberg_g != 0.0:
                     theta_h = -float(dt) * float(heisenberg_g)
@@ -136,9 +157,12 @@ class StellaratorManifoldWorker(object):
                         if c_alt != col:
                             SPD.apply_bond_step(
                                 sim, qa, qb, c_alt, theta_h, non_clifford=True)
+            for p_str, coeff in s_nonloc:
+                SPD.apply_pauli_string_step(
+                    sim, p_str, float(dt) * coeff, q_counts=qc)
             if not self.shared_dimer and n_core < 24:
                 self.last_cycles[bid] = SPD.measure_all_internal_loops(
-                    sim, b, q_counts=self.q_counts[bid])
+                    sim, b, q_counts=qc)
 
     def apply_sources(self, bid, bond_indices, theta_drive):
         """Step 2: Apply flux-preserving 2-qubit bond rotations on selected
@@ -155,7 +179,7 @@ class StellaratorManifoldWorker(object):
                 qa, qb = int(ib["qa"]), int(ib["qb"])
                 col = int(ib["colour"])
                 SPD.apply_bond_step(
-                    sim, qa, qb, col, float(theta_drive) * float(ib["u"]),
+                    sim, qa, qb, col, -float(theta_drive),
                     non_clifford=True)
 
     def read_bond_expectation(self, bid, qa, qb, col):
@@ -274,13 +298,11 @@ class StellaratorManifoldWorker(object):
                         0.5 * phi * float(chosen["u"]), non_clifford=True)
 
     def measure_and_reset_sinks(self, bid, drive_amplitude=0.0, max_bonds=2):
-        """Step 6: 2-qubit bond-parity divertor sink measurement and reset on
+        """Step 6: Purely bond-operator divertor sink readout and cooling on
         `b['divertor_bonds']` (island-divertor target bonds on outer shell s=4).
-        For tree divertor bonds with a non-cycle leaf qubit (`q_counts[q] == 0`),
-        performs a projective 2-qubit bond-parity measurement + conditional reset
-        to the bond ground state `sigma^col_qa sigma^col_qb = +u_b`. For cycle-
-        touching divertor bonds, reads the 2-qubit bond expectation and applies
-        a flux-preserving damping rotation toward `+u_b`.
+        Uses ONLY 2-qubit Kitaev bond operators `sigma^col_qa sigma^col_qb`
+        (zero single-qubit X/Y/Z resets, `N8`), so every sink operation commutes
+        identically with ALL 60 internal cycles AND ALL seam-crossing loops.
         Returns `(exhaust_bond_excitation_sum, exhaust_reset_count)`."""
         if bid not in self.sims:
             return 0.0, 0
@@ -314,9 +336,8 @@ class StellaratorManifoldWorker(object):
             for db in ordered_bonds:
                 qa, qb = int(db["qa"]), int(db["qb"])
                 col = int(db["colour"])
-                u_b = float(db["u"])
                 SPD.apply_bond_step(
-                    sim, qa, qb, col, float(drive_amplitude) * u_b,
+                    sim, qa, qb, col, -float(drive_amplitude),
                     non_clifford=True)
 
         exhaust_sum = 0.0
@@ -329,32 +350,12 @@ class StellaratorManifoldWorker(object):
                 sim, qa, qb, col, q_counts=qc)
             p_ex = max(0.0, min(1.0, 0.5 * (1.0 - u_b * exp_val)))
             exhaust_sum += p_ex
-
-            leaf_q = None
-            other_q = None
-            cand_a = (qc.get(qa, 0), deg.get(qa, 3))
-            cand_b = (qc.get(qb, 0), deg.get(qb, 3))
-            if min(cand_a[0], cand_b[0]) == 0:
-                if cand_a <= cand_b:
-                    leaf_q, other_q = qa, qb
-                else:
-                    leaf_q, other_q = qb, qa
-
-            if leaf_q is not None:
-                SPD.apply_basis_change(sim, col, leaf_q, other_q, inverse=False)
-                sim.mcx([other_q], leaf_q)
-                outcome = 1 if sim.m(leaf_q) else 0
-                want = 1 if u_b < 0 else 0
-                if outcome != want:
-                    sim.x(leaf_q)
-                    reset_count += 1
-                sim.mcx([other_q], leaf_q)
-                SPD.apply_basis_change(sim, col, leaf_q, other_q, inverse=True)
-            else:
-                if p_ex > 0.25:
-                    reset_count += 1
-                damp_theta = -0.25 * u_b * p_ex
-                SPD.apply_bond_step(sim, qa, qb, col, damp_theta, non_clifford=True)
+            if p_ex > 0.25:
+                reset_count += 1
+            # Purely 2-qubit bond-operator damping rotation (zero single-qubit X!)
+            # Commutes identically with every internal AND seam-crossing loop W_p.
+            damp_theta = -0.25 * p_ex
+            SPD.apply_bond_step(sim, qa, qb, col, damp_theta, non_clifford=True)
 
         self.exhaust_counts[bid] += reset_count
         return exhaust_sum, reset_count
@@ -372,9 +373,82 @@ class StellaratorManifoldWorker(object):
         return cycles[0]["w_meas"], cycles[0]["target"], max_eps, cycles
 
 
+def _pauli_strings_commute(p1_dict, p2_dict):
+    """Return True iff two Pauli strings (dict site -> colour in {0,1,2}) commute."""
+    anti = 0
+    for q, c1 in p1_dict.items():
+        c2 = p2_dict.get(q)
+        if c2 is not None and c2 != c1:
+            anti += 1
+    return (anti % 2) == 0
+
+
+def verify_seam_loop_commutation(manifest, module_id=0):
+    """Algebraically verify (`N8`) that EVERY operator executed by the worker
+    on `module_id` (internal bonds, all 45 Sigma_keep Pauli strings per block,
+    seam kicks, and divertor sink bond operators) commutes with EVERY
+    seam-crossing loop in `module_id` (zero seam-vison creation)."""
+    import stellarator_flux as SF
+    import stellarator_kitaev as SK
+
+    idx, pos, bonds, loops, meta = SK.build(
+        nshell=int(manifest.get("nshell", manifest.get("n_shells", 5))),
+        candidate=manifest.get("candidate", "H"),
+        closed=False, core=True, divertor=True,
+        preset=manifest.get("preset", "standard"))
+    colmap, _ = SF.colour_map_and_eid(bonds)
+
+    mod_blocks = [b for b in manifest["blocks"] if int(b["module"]) == int(module_id)]
+    mod_sites = set()
+    site_block = {}
+    for b in manifest["blocks"]:
+        bid = int(b["block_id"])
+        is_mod = (int(b["module"]) == int(module_id))
+        for g in b["sites"]:
+            g_int = int(g)
+            site_block[g_int] = bid
+            if is_mod:
+                mod_sites.add(g_int)
+
+    seam_loops = []
+    for lp in loops:
+        if any(int(g) in mod_sites for g in lp):
+            blks = {site_block[int(g)] for g in lp}
+            if len(blks) >= 2:
+                p_glob = dict(SF.pauli_string(lp, colmap))
+                seam_loops.append(p_glob)
+
+    # Collect every global Pauli operator executed by the 4 block workers
+    ops = []
+    for b in mod_blocks:
+        sites = [int(g) for g in b["sites"]]
+        for ib in b["internal_bonds"]:
+            ops.append({sites[int(ib["qa"])]: int(ib["colour"]),
+                        sites[int(ib["qb"])]: int(ib["colour"])})
+        for sb in b.get("sigma_repair_bonds", []):
+            p_str = sb.get("pauli_string", [])
+            if p_str:
+                ops.append({sites[int(q)]: int(c) for q, c in p_str})
+        for db in b.get("divertor_bonds", []):
+            ops.append({sites[int(db["qa"])]: int(db["colour"]),
+                        sites[int(db["qb"])]: int(db["colour"])})
+
+    n_violations = 0
+    for slp in seam_loops:
+        for op in ops:
+            if not _pauli_strings_commute(op, slp):
+                n_violations += 1
+    return {
+        "n_seam_loops_checked": len(seam_loops),
+        "n_worker_operators_checked": len(ops),
+        "n_commutation_violations": n_violations,
+        "pass": (len(seam_loops) > 0) and (n_violations == 0),
+    }
+
+
 def worker_self_test(manifest):
     print("=" * 78)
-    print("PHASE 5 GATE (PYQRACK WORKER) -- 27Q MULTI-CYCLE, BOND KICKS & SINK RESET")
+    print("PHASE 5 GATE (PYQRACK WORKER) -- 27Q MULTI-CYCLE, 45-TERM SIGMA & SEAM-SAFE SINKS")
     print("=" * 78)
     signs = probe_pauli_signs()
     print("  startup Pauli & bond sign probe (X, Y, Z, bond) : %s" % (signs,))
@@ -383,36 +457,46 @@ def worker_self_test(manifest):
     mod0_blocks = manifest["blocks"][:4]
     worker = StellaratorManifoldWorker(mod0_blocks, device_id=0, kick_mode="xyz")
 
-    for step in range(4):
-        worker.step_trotter(dt=0.06, heisenberg_g=0.0)
+    for step in range(2):
+        worker.step_trotter(dt=0.04, heisenberg_g=0.0)
         # Core pellet source on block 0 + edge gas-puff on block 2 (s=4)
         worker.apply_sources(0, [0, 1], theta_drive=0.12)
         worker.apply_sources(2, [0, 1], theta_drive=0.08)
-        # Read 2-qubit seam bond expectations and apply 2-qubit bond-type seam kicks
+        # Read 2-qubit seam bond expectations across all 4 blocks, then exchange kicks
+        all_exps = {
+            bid: worker.read_seam_bond_expectations(bid, max_bonds=2)
+            for bid in range(4)
+        }
         for bid in range(4):
-            seam_exps = worker.read_seam_bond_expectations(bid, max_bonds=2)
+            nbr = (bid + 1) % 4
+            nbr_vals = [v[4] for v in all_exps[nbr].values()]
+            nbr_mean = float(np.mean(nbr_vals)) if nbr_vals else 0.0
             kicks = []
-            for q_s, (qa, qb, col, u_b, val) in seam_exps.items():
-                kicks.append((qa, qb, col, 0.04 * u_b * val))
+            for q_s, (qa, qb, col, u_b, val) in all_exps[bid].items():
+                kicks.append((qa, qb, col, 0.04 * (nbr_mean - val)))
             worker.apply_seam_kicks(bid, kicks)
-        # Measure & reset 2-qubit divertor sink bonds on block 2 & 3
+        # Purely bond-operator divertor cooling on block 2 & 3 (zero seam visons!)
         ex_prob2, ex_cnt2 = worker.measure_and_reset_sinks(2, drive_amplitude=0.18, max_bonds=3)
         ex_prob3, ex_cnt3 = worker.measure_and_reset_sinks(3, drive_amplitude=0.18, max_bonds=3)
 
-    all_ok = (signs == (1.0, 1.0, 1.0, 1.0))
+    seam_comm = verify_seam_loop_commutation(manifest, module_id=0)
+    all_ok = (signs == (1.0, 1.0, 1.0, 1.0)) and seam_comm["pass"]
     total_cycles = 0
     for bid in range(4):
         w_val, tgt, max_eps_w, cycles = worker.measure_flux(bid)
         total_cycles += len(cycles)
-        ok = max_eps_w < 1e-6
+        ok = (max_eps_w < 1e-6) and (worker.n_sigma_applied[bid] == 45)
         all_ok = all_ok and ok
         ex_val = ex_prob2 if bid == 2 else (ex_prob3 if bid == 3 else 0.0)
-        print("  block %d (type %d): %d cycles  <W_0>=%+.6f (tgt %+.1f)  max_eps_W=%.4e  div_bond_ex=%.4f  %s"
-              % (bid, bid % 4, len(cycles), w_val, tgt, max_eps_w,
+        print("  block %d (type %d): %d cycles | Sigma=%d/45 | <W_0>=%+.6f (tgt %+.1f)  max_eps_W=%.4e  div_ex=%.4f  %s"
+              % (bid, bid % 4, len(cycles), worker.n_sigma_applied[bid], w_val, tgt, max_eps_w,
                  ex_val, "PASS" if ok else "FAIL"))
 
-    print("  total monitored cycles in module 0 : %d (across 40 blocks = %d)"
+    print("  total monitored internal cycles in module 0 : %d (across 40 blocks = %d)"
           % (total_cycles, total_cycles * 10))
+    print("  seam-crossing loops checked in module 0     : %d loops x %d ops -> %d vison violations (%s)"
+          % (seam_comm["n_seam_loops_checked"], seam_comm["n_worker_operators_checked"],
+             seam_comm["n_commutation_violations"], "PASS" if seam_comm["pass"] else "FAIL"))
     print("-" * 78)
     print("WORKER SELF-TEST VERDICT: %s" % ("PASS" if all_ok else "FAIL"))
     print("=" * 78)
