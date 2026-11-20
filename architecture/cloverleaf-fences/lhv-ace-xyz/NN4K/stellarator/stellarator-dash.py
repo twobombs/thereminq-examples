@@ -207,7 +207,7 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
     f5_mc_z0 = float(f5_mc.get("mc_z_score_vs_zero", 0.0))
     f5_mc_zunc = float(f5_mc.get("mc_z_score_vs_uncoupled", 0.0))
     f5_eb = f5_pq.get("pyqrack_ebit_cat_entangler_audit", {})
-    f5_eb_imp = float(f5_eb.get("improvement_factor", 0.0))
+    f5_eb_rms = float(f5_eb.get("circuit_identity_18q", {}).get("rms_teleported_vs_exact", 0.0))
     zm_outer = 100.0 * rungs["F5"].get("edge_majorana_zero_modes", {}).get("outer_two_shells_fraction", 0.0)
     opt_c3 = opt["criterion_3_mhd_beta_limit"].get(
         "beta_crit_lattice_pct", opt["criterion_3_mhd_beta_limit"]["beta_crit_pct"])
@@ -242,13 +242,13 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
             base["criterion_6_bootstrap_current"]["bootstrap_current_proxy"]),
         "7. Knob Economy (Strict Int.)   7 / 0 tweaks  --",
         "-" * 56,
-        "Validation Rungs F1-F5 (2-Hop, 32/32 QPD & Ebit Link):",
+        "Validation Rungs F1-F5 (2-Hop, 32/32 QPD & Cat-Id):",
         "  F1 16q=%.1e 27q(6st)=%.1e | F2 K4=%.2f%%" % (
             f1_16q, f1_27q, f2_kick),
         "  F3 Ring err=%.1f%% | F4 40blk dev=%.4f err=%.1f%%" % (
             f3_kick, f4_dev, f4_kick),
-        "  F5 4x27q(%d/32)=%.1e (%.0fx) | Ebit 6st=%.0fx" % (
-            f5_4x27_seams, f5_4x27_rms, f5_4x27_imp, f5_eb_imp),
+        "  F5 4x27q(%d/32)=%.1e (%.0fx) | Cat18q=%.1e" % (
+            f5_4x27_seams, f5_4x27_rms, f5_4x27_imp, f5_eb_rms),
         "  MC %dksh z0=%.1f zu=%.1f | dt/2=%.2f%% | Isl L2=%.3f" % (
             f5_mc_shots // 1000, f5_mc_z0, f5_mc_zunc, trot_err, isl_l2),
     ]
