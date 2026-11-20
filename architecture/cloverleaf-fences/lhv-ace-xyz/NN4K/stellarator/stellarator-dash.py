@@ -135,7 +135,7 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
     ax4.plot(steps, stored_e, "-", color="#58a6ff", lw=2.0, label="Total Stored Energy E_stored(t)")
     ax4.plot(steps, core_e, "-", color="#3fb950", lw=1.8, label="Core Energy E_core (s=0,1)")
     ax4.plot(steps, exhaust_e * 15.0, "--", color="#ff7b72", lw=1.6, label="15x Divertor Exhaust / Step")
-    ax4.set_title("4. Steady-State Hold & 60-Site CPTP Bath Telemetry", color="#e6edf3", fontsize=11)
+    ax4.set_title("4. Steady-State Hold & Zero-T 60-Site CPTP Bath", color="#e6edf3", fontsize=11)
     ax4.set_xlabel("Trotter Evolution Step (dt = 0.10)", color="#c9d1d9", fontsize=9)
     ax4.set_ylabel("Excess Lattice Energy (J_0 units)", color="#c9d1d9", fontsize=9)
     ax4.tick_params(colors="#8b949e", labelsize=8)
@@ -143,7 +143,7 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
     ax4.legend(loc="lower right", fontsize=7.5, facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9")
 
     # ------------------------------------------------------------------
-    # Panel 5: 10-Unit Island Divertor Exhaust & External B_x LSQ Control
+    # Panel 5: 10-Unit Island Divertor Exhaust & External Busbar 3D LSQ Control
     # ------------------------------------------------------------------
     ax5 = fig.add_subplot(2, 3, 5, facecolor="#161b22")
     mods = np.arange(10)
@@ -163,13 +163,13 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
     ax5.bar(mods - w_bar, clean_norm, width=w_bar, color="#58a6ff",
             label="Standard Clean (P/M=%.3f)" % np.max(clean_norm))
     ax5.bar(mods, trm_norm, width=w_bar, color="#3fb950",
-            label="Ext B_x + Trim/Ctrl LSQ (P/M=%.3f)" % np.max(trm_norm))
+            label="Ext n=1 + Trim/Ctrl 3D LSQ (P/M=%.3f)" % np.max(trm_norm))
     ax5.bar(mods + w_bar, err_norm, width=w_bar, color="#f85149",
-            label="Ext B_x Untrimmed (P/M=%.3f)" % np.max(err_norm))
+            label="Ext n=1 Untrimmed (P/M=%.3f)" % np.max(err_norm))
     ax5.axhline(1.0, color="#c9d1d9", ls="--", lw=1.0, alpha=0.7)
     ax5.set_xticks(mods)
     ax5.set_xticklabels(["U%d" % m for m in mods])
-    ax5.set_title("5. 10-Unit CPTP Divertor Exhaust & Ext B_x LSQ Control", color="#e6edf3", fontsize=11)
+    ax5.set_title("5. 10-Unit Zero-T CPTP Divertor & Ext n=1 3D LSQ", color="#e6edf3", fontsize=11)
     ax5.set_xlabel("Half-Period Divertor Unit (m = 0..9)", color="#c9d1d9", fontsize=9)
     ax5.set_ylabel("Normalized Unit Exhaust P_u / <P>", color="#c9d1d9", fontsize=9)
     ax5.tick_params(colors="#8b949e", labelsize=8)
@@ -227,13 +227,13 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
             base["criterion_6_bootstrap_current"]["bootstrap_current_proxy"]),
         "7. Knob Economy (Strict Int.)   7 / 0 tweaks  --",
         "-" * 56,
-        "Validation Rungs F1-F5 (60-Site CPTP Bath & PyQrack):",
+        "Validation Rungs F1-F5 (Zero-T CPTP Bath & PyQrack):",
         "  F1 16q=%.1e 27q(6st)=%.1e | F2 K4=%.2f%%" % (
             f1_16q, f1_27q, f2_kick),
         "  F3 Ring pk=%d vs %d | F4 40blk=%.4f E_dr=%.1e" % (
             rungs["F3"]["t_peak_exact"], rungs["F3"]["t_peak_kick"],
             f4_dev, f4_drift),
-        "  F5 CPTP S_vN=%.1f led=%.1e | 4x27=%.1e K4=%.0fx" % (
+        "  F5 Zero-T S_vN=%.2f led=%.1e | 4x27=%.1e K4=%.0fx" % (
             f5_svn, f5_led, f5_4x27, f5_imp),
     ]
     text_block = "\n".join(lines)
