@@ -129,14 +129,17 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
     ax3.legend(loc="upper left", fontsize=7.5, facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9")
 
     # ------------------------------------------------------------------
-    # Panel 4: Steady-State Pulse Hold Telemetry (60-Site CPTP Bath)
+    # Panel 4: Steady-State Pulse Hold Telemetry (Core-to-Divertor NESS)
     # ------------------------------------------------------------------
     ax4 = fig.add_subplot(2, 3, 4, facecolor="#161b22")
+    dt_p = float(scoreboard["presets_benchmark"]["standard"].get("dt", 1.20))
+    ex_scale = 50.0 if float(np.max(stored_e)) > 50.0 * max(float(np.max(exhaust_e)), 1e-12) else 15.0
     ax4.plot(steps, stored_e, "-", color="#58a6ff", lw=2.0, label="Total Stored Energy E_stored(t)")
     ax4.plot(steps, core_e, "-", color="#3fb950", lw=1.8, label="Core Energy E_core (s=0,1)")
-    ax4.plot(steps, exhaust_e * 15.0, "--", color="#ff7b72", lw=1.6, label="15x Divertor Exhaust / Step")
-    ax4.set_title("4. Steady-State Hold & Zero-T 60-Site CPTP Bath", color="#e6edf3", fontsize=11)
-    ax4.set_xlabel("Trotter Evolution Step (dt = 0.10)", color="#c9d1d9", fontsize=9)
+    ax4.plot(steps, exhaust_e * ex_scale, "--", color="#ff7b72", lw=1.6,
+             label="%.0fx Divertor Exhaust / Step" % ex_scale)
+    ax4.set_title("4. Core-to-Divertor Lindblad NESS (60-Site CPTP)", color="#e6edf3", fontsize=11)
+    ax4.set_xlabel("Evolution Step (dt = %.2f)" % dt_p, color="#c9d1d9", fontsize=9)
     ax4.set_ylabel("Excess Lattice Energy (J_0 units)", color="#c9d1d9", fontsize=9)
     ax4.tick_params(colors="#8b949e", labelsize=8)
     ax4.grid(True, color="#30363d", alpha=0.45)
@@ -163,7 +166,7 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
     ax5.bar(mods - w_bar, clean_norm, width=w_bar, color="#58a6ff",
             label="Standard Clean (P/M=%.3f)" % np.max(clean_norm))
     ax5.bar(mods, trm_norm, width=w_bar, color="#3fb950",
-            label="Ext n=1 + Trim/Ctrl 3D LSQ (P/M=%.3f)" % np.max(trm_norm))
+            label="Ext n=1 + s3+s4 3D LSQ (P/M=%.3f)" % np.max(trm_norm))
     ax5.bar(mods + w_bar, err_norm, width=w_bar, color="#f85149",
             label="Ext n=1 Untrimmed (P/M=%.3f)" % np.max(err_norm))
     ax5.axhline(1.0, color="#c9d1d9", ls="--", lw=1.0, alpha=0.7)
@@ -190,14 +193,16 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
     f1_16q = rungs["F1"].get("pyqrack_exact16_max_rms", rungs["F1"]["max_bond_err"])
     f1_27q = rungs["F1"].get("pyqrack_27q_max_rms", rungs["F1"].get("pyqrack_27q_ace_mean_rms", 0.0))
     f2_kick = 100.0 * rungs["F2"].get("kick_rel_err_repaired", rungs["F2"]["rms_bond_err"])
+    f3_kick = 100.0 * rungs["F3"].get("kick_rel_err_repaired", 0.0)
     f4_dev = rungs["F4"].get("max_shell_deviation_blocks40", rungs["F4"]["max_shell_deviation"])
-    f4_drift = rungs["F4"].get("unitary_energy_drift", 0.0)
+    f4_kick = 100.0 * rungs["F4"].get("kick_rel_err_repaired", 0.0)
     f5_pq = rungs["F5"].get("pyqrack_module_flow", {})
     f5_imp = f5_pq.get("pyqrack_seam_pair_improvement_factor",
                        f5_pq.get("pyqrack_seam_improvement_factor", 0.0))
-    f5_4x27 = f5_pq.get("pyqrack_4x27q_vs_uncoupled_rms", 0.0)
+    f5_4x27_imp = f5_pq.get("pyqrack_4x27q_qpd_improvement_factor", 0.0)
+    f5_4x27_rms = f5_pq.get("pyqrack_4x27q_vs_ref108_rms", 0.0)
     f5_led = rungs["F5"].get("energy_ledger_max_err", 0.0)
-    f5_svn = rungs["F5"].get("von_neumann_entropy_nats", 0.0)
+    zm_outer = 100.0 * rungs["F5"].get("edge_majorana_zero_modes", {}).get("outer_two_shells_fraction", 0.0)
     opt_c3 = opt["criterion_3_mhd_beta_limit"].get(
         "beta_crit_lattice_pct", opt["criterion_3_mhd_beta_limit"]["beta_crit_pct"])
     base_c3 = base["criterion_3_mhd_beta_limit"].get(
@@ -227,14 +232,13 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
             base["criterion_6_bootstrap_current"]["bootstrap_current_proxy"]),
         "7. Knob Economy (Strict Int.)   7 / 0 tweaks  --",
         "-" * 56,
-        "Validation Rungs F1-F5 (Zero-T CPTP Bath & PyQrack):",
+        "Validation Rungs F1-F5 (2-Hop Sparse & 4x27q QPD):",
         "  F1 16q=%.1e 27q(6st)=%.1e | F2 K4=%.2f%%" % (
             f1_16q, f1_27q, f2_kick),
-        "  F3 Ring pk=%d vs %d | F4 40blk=%.4f E_dr=%.1e" % (
-            rungs["F3"]["t_peak_exact"], rungs["F3"]["t_peak_kick"],
-            f4_dev, f4_drift),
-        "  F5 Zero-T S_vN=%.2f led=%.1e | 4x27=%.1e K4=%.0fx" % (
-            f5_svn, f5_led, f5_4x27, f5_imp),
+        "  F3 Ring err=%.1f%% | F4 40blk dev=%.4f err=%.1f%%" % (
+            f3_kick, f4_dev, f4_kick),
+        "  F5 4x27q QPD=%.1e (%.0fx) | 16q=%.0fx | ZM=%.1f%% s3+4" % (
+            f5_4x27_rms, f5_4x27_imp, f5_imp, zm_outer),
     ]
     text_block = "\n".join(lines)
     ax6.text(

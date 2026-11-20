@@ -44,7 +44,8 @@ class MajoranaFlowPropagator(object):
     """Exact orthogonal Majorana correlation-matrix propagator on N sites."""
 
     def __init__(self, n_sites, bonds, u_gauge, weights=None, dt=0.08,
-                 sigma_extra=None, g0_init=None, beta_init=None):
+                 sigma_extra=None, g0_init=None, beta_init=None,
+                 fix_zero_mode_parity=True):
         self.n = int(n_sites)
         self.bonds = list(bonds)
         self.u = np.array(u_gauge, dtype=float)
@@ -60,6 +61,8 @@ class MajoranaFlowPropagator(object):
             self.A = self.A_bonds.copy()
 
         self.e0_total = None
+        self.n_zero_modes = 0
+        self.zero_mode_basis = None
         if g0_init is not None:
             self.G0 = np.array(g0_init, dtype=float).copy()
             X = self.A * self.dt
@@ -77,10 +80,29 @@ class MajoranaFlowPropagator(object):
         else:
             ev, V = np.linalg.eigh(1j * self.A)
             self.e0_total = -0.25 * float(np.sum(np.abs(ev)))
-            signs = np.where(np.abs(ev) > 1e-12, np.sign(ev), 0.0)
+            nz = np.abs(ev) > 1e-12
+            signs = np.where(nz, np.sign(ev), 0.0)
             C = (V * signs) @ V.conj().T
             self.G0 = np.real(-1j * C)
             self.G0 = 0.5 * (self.G0 - self.G0.T)
+            z_idx = np.where(~nz)[0]
+            self.n_zero_modes = int(len(z_idx))
+            if len(z_idx) >= 2:
+                Vz = V[:, z_idx]
+                B_real = np.hstack([np.real(Vz), np.imag(Vz)])
+                Q, s_z, _ = np.linalg.svd(B_real, full_matrices=False)
+                Q = Q[:, s_z > 1e-8]
+                self.zero_mode_basis = Q
+                if fix_zero_mode_parity:
+                    for r in range(0, (Q.shape[1] // 2) * 2, 2):
+                        q1 = Q[:, r].copy()
+                        q2 = Q[:, r + 1].copy()
+                        if q1[int(np.argmax(np.abs(q1)))] < 0.0:
+                            q1 = -q1
+                        if q2[int(np.argmax(np.abs(q2)))] < 0.0:
+                            q2 = -q2
+                        self.G0 += np.outer(q1, q2) - np.outer(q2, q1)
+                    self.G0 = 0.5 * (self.G0 - self.G0.T)
             phases = np.exp(-1j * ev * self.dt)
             self.U_step = np.real((V * phases) @ V.conj().T)
             self.G = self.G0.copy()
@@ -154,21 +176,23 @@ def _ortho_exp_antisym(A, dt):
 class BlockDecomposedFlowPropagator(object):
     """Genuine sparse block-pair Majorana propagator (`N1-N3`):
       - Maintains per-block diagonal correlation matrices `G_blocks[bid]`
-        (initialized strictly per block from `A_int + Sigma_keep` at `beta=1`
-        when `use_sigma_repair=True`, or `A_int` when `False`; zero global
-        `G_exact` leaked).
+        (initialized strictly locally via sparse Newton-Schulz when
+        `use_sigma_repair=True` and `use_seam_givens=True`, or from `A_int`
+        when `False`; zero global `G_exact` leaked).
       - Stores off-diagonal cross-blocks `C_seams[(a, b)]` (a < b) ONLY for
-        adjacent block pairs that share at least one seam bond (on the 40-block
-        stellarator: 161 / 780 = 20.6% of pairs; 79.4% unstored/zero).
+        block pairs within `<= max_hops` hops on the block adjacency graph
+        (on the 40-block stellarator: `161/780 = 20.6%` at `max_hops=1`,
+        `352/780 = 45.1%` at `max_hops=2`, keeping `> 54%` unstored/zero).
       - Evolves via Strang-split internal half-steps `exp(0.5 * dt * A_int[b])`
         and exact seam-bond Givens rotations `phi = 2 * dt * w_seam * u_seam`
         (when `use_seam_givens=True`; zero heuristic diffusion parameters!)."""
 
     def __init__(self, blocks, global_bonds, u_gauge, weights, dt=0.06,
-                 use_sigma_repair=True, use_seam_givens=None):
+                 use_sigma_repair=True, use_seam_givens=None, max_hops=1):
         self.blocks = list(blocks)
         self.dt = float(dt)
         self.use_sigma_repair = bool(use_sigma_repair)
+        self.max_hops = max(1, int(max_hops))
         if use_seam_givens is None:
             self.use_seam_givens = bool(use_sigma_repair)
         else:
@@ -220,10 +244,11 @@ class BlockDecomposedFlowPropagator(object):
             self.G0_blocks[bid] = G0_b
             self.G_blocks[bid] = G0_b.copy()
 
-        # Identify seam bonds connecting two distinct blocks and allocate ONLY
-        # adjacent cross-blocks C_seams[(a, b)] with a < b.
+        # Identify seam bonds connecting two distinct blocks and allocate
+        # cross-blocks C_seams[(a, b)] (a < b) within <= max_hops hops.
         self.seam_bonds = []
         self.C_seams = {}
+        self.direct_adj = {bid: set() for bid in self.block_ids}
         self.adj_blocks = {bid: set() for bid in self.block_ids}
 
         for b_idx, (gi, gj, col) in enumerate(global_bonds):
@@ -248,8 +273,33 @@ class BlockDecomposedFlowPropagator(object):
                 na = self.G_blocks[a].shape[0]
                 nb = self.G_blocks[b_id].shape[0]
                 self.C_seams[pair] = np.zeros((na, nb), dtype=float)
+                self.direct_adj[a].add(b_id)
+                self.direct_adj[b_id].add(a)
                 self.adj_blocks[a].add(b_id)
                 self.adj_blocks[b_id].add(a)
+
+        if self.max_hops > 1:
+            for src in self.block_ids:
+                visited = {src}
+                frontier = {src}
+                for _ in range(self.max_hops):
+                    nxt = set()
+                    for u in frontier:
+                        for v in self.direct_adj[u]:
+                            if v not in visited:
+                                visited.add(v)
+                                nxt.add(v)
+                    frontier = nxt
+                visited.discard(src)
+                for dst in visited:
+                    a, b_id = (src, dst) if src < dst else (dst, src)
+                    pair = (a, b_id)
+                    if pair not in self.C_seams:
+                        na = self.G_blocks[a].shape[0]
+                        nb = self.G_blocks[b_id].shape[0]
+                        self.C_seams[pair] = np.zeros((na, nb), dtype=float)
+                        self.adj_blocks[a].add(b_id)
+                        self.adj_blocks[b_id].add(a)
 
         n_blks = len(self.block_ids)
         self.n_block_pairs_total = n_blks * (n_blks - 1) // 2
@@ -259,7 +309,7 @@ class BlockDecomposedFlowPropagator(object):
         )
         self.C0_seams = {pair: mat.copy() for pair, mat in self.C_seams.items()}
         if self.use_sigma_repair and self.use_seam_givens:
-            self._init_sparse_newton_schulz(n_iter=8)
+            self._init_sparse_newton_schulz(n_iter=(10 if self.max_hops >= 2 else 8))
 
     def _init_sparse_newton_schulz(self, n_iter=8):
         """Purely local sparse block-pair Newton-Schulz matrix-sign iteration
@@ -900,7 +950,10 @@ def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
             w_s0.append(1.0)
             is_tor_seam.append(mod_of_s0[si] != mod_of_s0[sj])
 
-    prop_exact = MajoranaFlowPropagator(200, bonds_s0, u_s0, w_s0, dt=dt)
+    # The isolated s=0 subdivided ring has 120 connector - 80 branch = 40 exact
+    # Lieb flat-band zero modes; match local Newton-Schulz's canonical sign(iA).
+    prop_exact = MajoranaFlowPropagator(
+        200, bonds_s0, u_s0, w_s0, dt=dt, fix_zero_mode_parity=False)
     prop_exact_vac = MajoranaFlowPropagator(
         200, bonds_s0, u_s0, w_s0, dt=dt, g0_init=prop_exact.G0)
     prop_kick = MajoranaFlowPropagator(
@@ -952,10 +1005,10 @@ def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
         use_sigma_repair=False, use_seam_givens=False)
     prop_mod_rep = BlockDecomposedFlowPropagator(
         mod_blocks, bonds_s0, u_s0, w_s0, dt=dt,
-        use_sigma_repair=True, use_seam_givens=True)
+        use_sigma_repair=True, use_seam_givens=True, max_hops=2)
     prop_mod_rep_vac = BlockDecomposedFlowPropagator(
         mod_blocks, bonds_s0, u_s0, w_s0, dt=dt,
-        use_sigma_repair=True, use_seam_givens=True)
+        use_sigma_repair=True, use_seam_givens=True, max_hops=2)
 
     int_ring_pairs = []
     for mb in mod_blocks:
@@ -1033,8 +1086,12 @@ def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
 
     return {
         "rung": "F3",
-        "system": "200-qubit 10-module toroidal shell ring (block-pair)",
+        "system": "200-qubit 10-module toroidal shell ring (2-hop sparse block-pair)",
         "steps": steps,
+        "sparse_max_hops": int(prop_mod_rep.max_hops),
+        "sparse_seam_pairs_stored": int(prop_mod_rep.n_seam_pairs_stored),
+        "sparse_block_pairs_total": int(prop_mod_rep.n_block_pairs_total),
+        "sparse_storage_fraction": float(prop_mod_rep.sparse_storage_fraction),
         "t_peak_exact": t_peak_exact,
         "t_peak_kick": t_peak_blocks,
         "t_peak_strang": t_peak_kick,
@@ -1050,7 +1107,9 @@ def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
             and (peak_val_blocks > 0.1)
             and (transit_diff_blocks <= 1)
             and (transit_diff_strang <= 1)
-            and (mean_kick_rep < 0.50 * mean_kick_bare)
+            and (mean_kick_rep < 0.08)
+            and (mean_kick_rep < 0.10 * mean_kick_bare)
+            and (mean_rep < 0.01)
             and (mean_rep < mean_bare)
         ),
     }
@@ -1094,10 +1153,10 @@ def rung_f4_full_machine(manifest, steps=10, dt=0.06):
         use_sigma_repair=False, use_seam_givens=False)
     prop_rep_40 = BlockDecomposedFlowPropagator(
         manifest["blocks"], bonds, u_g, w_g, dt=dt,
-        use_sigma_repair=True, use_seam_givens=True)
+        use_sigma_repair=True, use_seam_givens=True, max_hops=2)
     prop_rep_40_vac = BlockDecomposedFlowPropagator(
         manifest["blocks"], bonds, u_g, w_g, dt=dt,
-        use_sigma_repair=True, use_seam_givens=True)
+        use_sigma_repair=True, use_seam_givens=True, max_hops=2)
 
     int_pairs_40 = []
     for b in manifest["blocks"]:
@@ -1184,10 +1243,11 @@ def rung_f4_full_machine(manifest, steps=10, dt=0.06):
 
     return {
         "rung": "F4",
-        "system": "1080-qubit full stellarator (40x27 sparse block-pair)",
+        "system": "1080-qubit full stellarator (40x27 2-hop sparse block-pair)",
         "steps": steps,
         "unitary_energy_init": e_ex_init,
         "unitary_energy_drift": float(max_unitary_drift),
+        "sparse_max_hops": int(prop_rep_40.max_hops),
         "sparse_seam_pairs_stored": int(prop_rep_40.n_seam_pairs_stored),
         "sparse_block_pairs_total": int(prop_rep_40.n_block_pairs_total),
         "sparse_storage_fraction": float(prop_rep_40.sparse_storage_fraction),
@@ -1204,11 +1264,11 @@ def rung_f4_full_machine(manifest, steps=10, dt=0.06):
         "outer_leakage_fraction": float(prof_ex[3] + prof_ex[4]),
         "pass": (
             (max_unitary_drift < 1e-11)
-            and (max_shell_dev_blocks40 < 0.05)
-            and (final_kick_rep < 0.30)
-            and (final_kick_rep < 0.40 * final_kick_bare)
-            and (mean_rep < 0.035)
-            and (mean_rep < 0.35 * mean_bare)
+            and (max_shell_dev_blocks40 < 0.02)
+            and (final_kick_rep < 0.05)
+            and (final_kick_rep < 0.05 * final_kick_bare)
+            and (mean_rep < 0.01)
+            and (mean_rep < 0.05 * mean_bare)
         ),
     }
 

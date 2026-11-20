@@ -266,7 +266,7 @@ def prepare_all_internal_loops(sim, block_spec):
     return q_counts
 
 
-def prepare_shared_dimer_state(sim, block_spec, max_dimers=None):
+def prepare_shared_dimer_state(sim, block_spec, max_dimers=None, seam_cols=None):
     """Prepare an exact gauge-fixed Gaussian stabilizer state shared between
     QrackSimulator `sim` and a Majorana correlation matrix `G0` (`N11`):
       1. Build a vertex-disjoint matching of internal bonds, matching
@@ -274,7 +274,10 @@ def prepare_shared_dimer_state(sim, block_spec, max_dimers=None):
          (and therefore has at least one missing bond colour). When
          `max_dimers` is set, stop once `len(matched_bonds) >= max_dimers`
          and all degree-3 vertices are covered (keeps 27-qubit ACE shards
-         exact across multi-step evolution).
+         exact across multi-step evolution). When `seam_cols` (`{q: set(cols)}`)
+         is provided for coupled multi-block QPD runs, seam bond colours are
+         included in the effective degree and excluded from unmatched missing
+         colours so every seam endpoint has `<sigma^c_q> == 0` identically.
       2. Prepare a maximally entangled Bell pair on each matched dimer
          `(qa, qb, col, u_b)` with `<sigma^col_qa sigma^col_qb> = u_b` and
          zero single-qubit Pauli expectations (`<sigma^a_q> = 0`), giving
@@ -302,7 +305,11 @@ def prepare_shared_dimer_state(sim, block_spec, max_dimers=None):
         u_b = float(ib["u"])
         adj[qa].append((qb, col, u_b))
         adj[qb].append((qa, col, -u_b))
-    deg = {q: len(adj[q]) for q in range(n_q)}
+    sc_map = seam_cols or {}
+    deg = {
+        q: len({col for _, col, _ in adj[q]} | set(sc_map.get(q, ())))
+        for q in range(n_q)
+    }
     deg3_qs = {q for q, d in deg.items() if d >= 3}
 
     order_b = sorted(
@@ -342,7 +349,7 @@ def prepare_shared_dimer_state(sim, block_spec, max_dimers=None):
     # 2. Prepare unmatched qubits in an eigenstate of a missing bond colour
     for q in range(n_q):
         if q not in used_qs:
-            present = {col for _, col, _ in adj[q]}
+            present = {col for _, col, _ in adj[q]} | set(sc_map.get(q, ()))
             missing = [c for c in (0, 1, 2) if c not in present]
             m_col = missing[0] if missing else 2
             apply_single_basis_change(sim, q, m_col, inverse=True)
