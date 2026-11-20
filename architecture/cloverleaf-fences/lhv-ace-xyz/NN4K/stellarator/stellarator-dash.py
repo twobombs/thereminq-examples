@@ -201,12 +201,19 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
                        f5_pq.get("pyqrack_seam_improvement_factor", 0.0))
     f5_4x27_imp = f5_pq.get("pyqrack_4x27q_qpd_improvement_factor", 0.0)
     f5_4x27_rms = f5_pq.get("pyqrack_4x27q_vs_ref108_rms", 0.0)
-    f5_led = rungs["F5"].get("energy_ledger_max_err", 0.0)
+    f5_4x27_seams = int(f5_pq.get("pyqrack_4x27q_k4_bridges", 32))
+    f5_mc = f5_pq.get("pyqrack_multistep_mc_qpd_audit", {})
+    f5_mc_shots = int(f5_mc.get("n_shots", 0))
+    f5_mc_z = float(f5_mc.get("mc_z_score_vs_exact", 0.0))
     zm_outer = 100.0 * rungs["F5"].get("edge_majorana_zero_modes", {}).get("outer_two_shells_fraction", 0.0)
     opt_c3 = opt["criterion_3_mhd_beta_limit"].get(
         "beta_crit_lattice_pct", opt["criterion_3_mhd_beta_limit"]["beta_crit_pct"])
     base_c3 = base["criterion_3_mhd_beta_limit"].get(
         "beta_crit_lattice_pct", base["criterion_3_mhd_beta_limit"]["beta_crit_pct"])
+    c3_ratio = scoreboard["optimisation"].get(
+        "c3_beta_crit_ratio_vs_baseline", opt_c3 / max(base_c3, 1e-12))
+    trot_err = 100.0 * scoreboard.get("trotter_convergence", {}).get("step_halving_tau_E_rel_err", 0.0)
+    isl_l2 = scoreboard.get("island_ablation", {}).get("max_unit_profile_l2_shift_vs_0isl", 0.0)
 
     lines = [
         "6. W7-X 7-CRITERIA (<J_rad>=<J_ins>=1.0) & GATES",
@@ -219,8 +226,8 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
         "2. Shafranov Shift (b=5%%)       %.4f        %.4f" % (
             opt["criterion_2_shafranov_stiffness"]["shafranov_shift_5pct"],
             base["criterion_2_shafranov_stiffness"]["shafranov_shift_5pct"]),
-        "3. Lattice MHD beta_crit        %.2f%% (>5%%)  %.2f%%" % (
-            opt_c3, base_c3),
+        "3. Lattice MHD beta_crit        %.2f%% (%.2fx) %.2f%%" % (
+            opt_c3, c3_ratio, base_c3),
         "4. Shape-Only Leakage/step      %.3e     %.3e" % (
             opt["criterion_4_neoclassical_transport"]["radial_leakage_rate"],
             base["criterion_4_neoclassical_transport"]["radial_leakage_rate"]),
@@ -232,20 +239,22 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
             base["criterion_6_bootstrap_current"]["bootstrap_current_proxy"]),
         "7. Knob Economy (Strict Int.)   7 / 0 tweaks  --",
         "-" * 56,
-        "Validation Rungs F1-F5 (2-Hop Sparse & 4x27q QPD):",
+        "Validation Rungs F1-F5 (2-Hop & ALL %d/32 Seam QPD):" % f5_4x27_seams,
         "  F1 16q=%.1e 27q(6st)=%.1e | F2 K4=%.2f%%" % (
             f1_16q, f1_27q, f2_kick),
         "  F3 Ring err=%.1f%% | F4 40blk dev=%.4f err=%.1f%%" % (
             f3_kick, f4_dev, f4_kick),
-        "  F5 4x27q QPD=%.1e (%.0fx) | 16q=%.0fx | ZM=%.1f%% s3+4" % (
-            f5_4x27_rms, f5_4x27_imp, f5_imp, zm_outer),
+        "  F5 4x27q(%d/32)=%.1e (%.0fx) | MC %dsh z=%.2f" % (
+            f5_4x27_seams, f5_4x27_rms, f5_4x27_imp, f5_mc_shots, f5_mc_z),
+        "  ZM=%.1f%% s3+4 | Trotter dt/2=%.2f%% | Isl L2=%.3f" % (
+            zm_outer, trot_err, isl_l2),
     ]
     text_block = "\n".join(lines)
     ax6.text(
         0.02, 0.96, text_block,
         transform=ax6.transAxes,
         fontfamily="monospace",
-        fontsize=8.2,
+        fontsize=8.0,
         verticalalignment="top",
         color="#e6edf3",
         bbox=dict(boxstyle="round,pad=0.5", facecolor="#0d1117", edgecolor="#30363d")

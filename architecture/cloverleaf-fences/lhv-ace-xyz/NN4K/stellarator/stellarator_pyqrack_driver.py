@@ -266,7 +266,8 @@ def prepare_all_internal_loops(sim, block_spec):
     return q_counts
 
 
-def prepare_shared_dimer_state(sim, block_spec, max_dimers=None, seam_cols=None):
+def prepare_shared_dimer_state(sim, block_spec, max_dimers=None, seam_cols=None,
+                               match_seed=None):
     """Prepare an exact gauge-fixed Gaussian stabilizer state shared between
     QrackSimulator `sim` and a Majorana correlation matrix `G0` (`N11`):
       1. Build a vertex-disjoint matching of internal bonds, matching
@@ -277,7 +278,10 @@ def prepare_shared_dimer_state(sim, block_spec, max_dimers=None, seam_cols=None)
          exact across multi-step evolution). When `seam_cols` (`{q: set(cols)}`)
          is provided for coupled multi-block QPD runs, seam bond colours are
          included in the effective degree and excluded from unmatched missing
-         colours so every seam endpoint has `<sigma^c_q> == 0` identically.
+         colours so every seam endpoint has `<sigma^c_q> == 0` identically;
+         if greedy matching leaves any degree-3 vertex uncovered (or if
+         `match_seed` is provided), an exact bipartite augmenting-path
+         matching guarantees 100% coverage of all degree-3 vertices.
       2. Prepare a maximally entangled Bell pair on each matched dimer
          `(qa, qb, col, u_b)` with `<sigma^col_qa sigma^col_qb> = u_b` and
          zero single-qubit Pauli expectations (`<sigma^a_q> = 0`), giving
@@ -300,11 +304,13 @@ def prepare_shared_dimer_state(sim, block_spec, max_dimers=None, seam_cols=None)
 
     ibs = block_spec["internal_bonds"]
     adj = {q: [] for q in range(n_q)}
+    ib_orig = {}
     for ib in ibs:
         qa, qb, col = int(ib["qa"]), int(ib["qb"]), int(ib["colour"])
         u_b = float(ib["u"])
         adj[qa].append((qb, col, u_b))
         adj[qb].append((qa, col, -u_b))
+        ib_orig[(min(qa, qb), max(qa, qb))] = (qa, qb, col, u_b)
     sc_map = seam_cols or {}
     deg = {
         q: len({col for _, col, _ in adj[q]} | set(sc_map.get(q, ())))
@@ -312,31 +318,106 @@ def prepare_shared_dimer_state(sim, block_spec, max_dimers=None, seam_cols=None)
     }
     deg3_qs = {q for q, d in deg.items() if d >= 3}
 
-    order_b = sorted(
-        range(len(ibs)),
-        key=lambda idx_b: (
-            -(1 if int(ibs[idx_b]["qa"]) in deg3_qs else 0)
-            - (1 if int(ibs[idx_b]["qb"]) in deg3_qs else 0),
-            -(deg[int(ibs[idx_b]["qa"])] + deg[int(ibs[idx_b]["qb"])]),
-        ),
-    )
     used_qs = set()
     matched_bonds = []
     dimer_col_of = {}
-    for idx_b in order_b:
-        if (max_dimers is not None
-                and len(matched_bonds) >= int(max_dimers)
-                and deg3_qs.issubset(used_qs)):
-            break
-        ib = ibs[idx_b]
-        qa, qb, col = int(ib["qa"]), int(ib["qb"]), int(ib["colour"])
-        u_b = float(ib["u"])
-        if qa not in used_qs and qb not in used_qs:
-            used_qs.add(qa)
-            used_qs.add(qb)
-            matched_bonds.append((qa, qb, col, u_b))
-            dimer_col_of[qa] = col
-            dimer_col_of[qb] = col
+    if match_seed is None:
+        order_b = sorted(
+            range(len(ibs)),
+            key=lambda idx_b: (
+                -(1 if int(ibs[idx_b]["qa"]) in deg3_qs else 0)
+                - (1 if int(ibs[idx_b]["qb"]) in deg3_qs else 0),
+                -(deg[int(ibs[idx_b]["qa"])] + deg[int(ibs[idx_b]["qb"])]),
+            ),
+        )
+        for idx_b in order_b:
+            if (max_dimers is not None
+                    and len(matched_bonds) >= int(max_dimers)
+                    and deg3_qs.issubset(used_qs)):
+                break
+            ib = ibs[idx_b]
+            qa, qb, col = int(ib["qa"]), int(ib["qb"]), int(ib["colour"])
+            u_b = float(ib["u"])
+            if qa not in used_qs and qb not in used_qs:
+                used_qs.add(qa)
+                used_qs.add(qb)
+                matched_bonds.append((qa, qb, col, u_b))
+                dimer_col_of[qa] = col
+                dimer_col_of[qb] = col
+
+    if match_seed is not None or not deg3_qs.issubset(used_qs):
+        # Exact bipartite augmenting-path matching covering 100% of deg3_qs
+        rng_m = np.random.default_rng(0 if match_seed is None else int(match_seed))
+        rank = {q: i for i, q in enumerate(rng_m.permutation(n_q))}
+        bcolor = {}
+        for q in range(n_q):
+            if q not in bcolor:
+                bcolor[q] = 0
+                st_b = [q]
+                while st_b:
+                    u_q = st_b.pop()
+                    for v_q, _, _ in adj[u_q]:
+                        if v_q not in bcolor:
+                            bcolor[v_q] = 1 - bcolor[u_q]
+                            st_b.append(v_q)
+        L_qs = [q for q in range(n_q) if bcolor[q] == 0]
+        R_qs = [q for q in range(n_q) if bcolor[q] == 1]
+        match_L, match_R = {}, {}
+
+        def _dfs_L(u_q, vis):
+            nbrs = sorted([v_q for v_q, _, _ in adj[u_q]],
+                          key=lambda x: (0 if x in deg3_qs else 1, rank[x]))
+            for v_q in nbrs:
+                if v_q not in vis:
+                    vis.add(v_q)
+                    if v_q not in match_R or _dfs_L(match_R[v_q], vis):
+                        match_L[u_q] = v_q
+                        match_R[v_q] = u_q
+                        return True
+            return False
+
+        for u_q in sorted(L_qs, key=lambda x: (0 if x in deg3_qs else 1, rank[x])):
+            _dfs_L(u_q, set())
+
+        def _dfs_R_swap(v_q, vis):
+            nbrs = sorted([u_q for u_q, _, _ in adj[v_q]], key=lambda x: rank[x])
+            for u_q in nbrs:
+                if u_q not in vis and u_q in match_L:
+                    vis.add(u_q)
+                    v_old = match_L[u_q]
+                    if v_old not in deg3_qs or _dfs_R_swap(v_old, vis):
+                        del match_R[v_old]
+                        match_L[u_q] = v_q
+                        match_R[v_q] = u_q
+                        return True
+            return False
+
+        for v_q in R_qs:
+            if v_q in deg3_qs and v_q not in match_R:
+                _dfs_R_swap(v_q, set())
+
+        matched_bonds = []
+        used_qs = set()
+        dimer_col_of = {}
+        for u_q, v_q in sorted(match_L.items()):
+            if u_q in deg3_qs or v_q in deg3_qs:
+                qa, qb, col, u_b = ib_orig[(min(u_q, v_q), max(u_q, v_q))]
+                matched_bonds.append((qa, qb, col, u_b))
+                used_qs.add(qa)
+                used_qs.add(qb)
+                dimer_col_of[qa] = col
+                dimer_col_of[qb] = col
+        if max_dimers is not None and len(matched_bonds) < int(max_dimers):
+            for u_q, v_q in sorted(match_L.items()):
+                if len(matched_bonds) >= int(max_dimers):
+                    break
+                if u_q not in used_qs and v_q not in used_qs:
+                    qa, qb, col, u_b = ib_orig[(min(u_q, v_q), max(u_q, v_q))]
+                    matched_bonds.append((qa, qb, col, u_b))
+                    used_qs.add(qa)
+                    used_qs.add(qb)
+                    dimer_col_of[qa] = col
+                    dimer_col_of[qb] = col
 
     # 1. Prepare Bell dimers in the bond Pauli basis with <sigma^c_a sigma^c_b> = u_b
     for qa, qb, col, u_b in matched_bonds:
