@@ -1339,17 +1339,24 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
     #   beta_crit_lattice = sup{beta : min_b Delta E_b(beta) > 0}
     # ZERO arbitrary `50 * W_mag` constant!
     # ------------------------------------------------------------------
-    def _min_flip_at_beta(beta_pct):
+    def _min_flip_at_beta(beta_pct, n_quad=24):
         wb = weights.copy()
         wb[bs_model.rad_mask] += 4.5 * (float(beta_pct) / 5.0) * curv_load_rad
-        _, deltas_b = exact_all_single_flip_deltas(n_sites, bonds, u_ground, wb, n_quad=24)
-        return float(np.min(deltas_b)), int(np.sum(deltas_b < -1e-9))
+        e0_b, deltas_b = exact_all_single_flip_deltas(n_sites, bonds, u_ground, wb, n_quad=n_quad)
+        arg_min = int(np.argmin(deltas_b))
+        return float(deltas_b[arg_min]), int(np.sum(deltas_b < -1e-9)), arg_min, e0_b, wb
 
-    min_vison_gap_5pct, n_unstable_5pct = _min_flip_at_beta(5.0)
+    min_vison_gap_5pct, n_unstable_5pct, min_bond_5pct, e0_5pct, wb_5pct = _min_flip_at_beta(5.0, n_quad=32)
+    u_flip_5 = u_ground.copy()
+    u_flip_5[min_bond_5pct] *= -1.0
+    ev_flip_5 = np.linalg.eigvalsh(1j * SK.majorana_matrix(n_sites, bonds, u=u_flip_5, bond_weights=wb_5pct))
+    min_vison_gap_5pct_direct = float(-0.25 * float(np.sum(np.abs(ev_flip_5))) - e0_5pct)
+    min_vison_gap_5pct_quad_err = float(abs(min_vison_gap_5pct - min_vison_gap_5pct_direct))
+
     b_lo, b_hi = 0.0, 10.0
     for _ in range(10):
         b_mid = 0.5 * (b_lo + b_hi)
-        if _min_flip_at_beta(b_mid)[0] > 0.0:
+        if _min_flip_at_beta(b_mid, n_quad=24)[0] > 0.0:
             b_lo = b_mid
         else:
             b_hi = b_mid
@@ -1474,6 +1481,9 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
             "beta_crit_lattice_pct": beta_crit_lattice_pct,
             "beta_crit_pct": beta_crit_lattice_pct,
             "min_vison_gap_5pct": min_vison_gap_5pct,
+            "min_vison_gap_5pct_direct": min_vison_gap_5pct_direct,
+            "min_vison_gap_5pct_quad_err": min_vison_gap_5pct_quad_err,
+            "min_vison_gap_5pct_bond": int(min_bond_5pct),
             "n_unstable_bonds_5pct": int(n_unstable_5pct),
             "vacuum_magnetic_well_diag": w_mag,
             "vortex_gap": vortex_gap,
@@ -1481,6 +1491,8 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
             "pass_5pct": (
                 beta_crit_lattice_pct > 5.0
                 and min_vison_gap_5pct > 0.0
+                and min_vison_gap_5pct_direct > 0.0
+                and min_vison_gap_5pct_quad_err < 1e-8
                 and n_unstable_5pct == 0
                 and vortex_gap > 0.0
                 and pol["n_lowering_remaining"] == 0
@@ -2043,11 +2055,12 @@ def main():
              b_ev["criterion_2_shafranov_stiffness"]["shafranov_shift_5pct"],
              "PASS" if o_ev["criterion_2_shafranov_stiffness"]["shafranov_shift_5pct"]
              < b_ev["criterion_2_shafranov_stiffness"]["shafranov_shift_5pct"] else "FAIL"))
-    print("  [3] Lattice MHD beta_crit   : %.2f%% > 5.0%% (base: %.2f%%, d5=%+.5f vs %+.5f)  [%s]"
+    print("  [3] Lattice MHD beta_crit   : %.2f%% > 5.0%% (base: %.2f%%, d5=%+.5f vs %+.5f, q_err=%.1e)  [%s]"
           % (o_ev["criterion_3_mhd_beta_limit"]["beta_crit_lattice_pct"],
              b_ev["criterion_3_mhd_beta_limit"]["beta_crit_lattice_pct"],
-             o_ev["criterion_3_mhd_beta_limit"]["min_vison_gap_5pct"],
-             b_ev["criterion_3_mhd_beta_limit"]["min_vison_gap_5pct"],
+             o_ev["criterion_3_mhd_beta_limit"]["min_vison_gap_5pct_direct"],
+             b_ev["criterion_3_mhd_beta_limit"]["min_vison_gap_5pct_direct"],
+             o_ev["criterion_3_mhd_beta_limit"]["min_vison_gap_5pct_quad_err"],
              "PASS" if o_ev["criterion_3_mhd_beta_limit"]["pass_5pct"] else "FAIL"))
     print("  [4] Neoclassical (shape)    : iso=%.4e vs %.4e | out=%.4e vs %.4e | rip=%.4f  [%s]"
           % (o_ev["criterion_4_neoclassical_transport"]["radial_leakage_rate"],

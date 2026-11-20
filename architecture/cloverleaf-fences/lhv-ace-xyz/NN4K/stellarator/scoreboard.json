@@ -8,31 +8,31 @@
       "dt": 0.04,
       "max_bond_err": 0.0012006816447139856,
       "pyqrack_exact16_step_rms": [
-        3.6717635315176e-05,
-        1.7252334891598343e-05,
-        1.8756391283681926e-05,
-        1.5212960538104734e-05,
-        2.0397029923086617e-05,
-        2.6342436048211383e-05,
-        2.9020228578687807e-05,
-        2.9422108174299397e-05,
-        3.084806744708931e-05,
-        4.0487498038043613e-05
+        4.088128388286712e-05,
+        4.169244094381021e-05,
+        3.1207916334929906e-05,
+        2.056232990181289e-05,
+        2.2742315701036402e-05,
+        2.1602993664346708e-05,
+        3.016319076263202e-05,
+        2.7106846381432335e-05,
+        3.285641139555546e-05,
+        4.2284354315698956e-05
       ],
-      "pyqrack_exact16_max_rms": 4.0487498038043613e-05,
+      "pyqrack_exact16_max_rms": 4.2284354315698956e-05,
       "pyqrack_exact16_w0": 1.0,
       "pyqrack_27q_step_rms": [
-        0.00043655464527275897,
-        0.0013352206414287745,
-        0.0014168169600660007,
-        0.0013103533641681123,
-        0.0012267348350996378,
-        0.0009752832475167732
+        0.000341803565305462,
+        0.0013151606276130764,
+        0.0014166477581278032,
+        0.0013173264961274245,
+        0.0013237319643582377,
+        0.0009351069346374395
       ],
-      "pyqrack_27q_max_rms": 0.0014168169600660007,
-      "pyqrack_rms_bond_err": 4.0487498038043613e-05,
-      "pyqrack_27q_ace_mean_rms": 0.0011168272822586762,
-      "pyqrack_step1_rms_err": 3.6717635315176e-05,
+      "pyqrack_27q_max_rms": 0.0014166477581278032,
+      "pyqrack_rms_bond_err": 4.2284354315698956e-05,
+      "pyqrack_27q_ace_mean_rms": 0.001108296224361574,
+      "pyqrack_step1_rms_err": 4.088128388286712e-05,
       "pyqrack_w0": 1.0,
       "pass": true
     },
@@ -146,12 +146,12 @@
               1
             ],
             "n_seam_bonds": 1,
-            "rms_coupled": 2.233131663842954e-05,
-            "rms_uncoupled": 0.049425994497530434,
-            "improvement_factor": 2213.3040920871713,
-            "cross_seam_signal_norm": 0.039558099412852064,
-            "cross_seam_rel_err_coupled": 0.00035738404925973586,
-            "cross_seam_rel_err_uncoupled": 0.9999744976406217
+            "rms_coupled": 2.2688924085357165e-05,
+            "rms_uncoupled": 0.04942600162465235,
+            "improvement_factor": 2178.419806893822,
+            "cross_seam_signal_norm": 0.03955809750868932,
+            "cross_seam_rel_err_coupled": 0.00037787555799297616,
+            "cross_seam_rel_err_uncoupled": 0.9999536292509642
           },
           {
             "pair": [
@@ -159,12 +159,12 @@
               2
             ],
             "n_seam_bonds": 1,
-            "rms_coupled": 2.0769467588599486e-05,
-            "rms_uncoupled": 0.05904924663176467,
-            "improvement_factor": 2843.0794568936008,
+            "rms_coupled": 2.028875109682461e-05,
+            "rms_uncoupled": 0.05904921422577561,
+            "improvement_factor": 2910.4410588889027,
             "cross_seam_signal_norm": 0.029453374572666516,
-            "cross_seam_rel_err_coupled": 0.0007024469779858737,
-            "cross_seam_rel_err_uncoupled": 0.999967523364459
+            "cross_seam_rel_err_coupled": 0.000879246121484701,
+            "cross_seam_rel_err_uncoupled": 0.9999997929768476
           },
           {
             "pair": [
@@ -172,12 +172,12 @@
               3
             ],
             "n_seam_bonds": 1,
-            "rms_coupled": 2.1406245467311067e-05,
-            "rms_uncoupled": 0.1121337840219275,
-            "improvement_factor": 5238.367662052841,
-            "cross_seam_signal_norm": 0.03220978076108085,
-            "cross_seam_rel_err_coupled": 0.001988395021392181,
-            "cross_seam_rel_err_uncoupled": 0.9999625925748054
+            "rms_coupled": 2.1622330505726622e-05,
+            "rms_uncoupled": 0.11213372260332634,
+            "improvement_factor": 5186.014642298987,
+            "cross_seam_signal_norm": 0.03220978076108135,
+            "cross_seam_rel_err_coupled": 0.0023955631620640625,
+            "cross_seam_rel_err_uncoupled": 0.9999577441184956
           },
           {
             "pair": [
@@ -185,12 +185,12 @@
               2
             ],
             "n_seam_bonds": 1,
-            "rms_coupled": 1.9694426663080044e-05,
-            "rms_uncoupled": 0.0767414075866422,
-            "improvement_factor": 3896.6053137512604,
-            "cross_seam_signal_norm": 0.017135454664232976,
-            "cross_seam_rel_err_coupled": 0.0006291365323653496,
-            "cross_seam_rel_err_uncoupled": 0.9999231503280397
+            "rms_coupled": 2.02021534502648e-05,
+            "rms_uncoupled": 0.076741441624509,
+            "improvement_factor": 3798.676305149197,
+            "cross_seam_signal_norm": 0.017135454664233163,
+            "cross_seam_rel_err_coupled": 0.0009650651887972184,
+            "cross_seam_rel_err_uncoupled": 0.9999786117855938
           },
           {
             "pair": [
@@ -198,12 +198,12 @@
               3
             ],
             "n_seam_bonds": 1,
-            "rms_coupled": 2.9147416497525166e-05,
-            "rms_uncoupled": 0.10443584869088818,
-            "improvement_factor": 3583.0224850204327,
-            "cross_seam_signal_norm": 0.06017834081808942,
-            "cross_seam_rel_err_coupled": 0.0004068120663117036,
-            "cross_seam_rel_err_uncoupled": 0.9999790581000662
+            "rms_coupled": 2.8901760379551922e-05,
+            "rms_uncoupled": 0.10443587037076063,
+            "improvement_factor": 3613.4778296981976,
+            "cross_seam_signal_norm": 0.0601783395126013,
+            "cross_seam_rel_err_coupled": 0.0004023453626546222,
+            "cross_seam_rel_err_uncoupled": 0.9999753863146239
           },
           {
             "pair": [
@@ -211,29 +211,29 @@
               3
             ],
             "n_seam_bonds": 1,
-            "rms_coupled": 2.1108610637060212e-05,
-            "rms_uncoupled": 0.07154621812516045,
-            "improvement_factor": 3389.4328411907577,
+            "rms_coupled": 1.9829113996850197e-05,
+            "rms_uncoupled": 0.07154619108102471,
+            "improvement_factor": 3608.1385730290135,
             "cross_seam_signal_norm": 0.031162407280082734,
-            "cross_seam_rel_err_coupled": 0.0005022212123067432,
-            "cross_seam_rel_err_uncoupled": 0.9999752872718238
+            "cross_seam_rel_err_coupled": 0.00038533167572795557,
+            "cross_seam_rel_err_uncoupled": 0.9999723332621309
           }
         ],
-        "pyqrack_seam_pair_rms_coupled_mean": 2.2409580582000917e-05,
-        "pyqrack_seam_pair_rms_coupled_max": 2.9147416497525166e-05,
-        "pyqrack_seam_pair_rms_uncoupled_mean": 0.07888874992565224,
-        "pyqrack_seam_pair_improvement_factor": 3520.3135389787108,
-        "cross_seam_signal_min_norm": 0.017135454664232976,
-        "cross_seam_rel_err_coupled_max": 0.001988395021392181,
-        "cross_seam_rel_err_uncoupled_min": 0.9999231503280397,
-        "pyqrack_4x27q_vs_uncoupled_rms": 4.788130638240639e-06,
-        "pyqrack_4x27q_vs_ref108_rms": 0.0007489896708414965,
-        "exact_uncoupled_4x27_vs_ref108_rms": 0.0007490662188987369,
+        "pyqrack_seam_pair_rms_coupled_mean": 2.2255505585762552e-05,
+        "pyqrack_seam_pair_rms_coupled_max": 2.8901760379551922e-05,
+        "pyqrack_seam_pair_rms_uncoupled_mean": 0.07888874025500811,
+        "pyqrack_seam_pair_improvement_factor": 3544.684255812879,
+        "cross_seam_signal_min_norm": 0.017135454664233163,
+        "cross_seam_rel_err_coupled_max": 0.0023955631620640625,
+        "cross_seam_rel_err_uncoupled_min": 0.9999536292509642,
+        "pyqrack_4x27q_vs_uncoupled_rms": 4.11091841946999e-06,
+        "pyqrack_4x27q_vs_ref108_rms": 0.0007490079155700364,
+        "exact_uncoupled_4x27_vs_ref108_rms": 0.0007490659810535632,
         "pyqrack_4x27q_per_block_rms": [
-          9.212842692280525e-06,
-          5.516275438290849e-07,
-          8.859928388204979e-07,
-          2.0650964955870748e-06
+          7.863037639545918e-06,
+          3.9432300409644083e-07,
+          7.608883683671294e-07,
+          1.994311760762552e-06
         ],
         "numpy_feedback_in_4x27q": false,
         "seam_coupling_pass": true,
@@ -251,18 +251,18 @@
           0.0
         ],
         "seam_rms_trace": [
-          1.2785508912272833e-06,
-          2.436419600164509e-06
+          1.2694879844039002e-06,
+          2.6085120036761683e-06
         ],
         "max_eps_W": 0.0,
-        "divertor_exhaust": 3.9471347821659037
+        "divertor_exhaust": 3.9471366286179546
       },
       "eps_W_g0": 0.0,
-      "eps_W_g_heis": 2.2462476096755898e-09,
-      "eps_W_2g_heis": 3.5878330617353086e-08,
-      "g2_scaling_ratio": 15.972562625246265,
+      "eps_W_g_heis": 2.2462720934577373e-09,
+      "eps_W_2g_heis": 3.587882676424649e-08,
+      "g2_scaling_ratio": 15.97260940415166,
       "g_heis": 0.04,
-      "divertor_exhaust_sample": 3.9471347821659037,
+      "divertor_exhaust_sample": 3.9471366286179546,
       "pass": true
     }
   },
@@ -328,7 +328,10 @@
       "criterion_3_mhd_beta_limit": {
         "beta_crit_lattice_pct": 3.1591796875,
         "beta_crit_pct": 3.1591796875,
-        "min_vison_gap_5pct": -0.0033150594097046864,
+        "min_vison_gap_5pct": -0.0033150564448497966,
+        "min_vison_gap_5pct_direct": -0.003315056709766395,
+        "min_vison_gap_5pct_quad_err": 2.649165986405577e-10,
+        "min_vison_gap_5pct_bond": 690,
         "n_unstable_bonds_5pct": 1,
         "vacuum_magnetic_well_diag": 0.09272127481096508,
         "vortex_gap": 3.5886243423693713,
@@ -403,7 +406,10 @@
       "criterion_3_mhd_beta_limit": {
         "beta_crit_lattice_pct": 5.9228515625,
         "beta_crit_pct": 5.9228515625,
-        "min_vison_gap_5pct": 0.0001442581403503255,
+        "min_vison_gap_5pct": 0.0001442581226402865,
+        "min_vison_gap_5pct_direct": 0.00014425812253193726,
+        "min_vison_gap_5pct_quad_err": 1.0834922911130695e-13,
+        "min_vison_gap_5pct_bond": 23,
         "n_unstable_bonds_5pct": 0,
         "vacuum_magnetic_well_diag": 0.1740470167196237,
         "vortex_gap": 3.1404998632779098,
