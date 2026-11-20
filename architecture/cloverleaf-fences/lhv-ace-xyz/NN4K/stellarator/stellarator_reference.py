@@ -656,11 +656,11 @@ def rung_f1_single_manifold(manifest, steps=10, dt=0.04):
 
     # 3. Full 27-qubit Block 1 manifold over 6 full steps (`N11`) using
     #    `max_dimers=4` (covering all 4 degree-3 vertices + exact missing-colour
-    #    eigenstates on remaining 19 vertices; ace_max_qb=21, sdrp=0.0).
+    #    eigenstates on remaining 19 vertices; ace_max_qb=23, sdrp=0.0).
     steps_27 = 6
     sim27 = QrackSimulator(27, is_gpu=SPD.HAS_OPENCL_SO, is_stabilizer_hybrid=False)
     qc27, G0_27, _ = SPD.prepare_shared_dimer_state(sim27, blk, max_dimers=4)
-    SPD.configure_simulator_27q(sim27, ace_max_qb=21, sdrp=0.0)
+    SPD.configure_simulator_27q(sim27, ace_max_qb=23, sdrp=0.0)
     prop27 = MajoranaFlowPropagator(n_q, bonds_loc, u_loc, w_loc, dt=dt, g0_init=G0_27)
 
     qrack27_step_rms = []
@@ -703,8 +703,8 @@ def rung_f1_single_manifold(manifest, steps=10, dt=0.04):
             and (max_exact16 < 5e-4)
             and (abs(w16_final - 1.0) < 1e-5)
             and (abs(w27_final - 1.0) < 1e-4)
-            and (mean_27 < 0.015)
-            and (max_27 < 0.025)
+            and (mean_27 < 0.003)
+            and (max_27 < 0.005)
         ),
     }
 

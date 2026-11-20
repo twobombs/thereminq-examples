@@ -129,54 +129,53 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
     ax3.legend(loc="upper left", fontsize=7.5, facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9")
 
     # ------------------------------------------------------------------
-    # Panel 4: Steady-State Pulse Hold Telemetry & Shell Distribution
+    # Panel 4: Steady-State Pulse Hold Telemetry (60-Site CPTP Bath)
     # ------------------------------------------------------------------
     ax4 = fig.add_subplot(2, 3, 4, facecolor="#161b22")
-    ax4.plot(steps, stored_e, "o-", color="#58a6ff", lw=2.0, ms=4, label="Total Stored Energy E_stored(t)")
-    ax4.plot(steps, core_e, "s-", color="#3fb950", lw=1.8, ms=4, label="Core Energy E_core (s=0,1)")
-    ax4.plot(steps, exhaust_e * 5.0, "^--", color="#ff7b72", lw=1.6, ms=4, label="5x Divertor Exhaust / Step")
-    ax4.set_title("4. Steady-State Pulse Hold & Divertor Exhaust Telemetry", color="#e6edf3", fontsize=11)
-    ax4.set_xlabel("Trotter Evolution Step", color="#c9d1d9", fontsize=9)
-    ax4.set_ylabel("Lattice Excitation Energy (J_0 units)", color="#c9d1d9", fontsize=9)
+    ax4.plot(steps, stored_e, "-", color="#58a6ff", lw=2.0, label="Total Stored Energy E_stored(t)")
+    ax4.plot(steps, core_e, "-", color="#3fb950", lw=1.8, label="Core Energy E_core (s=0,1)")
+    ax4.plot(steps, exhaust_e * 15.0, "--", color="#ff7b72", lw=1.6, label="15x Divertor Exhaust / Step")
+    ax4.set_title("4. Steady-State Hold & 60-Site CPTP Bath Telemetry", color="#e6edf3", fontsize=11)
+    ax4.set_xlabel("Trotter Evolution Step (dt = 0.10)", color="#c9d1d9", fontsize=9)
+    ax4.set_ylabel("Excess Lattice Energy (J_0 units)", color="#c9d1d9", fontsize=9)
     ax4.tick_params(colors="#8b949e", labelsize=8)
     ax4.grid(True, color="#30363d", alpha=0.45)
     ax4.legend(loc="lower right", fontsize=7.5, facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9")
 
     # ------------------------------------------------------------------
-    # Panel 5: 10-Unit Island Divertor Exhaust Symmetry & Trim Control
+    # Panel 5: 10-Unit Island Divertor Exhaust & External B_x LSQ Control
     # ------------------------------------------------------------------
     ax5 = fig.add_subplot(2, 3, 5, facecolor="#161b22")
     mods = np.arange(10)
     std_pb = scoreboard["presets_benchmark"]["standard"]
-    low_pb = scoreboard["presets_benchmark"]["low-iota"]
-    std_div = np.array(
+    std_clean = np.array(std_pb["divertor_unit_exhaust"], dtype=float)
+    std_trm = np.array(
         std_pb.get("divertor_unit_exhaust_trimmed", std_pb["divertor_unit_exhaust"]),
         dtype=float)
-    low_div = np.array(low_pb["divertor_unit_exhaust"], dtype=float)
     err_div = np.array(
         std_pb.get("divertor_unit_exhaust_n1_err", std_pb["divertor_unit_exhaust"]),
         dtype=float)
-    std_norm = std_div / max(float(np.mean(std_div)), 1e-12)
-    low_norm = low_div / max(float(np.mean(low_div)), 1e-12)
+    clean_norm = std_clean / max(float(np.mean(std_clean)), 1e-12)
+    trm_norm = std_trm / max(float(np.mean(std_trm)), 1e-12)
     err_norm = err_div / max(float(np.mean(err_div)), 1e-12)
 
     w_bar = 0.26
-    ax5.bar(mods - w_bar, std_norm, width=w_bar, color="#3fb950",
-            label="Standard + 5-Trim Sim (P/M=%.3f)" % np.max(std_norm))
-    ax5.bar(mods, low_norm, width=w_bar, color="#d29922",
-            label="Low-Iota 5/6 Sim (P/M=%.3f)" % np.max(low_norm))
+    ax5.bar(mods - w_bar, clean_norm, width=w_bar, color="#58a6ff",
+            label="Standard Clean (P/M=%.3f)" % np.max(clean_norm))
+    ax5.bar(mods, trm_norm, width=w_bar, color="#3fb950",
+            label="Ext B_x + Trim/Ctrl LSQ (P/M=%.3f)" % np.max(trm_norm))
     ax5.bar(mods + w_bar, err_norm, width=w_bar, color="#f85149",
-            label="Untrimmed n=1 Sim (P/M=%.3f)" % np.max(err_norm))
+            label="Ext B_x Untrimmed (P/M=%.3f)" % np.max(err_norm))
     ax5.axhline(1.0, color="#c9d1d9", ls="--", lw=1.0, alpha=0.7)
     ax5.set_xticks(mods)
     ax5.set_xticklabels(["U%d" % m for m in mods])
-    ax5.set_title("5. 10-Unit Local Divertor Exhaust & n=1 Trim Control", color="#e6edf3", fontsize=11)
+    ax5.set_title("5. 10-Unit CPTP Divertor Exhaust & Ext B_x LSQ Control", color="#e6edf3", fontsize=11)
     ax5.set_xlabel("Half-Period Divertor Unit (m = 0..9)", color="#c9d1d9", fontsize=9)
     ax5.set_ylabel("Normalized Unit Exhaust P_u / <P>", color="#c9d1d9", fontsize=9)
     ax5.tick_params(colors="#8b949e", labelsize=8)
-    ax5.set_ylim(0.0, max(1.50, float(np.max(err_norm)) * 1.15))
+    ax5.set_ylim(0.0, max(1.65, float(np.max(err_norm)) * 1.18))
     ax5.grid(True, axis="y", color="#30363d", alpha=0.45)
-    ax5.legend(loc="upper right", fontsize=7.5, facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9")
+    ax5.legend(loc="upper right", fontsize=7.2, facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9")
 
     # ------------------------------------------------------------------
     # Panel 6: W7-X 7-Criteria Scoreboard & Validation Ladder Summary
@@ -194,11 +193,18 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
     f4_dev = rungs["F4"].get("max_shell_deviation_blocks40", rungs["F4"]["max_shell_deviation"])
     f4_drift = rungs["F4"].get("unitary_energy_drift", 0.0)
     f5_pq = rungs["F5"].get("pyqrack_module_flow", {})
-    f5_imp = f5_pq.get("pyqrack_seam_improvement_factor", 0.0)
+    f5_imp = f5_pq.get("pyqrack_seam_pair_improvement_factor",
+                       f5_pq.get("pyqrack_seam_improvement_factor", 0.0))
+    f5_4x27 = f5_pq.get("pyqrack_4x27q_vs_uncoupled_rms", 0.0)
     f5_led = rungs["F5"].get("energy_ledger_max_err", 0.0)
+    f5_svn = rungs["F5"].get("von_neumann_entropy_nats", 0.0)
+    opt_c3 = opt["criterion_3_mhd_beta_limit"].get(
+        "beta_crit_lattice_pct", opt["criterion_3_mhd_beta_limit"]["beta_crit_pct"])
+    base_c3 = base["criterion_3_mhd_beta_limit"].get(
+        "beta_crit_lattice_pct", base["criterion_3_mhd_beta_limit"]["beta_crit_pct"])
 
     lines = [
-        "6. W7-X 7-CRITERIA SCOREBOARD & VALIDATION GATES",
+        "6. W7-X 7-CRITERIA (<J_rad>=<J_ins>=1.0) & GATES",
         "=" * 56,
         "Criterion                       7-Knob W7-X   Uniform-J",
         "-" * 56,
@@ -208,10 +214,9 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
         "2. Shafranov Shift (b=5%%)       %.4f        %.4f" % (
             opt["criterion_2_shafranov_stiffness"]["shafranov_shift_5pct"],
             base["criterion_2_shafranov_stiffness"]["shafranov_shift_5pct"]),
-        "3. MHD Well <beta>_crit         %.2f%% (>5%%)  %.2f%%" % (
-            opt["criterion_3_mhd_beta_limit"]["beta_crit_pct"],
-            base["criterion_3_mhd_beta_limit"]["beta_crit_pct"]),
-        "4. Neoclassical Leakage/step    %.3e     %.3e" % (
+        "3. Lattice MHD beta_crit        %.2f%% (>5%%)  %.2f%%" % (
+            opt_c3, base_c3),
+        "4. Shape-Only Leakage/step      %.3e     %.3e" % (
             opt["criterion_4_neoclassical_transport"]["radial_leakage_rate"],
             base["criterion_4_neoclassical_transport"]["radial_leakage_rate"]),
         "5. Mirror Fast-Ion Surv (2.5%%)  %.4f        %.4f" % (
@@ -222,14 +227,14 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
             base["criterion_6_bootstrap_current"]["bootstrap_current_proxy"]),
         "7. Knob Economy (Strict Int.)   7 / 0 tweaks  --",
         "-" * 56,
-        "Validation Rungs F1-F5 (Signed Energy & K4 Seam Gated):",
-        "  F1 16q=%.1e 27q(6st)=%.4f | F2 K4 kick=%.2f%%" % (
+        "Validation Rungs F1-F5 (60-Site CPTP Bath & PyQrack):",
+        "  F1 16q=%.1e 27q(6st)=%.1e | F2 K4=%.2f%%" % (
             f1_16q, f1_27q, f2_kick),
-        "  F3 Ring pk=%d vs %d | F4 40blk dev=%.4f E_dr=%.1e" % (
+        "  F3 Ring pk=%d vs %d | F4 40blk=%.4f E_dr=%.1e" % (
             rungs["F3"]["t_peak_exact"], rungs["F3"]["t_peak_kick"],
             f4_dev, f4_drift),
-        "  F5 Local led=%.1e | K4 PyQrack %.0fx vs unc [PASS]" % (
-            f5_led, f5_imp),
+        "  F5 CPTP S_vN=%.1f led=%.1e | 4x27=%.1e K4=%.0fx" % (
+            f5_svn, f5_led, f5_4x27, f5_imp),
     ]
     text_block = "\n".join(lines)
     ax6.text(
