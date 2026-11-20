@@ -8,31 +8,31 @@
       "dt": 0.04,
       "max_bond_err": 0.0012006816447139856,
       "pyqrack_exact16_step_rms": [
-        4.236223690121221e-05,
-        3.779761016385673e-05,
-        1.9584272060656393e-05,
-        1.886905125382142e-05,
-        2.754477573019329e-05,
-        2.9707075405865266e-05,
-        2.8861924403247278e-05,
-        2.9855205413586038e-05,
-        3.198913686261684e-05,
-        4.0916689908293234e-05
+        3.7646995142370416e-05,
+        1.5823786732263982e-05,
+        1.592379717899993e-05,
+        1.8084709695899648e-05,
+        2.6298258011557446e-05,
+        2.564603091637857e-05,
+        2.972652179670179e-05,
+        3.0642739488362786e-05,
+        3.073586651861675e-05,
+        4.0041785522828016e-05
       ],
-      "pyqrack_exact16_max_rms": 4.236223690121221e-05,
+      "pyqrack_exact16_max_rms": 4.0041785522828016e-05,
       "pyqrack_exact16_w0": 1.0,
       "pyqrack_27q_step_rms": [
-        0.00036798336109157944,
-        0.0012114233947961971,
-        0.0012320283856393783,
-        0.0010916013910141755,
-        0.0009837875882324901,
-        0.000613621073602722
+        0.00036428278671843785,
+        0.0011359329560603356,
+        0.0012421387235250147,
+        0.0009429596448004215,
+        0.0008643188503400916,
+        0.0006578060582987719
       ],
-      "pyqrack_27q_max_rms": 0.0012320283856393783,
-      "pyqrack_rms_bond_err": 4.236223690121221e-05,
-      "pyqrack_27q_ace_mean_rms": 0.0009167408657294237,
-      "pyqrack_step1_rms_err": 4.236223690121221e-05,
+      "pyqrack_27q_max_rms": 0.0012421387235250147,
+      "pyqrack_rms_bond_err": 4.0041785522828016e-05,
+      "pyqrack_27q_ace_mean_rms": 0.0008679065032905121,
+      "pyqrack_step1_rms_err": 3.7646995142370416e-05,
       "pyqrack_w0": 1.0,
       "pass": true
     },
@@ -186,12 +186,12 @@
               1
             ],
             "n_seam_bonds": 1,
-            "rms_coupled": 2.260806256480335e-05,
-            "rms_uncoupled": 0.049425985853619965,
-            "improvement_factor": 2186.2105924356056,
-            "cross_seam_signal_norm": 0.03955810131701491,
-            "cross_seam_rel_err_coupled": 0.00026260113682846946,
-            "cross_seam_rel_err_uncoupled": 0.9999616699942818
+            "rms_coupled": 2.175289531920164e-05,
+            "rms_uncoupled": 0.0494259723844796,
+            "improvement_factor": 2272.1560352865063,
+            "cross_seam_signal_norm": 0.03955810131701503,
+            "cross_seam_rel_err_coupled": 0.00034098552519311505,
+            "cross_seam_rel_err_uncoupled": 0.9999538821774727
           },
           {
             "pair": [
@@ -199,12 +199,12 @@
               2
             ],
             "n_seam_bonds": 1,
-            "rms_coupled": 2.005975136117672e-05,
-            "rms_uncoupled": 0.05904932455362288,
-            "improvement_factor": 2943.6718078124277,
-            "cross_seam_signal_norm": 0.029453374572666516,
-            "cross_seam_rel_err_coupled": 0.0006740125400616794,
-            "cross_seam_rel_err_uncoupled": 0.999967966877314
+            "rms_coupled": 1.9550930235821916e-05,
+            "rms_uncoupled": 0.05904938248880496,
+            "improvement_factor": 3020.2850594092224,
+            "cross_seam_signal_norm": 0.02945337457266667,
+            "cross_seam_rel_err_coupled": 0.0007514075939484985,
+            "cross_seam_rel_err_uncoupled": 0.999982600020704
           },
           {
             "pair": [
@@ -212,12 +212,12 @@
               3
             ],
             "n_seam_bonds": 1,
-            "rms_coupled": 2.1583054799528393e-05,
-            "rms_uncoupled": 0.11213379321221478,
-            "improvement_factor": 5195.455150058971,
-            "cross_seam_signal_norm": 0.03220978076108113,
-            "cross_seam_rel_err_coupled": 0.0018675587310663841,
-            "cross_seam_rel_err_uncoupled": 0.9999623063212901
+            "rms_coupled": 2.1748979590001955e-05,
+            "rms_uncoupled": 0.11213369779581811,
+            "improvement_factor": 5155.814199548294,
+            "cross_seam_signal_norm": 0.032209780761080796,
+            "cross_seam_rel_err_coupled": 0.0020092779290490645,
+            "cross_seam_rel_err_uncoupled": 0.9999427040476478
           },
           {
             "pair": [
@@ -225,12 +225,12 @@
               2
             ],
             "n_seam_bonds": 1,
-            "rms_coupled": 1.993705245364813e-05,
-            "rms_uncoupled": 0.07674140104274801,
-            "improvement_factor": 3849.1848893493625,
-            "cross_seam_signal_norm": 0.017135454664233163,
-            "cross_seam_rel_err_coupled": 0.0007364584529776811,
-            "cross_seam_rel_err_uncoupled": 0.9999161038358853
+            "rms_coupled": 1.9465600807030504e-05,
+            "rms_uncoupled": 0.07674141040253363,
+            "improvement_factor": 3942.411598968807,
+            "cross_seam_signal_norm": 0.017135454664233326,
+            "cross_seam_rel_err_coupled": 0.0007274358154108074,
+            "cross_seam_rel_err_uncoupled": 0.9999051734531202
           },
           {
             "pair": [
@@ -238,12 +238,12 @@
               3
             ],
             "n_seam_bonds": 1,
-            "rms_coupled": 2.9759506582229436e-05,
-            "rms_uncoupled": 0.10443577431102474,
-            "improvement_factor": 3509.3247941613195,
-            "cross_seam_signal_norm": 0.06017833951260167,
-            "cross_seam_rel_err_coupled": 0.00041040329936544725,
-            "cross_seam_rel_err_uncoupled": 0.9999706004785341
+            "rms_coupled": 2.945127179842286e-05,
+            "rms_uncoupled": 0.10443584165034334,
+            "improvement_factor": 3546.055408579536,
+            "cross_seam_signal_norm": 0.06017834212357686,
+            "cross_seam_rel_err_coupled": 0.00044335357795585246,
+            "cross_seam_rel_err_uncoupled": 0.9999739310009395
           },
           {
             "pair": [
@@ -251,103 +251,113 @@
               3
             ],
             "n_seam_bonds": 1,
-            "rms_coupled": 2.048864461949652e-05,
-            "rms_uncoupled": 0.07154618093693677,
-            "improvement_factor": 3491.9918943225302,
-            "cross_seam_signal_norm": 0.031162407280083043,
-            "cross_seam_rel_err_coupled": 0.000465913592431083,
-            "cross_seam_rel_err_uncoupled": 0.9999815805343523
+            "rms_coupled": 2.0611235273456238e-05,
+            "rms_uncoupled": 0.07154622117099421,
+            "improvement_factor": 3471.2243211901796,
+            "cross_seam_signal_norm": 0.031162407280083085,
+            "cross_seam_rel_err_coupled": 0.0004735024816130449,
+            "cross_seam_rel_err_uncoupled": 0.9999787546265609
           }
         ],
-        "pyqrack_seam_pair_rms_coupled_mean": 2.240601206348042e-05,
-        "pyqrack_seam_pair_rms_coupled_max": 2.9759506582229436e-05,
-        "pyqrack_seam_pair_rms_uncoupled_mean": 0.0788887433183612,
-        "pyqrack_seam_pair_improvement_factor": 3520.873910754606,
-        "cross_seam_signal_min_norm": 0.017135454664233163,
-        "cross_seam_rel_err_coupled_max": 0.0018675587310663841,
-        "cross_seam_rel_err_uncoupled_min": 0.9999161038358853,
-        "pyqrack_4x27q_coupling_method": "Mitarai-Fujii Strang-QPD circuit knitting across ALL 32/32 Module-0 K4 seam bonds (142 bonds total, 4 independent QrackSimulator(27) workers, all-order final-layer diag + all cross-seam pairs (e1,e2)) + 2-step real MC shot audit",
+        "pyqrack_seam_pair_rms_coupled_mean": 2.209681883732252e-05,
+        "pyqrack_seam_pair_rms_coupled_max": 2.945127179842286e-05,
+        "pyqrack_seam_pair_rms_uncoupled_mean": 0.07888875431549563,
+        "pyqrack_seam_pair_improvement_factor": 3570.1407924949353,
+        "cross_seam_signal_min_norm": 0.017135454664233326,
+        "cross_seam_rel_err_coupled_max": 0.0020092779290490645,
+        "cross_seam_rel_err_uncoupled_min": 0.9999051734531202,
+        "pyqrack_4x27q_coupling_method": "Mitarai-Fujii Strang-QPD circuit knitting across ALL 32/32 Module-0 K4 seam bonds (142 bonds total, 4 independent QrackSimulator(27) workers, all-order final-layer diag + all cross-seam pairs (e1,e2)) + 25k-shot seeded 2-Strang-step MC QPD + 6-step 1-ebit Cat-entangler LOCC teleportation",
         "pyqrack_4x27q_k4_bridges": 32,
         "pyqrack_4x27q_total_module0_bonds": 142,
         "pyqrack_4x27q_source_block": 1,
         "pyqrack_4x27q_seam_4cycle_sectors_averaged": 16,
-        "pyqrack_4x27q_vs_uncoupled_rms": 3.197841931420347e-05,
-        "pyqrack_4x27q_vs_ref108_rms": 0.0005432480634194869,
-        "exact_uncoupled_4x27_vs_ref108_rms": 0.03263318156427196,
-        "pyqrack_4x27q_qpd_improvement_factor": 60.070497737003755,
+        "pyqrack_4x27q_vs_uncoupled_rms": 3.175560751808319e-05,
+        "pyqrack_4x27q_vs_ref108_rms": 0.0005431811099037836,
+        "exact_uncoupled_4x27_vs_ref108_rms": 0.03263313043141178,
+        "pyqrack_4x27q_qpd_improvement_factor": 60.077808002550476,
         "pyqrack_4x27q_per_block_rms": [
-          0.00038589303506748255,
-          0.00046372028829815075,
-          0.0006668973999405766,
-          0.0006096267414556109
+          0.0003857636557970911,
+          0.0004635444652416472,
+          0.0006668746498075314,
+          0.0006096281248360838
         ],
         "pyqrack_4x27q_per_block_uncoupled_rms": [
-          0.029625642095861302,
-          0.03390930403329978,
-          0.03246016498281987,
-          0.03443644040064625
+          0.02962548309532172,
+          0.033909261854217186,
+          0.03246016665806707,
+          0.034436424740020254
         ],
         "pyqrack_4x27q_remote_block_signals": [
           {
             "block": 0,
-            "signal_norm_ref": 0.0002924035067058961,
-            "rel_err_qpd": 0.035576051146162184,
+            "signal_norm_ref": 0.00029240363345017784,
+            "rel_err_qpd": 0.0356374614838803,
             "rel_err_uncoupled": 1.0
           },
           {
             "block": 2,
             "signal_norm_ref": 0.0007988643991414411,
-            "rel_err_qpd": 8.857156364098158e-06,
+            "rel_err_qpd": 9.443588460048679e-06,
             "rel_err_uncoupled": 1.0
           },
           {
             "block": 3,
-            "signal_norm_ref": 0.001071469559954161,
-            "rel_err_qpd": 3.604602520904181e-05,
+            "signal_norm_ref": 0.0010714696228380925,
+            "rel_err_qpd": 3.6140282140778266e-05,
             "rel_err_uncoupled": 1.0
           }
         ],
-        "pyqrack_4x27q_remote_sig_min_norm": 0.0002924035067058961,
-        "pyqrack_4x27q_remote_sig_max_err": 0.035576051146162184,
+        "pyqrack_4x27q_remote_sig_min_norm": 0.00029240363345017784,
+        "pyqrack_4x27q_remote_sig_max_err": 0.0356374614838803,
         "pyqrack_multistep_mc_qpd_audit": {
           "n_blocks": 2,
           "n_qubits_per_block": 27,
           "n_trotter_steps": 2,
           "n_cut_layers": 3,
-          "dt": 0.14,
-          "n_shots": 500,
+          "dt": 0.18,
+          "seed": 2026,
+          "bit_reproducible": true,
+          "n_shots": 25000,
+          "n_unique_branches_sampled": 187,
           "target_bond_B1": [
-            16,
-            19,
-            1
+            21,
+            23,
+            0
           ],
-          "exact_ref_54q": 0.04543337056093104,
-          "mc_shot_mean": 7.105427357601002e-18,
-          "mc_empirical_se": 0.16862733690338844,
-          "mc_theoretical_se_Gamma_over_sqrtN": 0.16845862516839738,
-          "mc_se_emp_over_theory": 1.001001502504383,
-          "mc_z_score_vs_exact": 0.26943063559712827,
-          "Gamma_LO": 3.766849372726935,
+          "exact_ref_54q": 0.46309082568318827,
+          "exact_uncoupled_54q": 0.5801010444968229,
+          "mc_shot_mean": 0.49919510480253726,
+          "mc_empirical_se": 0.019741848659949813,
+          "mc_theoretical_se": 0.019776620148091457,
+          "mc_se_emp_over_theory": 0.998241788137646,
+          "mc_z_score_vs_exact": 1.828819567064839,
+          "mc_z_score_vs_zero": 25.286137757466037,
+          "mc_z_score_vs_uncoupled": 4.098194707490544,
+          "Gamma_LO": 3.161063226966421,
           "sampling_cost_table": [
             {
-              "regime": "2x27q MC shot-sampled (1 bridge, 2 steps, 3 cuts)",
+              "regime": "2x27q MC shot-sampled (1 bridge, 2 Strang steps, 3 cuts)",
               "n_seam_bonds": 1,
               "n_cut_layers": 3,
               "total_cuts": 3,
-              "theta_per_cut_rad": 0.14084000000000002,
-              "log10_Gamma_LO": 0.576,
-              "Gamma_LO": 3.766849372726935,
-              "log10_shots_eps_1e2": 5.15
+              "theta_per_cut_rad": 0.18108,
+              "log10_Gamma_LO": 0.4998,
+              "Gamma_LO": 3.161063226966421,
+              "log10_shots_LO_QPD_eps_1e2": 5.0,
+              "ebits_for_Gamma1_link": 3,
+              "log10_shots_ebit_link_eps_1e2": 4.0
             },
             {
-              "regime": "4x27q 6 K4 bridges (1 Strang step, dt=0.20)",
-              "n_seam_bonds": 6,
-              "n_cut_layers": 2,
-              "total_cuts": 12,
-              "theta_per_cut_rad": 0.10060000000000001,
-              "log10_Gamma_LO": 1.7524,
-              "Gamma_LO": 56.543711096828474,
-              "log10_shots_eps_1e2": 7.5
+              "regime": "2x8q+2e Cat-entangler (1 bridge, 6 steps, dt=0.12)",
+              "n_seam_bonds": 1,
+              "n_cut_layers": 6,
+              "total_cuts": 6,
+              "theta_per_cut_rad": 0.12072,
+              "log10_Gamma_LO": 1.0184,
+              "Gamma_LO": 10.432852985954991,
+              "log10_shots_LO_QPD_eps_1e2": 6.04,
+              "ebits_for_Gamma1_link": 6,
+              "log10_shots_ebit_link_eps_1e2": 4.0
             },
             {
               "regime": "4x27q ALL 32 seams (1 Strang step, dt=0.14)",
@@ -357,17 +367,9 @@
               "theta_per_cut_rad": 0.07042000000000001,
               "log10_Gamma_LO": 6.8777,
               "Gamma_LO": 7545928.390973122,
-              "log10_shots_eps_1e2": 17.76
-            },
-            {
-              "regime": "4x27q ALL 32 seams (3 Trotter steps, dt=0.05, T=0.15)",
-              "n_seam_bonds": 32,
-              "n_cut_layers": 3,
-              "total_cuts": 96,
-              "theta_per_cut_rad": 0.050300000000000004,
-              "log10_Gamma_LO": 7.6313,
-              "Gamma_LO": 42785462.733584106,
-              "log10_shots_eps_1e2": 19.26
+              "log10_shots_LO_QPD_eps_1e2": 17.76,
+              "ebits_for_Gamma1_link": 64,
+              "log10_shots_ebit_link_eps_1e2": 4.0
             },
             {
               "regime": "4x27q ALL 32 seams (10 Trotter steps, dt=0.05, T=0.50)",
@@ -377,9 +379,50 @@
               "theta_per_cut_rad": 0.050300000000000004,
               "log10_Gamma_LO": 25.4377,
               "Gamma_LO": 2.7393915457465866e+25,
-              "log10_shots_eps_1e2": 54.88
+              "log10_shots_LO_QPD_eps_1e2": 54.88,
+              "ebits_for_Gamma1_link": 320,
+              "log10_shots_ebit_link_eps_1e2": 4.0
+            },
+            {
+              "regime": "40x27q FULL 1080q (520 seams, 10 steps, dt=0.05)",
+              "n_seam_bonds": 520,
+              "n_cut_layers": 10,
+              "total_cuts": 5200,
+              "theta_per_cut_rad": 0.050300000000000004,
+              "log10_Gamma_LO": 413.3619,
+              "Gamma_LO": null,
+              "log10_shots_LO_QPD_eps_1e2": 830.72,
+              "ebits_for_Gamma1_link": 5200,
+              "log10_shots_ebit_link_eps_1e2": 4.0
             }
           ]
+        },
+        "pyqrack_ebit_cat_entangler_audit": {
+          "protocol": "1-ebit Cat-entangler LOCC gate teleportation (Bell pair + 2 classical bits/cut, Gamma_ebit=1.000)",
+          "n_data_qubits": 16,
+          "n_comm_qubits": 2,
+          "n_trotter_steps": 6,
+          "dt": 0.12,
+          "n_seams_teleported": 1,
+          "ebits_consumed": 6,
+          "rms_teleported_vs_exact": 4.089992745887571e-06,
+          "rms_uncoupled_vs_exact": 0.031647890868196964,
+          "improvement_factor": 7737.884352000004,
+          "Gamma_ebit": 1.0,
+          "equivalent_LO_QPD_Gamma": 10.432852985954995,
+          "shot_reduction_vs_LO_QPD": 108.84442142655004,
+          "n_shots": 4000,
+          "target_bond_B1": [
+            8,
+            9,
+            0
+          ],
+          "exact_ref": -0.06431769065884463,
+          "exact_uncoupled": -0.11456488099240764,
+          "shot_mean": -0.0575,
+          "shot_se": 0.015787201982511313,
+          "z_vs_exact": 0.4318492071234093,
+          "z_vs_uncoupled": 3.6146291822719916
         },
         "numpy_feedback_in_4x27q": false,
         "seam_coupling_pass": true,
@@ -397,18 +440,18 @@
           0.0
         ],
         "seam_rms_trace": [
-          1.2273347545846702e-06,
-          2.9604973645657643e-06
+          9.634035751369365e-07,
+          2.7205945785013604e-06
         ],
         "max_eps_W": 0.0,
-        "divertor_exhaust": 3.9471339179558527
+        "divertor_exhaust": 3.947133380863761
       },
       "eps_W_g0": 0.0,
-      "eps_W_g_heis": 2.2461734694589563e-09,
-      "eps_W_2g_heis": 3.587935047857785e-08,
-      "g2_scaling_ratio": 15.97354388092752,
+      "eps_W_g_heis": 2.246304163965789e-09,
+      "eps_W_2g_heis": 3.5879030736742166e-08,
+      "g2_scaling_ratio": 15.972472166636022,
       "g_heis": 0.04,
-      "divertor_exhaust_sample": 3.9471339179558527,
+      "divertor_exhaust_sample": 3.947133380863761,
       "pass": true
     }
   },
@@ -473,8 +516,10 @@
       },
       "criterion_3_mhd_beta_limit": {
         "curvature_load_scale": 4.5,
+        "dimensionless_critical_load_x_crit": 0.14216308593750002,
         "beta_crit_lattice_pct": 3.1591796875,
         "beta_crit_pct": 3.1591796875,
+        "min_vison_gap_0pct": 1.4708507533945296e-05,
         "min_vison_gap_5pct": -0.0033150564448497966,
         "min_vison_gap_5pct_direct": -0.003315056709766395,
         "min_vison_gap_5pct_quad_err": 2.649165986405577e-10,
@@ -552,8 +597,10 @@
       },
       "criterion_3_mhd_beta_limit": {
         "curvature_load_scale": 4.5,
+        "dimensionless_critical_load_x_crit": 0.2665283203125,
         "beta_crit_lattice_pct": 5.9228515625,
         "beta_crit_pct": 5.9228515625,
+        "min_vison_gap_0pct": 0.00011092721335253146,
         "min_vison_gap_5pct": 0.0001442581226402865,
         "min_vison_gap_5pct_direct": 0.00014425812253193726,
         "min_vison_gap_5pct_quad_err": 1.0834922911130695e-13,
@@ -649,29 +696,30 @@
       "poloidal_peak_to_mean": 1.263425767786248,
       "external_error_field_desc": "external 3D Biot-Savart cryostat busbar dipole pair (rho=1.70, phi=0.605pi/1.405pi, tilt=+-0.08)",
       "external_error_field_edge_rms_before": 10.356721000912236,
-      "external_error_field_edge_rms_after": 2.632484917459214,
-      "external_error_field_edge_rms_reduction_pct": 74.58186894068749,
+      "external_error_field_edge_rms_after": 3.110827521512985,
+      "external_error_field_edge_rms_reduction_pct": 69.96320050294898,
       "external_error_field_s4_rms_before": 11.118086187351002,
-      "external_error_field_s4_rms_after": 2.932987480644216,
-      "external_error_field_s4_rms_reduction_pct": 73.61967310542113,
+      "external_error_field_s4_rms_after": 3.581762176013665,
+      "external_error_field_s4_rms_reduction_pct": 67.78436400242498,
+      "external_error_field_bond_par_reduction_pct": 72.47203048993657,
       "lsq_trim_amps": [
-        0.0023,
-        -11.885,
-        0.0005,
-        11.902,
-        -0.0029
+        0.0063,
+        -13.9354,
+        0.0111,
+        13.8625,
+        -0.0195
       ],
       "lsq_ctrl_amps": [
-        0.0008,
-        -0.0006,
-        0.0454,
-        0.0185,
-        0.0038,
-        -0.0031,
-        -0.0004,
-        -0.0705,
-        0.0001,
-        -0.0009
+        0.001,
+        0.0021,
+        0.0699,
+        0.1018,
+        0.0111,
+        -0.004,
+        -0.0158,
+        -0.1477,
+        -0.0082,
+        -0.0016
       ],
       "divertor_unit_exhaust_n1_err": [
         22.027347310452434,
@@ -686,24 +734,24 @@
         25.79236432599196
       ],
       "divertor_unit_exhaust_trimmed": [
-        19.686210824697223,
-        21.145479652147042,
-        15.057680648929777,
-        20.429465093032512,
-        14.957899315616087,
-        19.957640534823522,
-        17.35574375550718,
-        17.315784885776523,
-        17.241468678150063,
-        22.37686529034734
+        18.82833467462745,
+        20.863796835066367,
+        15.235744272223464,
+        17.607727371658743,
+        14.198234566602945,
+        18.087991245544394,
+        16.38375043729634,
+        16.31986779159539,
+        16.688930774514073,
+        20.46041616813111
       ],
       "n1_error_peak_to_mean": 1.3146886135698712,
-      "trimmed_peak_to_mean": 1.2061424129631506,
+      "trimmed_peak_to_mean": 1.1944366065015368,
       "n1_error_period_peak_to_mean": 1.1752641305963445,
-      "trimmed_period_peak_to_mean": 1.1004408579594436,
+      "trimmed_period_peak_to_mean": 1.1361722710405358,
       "n1_profile_l2_err": 0.665161415152126,
-      "trimmed_profile_l2_err": 0.20471349234472302,
-      "n1_profile_l2_recovery_pct": 69.22348655808545
+      "trimmed_profile_l2_err": 0.12863755802743543,
+      "n1_profile_l2_recovery_pct": 80.66070053116124
     },
     "high-iota": {
       "preset": "high-iota",
@@ -755,29 +803,30 @@
       "poloidal_peak_to_mean": 1.2286629631130725,
       "external_error_field_desc": "external 3D Biot-Savart cryostat busbar dipole pair (rho=1.70, phi=0.605pi/1.405pi, tilt=+-0.08)",
       "external_error_field_edge_rms_before": 10.356721000912236,
-      "external_error_field_edge_rms_after": 2.632484917459214,
-      "external_error_field_edge_rms_reduction_pct": 74.58186894068749,
+      "external_error_field_edge_rms_after": 3.1067539397613384,
+      "external_error_field_edge_rms_reduction_pct": 70.00253323916237,
       "external_error_field_s4_rms_before": 11.118086187351002,
-      "external_error_field_s4_rms_after": 2.932987480644216,
-      "external_error_field_s4_rms_reduction_pct": 73.61967310542113,
+      "external_error_field_s4_rms_after": 3.5768954857971824,
+      "external_error_field_s4_rms_reduction_pct": 67.82813673573965,
+      "external_error_field_bond_par_reduction_pct": 72.37290370324878,
       "lsq_trim_amps": [
-        0.0023,
-        -11.885,
-        0.0005,
-        11.902,
-        -0.0029
+        0.0063,
+        -13.9254,
+        0.0111,
+        13.855,
+        -0.0196
       ],
       "lsq_ctrl_amps": [
-        0.0008,
-        -0.0006,
-        0.0454,
-        0.0185,
-        0.0038,
-        -0.0031,
-        -0.0004,
-        -0.0705,
-        0.0001,
-        -0.0009
+        0.001,
+        0.0022,
+        0.0696,
+        0.0988,
+        0.0111,
+        -0.004,
+        -0.0148,
+        -0.1444,
+        -0.0082,
+        -0.0015
       ],
       "divertor_unit_exhaust_n1_err": [
         24.199283182152378,
@@ -792,24 +841,24 @@
         25.827908828969647
       ],
       "divertor_unit_exhaust_trimmed": [
-        23.06066573239376,
-        23.907927181414756,
-        18.03102353375911,
-        24.834101374005076,
-        18.934157721263308,
-        17.651299132291403,
-        17.091816144546307,
-        19.515186956651828,
-        19.485496637612545,
-        23.727250299161522
+        22.123144370497716,
+        23.287405851079697,
+        17.1308715869116,
+        20.48833544921881,
+        17.26327257102938,
+        16.901065082360343,
+        16.286319976269887,
+        19.215658262298337,
+        18.77187509758296,
+        23.55280323742265
       ],
       "n1_error_peak_to_mean": 1.2341335559920423,
-      "trimmed_peak_to_mean": 1.204142302843751,
+      "trimmed_peak_to_mean": 1.2077075417932588,
       "n1_error_period_peak_to_mean": 1.179949024820983,
-      "trimmed_period_peak_to_mean": 1.1386937014714087,
+      "trimmed_period_peak_to_mean": 1.1642491856859314,
       "n1_profile_l2_err": 0.6057188165072346,
-      "trimmed_profile_l2_err": 0.18473874578327484,
-      "n1_profile_l2_recovery_pct": 69.50090689793382
+      "trimmed_profile_l2_err": 0.14006089216203713,
+      "n1_profile_l2_recovery_pct": 76.87691246415748
     },
     "low-iota": {
       "preset": "low-iota",
@@ -861,29 +910,30 @@
       "poloidal_peak_to_mean": 1.274482520160812,
       "external_error_field_desc": "external 3D Biot-Savart cryostat busbar dipole pair (rho=1.70, phi=0.605pi/1.405pi, tilt=+-0.08)",
       "external_error_field_edge_rms_before": 10.356721000912236,
-      "external_error_field_edge_rms_after": 2.632484917459214,
-      "external_error_field_edge_rms_reduction_pct": 74.58186894068749,
+      "external_error_field_edge_rms_after": 3.1138427271971305,
+      "external_error_field_edge_rms_reduction_pct": 69.93408698638441,
       "external_error_field_s4_rms_before": 11.118086187351002,
-      "external_error_field_s4_rms_after": 2.932987480644216,
-      "external_error_field_s4_rms_reduction_pct": 73.61967310542113,
+      "external_error_field_s4_rms_after": 3.5853678571449024,
+      "external_error_field_s4_rms_reduction_pct": 67.75193323088321,
+      "external_error_field_bond_par_reduction_pct": 72.54531815983289,
       "lsq_trim_amps": [
-        0.0023,
-        -11.885,
-        0.0005,
-        11.902,
-        -0.0029
+        0.0062,
+        -13.9427,
+        0.0111,
+        13.8679,
+        -0.0194
       ],
       "lsq_ctrl_amps": [
-        0.0008,
-        -0.0006,
-        0.0454,
-        0.0185,
-        0.0038,
-        -0.0031,
-        -0.0004,
-        -0.0705,
-        0.0001,
-        -0.0009
+        0.001,
+        0.002,
+        0.0703,
+        0.1044,
+        0.0112,
+        -0.004,
+        -0.0168,
+        -0.1506,
+        -0.0083,
+        -0.0016
       ],
       "divertor_unit_exhaust_n1_err": [
         20.305525925160197,
@@ -898,24 +948,24 @@
         23.586056986711462
       ],
       "divertor_unit_exhaust_trimmed": [
-        16.950805806135918,
-        18.624615973149645,
-        13.879629492510267,
-        15.858232829285452,
-        14.697920707369116,
-        18.038052112946414,
-        15.635817580088494,
-        14.476589075930066,
-        18.132132835404892,
-        20.729908207818152
+        16.015061298144115,
+        18.42139522329923,
+        13.910622093511396,
+        15.55343578053654,
+        13.63127219760235,
+        17.292441923095566,
+        14.655802484913757,
+        14.828476283439507,
+        17.39280699826853,
+        18.741499777650994
       ],
       "n1_error_peak_to_mean": 1.2901898414346409,
-      "trimmed_peak_to_mean": 1.2411356971695768,
+      "trimmed_peak_to_mean": 1.168110886573478,
       "n1_error_period_peak_to_mean": 1.1750134926124103,
-      "trimmed_period_peak_to_mean": 1.1633690299077772,
+      "trimmed_period_peak_to_mean": 1.1260805598405454,
       "n1_profile_l2_err": 0.5870960528027728,
-      "trimmed_profile_l2_err": 0.25338432614176243,
-      "n1_profile_l2_recovery_pct": 56.84107823036521
+      "trimmed_profile_l2_err": 0.1768691346551018,
+      "n1_profile_l2_recovery_pct": 69.87390158548405
     },
     "high-mirror": {
       "preset": "high-mirror",
@@ -967,29 +1017,30 @@
       "poloidal_peak_to_mean": 1.188762764229742,
       "external_error_field_desc": "external 3D Biot-Savart cryostat busbar dipole pair (rho=1.70, phi=0.605pi/1.405pi, tilt=+-0.08)",
       "external_error_field_edge_rms_before": 10.356721000912236,
-      "external_error_field_edge_rms_after": 2.632484917459214,
-      "external_error_field_edge_rms_reduction_pct": 74.58186894068749,
+      "external_error_field_edge_rms_after": 3.1114531801392555,
+      "external_error_field_edge_rms_reduction_pct": 69.95715941498092,
       "external_error_field_s4_rms_before": 11.118086187351002,
-      "external_error_field_s4_rms_after": 2.932987480644216,
-      "external_error_field_s4_rms_reduction_pct": 73.61967310542113,
+      "external_error_field_s4_rms_after": 3.582411721332758,
+      "external_error_field_s4_rms_reduction_pct": 67.77852176205963,
+      "external_error_field_bond_par_reduction_pct": 72.2747188599981,
       "lsq_trim_amps": [
-        0.0023,
-        -11.885,
-        0.0005,
-        11.902,
-        -0.0029
+        0.0064,
+        -13.9383,
+        0.0112,
+        13.8645,
+        -0.0195
       ],
       "lsq_ctrl_amps": [
-        0.0008,
-        -0.0006,
-        0.0454,
-        0.0185,
-        0.0038,
-        -0.0031,
-        -0.0004,
-        -0.0705,
-        0.0001,
-        -0.0009
+        0.0009,
+        0.0024,
+        0.0671,
+        0.0917,
+        0.0111,
+        -0.0041,
+        -0.0118,
+        -0.1396,
+        -0.0083,
+        -0.0015
       ],
       "divertor_unit_exhaust_n1_err": [
         21.419404270656216,
@@ -1004,24 +1055,24 @@
         23.921486764631297
       ],
       "divertor_unit_exhaust_trimmed": [
-        20.327476871972085,
-        21.438470682699005,
-        17.3738585457035,
-        21.697739845666312,
-        17.465748879464464,
-        19.915045598924127,
-        18.84382819329261,
-        18.23307469872485,
-        19.02139418567896,
-        24.93037133427177
+        20.88910879699786,
+        20.99255899799545,
+        18.368646294459936,
+        19.50770601876678,
+        17.202910634797902,
+        18.862585627443764,
+        18.050930439545997,
+        18.50685316884889,
+        18.977060653658672,
+        24.31596151981874
       ],
       "n1_error_peak_to_mean": 1.4045887763391247,
-      "trimmed_peak_to_mean": 1.2512293900854579,
+      "trimmed_peak_to_mean": 1.2426751375629437,
       "n1_error_period_peak_to_mean": 1.2464868280470116,
-      "trimmed_period_peak_to_mean": 1.1029466835318882,
+      "trimmed_period_peak_to_mean": 1.1062520032591054,
       "n1_profile_l2_err": 0.7111036610019433,
-      "trimmed_profile_l2_err": 0.19859678249383536,
-      "n1_profile_l2_recovery_pct": 72.07203486844477
+      "trimmed_profile_l2_err": 0.08072148277659309,
+      "n1_profile_l2_recovery_pct": 88.64842255728838
     }
   },
   "island_ablation": {
