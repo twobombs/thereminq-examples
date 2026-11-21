@@ -24,6 +24,7 @@ Subcommands (each takes the options of the former script):
     python3 stellarator.py dash --manifest manifest.json --scoreboard scoreboard.json \
         --telemetry flow_telemetry.npz --save stellarator_dashboard.png --check
     python3 stellarator.py bench            # all Phase 0 to 8 gates in order
+    python3 stellarator.py ui               # native live dashboard (runs stellarator_ui.py)
 """
 
 import argparse
@@ -5113,12 +5114,14 @@ def _extract_exact_cycle_subgraph(blk, target_n=16):
                 "colour": int(ib["colour"]),
                 "u": float(ib["u"]),
                 "weight": float(ib["weight"]),
+                "bond_id": ib.get("bond_id"),
             })
     sub_loop = [
         [old_to_new[int(q)], int(c)]
         for q, c in blk["internal_loops"][0]["pauli_local"]
     ]
     return {
+        "sub_qs": [int(q) for q in sub_qs],
         "n_qubits": len(sub_qs),
         "internal_bonds": sub_bonds,
         "internal_loops": [{
@@ -7184,6 +7187,52 @@ def _fundamental_cycles_of_cluster(n_q, all_bonds):
     return cycs
 
 
+EBIT_STORAGE_SHARE = 0.5
+
+
+def dejmps_link_budget(F0, n_ebits, target_delta=0.01, storage_share=EBIT_STORAGE_SHARE,
+                       max_rounds=12):
+    """Exact DEJMPS 2-to-1 Bell-diagonal distillation cost plus ebit-storage
+    budget. Each of `n_ebits` consumed ebits must satisfy 1 - F <= eps_req =
+    target_delta / n_ebits, split into a distillation residual
+    (1 - storage_share) * eps_req under ideal local gates and a storage share
+    while the ebit waits r + 1 classical rounds. A depolarising pair memory,
+    F(t) = 1/4 + (F - 1/4) exp(-t / T_mem), then needs
+    T_mem / t_round >= 3 (r + 1) / (4 * storage_share * eps_req)."""
+    eps_req = float(target_delta) / max(float(n_ebits), 1.0)
+    eps_dist = (1.0 - storage_share) * eps_req
+    eps_store = storage_share * eps_req
+    A = float(F0)
+    B = C = D = (1.0 - A) / 3.0
+    raw_per = 1.0
+    r = 0
+    while (1.0 - A) > eps_dist and r < max_rounds:
+        errs = sorted([B, C, D])
+        B, C, D = errs[0], errs[1], errs[2]
+        p_s = (A + B) ** 2 + (C + D) ** 2
+        A, B, C, D = (A * A + B * B) / p_s, (2.0 * C * D) / p_s, (C * C + D * D) / p_s, (2.0 * A * B) / p_s
+        raw_per *= (2.0 / p_s)
+        r += 1
+    raw_per_shot = float(n_ebits) * raw_per
+    t_wait_rounds = int(r + 1)
+    tmem_over_tround = float(0.75 * t_wait_rounds / max(eps_store, 1e-300))
+    return {
+        "F0_raw": float(F0),
+        "eps_req": eps_req,
+        "eps_distill_target": eps_dist,
+        "eps_storage_budget": eps_store,
+        "dejmps_rounds": int(r),
+        "F_distilled": float(A),
+        "reached_target": bool((1.0 - A) <= eps_dist),
+        "storage_wait_classical_rounds": t_wait_rounds,
+        "required_T_mem_over_t_round": tmem_over_tround,
+        "required_T_mem_s_at_1us_round": float(tmem_over_tround * 1e-6),
+        "raw_ebits_per_distilled": round(raw_per, 2),
+        "raw_ebits_per_shot": round(raw_per_shot, 1),
+        "raw_ebits_for_1e4_shots": float(1e4 * raw_per_shot),
+    }
+
+
 class ExactStateVector(object):
     """Exact complex128 state-vector stand-in for the subset of the
     QrackSimulator API used by the Cat-entangler circuit-identity check
@@ -8491,39 +8540,8 @@ def run_coupled_pyqrack_module_flow(manifest, steps=2, dt=0.04, gamma_div=0.18,
     # depolarising pair memory, F(t) = 1/4 + (F - 1/4) exp(-t / T_mem), so the
     # storage share needs T_mem / t_round >= 3 (r + 1) / (2 eps_req).
     # Regimes with eps_req < 1e-3 are flagged as needing QEC logical links.
-    EBIT_STORAGE_SHARE = 0.5
-
     def _dejmps_budget(F0, n_ebits, target_delta=0.01, max_rounds=12):
-        eps_req = float(target_delta) / max(float(n_ebits), 1.0)
-        eps_dist = (1.0 - EBIT_STORAGE_SHARE) * eps_req
-        eps_store = EBIT_STORAGE_SHARE * eps_req
-        A = float(F0)
-        B = C = D = (1.0 - A) / 3.0
-        raw_per = 1.0
-        r = 0
-        while (1.0 - A) > eps_dist and r < max_rounds:
-            errs = sorted([B, C, D])
-            B, C, D = errs[0], errs[1], errs[2]
-            p_s = (A + B) ** 2 + (C + D) ** 2
-            A, B, C, D = (A * A + B * B) / p_s, (2.0 * C * D) / p_s, (C * C + D * D) / p_s, (2.0 * A * B) / p_s
-            raw_per *= (2.0 / p_s)
-            r += 1
-        raw_per_shot = float(n_ebits) * raw_per
-        t_wait_rounds = int(r + 1)
-        tmem_over_tround = float(0.75 * t_wait_rounds / max(eps_store, 1e-300))
-        return {
-            "F0_raw": float(F0),
-            "eps_distill_target": eps_dist,
-            "eps_storage_budget": eps_store,
-            "dejmps_rounds": int(r),
-            "F_distilled": float(A),
-            "storage_wait_classical_rounds": t_wait_rounds,
-            "required_T_mem_over_t_round": tmem_over_tround,
-            "required_T_mem_s_at_1us_round": float(tmem_over_tround * 1e-6),
-            "raw_ebits_per_distilled": round(raw_per, 2),
-            "raw_ebits_per_shot": round(raw_per_shot, 1),
-            "raw_ebits_for_1e4_shots": float(1e4 * raw_per_shot),
-        }
+        return dejmps_link_budget(F0, n_ebits, target_delta=target_delta, max_rounds=max_rounds)
 
     def _qpd_overhead_entry(label, n_seams, n_layers, n_locc_rounds, th_rad, exact_G_LO=None):
         if exact_G_LO is not None:
@@ -8962,7 +8980,7 @@ def rung_f5_open_heisenberg(manifest, idx=None, steps=10, dt=0.04, gamma_div=0.3
 # =====================================================================
 def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
                                 coil_knobs=None, preset="standard",
-                                uniform=False, label="w7x"):
+                                uniform=False, label="w7x", progress=None):
     """Evaluate all 7 W7-X optimization criteria using exact signed bond
     energies (`R4`), genuinely independent physical observables (`N5`),
     pure scale-invariant 3D Biot-Savart coil weights with SEPARATELY matched
@@ -9004,6 +9022,8 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
 
     # ------------------------------------------------------------------
     # Criterion 1: Vacuum flux-surface integrity (always executed, never skipped)
+    if progress is not None:
+        progress("C1 flux integrity")
     # ------------------------------------------------------------------
     stabs, _ = build_stabilizers(bonds, loops, u_ref=u_ground)
     _, meas_preset, _ = seed_edge_island_chain(
@@ -9033,6 +9053,8 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
 
     # ------------------------------------------------------------------
     # Criterion 2: Finite-beta equilibrium stiffness (Shafranov shift)
+    if progress is not None:
+        progress("C2 Shafranov shift")
     # Driven by bond-local 3D Biot-Savart flux-surface curvature kappa_b * (R/R0)^2
     # ------------------------------------------------------------------
     beta_grid = [0.5, 1.5, 2.5, 3.5, 5.0]
@@ -9058,6 +9080,8 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
 
     # ------------------------------------------------------------------
     # Criterion 3: Pure Lattice Kitaev Flux-Sector Stability Limit (`D3`)
+    if progress is not None:
+        progress("C3 MHD stability")
     # Exact 1620-bond rank-2 Fredholm oracle under finite-beta curvature load:
     #   beta_crit_lattice = sup{beta : min_b Delta E_b(beta) > 0}
     # ZERO arbitrary `50 * W_mag` constant!
@@ -9103,6 +9127,8 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
 
     # ------------------------------------------------------------------
     # Criterion 4: Neoclassical transport (100% shape-only at <J_rad>=1.0!)
+    if progress is not None:
+        progress("C4 neoclassical transport")
     # Symmetric s<=1 core leakage + outboard bad-curvature s=1 leakage + eps_B
     # ------------------------------------------------------------------
     prop_main.reset()
@@ -9136,6 +9162,8 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
 
     # ------------------------------------------------------------------
     # Criterion 5: Fast-ion confinement at finite beta = 2.5%
+    if progress is not None:
+        progress("C5 fast-ion confinement")
     # Distinct initial state: localized outboard (R > R0) lowest-40%-|B|
     # mirror-throat wavepacket on shell s=2 with finite-beta diamagnetic
     # field depression B^2(beta) = B^2 * (1 - beta*(1-rho)^2).
@@ -9168,6 +9196,8 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
 
     # ------------------------------------------------------------------
     # Criterion 6: Bootstrap / Pfirsch-Schlueter symmetry (ZERO m%2 parity!)
+    if progress is not None:
+        progress("C6 bootstrap / PS")
     # 3D Biot-Savart outboard/inboard geodesic field asymmetry on s=2 +
     # dynamical outboard-vs-inboard toroidal seam RMS excitation asymmetry
     # ------------------------------------------------------------------
@@ -9263,7 +9293,7 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
 def _run_divertor_pulse(n_sites, bonds, u_p, w_p, site_shell,
                         div_units_sites, div_pol_of_site, core_sites,
                         steps=135, dt=1.20, gamma_heat=0.14, gamma_div=0.95,
-                        check_source_free=False, snap_step=None):
+                        check_source_free=False, snap_step=None, on_step=None):
     """Run a pure core-to-divertor non-equilibrium steady-state (NESS) open
     Majorana simulation driven ONLY at the magnetic axis (`s=0`, 20 core cap
     sites heated by the exact CPTP dual creation bath `L_s^heat = sqrt(gamma_h)
@@ -9334,6 +9364,19 @@ def _run_divertor_pulse(n_sites, bonds, u_p, w_p, site_shell,
         exhaust_trace.append(float(p_div))
         in_trace.append(float(de_in_step))
         shell_history.append([float(x) for x in sh_e])
+        if on_step is not None:
+            on_step(step_idx, {
+                "stored": e_stored_now,
+                "core": float(sh_e[0] + sh_e[1]),
+                "exhaust": float(p_div),
+                "injected": float(de_in_step),
+                "cum_in": float(cumulative_in),
+                "cum_ex": float(cumulative_ex),
+                "shell": [float(x) for x in sh_e],
+                "unit_exhaust": [float(x) for x in unit_exhaust],
+                "ledger_err": float(max_ledger_err),
+                "bond_energy": de,
+            })
 
         if snap_step is not None and step_idx == int(snap_step):
             w_s = min(15, len(stored_trace))
@@ -10489,6 +10532,24 @@ def main_dash(argv=None):
 
 
 #=============================================================================
+# PART M -- LIVE DASHBOARD LAUNCHER (ui subcommand)
+#
+# The native PySide6 dashboard lives in its own file, stellarator_ui.py, next
+# to this one; `python3 stellarator.py ui` simply starts it.
+#=============================================================================
+def main_ui(argv=None):
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import stellarator_ui
+    except ImportError as exc:
+        print("The ui subcommand needs stellarator_ui.py next to stellarator.py (%s)" % exc, file=sys.stderr)
+        sys.exit(1)
+    stellarator_ui.main_ui(argv)
+
+
+#=============================================================================
 # PART L -- COMMAND-LINE DISPATCH & BENCHTEST (formerly benchtest.sh)
 #=============================================================================
 SUBCOMMANDS = collections.OrderedDict([
@@ -10503,6 +10564,7 @@ SUBCOMMANDS = collections.OrderedDict([
     ("worker", main_worker),
     ("flow", main_flow),
     ("dash", main_dash),
+    ("ui", main_ui),
 ])
 
 BENCH_STEPS = [
