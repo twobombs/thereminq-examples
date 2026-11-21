@@ -213,7 +213,11 @@ Requirements: `numpy`, `scipy`, `pyqrack`, `ortools` (for `equiv`), `matplotlib`
 
 ---
 
-## 5. Live Dashboard (`stellarator_ui.py`)
+## 5. Live Dashboard (`stellarator_ui.py` & `stellarator_colab.ipynb`)
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/twobombs/thereminq-examples/blob/main/devices/stellarator/stellarator_colab.ipynb)
+
+For a browser-based interactive dashboard with zero local setup, open [`stellarator_colab.ipynb`](stellarator_colab.ipynb) in Google Colab via the badge above and run *Runtime > Run all* (a standard CPU runtime is enough).
 
 `python3 stellarator_ui.py` (or `python3 stellarator.py ui`) opens a native desktop window (PySide6 / Qt widgets, matplotlib charts and a QPainter 3D view; `pip install PySide6`). Pick a job, set its parameters and modes, tick **sweep** on one parameter (the coil landscape also takes a second, **Y** axis), set its range, and press **Run**. The sweep runs in a background thread; the window polls it ten times a second and shows every step while it is computed. **Stop** ends the run at the next step.
 

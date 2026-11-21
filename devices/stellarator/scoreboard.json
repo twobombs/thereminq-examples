@@ -1,0 +1,1554 @@
+{
+  "rungs": {
+    "F1": {
+      "rung": "F1",
+      "system": "27-qubit manifold (exact 16q + 6-step 27q PyQrack vs Majorana)",
+      "steps": 10,
+      "steps_27q": 6,
+      "dt": 0.04,
+      "max_bond_err": 0.001200681644715651,
+      "pyqrack_exact16_step_rms": [
+        3.11694951859772e-05,
+        1.4593991762941517e-05,
+        1.6414550874073397e-05,
+        1.8896053487727878e-05,
+        2.8583103313844212e-05,
+        2.870751136354443e-05,
+        3.148846289428762e-05,
+        3.294349906184853e-05,
+        3.420643710851399e-05,
+        4.313203911517991e-05
+      ],
+      "pyqrack_exact16_max_rms": 4.313203911517991e-05,
+      "pyqrack_exact16_w0": 1.0,
+      "pyqrack_27q_step_rms": [
+        0.00035443655771495144,
+        0.0011224088112842757,
+        0.0012884873666083646,
+        0.0009326733695780387,
+        0.0008996660712631662,
+        0.0006357899235820573
+      ],
+      "pyqrack_27q_max_rms": 0.0012884873666083646,
+      "pyqrack_rms_bond_err": 4.313203911517991e-05,
+      "pyqrack_27q_ace_mean_rms": 0.0008722436833384756,
+      "pyqrack_step1_rms_err": 3.11694951859772e-05,
+      "pyqrack_w0": 1.0,
+      "pass": true
+    },
+    "F2": {
+      "rung": "F2",
+      "system": "108-qubit half-period module (4x27 K4 block-pair)",
+      "steps": 8,
+      "dt": 0.06,
+      "rms_bond_err": 0.0013559040503663543,
+      "rms_bond_err_bare": 0.1545772731001295,
+      "rms_bond_err_repaired": 0.0013559040503663543,
+      "rms_bond_err_strang": 0.002711831148386769,
+      "kick_rel_err_bare": 0.729218056458398,
+      "kick_rel_err_repaired": 0.0034931290154106296,
+      "pass": true
+    },
+    "F3": {
+      "rung": "F3",
+      "system": "200-qubit 10-module toroidal shell ring (2-hop sparse block-pair)",
+      "steps": 16,
+      "sparse_max_hops": 2,
+      "sparse_seam_pairs_stored": 20,
+      "sparse_block_pairs_total": 45,
+      "sparse_storage_fraction": 0.4444444444444444,
+      "t_peak_exact": 7,
+      "t_peak_kick": 7,
+      "t_peak_strang": 7,
+      "peak_energy_exact": 0.40867110830174336,
+      "peak_energy_blocks": 0.3997666033773122,
+      "transit_step_diff": 0,
+      "rms_bond_err_bare": 0.1058011897688563,
+      "rms_bond_err_repaired": 0.0035813215638370475,
+      "kick_rel_err_bare": 0.8891741326053713,
+      "kick_rel_err_repaired": 0.035256013298017384,
+      "pass": true
+    },
+    "F4": {
+      "rung": "F4",
+      "system": "1080-qubit full stellarator (40x27 2-hop sparse block-pair)",
+      "steps": 10,
+      "unitary_energy_init": 0.4232671322527204,
+      "unitary_energy_drift": 2.0305979120394113e-13,
+      "sparse_max_hops": 2,
+      "sparse_seam_pairs_stored": 352,
+      "sparse_block_pairs_total": 780,
+      "sparse_storage_fraction": 0.4512820512820513,
+      "shell_profile_exact": [
+        0.9049807099747323,
+        0.10897774276293194,
+        -0.013947793825256946,
+        -1.0310478431971733e-05,
+        -3.4843397530699536e-07
+      ],
+      "shell_profile_decomp": [
+        0.9032728144852968,
+        0.11047901300073754,
+        -0.01374486821888323,
+        -6.658135165003576e-06,
+        -3.0113198610141266e-07
+      ],
+      "shell_profile_blocks40": [
+        0.9034734201415251,
+        0.11007046981751438,
+        -0.013533046711004536,
+        -1.0508542339671707e-05,
+        -3.347056953232331e-07
+      ],
+      "max_shell_deviation": 0.0015072898332072482,
+      "max_shell_deviation_blocks40": 0.0015072898332072482,
+      "max_shell_deviation_strang": 0.001707895489435507,
+      "rms_bond_err_bare": 0.1733321493829356,
+      "rms_bond_err_repaired": 0.003140885036252718,
+      "kick_rel_err_bare": 1.092129475708345,
+      "kick_rel_err_repaired": 0.014003441126719397,
+      "outer_leakage_fraction": -1.0658912407278728e-05,
+      "pass": true
+    },
+    "F5": {
+      "rung": "F5",
+      "system": "1080-qubit quasi-local zero-T 60-site Lindblad CPTP bath + QPD-coupled 4x27q PyQrack + Heisenberg g",
+      "edge_majorana_zero_modes": {
+        "n_zero_modes": 2,
+        "zero_mode_abs_evals": [
+          1.3541550862211312e-15,
+          1.78900455422438e-17
+        ],
+        "bulk_spectral_gap": 0.21115226191271616,
+        "shell_localization": [
+          0.002850185453854143,
+          0.011791914504425906,
+          0.031143480225229773,
+          0.17626948022437106,
+          0.7779449395921194
+        ],
+        "outer_two_shells_fraction": 0.9542144198164905,
+        "lcfs_shell_fraction": 0.7779449395921194,
+        "g0_parity_fixed_pure": true,
+        "g0_entropy_nats": 1.625877845788256e-11,
+        "g0_purity_err": 1.5097049927226044e-13,
+        "g0_commutator_err": 4.4171008768001573e-13
+      },
+      "bath_localization": {
+        "shell_weight_fractions": [
+          8.072211765970993e-05,
+          0.00021085861641879504,
+          0.001405946920449907,
+          0.009339964550388965,
+          0.9889625077950827
+        ],
+        "lcfs_weight_fraction": 0.9889625077950827,
+        "off_lcfs_tail_fraction": 0.011037492204917343,
+        "target_60_weight_fraction": 0.7915951044015108
+      },
+      "f4_recovery_err": 0.0,
+      "cptp_channel_min_eig": -2.424347539553105e-15,
+      "cptp_commutator_err": 2.694066057472436e-14,
+      "core_heating_cptp_min_eig": -1.5764266253607669e-15,
+      "core_heating_cptp_commutator_err": 1.7250541783873357e-14,
+      "source_free_steps": 10,
+      "source_free_energy_rise": 1.1210243844317347e-13,
+      "source_free_entropy_nats": 1.577098359058727e-10,
+      "source_free_cum_exhaust": 1.708926547529766e-14,
+      "ground_fixed_point_exhaust": 1.708926547529766e-14,
+      "core_one_step_exhaust": -1.1298366369673308e-06,
+      "energy_ledger_max_err": 1.617594946878853e-13,
+      "unit_booking_err": 0.0,
+      "pol_booking_err": 6.938893903907228e-18,
+      "cptp_max_eig_iG": 1.0000000000001088,
+      "von_neumann_entropy_nats": 0.09752879296818523,
+      "open_cum_exhaust_div": 0.06017452477196066,
+      "outer_shell_energy_undamped": 0.12383969828492308,
+      "outer_shell_energy_damped": 0.05357100604077293,
+      "pyqrack_module_flow": {
+        "n_blocks": 4,
+        "n_qubits_per_block": 27,
+        "n_cycles_monitored": 6,
+        "n_sigma_per_block": [
+          45,
+          45,
+          45,
+          45
+        ],
+        "interblock_k4_pairs": 6,
+        "n_seam_pair_bonds_compared": 84,
+        "n_4x27q_bonds_compared": 110,
+        "seam_pair_steps": 8,
+        "seam_pair_results": [
+          {
+            "pair": [
+              0,
+              1
+            ],
+            "n_seam_bonds": 1,
+            "rms_coupled": 2.273960532922719e-05,
+            "rms_uncoupled": 0.04942590079177511,
+            "improvement_factor": 2173.5601861237255,
+            "cross_seam_signal_norm": 0.039558101317014906,
+            "cross_seam_rel_err_coupled": 0.00036145958382275377,
+            "cross_seam_rel_err_uncoupled": 0.9999559606504664
+          },
+          {
+            "pair": [
+              0,
+              2
+            ],
+            "n_seam_bonds": 1,
+            "rms_coupled": 1.968211258387252e-05,
+            "rms_uncoupled": 0.05904939242493236,
+            "improvement_factor": 3000.1552004797136,
+            "cross_seam_signal_norm": 0.029453374572667168,
+            "cross_seam_rel_err_coupled": 0.0007219585758112308,
+            "cross_seam_rel_err_uncoupled": 0.9999740403571209
+          },
+          {
+            "pair": [
+              0,
+              3
+            ],
+            "n_seam_bonds": 1,
+            "rms_coupled": 2.1656442730751058e-05,
+            "rms_uncoupled": 0.11213363342061432,
+            "improvement_factor": 5177.841754287291,
+            "cross_seam_signal_norm": 0.032209780761080796,
+            "cross_seam_rel_err_coupled": 0.0018620211006665456,
+            "cross_seam_rel_err_uncoupled": 0.9998911034673854
+          },
+          {
+            "pair": [
+              1,
+              2
+            ],
+            "n_seam_bonds": 1,
+            "rms_coupled": 1.9672851274073738e-05,
+            "rms_uncoupled": 0.07674139650305647,
+            "improvement_factor": 3900.8781916727885,
+            "cross_seam_signal_norm": 0.01713545466423295,
+            "cross_seam_rel_err_coupled": 0.000747331569168739,
+            "cross_seam_rel_err_uncoupled": 0.9999533611732537
+          },
+          {
+            "pair": [
+              1,
+              3
+            ],
+            "n_seam_bonds": 1,
+            "rms_coupled": 2.951966497331056e-05,
+            "rms_uncoupled": 0.10443578620273489,
+            "improvement_factor": 3537.8377870195272,
+            "cross_seam_signal_norm": 0.060178340818089246,
+            "cross_seam_rel_err_coupled": 0.00040179780683374897,
+            "cross_seam_rel_err_uncoupled": 0.9999671839391032
+          },
+          {
+            "pair": [
+              2,
+              3
+            ],
+            "n_seam_bonds": 1,
+            "rms_coupled": 2.0932275492280083e-05,
+            "rms_uncoupled": 0.07154619405845221,
+            "improvement_factor": 3417.9845418544564,
+            "cross_seam_signal_norm": 0.031162407280083085,
+            "cross_seam_rel_err_coupled": 0.0004756503567302798,
+            "cross_seam_rel_err_uncoupled": 0.9999665035235985
+          }
+        ],
+        "pyqrack_seam_pair_rms_coupled_mean": 2.236715873058586e-05,
+        "pyqrack_seam_pair_rms_coupled_max": 2.951966497331056e-05,
+        "pyqrack_seam_pair_rms_uncoupled_mean": 0.07888871723359421,
+        "pyqrack_seam_pair_improvement_factor": 3526.9887509546857,
+        "cross_seam_signal_min_norm": 0.01713545466423295,
+        "cross_seam_rel_err_coupled_max": 0.0018620211006665456,
+        "cross_seam_rel_err_uncoupled_min": 0.9998911034673854,
+        "pyqrack_4x27q_coupling_method": "Mitarai-Fujii Strang-QPD circuit knitting across ALL 32/32 Module-0 K4 seam bonds (142 bonds total, 4 independent QrackSimulator(27) workers, all-order final-layer diag + all cross-seam pairs (e1,e2)) + 25k-shot seeded 2-Strang-step MC QPD + 6-step 1-ebit Cat-entangler LOCC teleportation",
+        "pyqrack_4x27q_k4_bridges": 32,
+        "pyqrack_4x27q_total_module0_bonds": 142,
+        "pyqrack_4x27q_source_block": 1,
+        "pyqrack_4x27q_seam_4cycle_sectors_averaged": 16,
+        "pyqrack_4x27q_vs_uncoupled_rms": 3.411489216076662e-05,
+        "pyqrack_4x27q_vs_ref108_rms": 0.0005436247557057599,
+        "exact_uncoupled_4x27_vs_ref108_rms": 0.03263342108672353,
+        "pyqrack_4x27q_qpd_improvement_factor": 60.029313868087634,
+        "pyqrack_4x27q_per_block_rms": [
+          0.0003868064736430759,
+          0.0004630582048807813,
+          0.0006680519904938943,
+          0.0006095867464880463
+        ],
+        "pyqrack_4x27q_per_block_uncoupled_rms": [
+          0.029625655856446213,
+          0.03390919400042311,
+          0.03246127435054505,
+          0.03443637675820604
+        ],
+        "pyqrack_4x27q_remote_block_signals": [
+          {
+            "block": 0,
+            "signal_norm_ref": 0.000292403506705452,
+            "rel_err_qpd": 0.03572244129634604,
+            "rel_err_uncoupled": 1.0
+          },
+          {
+            "block": 2,
+            "signal_norm_ref": 0.0007988643991415212,
+            "rel_err_qpd": 9.021360019091508e-06,
+            "rel_err_uncoupled": 1.0
+          },
+          {
+            "block": 3,
+            "signal_norm_ref": 0.0010714696857217693,
+            "rel_err_qpd": 3.57943900988273e-05,
+            "rel_err_uncoupled": 1.0
+          }
+        ],
+        "pyqrack_4x27q_remote_sig_min_norm": 0.000292403506705452,
+        "pyqrack_4x27q_remote_sig_max_err": 0.03572244129634604,
+        "pyqrack_multistep_mc_qpd_audit": {
+          "n_blocks": 2,
+          "n_qubits_per_block": 27,
+          "n_trotter_steps": 2,
+          "n_cut_layers": 3,
+          "dt": 0.18,
+          "seed": 2026,
+          "bit_reproducible": true,
+          "n_shots": 25000,
+          "n_unique_branches_sampled": 187,
+          "target_bond_B1": [
+            21,
+            23,
+            0
+          ],
+          "exact_ref_54q": 0.46309082568318827,
+          "exact_uncoupled_54q": 0.5801010444968229,
+          "mc_shot_mean": 0.49919510480253726,
+          "mc_empirical_se": 0.019741848659949813,
+          "mc_theoretical_se": 0.019776620148091457,
+          "mc_se_emp_over_theory": 0.998241788137646,
+          "mc_z_score_vs_exact": 1.828819567064839,
+          "mc_z_score_vs_zero": 25.286137757466037,
+          "mc_z_score_vs_uncoupled": 4.098194707490544,
+          "Gamma_LO": 3.161063226966421,
+          "ebit_shot_assumption": "Flat 10^4 shots (eps=1e-2) assumes distilled logical ebits with 1-F_ebit <= 0.01/N_ebits split evenly between distillation residual and storage decoherence, fault-tolerant local gates (required once eps_req < 1e-3, e.g. 1.92e-6 at 5200 ebits), a depolarising pair memory with T_mem/t_round >= 3(r+1)/(2 eps_req), and 1 LOCC feed-forward round per Trotter step.",
+          "sampling_cost_table": [
+            {
+              "regime": "2x27q MC shot-sampled (1 bridge, 2 Strang steps, 3 cuts)",
+              "n_seam_bonds": 1,
+              "n_cut_layers": 3,
+              "total_cuts": 3,
+              "theta_per_cut_rad": 0.18108,
+              "log10_Gamma_LO": 0.4998,
+              "Gamma_LO": 3.161063226966421,
+              "log10_shots_LO_QPD_eps_1e2": 5.0,
+              "logical_ebits_per_shot": 3,
+              "required_ebit_infidelity_eps_req_for_1pct_circuit": 0.0033333333333333335,
+              "requires_ft_logical_ebits": false,
+              "locc_feedforward_rounds_per_shot": 2,
+              "locc_classical_bits_per_step": 2,
+              "dejmps_F0_099_ideal_local": {
+                "F0_raw": 0.99,
+                "eps_distill_target": 0.0016666666666666668,
+                "eps_storage_budget": 0.0016666666666666668,
+                "dejmps_rounds": 2,
+                "F_distilled": 0.9999090102556556,
+                "storage_wait_classical_rounds": 3,
+                "required_T_mem_over_t_round": 1350.0,
+                "required_T_mem_s_at_1us_round": 0.0013499999999999999,
+                "raw_ebits_per_distilled": 4.11,
+                "raw_ebits_per_shot": 12.3,
+                "raw_ebits_for_1e4_shots": 123253.90354710835
+              },
+              "dejmps_F0_095_ideal_local": {
+                "F0_raw": 0.95,
+                "eps_distill_target": 0.0016666666666666668,
+                "eps_storage_budget": 0.0016666666666666668,
+                "dejmps_rounds": 3,
+                "F_distilled": 0.9999076062079971,
+                "storage_wait_classical_rounds": 4,
+                "required_T_mem_over_t_round": 1799.9999999999998,
+                "required_T_mem_s_at_1us_round": 0.0017999999999999997,
+                "raw_ebits_per_distilled": 9.21,
+                "raw_ebits_per_shot": 27.6,
+                "raw_ebits_for_1e4_shots": 276162.8343932131
+              },
+              "log10_shots_distilled_ebit_eps_1e2": 4.0
+            },
+            {
+              "regime": "22q/28q Cat-entangler identity check (6 steps, dt=0.12)",
+              "n_seam_bonds": 2,
+              "n_cut_layers": 6,
+              "total_cuts": 12,
+              "theta_per_cut_rad": 0.12072,
+              "log10_Gamma_LO": 2.0368,
+              "Gamma_LO": 108.84442142654997,
+              "log10_shots_LO_QPD_eps_1e2": 8.07,
+              "logical_ebits_per_shot": 12,
+              "required_ebit_infidelity_eps_req_for_1pct_circuit": 0.0008333333333333334,
+              "requires_ft_logical_ebits": true,
+              "locc_feedforward_rounds_per_shot": 6,
+              "locc_classical_bits_per_step": 4,
+              "dejmps_F0_099_ideal_local": {
+                "F0_raw": 0.99,
+                "eps_distill_target": 0.0004166666666666667,
+                "eps_storage_budget": 0.0004166666666666667,
+                "dejmps_rounds": 2,
+                "F_distilled": 0.9999090102556556,
+                "storage_wait_classical_rounds": 3,
+                "required_T_mem_over_t_round": 5400.0,
+                "required_T_mem_s_at_1us_round": 0.005399999999999999,
+                "raw_ebits_per_distilled": 4.11,
+                "raw_ebits_per_shot": 49.3,
+                "raw_ebits_for_1e4_shots": 493015.6141884334
+              },
+              "dejmps_F0_095_ideal_local": {
+                "F0_raw": 0.95,
+                "eps_distill_target": 0.0004166666666666667,
+                "eps_storage_budget": 0.0004166666666666667,
+                "dejmps_rounds": 3,
+                "F_distilled": 0.9999076062079971,
+                "storage_wait_classical_rounds": 4,
+                "required_T_mem_over_t_round": 7199.999999999999,
+                "required_T_mem_s_at_1us_round": 0.007199999999999999,
+                "raw_ebits_per_distilled": 9.21,
+                "raw_ebits_per_shot": 110.5,
+                "raw_ebits_for_1e4_shots": 1104651.3375728524
+              },
+              "log10_shots_distilled_ebit_eps_1e2": 4.0
+            },
+            {
+              "regime": "4x27q ALL 32 seams (1 Strang step, dt=0.14)",
+              "n_seam_bonds": 32,
+              "n_cut_layers": 2,
+              "total_cuts": 64,
+              "theta_per_cut_rad": 0.07042000000000001,
+              "log10_Gamma_LO": 6.8777,
+              "Gamma_LO": 7545928.390973122,
+              "log10_shots_LO_QPD_eps_1e2": 17.76,
+              "logical_ebits_per_shot": 64,
+              "required_ebit_infidelity_eps_req_for_1pct_circuit": 0.00015625,
+              "requires_ft_logical_ebits": true,
+              "locc_feedforward_rounds_per_shot": 2,
+              "locc_classical_bits_per_step": 64,
+              "dejmps_F0_099_ideal_local": {
+                "F0_raw": 0.99,
+                "eps_distill_target": 7.8125e-05,
+                "eps_storage_budget": 7.8125e-05,
+                "dejmps_rounds": 3,
+                "F_distilled": 0.9999993810571292,
+                "storage_wait_classical_rounds": 4,
+                "required_T_mem_over_t_round": 38400.0,
+                "required_T_mem_s_at_1us_round": 0.0384,
+                "raw_ebits_per_distilled": 8.22,
+                "raw_ebits_per_shot": 526.0,
+                "raw_ebits_for_1e4_shots": 5259787.092911437
+              },
+              "dejmps_F0_095_ideal_local": {
+                "F0_raw": 0.95,
+                "eps_distill_target": 7.8125e-05,
+                "eps_storage_budget": 7.8125e-05,
+                "dejmps_rounds": 4,
+                "F_distilled": 0.9999939328823254,
+                "storage_wait_classical_rounds": 5,
+                "required_T_mem_over_t_round": 48000.0,
+                "required_T_mem_s_at_1us_round": 0.048,
+                "raw_ebits_per_distilled": 18.41,
+                "raw_ebits_per_shot": 1178.5,
+                "raw_ebits_for_1e4_shots": 11785053.743143428
+              },
+              "log10_shots_distilled_ebit_eps_1e2": 4.0
+            },
+            {
+              "regime": "4x27q ALL 32 seams (10 Trotter steps, dt=0.05, T=0.50)",
+              "n_seam_bonds": 32,
+              "n_cut_layers": 10,
+              "total_cuts": 320,
+              "theta_per_cut_rad": 0.050300000000000004,
+              "log10_Gamma_LO": 25.4377,
+              "Gamma_LO": 2.7393915457465866e+25,
+              "log10_shots_LO_QPD_eps_1e2": 54.88,
+              "logical_ebits_per_shot": 320,
+              "required_ebit_infidelity_eps_req_for_1pct_circuit": 3.125e-05,
+              "requires_ft_logical_ebits": true,
+              "locc_feedforward_rounds_per_shot": 10,
+              "locc_classical_bits_per_step": 64,
+              "dejmps_F0_099_ideal_local": {
+                "F0_raw": 0.99,
+                "eps_distill_target": 1.5625e-05,
+                "eps_storage_budget": 1.5625e-05,
+                "dejmps_rounds": 3,
+                "F_distilled": 0.9999993810571292,
+                "storage_wait_classical_rounds": 4,
+                "required_T_mem_over_t_round": 192000.0,
+                "required_T_mem_s_at_1us_round": 0.192,
+                "raw_ebits_per_distilled": 8.22,
+                "raw_ebits_per_shot": 2629.9,
+                "raw_ebits_for_1e4_shots": 26298935.464557186
+              },
+              "dejmps_F0_095_ideal_local": {
+                "F0_raw": 0.95,
+                "eps_distill_target": 1.5625e-05,
+                "eps_storage_budget": 1.5625e-05,
+                "dejmps_rounds": 4,
+                "F_distilled": 0.9999939328823254,
+                "storage_wait_classical_rounds": 5,
+                "required_T_mem_over_t_round": 240000.0,
+                "required_T_mem_s_at_1us_round": 0.24,
+                "raw_ebits_per_distilled": 18.41,
+                "raw_ebits_per_shot": 5892.5,
+                "raw_ebits_for_1e4_shots": 58925268.71571714
+              },
+              "log10_shots_distilled_ebit_eps_1e2": 4.0
+            },
+            {
+              "regime": "40x27q FULL 1080q (520 seams, 10 steps, dt=0.05)",
+              "n_seam_bonds": 520,
+              "n_cut_layers": 10,
+              "total_cuts": 5200,
+              "theta_per_cut_rad": 0.050300000000000004,
+              "log10_Gamma_LO": 413.3619,
+              "Gamma_LO": null,
+              "log10_shots_LO_QPD_eps_1e2": 830.72,
+              "logical_ebits_per_shot": 5200,
+              "required_ebit_infidelity_eps_req_for_1pct_circuit": 1.923076923076923e-06,
+              "requires_ft_logical_ebits": true,
+              "locc_feedforward_rounds_per_shot": 10,
+              "locc_classical_bits_per_step": 1040,
+              "dejmps_F0_099_ideal_local": {
+                "F0_raw": 0.99,
+                "eps_distill_target": 9.615384615384615e-07,
+                "eps_storage_budget": 9.615384615384615e-07,
+                "dejmps_rounds": 3,
+                "F_distilled": 0.9999993810571292,
+                "storage_wait_classical_rounds": 4,
+                "required_T_mem_over_t_round": 3120000.0,
+                "required_T_mem_s_at_1us_round": 3.1199999999999997,
+                "raw_ebits_per_distilled": 8.22,
+                "raw_ebits_per_shot": 42735.8,
+                "raw_ebits_for_1e4_shots": 427357701.29905427
+              },
+              "dejmps_F0_095_ideal_local": {
+                "F0_raw": 0.95,
+                "eps_distill_target": 9.615384615384615e-07,
+                "eps_storage_budget": 9.615384615384615e-07,
+                "dejmps_rounds": 5,
+                "F_distilled": 0.9999999989168606,
+                "storage_wait_classical_rounds": 6,
+                "required_T_mem_over_t_round": 4680000.0,
+                "required_T_mem_s_at_1us_round": 4.68,
+                "raw_ebits_per_distilled": 36.83,
+                "raw_ebits_per_shot": 191509.4,
+                "raw_ebits_for_1e4_shots": 1915094469.3230302
+              },
+              "log10_shots_distilled_ebit_eps_1e2": 4.0
+            }
+          ]
+        },
+        "pyqrack_ebit_cat_entangler_audit": {
+          "protocol": "1-ebit Cat-entangler LOCC gate teleportation (Bell pair + 2 classical bits/cut); single-simulator circuit-identity check (22q exact complex128 + 22q/28q PyQrack) + 1,000 real repeated end-to-end circuit executions (10q, ideal F=1.0 vs noisy Werner F=0.80) + exact Pauli-pattern-enumerated noisy-ebit reference",
+          "single_simulator_circuit_identity_check": true,
+          "circuit_identity": {
+            "n_comm_qubits": 2,
+            "n_trotter_steps": 6,
+            "dt": 0.12,
+            "exact_22q_direct_rms": 9.202539463866162e-14,
+            "exact_22q_teleported_rms": 2.224933581030069e-14,
+            "exact_22q_uncoupled_rms": 0.09655583164032616,
+            "pyqrack_22q_direct_rms": 2.2238125662184566e-05,
+            "pyqrack_22q_teleported_rms": 0.00027451285642285,
+            "pyqrack_28q_teleported_rms": 0.033399315421734806,
+            "pyqrack_28q_uncoupled_rms": 0.1040473291355722,
+            "n_seams_teleported": 2,
+            "ebits_consumed_per_run": 12,
+            "runs": [
+              {
+                "simulator": "ExactStateVector(complex128)",
+                "n_qubits": 22,
+                "n_data_qubits": 20,
+                "n_seams": 2,
+                "seams_teleported": false,
+                "rms_vs_exact": 9.202539463866162e-14,
+                "rms_uncoupled_vs_exact": 0.09655583164032616,
+                "seam_weights": [
+                  1.006,
+                  1.006
+                ]
+              },
+              {
+                "simulator": "ExactStateVector(complex128)",
+                "n_qubits": 22,
+                "n_data_qubits": 20,
+                "n_seams": 2,
+                "seams_teleported": true,
+                "rms_vs_exact": 2.224933581030069e-14,
+                "rms_uncoupled_vs_exact": 0.09655583164032616,
+                "seam_weights": [
+                  1.006,
+                  1.006
+                ]
+              },
+              {
+                "simulator": "PyQrack",
+                "n_qubits": 22,
+                "n_data_qubits": 20,
+                "n_seams": 2,
+                "seams_teleported": false,
+                "rms_vs_exact": 2.2238125662184566e-05,
+                "rms_uncoupled_vs_exact": 0.0965558181126061,
+                "seam_weights": [
+                  1.006,
+                  1.006
+                ]
+              },
+              {
+                "simulator": "PyQrack",
+                "n_qubits": 22,
+                "n_data_qubits": 20,
+                "n_seams": 2,
+                "seams_teleported": true,
+                "rms_vs_exact": 0.00027451285642285,
+                "rms_uncoupled_vs_exact": 0.09655582515461042,
+                "seam_weights": [
+                  1.006,
+                  1.006
+                ]
+              },
+              {
+                "simulator": "PyQrack",
+                "n_qubits": 28,
+                "n_data_qubits": 26,
+                "n_seams": 2,
+                "seams_teleported": true,
+                "rms_vs_exact": 0.033399315421734806,
+                "rms_uncoupled_vs_exact": 0.1040473291355722,
+                "seam_weights": [
+                  1.006,
+                  1.006
+                ]
+              }
+            ],
+            "note": "Both halves share one classical state vector. The exact complex128 run verifies the circuit identity; the PyQrack runs measure simulator numerics, which grow with width and with mid-circuit measurements."
+          },
+          "repeated_circuit_shots_10q": {
+            "n_data_qubits": 8,
+            "n_comm_qubits": 2,
+            "n_trotter_steps": 6,
+            "dt": 0.22,
+            "n_full_circuit_executions": 1000,
+            "seed": 2026,
+            "target_bond_B1": [
+              5,
+              7,
+              1
+            ],
+            "exact_ref": -0.09115144328651364,
+            "exact_uncoupled": -0.48010187620049954,
+            "ideal_F1_shot_mean": -0.108,
+            "ideal_F1_shot_se": 0.031453542333500784,
+            "ideal_F1_z_vs_exact": 0.5356648397449708,
+            "ideal_F1_z_vs_uncoupled": 11.830205712765725,
+            "noisy_werner_F080_shot_mean": -0.184,
+            "noisy_werner_F080_shot_se": 0.031098410105841606,
+            "noisy_werner_F080_shot_bias_vs_ideal": 0.09284855671348635,
+            "n_cuts": 6,
+            "n_error_patterns_enumerated": 4096,
+            "exact_F1_enumerated": -0.09115123748779297,
+            "exact_F080_enumerated": -0.22770033363387346,
+            "exact_F080_bias_vs_ideal": 0.1365488903473598,
+            "noisy_F080_shot_z_vs_exact_noisy": 1.4052272603371667,
+            "exact_noise_scan": [
+              {
+                "F_ebit": 1.0,
+                "exact_value": -0.09115123748779297,
+                "exact_bias_vs_ideal": 2.0579872067605365e-07,
+                "bias_per_cut_per_infidelity": null
+              },
+              {
+                "F_ebit": 0.99,
+                "exact_value": -0.09949146590877427,
+                "exact_bias_vs_ideal": 0.00834002262226062,
+                "bias_per_cut_per_infidelity": 0.1390003770376769
+              },
+              {
+                "F_ebit": 0.95,
+                "exact_value": -0.13113135745080529,
+                "exact_bias_vs_ideal": 0.03997991416429164,
+                "bias_per_cut_per_infidelity": 0.13326638054763867
+              },
+              {
+                "F_ebit": 0.9,
+                "exact_value": -0.16701210585579587,
+                "exact_bias_vs_ideal": 0.07586066256928223,
+                "bias_per_cut_per_infidelity": 0.1264344376154704
+              },
+              {
+                "F_ebit": 0.8,
+                "exact_value": -0.22770033363387346,
+                "exact_bias_vs_ideal": 0.1365488903473598,
+                "bias_per_cut_per_infidelity": 0.1137907419561332
+              }
+            ]
+          },
+          "Gamma_ebit_ideal": 1.0,
+          "equivalent_LO_QPD_Gamma_6st": 108.84442142655003
+        },
+        "numpy_feedback_in_4x27q": false,
+        "seam_coupling_pass": true,
+        "seam_loop_commutation": {
+          "n_seam_loops_checked": 40,
+          "n_worker_operators_checked": 318,
+          "n_commutation_violations": 0,
+          "pass": true
+        },
+        "steps": 2,
+        "cycle_eps_trace": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "seam_rms_trace": [
+          2.301542112387159e-06,
+          2.0186536576600193e-06
+        ],
+        "max_eps_W": 0.0,
+        "divertor_exhaust": 3.9471347815288027
+      },
+      "eps_W_g0": 0.0,
+      "eps_W_g_heis": 2.2462976119079015e-09,
+      "eps_W_2g_heis": 3.587845189738802e-08,
+      "g2_scaling_ratio": 15.972261069589313,
+      "g_heis": 0.04,
+      "divertor_exhaust_sample": 3.9471347815288027,
+      "pass": true
+    }
+  },
+  "optimisation": {
+    "optimiser_method": "scipy.optimize.minimize(Powell, baseline x0 only, pure 3D Biot-Savart, <J_rad>=<J_ins>=1.0, zero penalty cliffs)",
+    "box_bounds_nonplanar": [
+      0.65,
+      1.35
+    ],
+    "box_bounds_planar": [
+      -0.35,
+      0.35
+    ],
+    "knobs_at_bound": [],
+    "strict_interior_optimum": true,
+    "converged": true,
+    "n_iterations": 12,
+    "n_evaluations": 1531,
+    "best_objective": -3.6371082148984746,
+    "best_knobs": {
+      "I1": 1.1977,
+      "I2": 0.8614,
+      "I3": 1.1449,
+      "I4": 0.8294,
+      "I5": 0.9091,
+      "IA": -0.0397,
+      "IB": -0.0807
+    },
+    "baseline": {
+      "label": "uniform_coil_baseline",
+      "mean_all_weight": 1.0,
+      "mean_radial_weight": 1.0,
+      "mean_inshell_weight": 0.9999999999999999,
+      "ground_sector_polish": {
+        "n_flips_applied": 104,
+        "n_lowering_single_flips": 0,
+        "min_single_flip_delta": 1.4708503439689902e-05,
+        "e0_per_site": -0.7793807880698466
+      },
+      "criterion_1_flux_integrity": {
+        "interior_eps_W": 0.0,
+        "outer_islands": 5,
+        "trim_residual": 0,
+        "pass": true
+      },
+      "criterion_2_shafranov_stiffness": {
+        "beta_grid_pct": [
+          0.5,
+          1.5,
+          2.5,
+          3.5,
+          5.0
+        ],
+        "rho_centroids": [
+          0.11405967594805498,
+          0.13766474208655752,
+          0.14500277327474867,
+          0.15011194061527372,
+          0.15665745384603166
+        ],
+        "shafranov_shift_5pct": 0.04259777789797668
+      },
+      "criterion_3_mhd_beta_limit": {
+        "curvature_load_scale": 4.5,
+        "dimensionless_critical_load_x_crit": 2.84326171875,
+        "beta_crit_lattice_pct": 3.1591796875,
+        "beta_crit_pct": 3.1591796875,
+        "min_vison_gap_0pct": 1.4708507533629145e-05,
+        "min_vison_gap_5pct": -0.0033150564448518175,
+        "min_vison_gap_5pct_direct": -0.0033150567101074557,
+        "min_vison_gap_5pct_quad_err": 2.6525563820087306e-10,
+        "min_vison_gap_5pct_bond": 690,
+        "n_unstable_bonds_5pct": 1,
+        "vacuum_magnetic_well_diag": 0.09272127481096508,
+        "vortex_gap": 3.5886243423693713,
+        "n_lowering_single_flips": 0,
+        "pass_5pct": false
+      },
+      "criterion_4_neoclassical_transport": {
+        "helical_ripple_eps_B": 0.07572345229751158,
+        "radial_leakage_rate": 0.012129354686701227,
+        "outboard_leakage_rate": 0.03640689972313838,
+        "shell_profile": [
+          0.4724425832951251,
+          0.3577464510910577,
+          0.1641558533492291,
+          0.005458077197525516,
+          0.00019703506706253987
+        ]
+      },
+      "criterion_5_fast_ion_confinement": {
+        "beta_pct": 2.5,
+        "n_outboard_mirror_bonds": 49,
+        "outboard_trapping_ratio": 0.738617922838529,
+        "inner_shell_survival": 0.5190114071588405
+      },
+      "criterion_6_bootstrap_current": {
+        "geodesic_field_asymmetry": 0.09032314428056758,
+        "pfirsch_schlueter_seam_dipole": 0.08757795907389572,
+        "bootstrap_current_proxy": 0.08757795907389572
+      },
+      "criterion_7_knob_economy": {
+        "global_coil_knobs": 7,
+        "trim_knobs": 5,
+        "control_knobs": 10,
+        "arbitrary_bond_tweaks": 0,
+        "pass": true
+      }
+    },
+    "optimised": {
+      "label": "w7x_optimised",
+      "mean_all_weight": 1.0,
+      "mean_radial_weight": 1.0000000000000002,
+      "mean_inshell_weight": 0.9999999999999999,
+      "ground_sector_polish": {
+        "n_flips_applied": 26,
+        "n_lowering_single_flips": 0,
+        "min_single_flip_delta": 0.00011092720512353524,
+        "e0_per_site": -0.7758747853107673
+      },
+      "criterion_1_flux_integrity": {
+        "interior_eps_W": 0.0,
+        "outer_islands": 5,
+        "trim_residual": 0,
+        "pass": true
+      },
+      "criterion_2_shafranov_stiffness": {
+        "beta_grid_pct": [
+          0.5,
+          1.5,
+          2.5,
+          3.5,
+          5.0
+        ],
+        "rho_centroids": [
+          0.10596954243093991,
+          0.12785078312798775,
+          0.1330228296299624,
+          0.13595926069733336,
+          0.13934497529309375
+        ],
+        "shafranov_shift_5pct": 0.033375432862153845
+      },
+      "criterion_3_mhd_beta_limit": {
+        "curvature_load_scale": 4.5,
+        "dimensionless_critical_load_x_crit": 5.33056640625,
+        "beta_crit_lattice_pct": 5.9228515625,
+        "beta_crit_pct": 5.9228515625,
+        "min_vison_gap_0pct": 0.00011092721335162378,
+        "min_vison_gap_5pct": 0.0001442581226400174,
+        "min_vison_gap_5pct_direct": 0.00014425812241825042,
+        "min_vison_gap_5pct_quad_err": 2.2176696785371208e-13,
+        "min_vison_gap_5pct_bond": 23,
+        "n_unstable_bonds_5pct": 0,
+        "vacuum_magnetic_well_diag": 0.1740470167196237,
+        "vortex_gap": 3.1404998632780234,
+        "n_lowering_single_flips": 0,
+        "pass_5pct": true
+      },
+      "criterion_4_neoclassical_transport": {
+        "helical_ripple_eps_B": 0.0520030414614822,
+        "radial_leakage_rate": 0.011333266309460337,
+        "outboard_leakage_rate": 0.03178951353343926,
+        "shell_profile": [
+          0.4671315433292078,
+          0.3742027283383475,
+          0.1496832793872534,
+          0.008737354157190819,
+          0.0002450947880005077
+        ]
+      },
+      "criterion_5_fast_ion_confinement": {
+        "beta_pct": 2.5,
+        "n_outboard_mirror_bonds": 48,
+        "outboard_trapping_ratio": 0.9022451835850266,
+        "inner_shell_survival": 0.532457919710424
+      },
+      "criterion_6_bootstrap_current": {
+        "geodesic_field_asymmetry": 0.06256286044034981,
+        "pfirsch_schlueter_seam_dipole": 0.07453410619885972,
+        "bootstrap_current_proxy": 0.07453410619885972
+      },
+      "criterion_7_knob_economy": {
+        "global_coil_knobs": 7,
+        "trim_knobs": 5,
+        "control_knobs": 10,
+        "arbitrary_bond_tweaks": 0,
+        "pass": true
+      }
+    },
+    "beats_all_7_criteria": true,
+    "c3_beta_crit_ratio_vs_baseline": 1.8748068006182381
+  },
+  "presets_benchmark": {
+    "standard": {
+      "preset": "standard",
+      "n_islands": 5,
+      "interior_eps_W": 0.0,
+      "steps": 135,
+      "dt": 1.2,
+      "mean_radial_weight": 1.0,
+      "mean_inshell_weight": 0.9999999999999999,
+      "source_free_energy_rise": 7.2584076582449e-13,
+      "source_free_entropy_nats": 1.0310642001321342e-10,
+      "source_free_cum_exhaust": 8.721892548834502e-14,
+      "stored_energy_ss": 317.14136925660875,
+      "core_energy_ss": 237.44706144889824,
+      "core_energy_fraction_ss": 0.7487104631145506,
+      "exhaust_power_ss": 2.6326731700354067,
+      "steady_state_ex_in_ratio": 0.886864935614433,
+      "tau_E": 120.46363098399469,
+      "confinement_product": 28603.735188613988,
+      "cumulative_energy_turnover": 631.2459908447146,
+      "cumulative_exhaust": 311.41321951691305,
+      "final_stored_energy": 319.83277132780694,
+      "energy_ledger_max_err": 5.343281372915953e-12,
+      "unit_booking_err": 5.684341886080802e-14,
+      "pol_booking_err": 1.1368683772161603e-13,
+      "von_neumann_entropy_nats": 131.71192455341654,
+      "divertor_unit_exhaust": [
+        32.36758626008902,
+        37.90807754870912,
+        29.06988301796644,
+        32.17607194553261,
+        24.794849543105027,
+        31.673466273003015,
+        29.50817816644072,
+        31.05432289031747,
+        27.364520221929624,
+        35.49626364981994
+      ],
+      "divertor_peak_to_mean": 1.2172918544535427,
+      "period_peak_to_mean": 1.1283346275057768,
+      "poloidal_target_exhaust": [
+        60.72661722666471,
+        50.45766041157376,
+        45.42940803350328,
+        65.57458099449121,
+        47.30177305906091,
+        41.92317979161908
+      ],
+      "poloidal_peak_to_mean": 1.2634257677862615,
+      "external_error_field_desc": "external 3D Biot-Savart cryostat busbar dipole pair (rho=1.70, phi=0.605pi/1.405pi, tilt=+-0.08)",
+      "external_error_field_edge_rms_before": 10.356721000912236,
+      "external_error_field_edge_rms_after": 2.745437292247496,
+      "external_error_field_edge_rms_reduction_pct": 73.49124986561216,
+      "external_error_field_s4_rms_before": 11.118086187351002,
+      "external_error_field_s4_rms_after": 3.126787572098294,
+      "external_error_field_s4_rms_reduction_pct": 71.87656652944797,
+      "external_error_field_bond_par_reduction_pct": 67.82595958812489,
+      "lam_par": 1.5,
+      "lam_par_sweep": [
+        {
+          "lam_par": 0.0,
+          "edge_rms_reduction_pct": 74.58186894068749,
+          "bond_par_reduction_pct": 63.23090753760048,
+          "trimmed_period_peak_to_mean": 1.1004408579594418,
+          "l2_recovery_pct": 69.22348655808494
+        },
+        {
+          "lam_par": 0.5,
+          "edge_rms_reduction_pct": 74.44658544076594,
+          "bond_par_reduction_pct": 64.98298344807303,
+          "trimmed_period_peak_to_mean": 1.1099820069026285,
+          "l2_recovery_pct": 71.96088298008829
+        },
+        {
+          "lam_par": 1.5,
+          "edge_rms_reduction_pct": 73.49124986561216,
+          "bond_par_reduction_pct": 67.82595958812489,
+          "trimmed_period_peak_to_mean": 1.1228944476247362,
+          "l2_recovery_pct": 77.16179324051735
+        },
+        {
+          "lam_par": 4.0,
+          "edge_rms_reduction_pct": 69.96320050294898,
+          "bond_par_reduction_pct": 72.47203048993657,
+          "trimmed_period_peak_to_mean": 1.1361722710405289,
+          "l2_recovery_pct": 80.66070053117373
+        }
+      ],
+      "lsq_trim_amps": [
+        0.0049,
+        -12.8693,
+        0.0056,
+        12.843,
+        -0.0115
+      ],
+      "lsq_ctrl_amps": [
+        0.0009,
+        0.0009,
+        0.0623,
+        0.0586,
+        0.007,
+        -0.0038,
+        -0.0135,
+        -0.1078,
+        -0.0034,
+        -0.0011
+      ],
+      "divertor_unit_exhaust_n1_err": [
+        22.027347310452672,
+        22.04413342984338,
+        11.029378403994585,
+        19.709666651310627,
+        20.565062353074843,
+        25.549036944249924,
+        17.93301123042378,
+        13.121949112772214,
+        18.414158946595983,
+        25.79236432599197
+      ],
+      "divertor_unit_exhaust_trimmed": [
+        19.402029818415897,
+        21.105804198132343,
+        15.231046489768264,
+        18.552477551226243,
+        14.452472196706827,
+        18.988731236184847,
+        16.95867176017073,
+        17.003758946833564,
+        17.13014553767362,
+        21.547265486912025
+      ],
+      "n1_error_peak_to_mean": 1.3146886135698597,
+      "trimmed_peak_to_mean": 1.1945987912790084,
+      "n1_error_period_peak_to_mean": 1.175264130596354,
+      "trimmed_period_peak_to_mean": 1.1228944476247362,
+      "n1_profile_l2_err": 0.6651614151521312,
+      "trimmed_profile_l2_err": 0.1519109392767445,
+      "n1_profile_l2_recovery_pct": 77.16179324051735
+    },
+    "high-iota": {
+      "preset": "high-iota",
+      "n_islands": 4,
+      "interior_eps_W": 0.0,
+      "steps": 135,
+      "dt": 1.2,
+      "mean_radial_weight": 0.9999999999999999,
+      "mean_inshell_weight": 1.0,
+      "source_free_energy_rise": 5.607701456497042e-13,
+      "source_free_entropy_nats": 9.610569274949747e-11,
+      "source_free_cum_exhaust": -1.9055691784695246e-14,
+      "stored_energy_ss": 329.48263888223886,
+      "core_energy_ss": 239.80533437626357,
+      "core_energy_fraction_ss": 0.7278238853185006,
+      "exhaust_power_ss": 2.816135761910271,
+      "steady_state_ex_in_ratio": 0.8883156563691019,
+      "tau_E": 116.99813742599565,
+      "confinement_product": 28056.777466840926,
+      "cumulative_energy_turnover": 662.492084895621,
+      "cumulative_exhaust": 330.18331071945477,
+      "final_stored_energy": 332.30877417617006,
+      "energy_ledger_max_err": 3.865352482534945e-12,
+      "unit_booking_err": 2.2737367544323206e-13,
+      "pol_booking_err": 2.2737367544323206e-13,
+      "von_neumann_entropy_nats": 135.77076407850845,
+      "divertor_unit_exhaust": [
+        35.46028823654141,
+        39.78275643889849,
+        32.15909188202461,
+        37.087442465145635,
+        28.379617003538602,
+        28.67328318176106,
+        25.760652629450615,
+        33.02152300348869,
+        30.2057564340837,
+        39.652899444521715
+      ],
+      "divertor_peak_to_mean": 1.2048687849247637,
+      "period_peak_to_mean": 1.1394132021919687,
+      "poloidal_target_exhaust": [
+        60.51074318751039,
+        55.61935863871044,
+        50.409200489527706,
+        67.61400081984189,
+        48.799143123291145,
+        47.230864460573
+      ],
+      "poloidal_peak_to_mean": 1.2286629631130785,
+      "external_error_field_desc": "external 3D Biot-Savart cryostat busbar dipole pair (rho=1.70, phi=0.605pi/1.405pi, tilt=+-0.08)",
+      "external_error_field_edge_rms_before": 10.356721000912236,
+      "external_error_field_edge_rms_after": 2.7437905999698278,
+      "external_error_field_edge_rms_reduction_pct": 73.50714961107718,
+      "external_error_field_s4_rms_before": 11.118086187351002,
+      "external_error_field_s4_rms_after": 3.1245330152883377,
+      "external_error_field_s4_rms_reduction_pct": 71.89684481090724,
+      "external_error_field_bond_par_reduction_pct": 67.72655530784746,
+      "lam_par": 1.5,
+      "lam_par_sweep": [
+        {
+          "lam_par": 0.0,
+          "edge_rms_reduction_pct": 74.58186894068749,
+          "bond_par_reduction_pct": 63.16197217592527,
+          "trimmed_period_peak_to_mean": 1.1386937014713854,
+          "l2_recovery_pct": 69.50090689793274
+        },
+        {
+          "lam_par": 0.5,
+          "edge_rms_reduction_pct": 74.44921651187758,
+          "bond_par_reduction_pct": 64.89915988003865,
+          "trimmed_period_peak_to_mean": 1.1421237574104692,
+          "l2_recovery_pct": 73.31565661545045
+        },
+        {
+          "lam_par": 1.5,
+          "edge_rms_reduction_pct": 73.50714961107718,
+          "bond_par_reduction_pct": 67.72655530784746,
+          "trimmed_period_peak_to_mean": 1.149448041835312,
+          "l2_recovery_pct": 76.4124032466589
+        },
+        {
+          "lam_par": 4.0,
+          "edge_rms_reduction_pct": 70.00253323916237,
+          "bond_par_reduction_pct": 72.37290370324878,
+          "trimmed_period_peak_to_mean": 1.164249185685984,
+          "l2_recovery_pct": 76.87691246416041
+        }
+      ],
+      "lsq_trim_amps": [
+        0.005,
+        -12.8619,
+        0.0055,
+        12.8369,
+        -0.0115
+      ],
+      "lsq_ctrl_amps": [
+        0.0009,
+        0.0009,
+        0.062,
+        0.0573,
+        0.007,
+        -0.0038,
+        -0.0129,
+        -0.1064,
+        -0.0034,
+        -0.0011
+      ],
+      "divertor_unit_exhaust_n1_err": [
+        24.19928318215257,
+        25.18859009613468,
+        12.589048523373203,
+        22.968325247380353,
+        21.011729176592713,
+        23.371079807401877,
+        19.30144172361237,
+        13.800933813039212,
+        21.021349822625087,
+        25.827908828969314
+      ],
+      "divertor_unit_exhaust_trimmed": [
+        22.560169414705644,
+        23.57230750461091,
+        17.56453627572981,
+        22.33218712264894,
+        17.722397052442734,
+        17.11847805198106,
+        17.036289011342344,
+        19.521558321213394,
+        19.512863017134876,
+        23.731516238715717
+      ],
+      "n1_error_peak_to_mean": 1.234133555991995,
+      "trimmed_peak_to_mean": 1.1826004885054329,
+      "n1_error_period_peak_to_mean": 1.1799490248209727,
+      "trimmed_period_peak_to_mean": 1.149448041835312,
+      "n1_profile_l2_err": 0.6057188165072824,
+      "trimmed_profile_l2_err": 0.14287451189684788,
+      "n1_profile_l2_recovery_pct": 76.4124032466589
+    },
+    "low-iota": {
+      "preset": "low-iota",
+      "n_islands": 6,
+      "interior_eps_W": 0.0,
+      "steps": 135,
+      "dt": 1.2,
+      "mean_radial_weight": 1.0,
+      "mean_inshell_weight": 1.0,
+      "source_free_energy_rise": 2.5163086490076516e-13,
+      "source_free_entropy_nats": 9.856772823860942e-11,
+      "source_free_cum_exhaust": -1.3676385480683642e-13,
+      "stored_energy_ss": 312.1635220897624,
+      "core_energy_ss": 236.767615533268,
+      "core_energy_fraction_ss": 0.7584730398614148,
+      "exhaust_power_ss": 2.4975629424378516,
+      "steady_state_ex_in_ratio": 0.8773651481687955,
+      "tau_E": 124.98724928432115,
+      "confinement_product": 29592.932985110878,
+      "cumulative_energy_turnover": 610.6545056123176,
+      "cumulative_exhaust": 295.6757693829437,
+      "final_stored_energy": 314.9787362293682,
+      "energy_ledger_max_err": 5.6843418860808015e-12,
+      "unit_booking_err": 0.0,
+      "pol_booking_err": 0.0,
+      "von_neumann_entropy_nats": 131.06010883213057,
+      "divertor_unit_exhaust": [
+        28.015809433237813,
+        34.93129123180052,
+        27.865352263600517,
+        27.47925110849684,
+        25.28198500671711,
+        29.6360161348366,
+        26.742864383003287,
+        30.585042522117448,
+        30.486908713773637,
+        34.65124858535993
+      ],
+      "divertor_peak_to_mean": 1.1814052705333236,
+      "period_peak_to_mean": 1.101513279817834,
+      "poloidal_target_exhaust": [
+        55.58904686063314,
+        51.03755204059232,
+        42.21760027825622,
+        62.80559995227674,
+        44.61100472693373,
+        39.41496552425158
+      ],
+      "poloidal_peak_to_mean": 1.2744825201608094,
+      "external_error_field_desc": "external 3D Biot-Savart cryostat busbar dipole pair (rho=1.70, phi=0.605pi/1.405pi, tilt=+-0.08)",
+      "external_error_field_edge_rms_before": 10.356721000912236,
+      "external_error_field_edge_rms_after": 2.7466737923657334,
+      "external_error_field_edge_rms_reduction_pct": 73.47931075748973,
+      "external_error_field_s4_rms_before": 11.118086187351002,
+      "external_error_field_s4_rms_after": 3.1284789222479428,
+      "external_error_field_s4_rms_reduction_pct": 71.86135392791613,
+      "external_error_field_bond_par_reduction_pct": 67.90004496697448,
+      "lam_par": 1.5,
+      "lam_par_sweep": [
+        {
+          "lam_par": 0.0,
+          "edge_rms_reduction_pct": 74.58186894068749,
+          "bond_par_reduction_pct": 63.282376400349115,
+          "trimmed_period_peak_to_mean": 1.1633690299077728,
+          "l2_recovery_pct": 56.841078230372446
+        },
+        {
+          "lam_par": 0.5,
+          "edge_rms_reduction_pct": 74.44459543790086,
+          "bond_par_reduction_pct": 65.04558626958547,
+          "trimmed_period_peak_to_mean": 1.1535974750782292,
+          "l2_recovery_pct": 60.642460880621755
+        },
+        {
+          "lam_par": 1.5,
+          "edge_rms_reduction_pct": 73.47931075748973,
+          "bond_par_reduction_pct": 67.90004496697448,
+          "trimmed_period_peak_to_mean": 1.136915157486491,
+          "l2_recovery_pct": 65.23694002168605
+        },
+        {
+          "lam_par": 4.0,
+          "edge_rms_reduction_pct": 69.93408698638441,
+          "bond_par_reduction_pct": 72.54531815983289,
+          "trimmed_period_peak_to_mean": 1.1260805598405492,
+          "l2_recovery_pct": 69.8739015854842
+        }
+      ],
+      "lsq_trim_amps": [
+        0.0049,
+        -12.8748,
+        0.0056,
+        12.8476,
+        -0.0114
+      ],
+      "lsq_ctrl_amps": [
+        0.0009,
+        0.0008,
+        0.0626,
+        0.0597,
+        0.007,
+        -0.0038,
+        -0.014,
+        -0.109,
+        -0.0034,
+        -0.0011
+      ],
+      "divertor_unit_exhaust_n1_err": [
+        20.30552592515922,
+        20.701083193508232,
+        11.248283721619105,
+        18.270967284160236,
+        17.347801618013513,
+        21.391450139296463,
+        18.558065819746616,
+        12.026551135805516,
+        19.37496209261152,
+        23.586056986710645
+      ],
+      "divertor_unit_exhaust_trimmed": [
+        16.4186681828048,
+        18.502033292689045,
+        14.058619529175715,
+        15.84034604507418,
+        13.95253649502071,
+        17.671189554233564,
+        15.114711968300522,
+        14.63290325053896,
+        17.394312713078126,
+        19.744004446351862
+      ],
+      "n1_error_peak_to_mean": 1.2901898414346413,
+      "trimmed_peak_to_mean": 1.2088462612979978,
+      "n1_error_period_peak_to_mean": 1.1750134926124278,
+      "trimmed_period_peak_to_mean": 1.136915157486491,
+      "n1_profile_l2_err": 0.5870960528027447,
+      "trimmed_profile_l2_err": 0.2040925529661319,
+      "n1_profile_l2_recovery_pct": 65.23694002168605
+    },
+    "high-mirror": {
+      "preset": "high-mirror",
+      "n_islands": 5,
+      "interior_eps_W": 0.0,
+      "steps": 135,
+      "dt": 1.2,
+      "mean_radial_weight": 1.0000000000000002,
+      "mean_inshell_weight": 1.0000000000000002,
+      "source_free_energy_rise": 1.7496498218653056e-13,
+      "source_free_entropy_nats": 9.641539452552389e-11,
+      "source_free_cum_exhaust": -9.428705710316946e-14,
+      "stored_energy_ss": 352.30261152503397,
+      "core_energy_ss": 251.2164505415268,
+      "core_energy_fraction_ss": 0.7130700776076303,
+      "exhaust_power_ss": 2.783516387122082,
+      "steady_state_ex_in_ratio": 0.865664615891466,
+      "tau_E": 126.56746450459548,
+      "confinement_product": 31795.82918688516,
+      "cumulative_energy_turnover": 680.7434842380426,
+      "cumulative_exhaust": 324.99547631025234,
+      "final_stored_energy": 355.7480079277917,
+      "energy_ledger_max_err": 1.5916157281026244e-12,
+      "unit_booking_err": 0.0,
+      "pol_booking_err": 5.684341886080802e-14,
+      "von_neumann_entropy_nats": 138.0440608794027,
+      "divertor_unit_exhaust": [
+        34.57226122892495,
+        34.84483344549397,
+        31.574971671764327,
+        31.872922691205968,
+        28.254311815237575,
+        29.61874346615814,
+        30.087974700021462,
+        31.694166107962538,
+        31.820946668307933,
+        40.654344515175495
+      ],
+      "divertor_peak_to_mean": 1.2509203197759404,
+      "period_peak_to_mean": 1.115019999759872,
+      "poloidal_target_exhaust": [
+        60.336783554928395,
+        54.67291624924438,
+        54.04352518736365,
+        64.39042013012285,
+        47.64802363179842,
+        43.903807556794696
+      ],
+      "poloidal_peak_to_mean": 1.1887627642297414,
+      "external_error_field_desc": "external 3D Biot-Savart cryostat busbar dipole pair (rho=1.70, phi=0.605pi/1.405pi, tilt=+-0.08)",
+      "external_error_field_edge_rms_before": 10.356721000912236,
+      "external_error_field_edge_rms_after": 2.7451945928041406,
+      "external_error_field_edge_rms_reduction_pct": 73.4935932660314,
+      "external_error_field_s4_rms_before": 11.118086187351002,
+      "external_error_field_s4_rms_after": 3.1264335561916594,
+      "external_error_field_s4_rms_reduction_pct": 71.87975067373925,
+      "external_error_field_bond_par_reduction_pct": 67.62991429771034,
+      "lam_par": 1.5,
+      "lam_par_sweep": [
+        {
+          "lam_par": 0.0,
+          "edge_rms_reduction_pct": 74.58186894068749,
+          "bond_par_reduction_pct": 63.05361732134751,
+          "trimmed_period_peak_to_mean": 1.1029466835318904,
+          "l2_recovery_pct": 72.07203486844071
+        },
+        {
+          "lam_par": 0.5,
+          "edge_rms_reduction_pct": 74.44721845165405,
+          "bond_par_reduction_pct": 64.79664161864372,
+          "trimmed_period_peak_to_mean": 1.1089222541537922,
+          "l2_recovery_pct": 76.23839518327176
+        },
+        {
+          "lam_par": 1.5,
+          "edge_rms_reduction_pct": 73.4935932660314,
+          "bond_par_reduction_pct": 67.62991429771034,
+          "trimmed_period_peak_to_mean": 1.1130488030650523,
+          "l2_recovery_pct": 82.16760627258128
+        },
+        {
+          "lam_par": 4.0,
+          "edge_rms_reduction_pct": 69.95715941498092,
+          "bond_par_reduction_pct": 72.2747188599981,
+          "trimmed_period_peak_to_mean": 1.1062520032591234,
+          "l2_recovery_pct": 88.64842255727274
+        }
+      ],
+      "lsq_trim_amps": [
+        0.005,
+        -12.869,
+        0.0056,
+        12.8423,
+        -0.0115
+      ],
+      "lsq_ctrl_amps": [
+        0.0009,
+        0.001,
+        0.0609,
+        0.0544,
+        0.007,
+        -0.0039,
+        -0.0115,
+        -0.1044,
+        -0.0035,
+        -0.0011
+      ],
+      "divertor_unit_exhaust_n1_err": [
+        21.419404270656106,
+        27.642294002843464,
+        15.260961151106114,
+        21.546788739220467,
+        22.325445728500117,
+        22.15521656998845,
+        16.55514378768575,
+        11.838605179450601,
+        14.134560429760072,
+        23.921486764631865
+      ],
+      "divertor_unit_exhaust_trimmed": [
+        20.727934186407445,
+        21.410189863243556,
+        17.973794420997915,
+        20.319400523128458,
+        17.236052994029297,
+        19.33708194136747,
+        18.423560182507085,
+        18.172567168195968,
+        19.158120547706275,
+        24.826209195995645
+      ],
+      "n1_error_peak_to_mean": 1.4045887763391094,
+      "trimmed_peak_to_mean": 1.2564830516351,
+      "n1_error_period_peak_to_mean": 1.2464868280469898,
+      "trimmed_period_peak_to_mean": 1.1130488030650523,
+      "n1_profile_l2_err": 0.7111036610019876,
+      "trimmed_profile_l2_err": 0.12680680463996333,
+      "n1_profile_l2_recovery_pct": 82.16760627258128
+    }
+  },
+  "island_ablation": {
+    "fixed_weights_preset": "standard",
+    "mean_radial_weight": 1.0,
+    "mean_inshell_weight": 0.9999999999999999,
+    "cases": {
+      "0_islands": {
+        "n_islands": 0,
+        "tau_E": 123.80118576165566,
+        "steady_state_ex_in_ratio": 0.8841783850147263,
+        "divertor_peak_to_mean": 1.2545013422970928,
+        "period_peak_to_mean": 1.106728314446161,
+        "poloidal_peak_to_mean": 1.221086748517683,
+        "unit_norm_std": 0.14772901086011192,
+        "unit_profile_l2_shift_vs_0isl": 0.0
+      },
+      "4_islands": {
+        "n_islands": 4,
+        "tau_E": 121.59392356710349,
+        "tau_E_shift_pct_vs_0isl": -1.782908766965798,
+        "steady_state_ex_in_ratio": 0.8863036548882226,
+        "divertor_peak_to_mean": 1.1989325346298862,
+        "period_peak_to_mean": 1.0961519747822852,
+        "poloidal_peak_to_mean": 1.240502519321838,
+        "unit_norm_std": 0.12648531581692402,
+        "unit_profile_l2_shift_vs_0isl": 0.2801650393379063
+      },
+      "5_islands": {
+        "n_islands": 5,
+        "tau_E": 120.46363098399469,
+        "tau_E_shift_pct_vs_0isl": -2.6958988778075934,
+        "steady_state_ex_in_ratio": 0.886864935614433,
+        "divertor_peak_to_mean": 1.2172918544535427,
+        "period_peak_to_mean": 1.1283346275057768,
+        "poloidal_peak_to_mean": 1.2634257677862615,
+        "unit_norm_std": 0.11538759065159157,
+        "unit_profile_l2_shift_vs_0isl": 0.27597611994604115
+      },
+      "6_islands": {
+        "n_islands": 6,
+        "tau_E": 122.79493516014665,
+        "tau_E_shift_pct_vs_0isl": -0.8127956087967216,
+        "steady_state_ex_in_ratio": 0.883954192259895,
+        "divertor_peak_to_mean": 1.2418366637926603,
+        "period_peak_to_mean": 1.1159705249072869,
+        "poloidal_peak_to_mean": 1.2678109281610164,
+        "unit_norm_std": 0.12480816044040938,
+        "unit_profile_l2_shift_vs_0isl": 0.3135518643039084
+      }
+    },
+    "tau_E_island_spread_pct": 2.77059121528922,
+    "max_unit_profile_l2_shift_vs_0isl": 0.3135518643039084
+  },
+  "trotter_convergence": {
+    "preset": "standard",
+    "T_compare": 108.0,
+    "r_heat_continuous": 0.11666666666666668,
+    "r_div_continuous": 0.7916666666666666,
+    "dt_nominal": 1.2,
+    "steps_nominal": 90,
+    "tau_E_dt_nominal": 119.02075938906775,
+    "stored_E_dt_nominal": 288.9430694237389,
+    "tor_p2m_dt_nominal": 1.2145401659430766,
+    "dt_half": 0.6,
+    "steps_half": 180,
+    "tau_E_dt_half": 119.48165011677258,
+    "stored_E_dt_half": 293.61056809269,
+    "tor_p2m_dt_half": 1.20960456954687,
+    "step_halving_tau_E_rel_err": 0.003857418501120425,
+    "step_halving_stored_E_rel_err": 0.015896902823598732,
+    "step_halving_unit_profile_l2_diff": 0.007978667481115621,
+    "continuous_lyapunov_ness_T_inf": {
+      "lyapunov_residual": 1.2007101082933917e-12,
+      "stored_E_ss": 355.337616798468,
+      "exhaust_power_ss": 2.787082599325544,
+      "tau_E_ss": 127.49446926490711,
+      "tor_p2m_ss": 1.221366395833146,
+      "finite_horizon_plus_splitting_tau_E_rel_diff": 0.05514622180436544
+    }
+  },
+  "divertor_hierarchy_pass": true
+}
