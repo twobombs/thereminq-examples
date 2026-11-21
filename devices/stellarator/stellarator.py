@@ -47,7 +47,27 @@ if os.path.exists(QRACK_LIB_PATH):
 os.environ.setdefault("QRACK_DISABLE_QUNIT_FIDELITY_GUARD", "1")
 
 import numpy as np
-from pyqrack import Pauli, QrackSimulator
+try:
+    from pyqrack import Pauli, QrackSimulator
+    HAS_PYQRACK = True
+except Exception as _pyqrack_exc:
+    HAS_PYQRACK = False
+    _PYQRACK_IMPORT_ERROR = _pyqrack_exc
+
+    class Pauli(object):
+        """Fallback Pauli enum when pyqrack is not installed."""
+        PauliI = 0
+        PauliX = 1
+        PauliY = 2
+        PauliZ = 3
+
+    class QrackSimulator(object):
+        """Placeholder raising an informative error if PyQrack is invoked when unavailable."""
+        def __init__(self, *args, **kwargs):
+            raise ImportError(
+                "pyqrack could not be imported (%s). Install pyqrack and libqrack to run "
+                "PyQrack quantum-simulator subcommands." % (_PYQRACK_IMPORT_ERROR,)
+            )
 from scipy.linalg import solve_continuous_lyapunov
 from scipy.optimize import minimize
 
@@ -334,10 +354,12 @@ def generate_coil_filaments(n_pts=96):
             frac = (k + 0.5) / 5.0
             phi0 = (m + frac) * dphi_mod
             sgn = -1.0 if is_odd_half else 1.0
-            # Non-planar toroidal excursion warps with coil_type (NPC1..NPC5)
+            # Non-planar toroidal excursion warps with coil_type (NPC1..NPC5).
+            # Under Z2 stellarator flip (u, phi, sgn) -> (-u, -phi, -sgn), both
+            # sin(2u) and sin(3u + sgn*phase) are strictly odd so phi_u(-u) = -phi_u(u).
             warp_amp = 0.032 * (1.0 + 0.22 * coil_type)
             phi_u = (phi0
-                     + sgn * warp_amp * np.sin(2.0 * u)
+                     + warp_amp * np.sin(2.0 * u)
                      + 0.014 * np.sin(3.0 * u + sgn * 0.4 * coil_type))
             pts = surface_xyz(1.32, u, phi_u)
             coils["non_planar"].append({
@@ -391,11 +413,50 @@ def generate_coil_filaments(n_pts=96):
         coils["control"].append({
             "module": m,
             "period": m // 2,
+            "type": m % 2,
             "label": "CTRL_M%d" % m,
             "xyz": pts,
         })
 
     return coils
+
+
+def check_coil_d5_symmetry(coils, n_samples=24):
+    """Verify exact D5 (Z2 stellarator flip x Z5 field-period rotation) symmetry
+    of the 50 non-planar coil filaments and their 3D Biot-Savart |B| field."""
+    npc = coils["non_planar"]
+    err_npc_flip = 0.0
+    for m in range(N_MODULES):
+        for k in range(5):
+            c1 = npc[m * 5 + k]
+            c2 = npc[(N_MODULES - 1 - m) * 5 + (4 - k)]
+            p1 = c1["xyz"]
+            p2 = c2["xyz"][::-1].copy()
+            p2[:, 1] *= -1.0
+            p2[:, 2] *= -1.0
+            err_npc_flip = max(err_npc_flip, float(np.max(np.abs(p1 - p2))))
+
+    c_rot = math.cos(2.0 * math.pi / N_FP)
+    s_rot = math.sin(2.0 * math.pi / N_FP)
+    R_z5 = np.array([[c_rot, -s_rot, 0.0],
+                     [s_rot,  c_rot, 0.0],
+                     [0.0,    0.0,   1.0]], dtype=float)
+    err_npc_rot = 0.0
+    for m in range(N_MODULES):
+        m_next = (m + 2) % N_MODULES
+        for k in range(5):
+            p1 = npc[m * 5 + k]["xyz"] @ R_z5.T
+            p2 = npc[m_next * 5 + k]["xyz"]
+            err_npc_rot = max(err_npc_rot, float(np.max(np.abs(p1 - p2))))
+
+    rng = np.random.default_rng(1)
+    rhos = rng.uniform(0.1, 1.0, n_samples)
+    ths = rng.uniform(-math.pi, math.pi, n_samples)
+    phs = rng.uniform(-math.pi, math.pi, n_samples)
+    B_a = np.linalg.norm(biot_savart_point(surface_xyz(rhos, ths, phs), coils, "standard"), axis=-1)
+    B_b = np.linalg.norm(biot_savart_point(surface_xyz(rhos, -ths, -phs), coils, "standard"), axis=-1)
+    err_B_flip = float(np.max(np.abs(B_a - B_b)))
+    return err_npc_flip, err_npc_rot, err_B_flip
 
 
 # =====================================================================
@@ -419,7 +480,6 @@ def biot_savart_point(pts_xyz, coils, preset="standard", trim_amps=None):
         xyz = c["xyz"]
         dl = np.diff(xyz, axis=0)
         mid = 0.5 * (xyz[:-1] + xyz[1:])
-        # r = pts[:, None, :] - mid[None, :, :]
         r = pts[:, None, :] - mid[None, :, :]
         r2 = np.sum(r * r, axis=-1) + eps2
         r3 = r2 * np.sqrt(r2)
@@ -455,6 +515,42 @@ def biot_savart_point(pts_xyz, coils, preset="standard", trim_amps=None):
     return B
 
 
+def biot_savart_resonant_harmonic(coils, preset="standard", n_theta=24, n_phi=10):
+    """Evaluate the resonant edge (m_isl, N_fp) Biot-Savart magnetic-field
+    harmonic amplitude on the LCFS (rho = 1.0) over one field period."""
+    p = PRESETS[preset]
+    m_isl = p["island_m"]
+    n_isl = p["island_n"]
+    ths = np.linspace(0.0, 2.0 * math.pi, n_theta, endpoint=False)
+    phs = np.linspace(0.0, 2.0 * math.pi / N_FP, n_phi, endpoint=False)
+    TH, PH = np.meshgrid(ths, phs, indexing="ij")
+    pts = surface_xyz(np.ones_like(TH), TH, PH).reshape(-1, 3)
+    B_mag = np.linalg.norm(biot_savart_point(pts, coils, preset=preset), axis=-1)
+    b_mean = max(float(np.mean(B_mag)), 1e-12)
+    dB = (B_mag - b_mean) / b_mean
+    phase = (m_isl * TH - n_isl * PH).reshape(-1)
+    c_mn = 2.0 * float(np.mean(dB * np.cos(phase)))
+    s_mn = 2.0 * float(np.mean(dB * np.sin(phase)))
+    return float(math.hypot(c_mn, s_mn))
+
+
+def _count_poincare_island_clusters(thetas):
+    """Detect disconnected angular island lobes on the phi = 0 Poincare section
+    from traced edge-orbit poloidal angles. An unbroken KAM surface covers
+    [0, 2*pi) with small uniform spacing (max gap < 0.25 rad -> 0 islands);
+    an m-island chain has m disconnected angular clusters separated by m
+    X-point gaps (> max(0.25, 0.5 * max_gap))."""
+    th = np.sort(np.asarray(thetas, dtype=float) % (2.0 * math.pi))
+    if len(th) < 8:
+        return 0
+    gaps = np.diff(np.append(th, th[0] + 2.0 * math.pi))
+    max_gap = float(np.max(gaps))
+    if max_gap <= 0.25:
+        return 0
+    thresh = max(0.25, 0.5 * max_gap)
+    return int(np.sum(gaps > thresh))
+
+
 def iota_profile(rho, preset="standard"):
     """W7-X low-shear rotational transform profile iota(rho) for a preset.
 
@@ -469,32 +565,37 @@ def iota_profile(rho, preset="standard"):
 
 
 def trace_poincare_map(preset="standard", n_surfaces=9, n_turns=60,
-                       error_field_n1=0.0, trim_cancel=False):
+                       error_field_n1=0.0, trim_cancel=False, coils=None):
     """Trace magnetic field lines in flux-surface coordinates (psi, theta, phi)
-    coupled to the Biot-Savart coil harmonic spectrum to produce Poincare
+    coupled to the 3D Biot-Savart coil harmonic spectrum to produce Poincare
     punctures at phi = 0 (bean plane) and phi = pi/5 (triangular plane).
 
     The field-line Hamiltonian in Boozer-like coordinates is:
         H_fl(psi, theta, phi) = int iota(psi) dpsi
             + eps_m(psi) * cos(m_isl * theta - N_fp * phi)
-            + eps_err(psi) * cos(theta - phi - phi_err)
+            + eps_err * sqrt(2*psi) * cos(theta - phi)
     where m_isl in {4, 5, 6} is the natural edge island harmonic selected by
-    the preset's planar/non-planar coil currents, and eps_err is any n=1
+    the preset's planar/non-planar coil currents, eps_m is driven by the
+    (m_isl, N_fp) Biot-Savart harmonic on the LCFS, and eps_err is any n=1
     error field (cancelled when trim_cancel=True).
 
     Returns a dictionary containing:
-        - bean_rz:     list of (R, Z) puncture arrays at phi = 0 (mod 2*pi/5)
-        - tri_rz:      list of (R, Z) puncture arrays at phi = pi/5 (mod 2*pi/5)
-        - rho_seeds:   initial normalized minor radii
-        - iota_measured: measured rotational transform per surface
-        - island_count:  number of edge islands outside LCFS
+        - bean_section:   list of (R, Z, rho, theta) puncture arrays at phi = 0
+        - triangle_section: list of puncture arrays at phi = pi/5
+        - iota_profile:   measured rotational transform per core surface
+        - biot_savart_harmonic_amp: LCFS (m_isl, N_fp) Biot-Savart |B| harmonic
+        - expected_islands: expected edge island multiplicity m_isl
+        - detected_islands: island lobes detected from traced Poincare punctures
     """
     p = PRESETS[preset]
     m_isl = p["island_m"]
     n_isl = p["island_n"]
 
-    # Resonant island perturbation amplitude peaks near the edge (rho ~ 1.0)
-    eps_isl = 0.016 * (1.0 + 0.3 * p["mirror_mod"])
+    if coils is None:
+        coils = generate_coil_filaments(48)
+    bs_harm = biot_savart_resonant_harmonic(coils, preset=preset)
+    # Couple edge island perturbation amplitude to the 3D Biot-Savart LCFS harmonic
+    eps_isl = float(np.clip(0.012 + 0.5 * bs_harm, 0.008, 0.028))
     eff_err = 0.0 if trim_cancel else float(error_field_n1)
 
     # Seed surfaces from core (rho=0.18) out to the island divertor layer (rho=1.0)
@@ -540,9 +641,9 @@ def trace_poincare_map(preset="standard", n_surfaces=9, n_turns=60,
             dth_dphi = iot + eps_isl * d_prof * math.cos(phase)
 
             if abs(eff_err) > 1e-12:
-                # n=1, m=1 error field resonance
+                # Symplectic n=1, m=1 error-field Hamiltonian H_err = eff_err * sqrt(2*psi) * cos(th - phi)
                 dpsi_dphi += eff_err * rho_val * math.sin(th_val - ph_val)
-                dth_dphi += eff_err * math.cos(th_val - ph_val)
+                dth_dphi += (eff_err / max(rho_val, 1e-4)) * math.cos(th_val - ph_val)
             return dpsi_dphi, dth_dphi
 
         for p_step in range(total_periods):
@@ -582,15 +683,21 @@ def trace_poincare_map(preset="standard", n_surfaces=9, n_turns=60,
         if tag == "core":
             iota_meas.append((rho0, iot_est))
 
-    # Count distinct island clusters on the edge ring (tag == "island_ring")
+    # Count distinct island lobes from the traced angular punctures on phi = 0
+    # (non-tautological topological X-point gap cluster count).
     island_ring_pts = [tr["points"] for tr in bean_rz if tr["tag"] == "island_ring"]
-    detected_islands = len(island_ring_pts)
+    detected_islands = (
+        _count_poincare_island_clusters(np.concatenate([pts[:, 3] for pts in island_ring_pts]))
+        if island_ring_pts else 0
+    )
 
     return {
         "preset": preset,
         "bean_section": bean_rz,
         "triangle_section": tri_rz,
         "iota_profile": iota_meas,
+        "biot_savart_harmonic_amp": bs_harm,
+        "eps_isl": eps_isl,
         "expected_islands": m_isl,
         "detected_islands": detected_islands,
     }
@@ -645,7 +752,8 @@ def geometry_report():
           % ("PASS" if max(err_flip, err_rot) < 1e-12 else "FAIL"))
     print("")
     coils = generate_coil_filaments(48)
-    print("Coil system inventory:")
+    err_c_flip, err_c_rot, err_B_flip = check_coil_d5_symmetry(coils)
+    print("Coil system inventory & D5 symmetry check:")
     print("  Non-planar modular coils : %2d  (5 types x 10 half-period modules)"
           % len(coils["non_planar"]))
     print("  Planar coils             : %2d  (2 types x 10 half-period modules)"
@@ -654,6 +762,8 @@ def geometry_report():
           % len(coils["trim"]))
     print("  Divertor control coils   : %2d  (1 per half-period module)"
           % len(coils["control"]))
+    print("  NPC Z2 flip / Z5 rot err : %.3e m / %.3e m  (|B| Z2 err %.3e)"
+          % (err_c_flip, err_c_rot, err_B_flip))
     sample_pts = surface_xyz(np.array([0.0, 0.5, 1.0]),
                              np.array([0.0, 0.5, 1.0]),
                              np.array([0.0, 0.2, 0.4]))
@@ -665,9 +775,9 @@ def geometry_report():
     print("%-14s %10s %10s %10s %12s %10s"
           % ("Preset", "iota_0", "iota_edge", "islands", "PolShift", "verdict"))
     print("-" * 78)
-    all_ok = (max(err_flip, err_rot) < 1e-12)
+    all_ok = (max(err_flip, err_rot, err_c_flip, err_c_rot, err_B_flip) < 1e-11)
     for name in ("standard", "high-iota", "low-iota", "high-mirror"):
-        res = trace_poincare_map(name, n_surfaces=8, n_turns=36)
+        res = trace_poincare_map(name, n_surfaces=8, n_turns=36, coils=coils)
         p = PRESETS[name]
         ok = (res["detected_islands"] == p["islands"]
               and abs(res["iota_profile"][0][1] - p["iota_0"]) < 0.05)
@@ -957,17 +1067,8 @@ def surface_wilson_lines(idx, bonds, nshell, candidate="H", shift=0, u_ref=None)
         }))
 
         # 2. Toroidal Wilson line: shortest cycle on shell s that visits all 10 modules
+        # via unwrapped lift (u, m_unwrapped)
         start = idx[(s, "b", 0, 0)]
-        # Walk forward module by module m = 0 -> 1 -> ... -> 9 -> 0 using BFS per module step
-        tor_path = []
-        cur = start
-        for m in range(10):
-            nxt_mod = (m + 1) % 10
-            # Target in nxt_mod: if nxt_mod == 0, return to start; else any branch site in nxt_mod
-            # Use global BFS on shell s from module 0 to module 0 wrapping positively in module index
-            pass
-
-        # Clean exact shortest non-contractible toroidal cycle via unwrapped lift (u, m_unwrapped)
         q = collections.deque([(start, 0, [start])])
         visited = {(start, 0)}
         best_tor = None
@@ -1898,8 +1999,8 @@ def find_ground_gauge(n, bonds, u_init, candidate="H", nshell=5,
     """Return the minimum-energy Z2 gauge u_ground.
     For the canonical 5-shell 1080-site machine (core+divertor), uses the
     precomputed exact ground gauge verified to have 0 energy-lowering single-bond
-    flips across all 1620 bonds. For other shell counts, performs a rapid
-    module-symmetric coordinate descent from u_init."""
+    flips across all 1620 bonds. For other shell counts or helical shifts, runs
+    exact rank-2 Fredholm coordinate descent from u_init via polish_ground_sector."""
     if (nshell == 5 and not closed and core and divertor
             and candidate in GROUND_GAUGE_5SHELL_HEX
             and len(bonds) == 1620
@@ -1907,7 +2008,9 @@ def find_ground_gauge(n, bonds, u_init, candidate="H", nshell=5,
         u_pre = _decode_gauge_hex(GROUND_GAUGE_5SHELL_HEX[candidate], len(bonds))
         if energy(n, bonds, u_pre) <= energy(n, bonds, u_init):
             return u_pre
-    return u_init.copy()
+    w_ones = np.ones(len(bonds), dtype=float)
+    pol = polish_ground_sector(n, bonds, u_init, w_ones, max_rounds=25)
+    return pol["u"]
 
 
 def single_bond_stability_probe(n, bonds, u, max_bonds=160, seed=0, bond_weights=None):
@@ -4669,16 +4772,20 @@ def _ortho_exp_antisym(A, dt):
 class BlockDecomposedFlowPropagator(object):
     """Genuine sparse block-pair Majorana propagator (`N1-N3`):
       - Maintains per-block diagonal correlation matrices `G_blocks[bid]`
-        (initialized strictly locally via sparse Newton-Schulz when
-        `use_sigma_repair=True` and `use_seam_givens=True`, or from `A_int`
-        when `False`; zero global `G_exact` leaked).
-      - Stores off-diagonal cross-blocks `C_seams[(a, b)]` (a < b) ONLY for
+        and off-diagonal cross-blocks `C_seams[(a, b)]` (a < b) ONLY for
         block pairs within `<= max_hops` hops on the block adjacency graph
         (on the 40-block stellarator: `161/780 = 20.6%` at `max_hops=1`,
         `352/780 = 45.1%` at `max_hops=2`, keeping `> 54%` unstored/zero).
-      - Evolves via Strang-split internal half-steps `exp(0.5 * dt * A_int[b])`
-        and exact seam-bond Givens rotations `phi = 2 * dt * w_seam * u_seam`
-        (when `use_seam_givens=True`; zero heuristic diffusion parameters!)."""
+      - When `use_seam_givens=True` and `use_sigma_repair=True` (coupled
+        sparse block-pair mode), initializes both `G_blocks` and `C_seams`
+        strictly locally via sparse Newton-Schulz matrix-sign iteration from
+        `(A_int, A_seam)` and evolves via Strang-split internal half-steps
+        `exp(0.5 * dt * A_int[b])` + exact seam-bond Givens rotations.
+      - When `use_seam_givens=False` and `use_sigma_repair=True` (decoupled
+        seam-repaired mode), applies `A_eff = A_int + Sigma_keep` consistently
+        to both `G0_blocks` and `U_half` / `U_full`.
+      - When both flags are `False` (bare open blocks), initializes and
+        evolves each block from `A_int` alone."""
 
     def __init__(self, blocks, global_bonds, u_gauge, weights, dt=0.06,
                  use_sigma_repair=True, use_seam_givens=None, max_hops=1):
@@ -4702,6 +4809,7 @@ class BlockDecomposedFlowPropagator(object):
         self.U_full = {}
         self.block_ids = []
 
+        use_coupled_ns = self.use_sigma_repair and self.use_seam_givens
         for b in self.blocks:
             bid = int(b["block_id"])
             self.block_ids.append(bid)
@@ -4725,17 +4833,26 @@ class BlockDecomposedFlowPropagator(object):
             self.block_w[bid] = np.array(w_loc, dtype=float)
 
             A_int = majorana_matrix(n_q, bonds_loc, u=u_loc, bond_weights=w_loc)
-            self.U_half[bid] = _ortho_exp_antisym(A_int, 0.5 * self.dt)
-            self.U_full[bid] = self.U_half[bid] @ self.U_half[bid]
-
-            if self.use_sigma_repair:
-                sigma_keep = build_sigma_keep_from_manifest(b)
-                G0_b = thermal_correlator(A_int + sigma_keep, beta=1.0)
+            if self.use_sigma_repair and not self.use_seam_givens:
+                A_eff = A_int + build_sigma_keep_from_manifest(b)
+                self.U_half[bid] = _ortho_exp_antisym(A_eff, 0.5 * self.dt)
+                self.U_full[bid] = self.U_half[bid] @ self.U_half[bid]
+                G0_b = thermal_correlator(A_eff, beta=1.0)
+                G0_b = 0.5 * (G0_b - G0_b.T)
+                self.G0_blocks[bid] = G0_b
+                self.G_blocks[bid] = G0_b.copy()
             else:
-                G0_b = correlation_matrix(A_int)
-            G0_b = 0.5 * (G0_b - G0_b.T)
-            self.G0_blocks[bid] = G0_b
-            self.G_blocks[bid] = G0_b.copy()
+                self.U_half[bid] = _ortho_exp_antisym(A_int, 0.5 * self.dt)
+                self.U_full[bid] = self.U_half[bid] @ self.U_half[bid]
+                if use_coupled_ns:
+                    # Populated below by _init_sparse_newton_schulz from (A_int, A_seam)
+                    self.G0_blocks[bid] = np.zeros((n_q, n_q), dtype=float)
+                    self.G_blocks[bid] = np.zeros((n_q, n_q), dtype=float)
+                else:
+                    G0_b = correlation_matrix(A_int)
+                    G0_b = 0.5 * (G0_b - G0_b.T)
+                    self.G0_blocks[bid] = G0_b
+                    self.G_blocks[bid] = G0_b.copy()
 
         # Identify seam bonds connecting two distinct blocks and allocate
         # cross-blocks C_seams[(a, b)] (a < b) within <= max_hops hops.
@@ -5271,9 +5388,9 @@ def step_decomposed_strang(prop, bonds_list, u_arr, w_arr, is_seam_arr, dt):
 def rung_f2_single_module(manifest, steps=8, dt=0.06):
     """Rung F2: One half-period module (108 qubits = 4 x 27 K4 cluster).
     Gates BOTH total RMS AND kick-induced change above vacuum (`N2, N3`) on:
-      1. Bare open 4 x 27 blocks (no Sigma, no seam Givens)
-      2. Repaired 4 x 27 sparse block-pair propagator (Sigma_keep + exact K4
-         seam-bond Givens rotations)
+      1. Bare open 4 x 27 blocks (no Newton-Schulz coupling, no seam Givens)
+      2. Coupled 4 x 27 sparse block-pair propagator (local sparse Newton-Schulz
+         initialisation + exact K4 seam-bond Givens rotations)
       3. Global 3-colour Strang K4-kick evolution."""
     raw_mod_blocks = manifest["blocks"][:4]
     mod_sites = []
@@ -5305,27 +5422,12 @@ def rung_f2_single_module(manifest, steps=8, dt=0.06):
     prop_k4 = MajoranaFlowPropagator(
         108, bonds_mod, u_mod, w_mod, dt=dt, g0_init=prop_exact.G0)
 
-    # Build module-embedded 4 x 27 blocks with Sigma_keep from the 108-site module
-    A_mod = prop_exact.A
-    G_mod = prop_exact.G0
+    # Embed the 4 x 27 module blocks in module-local site indices 0..107
     mod_blocks = []
     for k_blk, b in enumerate(raw_mod_blocks):
         m_indices = list(range(27 * k_blk, 27 * (k_blk + 1)))
-        idx_arr = np.ix_(m_indices, m_indices)
-        Sigma_m = entanglement_hamiltonian(G_mod[idx_arr]) - A_mod[idx_arr]
-        Sigma_keep_m = sparsify_antisymmetric(Sigma_m, keep=45)
-        sig_bonds = []
-        for qa in range(27):
-            for qb in range(qa + 1, 27):
-                if abs(Sigma_keep_m[qa, qb]) > 1e-12:
-                    sig_bonds.append({
-                        "qa": qa,
-                        "qb": qb,
-                        "sigma_ab": float(Sigma_keep_m[qa, qb]),
-                    })
         b_copy = dict(b)
         b_copy["sites"] = m_indices
-        b_copy["sigma_repair_bonds"] = sig_bonds
         mod_blocks.append(b_copy)
 
     prop_bare_blks = BlockDecomposedFlowPropagator(
@@ -5423,9 +5525,9 @@ def rung_f2_single_module(manifest, steps=8, dt=0.06):
 
 def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
     """Rung F3: Ring of 10 modules on a single shell (200 sites = 10 x 20 blocks).
-    Compares exact 200-site ring propagation against 10 sparse block-pair
-    module blocks (storing ONLY nearest-neighbor module cross-blocks `10/45 = 22.2%`)
-    gating BOTH transit peak on Module 5 AND kick-induced relative error (`N2, N3`)."""
+    Compares exact 200-site ring propagation against 10 sparse 2-hop block-pair
+    module blocks (storing ONLY cross-blocks within <= 2 hops: `20/45 = 44.4%`)
+    gating BOTH transit peak on Module 1 AND kick-induced relative error (`N2, N3`)."""
     idx, pos, bonds, loops, meta = build(
         nshell=2, candidate=manifest["candidate"], closed=True,
         preset=manifest["preset"])
@@ -5456,8 +5558,6 @@ def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
     prop_vac = MajoranaFlowPropagator(
         200, bonds_s0, u_s0, w_s0, dt=dt, g0_init=prop_exact.G0)
 
-    A_ring = prop_exact.A
-    G_ring = prop_exact.G0
     mod_blocks = []
     for m_id in range(10):
         m_sites = [si for si in range(200) if mod_of_s0[si] == m_id]
@@ -5472,24 +5572,11 @@ def rung_f3_toroidal_ring(manifest, steps=16, dt=0.10):
                     "u": u_s0[b_idx],
                     "weight": w_s0[b_idx],
                 })
-        idx_arr = np.ix_(m_sites, m_sites)
-        Sigma_m = entanglement_hamiltonian(G_ring[idx_arr]) - A_ring[idx_arr]
-        Sigma_keep_m = sparsify_antisymmetric(Sigma_m, keep=35)
-        sig_bonds = []
-        for qa in range(len(m_sites)):
-            for qb in range(qa + 1, len(m_sites)):
-                if abs(Sigma_keep_m[qa, qb]) > 1e-12:
-                    sig_bonds.append({
-                        "qa": qa,
-                        "qb": qb,
-                        "sigma_ab": float(Sigma_keep_m[qa, qb]),
-                    })
         mod_blocks.append({
             "block_id": m_id,
             "n_qubits": len(m_sites),
             "sites": m_sites,
             "internal_bonds": ib_list,
-            "sigma_repair_bonds": sig_bonds,
         })
 
     prop_mod_bare = BlockDecomposedFlowPropagator(
@@ -6783,12 +6870,12 @@ class BiotSavartCoilModel(object):
     modules (`N6, D2` -- zero shell conditionals, zero even/odd module parity):
       - Dimensionless normalized field `b_norm = |B| / <|B|>` (invariant under
         uniform current rescaling `I -> alpha * I`).
-      - In-shell bonds (parallel/helical surface coupling):
+      - In-shell & cap bonds (1380 bonds: 1200 in-shell + 60 core_cap + 120 divertor):
             J_ins ~ b_norm * (1 + 0.25 * |e_hat_b . b_hat_b|)
-      - Radial bonds (cross-surface neoclassical ripple + grad-B drift):
+      - Inter-shell radial transport rungs (240 `radial` bonds connecting s <-> s+1):
             J_rad ~ (0.35 + 4.0 * kappa_b + 1.5 * |B(j) - B(i)| / |B_b|) / b_norm^2
-      - BOTH mean radial coupling AND mean in-shell coupling are strictly
-        matched SEPARATELY (`<J_rad> == 1.000000` AND `<J_ins> == 1.000000`,
+      - BOTH mean inter-shell radial coupling AND mean in-shell/cap coupling are
+        strictly matched SEPARATELY (`<J_rad> == 1.000000` AND `<J_ins> == 1.000000`,
         hence `<J_all> == 1.000000`) for every coil setting (`D2`), so every
         confinement improvement is 100% pure 3D coil-shaping geometry."""
 
@@ -6802,6 +6889,7 @@ class BiotSavartCoilModel(object):
             [meta["site_shell"][s] for s in range(self.n_sites)], dtype=int)
         self.site_module = np.array(
             [meta["site_module"][s] for s in range(self.n_sites)], dtype=int)
+        # 240 bulk inter-shell radial rungs (s <-> s+1); 1380 in-shell + axis/divertor cap bonds
         self.rad_mask = np.array(
             [meta["bond_meta"][b]["kind"] == "radial" for b in range(self.n_bonds)],
             dtype=bool)
@@ -8705,8 +8793,9 @@ def run_coupled_pyqrack_module_flow(manifest, steps=2, dt=0.04, gamma_div=0.18,
         "pyqrack_4x27q_coupling_method": (
             "Mitarai-Fujii Strang-QPD circuit knitting across ALL 32/32 Module-0 "
             "K4 seam bonds (142 bonds total, 4 independent QrackSimulator(27) workers, "
-            "all-order final-layer diag + all cross-seam pairs (e1,e2)) + 25k-shot "
-            "seeded 2-Strang-step MC QPD + 6-step 1-ebit Cat-entangler LOCC teleportation"
+            "all-order final-layer diag + deterministic 2-cut cross-seam pair cluster "
+            "expansion (e1,e2)) + 25k-shot seeded 2-Strang-step MC QPD + 6-step "
+            "1-ebit Cat-entangler LOCC teleportation"
         ),
         "pyqrack_4x27q_k4_bridges": len(all_32_seams),
         "pyqrack_4x27q_total_module0_bonds": len(bonds_108_qpd),
@@ -9025,12 +9114,24 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
     if progress is not None:
         progress("C1 flux integrity")
     # ------------------------------------------------------------------
+    # Non-tautological vacuum sector fidelity: compare the re-polished equilibrium
+    # gauge `u_ground` against the canonical uniform-weight vacuum sector `u_init`
+    # on interior shells (0 .. nshell - 2).
+    stabs_can, (_, eid_can, _) = build_stabilizers(bonds, loops, u_ref=u_init)
+    meas_vs_can = w_from_u(stabs_can, u_ground, eid_can)
+    by_shell_can = eps_W_by_shell(stabs_can, meas_vs_can)
+    eps_interior_vs_canonical = float(
+        np.mean([by_shell_can[s][0] for s in range(nshell - 1)])
+    ) if nshell > 1 else 0.0
+
+    # Equilibrium-sector edge island chain & trim cancellation check
     stabs, _ = build_stabilizers(bonds, loops, u_ref=u_ground)
     _, meas_preset, _ = seed_edge_island_chain(
         idx, bonds, stabs, nshell, preset=preset, u_base=u_ground)
     det_isl = detect_island_chain(stabs, meas_preset, nshell)
     eps_interior = float(det_isl["interior_eps_W"])
     islands = int(det_isl["island_count"])
+    want_islands = int(PRESET_ISLANDS.get(preset, 5))
     trim_res = error_field_trim_test(
         idx, bonds, stabs, nshell, preset=preset, u_base=u_ground)
     trim_residual = 0 if trim_res["cancelled"] else 1
@@ -9164,21 +9265,25 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
     # Criterion 5: Fast-ion confinement at finite beta = 2.5%
     if progress is not None:
         progress("C5 fast-ion confinement")
-    # Distinct initial state: localized outboard (R > R0) lowest-40%-|B|
-    # mirror-throat wavepacket on shell s=2 with finite-beta diamagnetic
+    # Controlled initial state: localized outboard (R > R0) lowest-40%-|B_ref|
+    # mirror-throat wavepacket on shell s=2 (defined on the fixed reference
+    # uniform-coil field so baseline and optimised are compared on identical
+    # kicked bonds and radial-rung connectivity) with finite-beta diamagnetic
     # field depression B^2(beta) = B^2 * (1 - beta*(1-rho)^2).
     # ------------------------------------------------------------------
     beta_fast_pct = 2.5
     w_fast, _, _, _ = bs_model.bond_weights_and_field(
         coil_knobs=coil_knobs, preset=preset, uniform=uniform,
         beta_diamag_pct=beta_fast_pct)
+    _, _, B_b_ref, _ = bs_model.bond_weights_and_field(
+        coil_knobs=None, preset=preset, uniform=True)
     s2_out_bonds = [
         b_idx for b_idx, (i, j, _) in enumerate(bonds)
         if site_shell[i] == 2 and site_shell[j] == 2
         and not bs_model.rad_mask[b_idx] and bs_model.r_bonds[b_idx] > bs_model.r0
     ]
-    b_thresh = float(np.percentile(B_b[s2_out_bonds], 40.0))
-    mirror_bonds = [b_idx for b_idx in s2_out_bonds if B_b[b_idx] <= b_thresh]
+    b_thresh = float(np.percentile(B_b_ref[s2_out_bonds], 40.0))
+    mirror_bonds = [b_idx for b_idx in s2_out_bonds if B_b_ref[b_idx] <= b_thresh]
 
     prop_fast = MajoranaFlowPropagator(n_sites, bonds, u_ground, w_fast, dt=0.08)
     for b_idx in mirror_bonds:
@@ -9227,9 +9332,15 @@ def evaluate_w7x_seven_criteria(idx, pos, bonds, loops, meta, bs_model,
         },
         "criterion_1_flux_integrity": {
             "interior_eps_W": eps_interior,
+            "interior_eps_W_vs_canonical": eps_interior_vs_canonical,
             "outer_islands": islands,
             "trim_residual": int(trim_residual),
-            "pass": eps_interior == 0.0 and trim_residual == 0,
+            "pass": (
+                eps_interior == 0.0
+                and islands == want_islands
+                and trim_residual == 0
+                and pol["n_lowering_remaining"] == 0
+            ),
         },
         "criterion_2_shafranov_stiffness": {
             "beta_grid_pct": beta_grid,
@@ -9609,6 +9720,7 @@ def run_preset_benchmarks(idx, pos, bonds, loops, meta, bs_model,
             "n_islands": n_isl,
             "interior_eps_W": float(p_det["interior_eps_W"]),
             "steps": int(steps),
+            "steps_err": int(steps_err),
             "dt": float(dt),
             "mean_radial_weight": float(np.mean(w_p[bs_model.rad_mask])),
             "mean_inshell_weight": float(np.mean(w_p[bs_model.ins_mask])),
@@ -9631,6 +9743,7 @@ def run_preset_benchmarks(idx, pos, bonds, loops, meta, bs_model,
             "pol_booking_err": run_clean["pol_booking_err"],
             "von_neumann_entropy_nats": run_clean["von_neumann_entropy_nats"],
             "divertor_unit_exhaust": [float(x) for x in run_clean["unit_exhaust"]],
+            "divertor_unit_exhaust_clean_matched": [float(x) for x in run_clean["snap"]["unit_exhaust"]],
             "divertor_peak_to_mean": run_clean["tor_p2m"],
             "period_peak_to_mean": run_clean["per_p2m"],
             "poloidal_target_exhaust": [float(x) for x in run_clean["pol_exhaust"]],
@@ -9665,6 +9778,7 @@ def run_preset_benchmarks(idx, pos, bonds, loops, meta, bs_model,
                 "exhaust_per_step": run_clean["exhaust_trace"],
                 "shell_history": run_clean["shell_history"],
                 "divertor_unit_exhaust": [float(x) for x in run_clean["unit_exhaust"]],
+                "divertor_unit_exhaust_clean_matched": [float(x) for x in run_clean["snap"]["unit_exhaust"]],
                 "divertor_unit_exhaust_n1_err": [float(x) for x in run_err["unit_exhaust"]],
                 "divertor_unit_exhaust_trimmed": [float(x) for x in run_trm["unit_exhaust"]],
             }
@@ -9882,6 +9996,8 @@ def optimise_seven_coil_knobs(idx, pos, bonds, loops, meta, bs_model, preset="st
         and int(res.nfev) >= 50
         and len(knobs_at_bound) == 0
         and best_eval["criterion_1_flux_integrity"]["pass"]
+        and best_eval["criterion_1_flux_integrity"]["interior_eps_W_vs_canonical"]
+            <= base_eval["criterion_1_flux_integrity"]["interior_eps_W_vs_canonical"]
         and best_eval["criterion_2_shafranov_stiffness"]["shafranov_shift_5pct"]
             < base_eval["criterion_2_shafranov_stiffness"]["shafranov_shift_5pct"]
         and best_eval["criterion_3_mhd_beta_limit"]["pass_5pct"]
@@ -9938,6 +10054,8 @@ def save_telemetry_files(npz_path, csv_path, telemetry_traces, opt_result, prese
     exhaust = np.array(telemetry_traces["exhaust_per_step"], dtype=float)
     shell_hist = np.array(telemetry_traces["shell_history"], dtype=float)
     div_units = np.array(telemetry_traces["divertor_unit_exhaust"], dtype=float)
+    div_clean_matched = np.array(
+        telemetry_traces.get("divertor_unit_exhaust_clean_matched", div_units), dtype=float)
     div_err = np.array(telemetry_traces["divertor_unit_exhaust_n1_err"], dtype=float)
     div_trm = np.array(telemetry_traces["divertor_unit_exhaust_trimmed"], dtype=float)
 
@@ -9956,6 +10074,7 @@ def save_telemetry_files(npz_path, csv_path, telemetry_traces, opt_result, prese
         exhaust_per_step=exhaust,
         shell_history=shell_hist,
         divertor_unit_exhaust=div_units,
+        divertor_unit_exhaust_clean_matched=div_clean_matched,
         divertor_unit_exhaust_n1_err=div_err,
         divertor_unit_exhaust_trimmed=div_trm,
         beta_grid=beta_grid,
@@ -10387,12 +10506,14 @@ def render_dashboard(manifest, scoreboard, telemetry_path, out_png):
     ax5 = fig.add_subplot(2, 3, 5, facecolor="#161b22")
     mods = np.arange(10)
     std_pb = scoreboard["presets_benchmark"]["standard"]
-    std_clean = np.array(std_pb["divertor_unit_exhaust"], dtype=float)
+    std_clean = np.array(
+        std_pb.get("divertor_unit_exhaust_clean_matched", std_pb["divertor_unit_exhaust"]),
+        dtype=float)
     std_trm = np.array(
-        std_pb.get("divertor_unit_exhaust_trimmed", std_pb["divertor_unit_exhaust"]),
+        std_pb.get("divertor_unit_exhaust_trimmed", std_clean),
         dtype=float)
     err_div = np.array(
-        std_pb.get("divertor_unit_exhaust_n1_err", std_pb["divertor_unit_exhaust"]),
+        std_pb.get("divertor_unit_exhaust_n1_err", std_clean),
         dtype=float)
     clean_norm = std_clean / max(float(np.mean(std_clean)), 1e-12)
     trm_norm = std_trm / max(float(np.mean(std_trm)), 1e-12)

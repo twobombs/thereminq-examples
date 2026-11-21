@@ -25,7 +25,7 @@ To maintain exact degree-$3$ coordination and proper $(X, Y, Z)$ $3$-edge-colour
 | Field periods / Half-period modules | $N_{\text{fp}} = 5, \; N_{\text{mod}} = 2 N_{\text{fp}}$ | $5$ periods / $10$ modules |
 | Regular shell sites per module | $8\text{ (branch)} + 12\text{ (connector)}$ | $20$ regular sites (+ $2$ axis cap on $s=0$, + $6$ SOL cap on $s=4$) |
 | Per-shell site breakdown ($s = 0..4$) | $220 + 200 + 200 + 200 + 260$ | **$1080$ sites ($108$ / module)** |
-| Bonds per shell / Radial bonds / Total | $1140\text{ in-shell} + 480\text{ radial}$ | **$1620$ bonds ($3 \times 540$)** |
+| Bonds (in-shell / radial / caps) | $1200\text{ in-shell} + 240\text{ radial} + 60\text{ axis} + 120\text{ divertor}$ | **$1620$ bonds ($3 \times 540$)** |
 | Manifolds per module / Total manifolds | $4\text{ blocks/module} \times 10\text{ modules}$ | **$40 \times 27$-qubit manifolds ($1100$ internal + $320$ $K_4$ + $200$ toroidal seam bonds)** |
 | Independent internal cycles | $(2 + 1 + 2 + 1)\text{ cycles/module} \times 10$ | **$60$ internal cycles (matches exact cycle rank $1100 - 40 \times 26 = 60$)** |
 | Unique manifold equivalence classes | $40 / |D_5| = 40 / 10$ | **$4$ canonical block types (`type0..3`)** |
@@ -110,7 +110,7 @@ The bias grows close to linearly in $N_{\text{cuts}} (1 - F)$, with a coefficien
 
 ### 3.4 LO-QPD vs Distilled-Ebit Link Resources
 
-Unentangled LO-QPD pays a $\Gamma_{\text{LO}}^2$ shot overhead, $\Gamma_{\text{LO}} = \prod_c (|\cos 2\theta_c| + 3|\sin 2\theta_c|)$. Ebit links keep $N_{\text{shots}} \approx 10^4$ at $\varepsilon = 10^{-2}$, provided each of the $N_{\text{ebits}}$ consumed ebits stays within $\epsilon_e^{\text{req}} = 0.01 / N_{\text{ebits}}$. The budget is split evenly between the DEJMPS distillation residual (ideal local gates) and storage decoherence while an ebit waits $r + 1$ classical rounds ($r$ DEJMPS parity exchanges plus the feed-forward). A depolarising pair memory then needs $T_{\text{mem}} / t_{\text{round}} \ge 3 (r + 1) / (2 \epsilon_e^{\text{req}})$. Below $\epsilon_e^{\text{req}} = 10^{-3}$ (`FT`), physical CNOT errors exceed the target, so fault-tolerant logical Bell pairs are needed and the raw-ebit counts are lower bounds.
+Unentangled LO-QPD pays a $\Gamma_{\text{LO}}^2$ shot overhead, $\Gamma_{\text{LO}} = \prod_c (1 + 2|\sin 2\theta_c|)$. Ebit links keep $N_{\text{shots}} \approx 10^4$ at $\varepsilon = 10^{-2}$, provided each of the $N_{\text{ebits}}$ consumed ebits stays within $\epsilon_e^{\text{req}} = 0.01 / N_{\text{ebits}}$. The budget is split evenly between the DEJMPS distillation residual (ideal local gates) and storage decoherence while an ebit waits $r + 1$ classical rounds ($r$ DEJMPS parity exchanges plus the feed-forward). A depolarising pair memory then needs $T_{\text{mem}} / t_{\text{round}} \ge 3 (r + 1) / (2 \epsilon_e^{\text{req}})$. Below $\epsilon_e^{\text{req}} = 10^{-3}$ (`FT`), physical CNOT errors exceed the target, so fault-tolerant logical Bell pairs are needed and the raw-ebit counts are lower bounds.
 
 | Regime | Ebits / shot | $\log_{10} N_{\text{shots}}$ LO-QPD | $\epsilon_e^{\text{req}}$ | DEJMPS $F_0 = 0.99$: rounds, raw / ebit, raw / $10^4$ shots | $T_{\text{mem}} / t_{\text{round}}$ ($F_0 = 0.99$) | DEJMPS $F_0 = 0.95$: rounds, raw / ebit, raw / $10^4$ shots | Feed-forward |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
