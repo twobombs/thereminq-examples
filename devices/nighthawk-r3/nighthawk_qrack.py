@@ -16122,7 +16122,7 @@ def cmd_field_plan(a):
         total.append(gb or 0)
         sp = die_split(widths, a.vram_gb or 8.0, a.gtt or 0.0) if widths and not on_cpu else None
         if sp:
-            splits.append(sp)
+            splits.append((c, sp))
         reg = ""
         if field.rooms is not None and not field.rooms[c].exact:
             rm = field.rooms[c]
@@ -16140,13 +16140,36 @@ def cmd_field_plan(a):
             print("note: ghost room was judged by the chip registers' own width caps (sized for one 8 GB die); "
                   "on the CPU, --ghost-max-width W (--ghost-max-wide N) admits more links")
     elif any(total):
-        per = a.chips_per_gpu
-        ok = all(sp["fits"] for sp in splits) and per == 1 if splits else max(total) * per <= a.die_gb
-        gtt_host = sum(sp["gtt"] for sp in splits)
-        print(f"one loom = {len(field.specs)} chip workers, {per} chip(s) per {a.vram_gb or a.die_gb:g} GB device: "
-              f"{'fits' if ok else 'DOES NOT FIT'}"
+        per = max(1, a.chips_per_gpu)
+        vram_gb = a.vram_gb or 8.0
+        # Chips land on devices as start_chips places loom 0's workers: chip c on gpus[(c // per) % len(gpus)]
+        # (with fewer --gpus than that needs, devices wrap and take more than --chips-per-gpu chips), or on
+        # device c // per when no --gpus are given. Every worker on a device brings its own context, kernels
+        # and buffers, so each one is charged the die reserve.
+        gpus = parse_gpus(a.gpus) if a.gpus else []
+        dev_of = (lambda c: gpus[(c // per) % len(gpus)]) if gpus else (lambda c: c // per)
+        on_dev = collections.defaultdict(list)
+        for c in range(len(field.specs)):
+            on_dev[dev_of(c)].append(c)
+        if splits:
+            sp_of = dict(splits)
+            dev_rows = []
+            for d, cs in sorted(on_dev.items()):
+                used = sum(sp_of[c]["vram"] for c in cs if c in sp_of)
+                room = vram_gb - GTT_RESERVE_GB * len(cs)
+                dev_rows.append((d, cs, used, room, used <= room and all(sp_of[c]["fits"] for c in cs if c in sp_of)))
+            ok = all(r[4] for r in dev_rows)
+            if any(len(cs) > 1 for _, cs, _, _, _ in dev_rows):
+                for d, cs, used, room, fit in dev_rows:
+                    print(f"device {d}: chips {cs}, VRAM {used:.2f} of {vram_gb:g} GiB "
+                          f"(-{GTT_RESERVE_GB:g} reserve x {len(cs)} workers) -> {'fits' if fit else 'DOES NOT FIT'}")
+        else:
+            ok = all(sum(total[c] or 0 for c in cs) <= a.die_gb for cs in on_dev.values())
+        gtt_host = sum(sp["gtt"] for _, sp in splits)
+        print(f"one loom = {len(field.specs)} chip workers, up to {max(len(cs) for cs in on_dev.values())} chip(s) "
+              f"per {vram_gb if splits else a.die_gb:g} GB device: {'fits' if ok else 'DOES NOT FIT'}"
               + (f" (host memory mapped as GTT: {gtt_host:.1f} GiB per loom)" if gtt_host else "")
-              + f"; devices per loom: {math.ceil(len(field.specs) / per)}")
+              + f"; devices per loom: {len(on_dev)}")
     if a.png:
         draw_field(field, a.png)
         print(f"drawn: {a.png}")
