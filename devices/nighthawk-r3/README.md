@@ -126,7 +126,13 @@ Of the factorings of 520 only 20 x 26 has 994 edges (13 x 40: 987, 10 x 52: 978)
 
 `nighthawk120t` is `nighthawk120` transposed (a 10 x 12 tile). `nighthawk140` (a 10 x 14 tile) is `nighthawk120t` with a column inserted before its columns 0 and 9: each new cell sits on a free site of a patch's bulk or of one of that patch's seams, so every new coupler is a register coupler. Both are the tiles of `--device r3t` (3.13).
 
-Both were found by annealing the seams on the lattice for an ACE ring of patches and assigning sites from `QrackAceBackend._unpack` (PyQrack 2.30.6). They were not searched with `layoutsearch`: a CP-SAT search (`layoutsearch --n 120 --region fixed`) may find a shorter boundary, and its result can be saved over these names.
+Both were found by annealing the seams on the lattice for an ACE ring of patches and assigning sites from `QrackAceBackend._unpack` (PyQrack 2.30.6). `layoutsearch --lattice 10x12` (or `10x14`) searches a tile on its own lattice, warm-started with `--hint`; `--compare` ranks the stored tile with the candidates, and `--test-family hamming --test-protocol nnqab --test-no-ace-error-detection` ranks them by the signal the field benchmarks measure. Fewer boundary qubits do not by themselves give a higher signal:
+
+| `nighthawk120t` layout (CPU, 30 s CP-SAT, d4, 1 instance) | Caps | Boundary qubits | Couplers through a boundary | Widths (incl. ancilla) | Hamming signal |
+|---|---|---|---|---|---|
+| stored | 27 x 2 | 39 | 126 / 218 | 20 23 22 22 21 23 16 20 | 0.831 |
+| searched, `--objective seam,bcz,couplers` | 28 x 2 | 35 | 110 / 218 | 25 27 24 27 19 25 10 6 | 0.756 |
+| searched, `--objective balance,seam,bcz` | 28 x 2 | 48 | 137 / 218 | 22 x 8 | test crashed (native, in `prob`) |
 
 Check of `nighthawk120` on PyQrack 2.30.6 from pip, CPU, outside the script: mirror circuits (random single-qubit gates, CZ colours A B C D, then the inverse), Hamming signal 1 - 2h, three circuits per point.
 

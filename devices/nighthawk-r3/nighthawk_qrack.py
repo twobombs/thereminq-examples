@@ -5884,6 +5884,12 @@ def search_layout(row, edges, n, *, R=12, C=10, broken=frozenset(), broken_polic
     sol.parameters.max_time_in_seconds = float(time_s)
     sol.parameters.num_workers = int(workers or max(1, min(16, os.cpu_count() or 1)))
     sol.parameters.random_seed = int(seed)
+    if hint:
+        # the hint covers placement only (inc, x); let CP-SAT complete the derived seam / boundary-coupler
+        # variables from it, so a valid layout is the first solution (without this a 140-qubit tile can
+        # run out of time before reaching its own preset)
+        sol.parameters.repair_hint = True
+        sol.parameters.hint_conflict_limit = 10000
     st_ = sol.Solve(m)
     if st_ not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None if st_ != cp_model.INFEASIBLE else dict(status="INFEASIBLE")
@@ -5977,10 +5983,11 @@ def save_register(path, name, entry):
     os.replace(tmp, path)
 
 
-def parse_geometries(spec_list, n, max_width, patches, torus_mode, limit):
-    """'SIZE:LRC:LRR[:t]' entries, or 'auto': every ACE register of n..n+40 sites with the
+def parse_geometries(spec_list, n, max_width, patches, torus_mode, limit, extra_sites=40):
+    """'SIZE:LRC:LRR[:t]' entries, or 'auto': every ACE register of n..n+extra_sites sites with the
     requested patch count whose patches can hold n qubits under the width cap, one per
-    distinct group structure, most bulk capacity first."""
+    distinct group structure, most bulk capacity first. Explicit entries come first and are
+    not repeated by auto."""
     out = []
     for tok in spec_list:
         if tok != "auto":
@@ -5989,7 +5996,7 @@ def parse_geometries(spec_list, n, max_width, patches, torus_mode, limit):
             continue
         seen, cands = set(), []
         tor = {"flat": (False,), "torus": (True,), "any": (False, True)}[torus_mode]
-        for size in range(n, n + 41):
+        for size in range(n, n + extra_sites + 1):
             for torus in tor:
                 for lrc in range(1, 9):
                     for lrr in range(1, 9):
@@ -6011,13 +6018,14 @@ def parse_geometries(spec_list, n, max_width, patches, torus_mode, limit):
                         seen.add(sig)
                         cands.append((-sum(min(cap, v) for v in bulk.values()), size, row["lrc"], row["lrr"], torus))
         cands.sort()
-        out += [(s_, a_, b_, t_) for _, s_, a_, b_, t_ in cands[:limit]]
+        have = {(s_, a_, b_, t_) for s_, a_, b_, t_ in out}
+        out += [g for g in ((s_, a_, b_, t_) for _, s_, a_, b_, t_ in cands) if g not in have][:limit]
     return out
 
 
-def score_records(path, depths):
-    """Plain mean survival over instances per depth, and the score: geometric mean over the
-    test depths (floor 1e-9, so a zero cannot hide behind others)."""
+def score_records(path, depths, family="mirror"):
+    """Plain mean survival (mirror) or Hamming-weight signal (hamming) over instances per depth, and
+    the score: geometric mean over the test depths (floor 1e-9, so a zero cannot hide behind others)."""
     per = defaultdict(list)
     for fn in [Path(path)] + sorted(Path(path).parent.glob(Path(path).stem + ".w*.jsonl")):
         try:
@@ -6026,7 +6034,7 @@ def score_records(path, depths):
                     r = json.loads(line)
                 except ValueError:
                     continue
-                if r.get("family") == "mirror" and r.get("depth") in depths:
+                if r.get("family") == family and r.get("depth") in depths:
                     per[r["depth"]].append(float(r["fidelity"]))
         except OSError:
             pass
@@ -6042,6 +6050,18 @@ def cmd_layoutsearch(a):
     if not a.max_width or a.max_width < 2:
         raise SystemExit("--max-width must be given (patch width cap incl. the ancilla)")
     R, C, broken, L = lattice_info(a.repo)
+    lattice = None
+    if getattr(a, "lattice", None):
+        try:
+            R, C = (int(x) for x in a.lattice.lower().split("x"))
+        except ValueError:
+            raise SystemExit("--lattice: RxC, e.g. 10x12")
+        if a.n != R * C:
+            raise SystemExit(f"--lattice {R}x{C}: the region is the whole lattice, so --n must be {R * C}")
+        if a.cz_weights or a.window or (a.fixed_register and a.fixed_register.startswith("release")):
+            raise SystemExit("--lattice: --cz-weights, --window and the release register need the device lattice")
+        broken, lattice = set(), (R, C)
+        a.region, a.fixed_register = "fixed", None
     objective = tuple(a.objective.split(","))
     if any(o not in LS_OBJECTIVES for o in objective):
         raise SystemExit(f"--objective: choose from {','.join(LS_OBJECTIVES)}")
@@ -6072,11 +6092,15 @@ def cmd_layoutsearch(a):
         elif window:
             fixed = {(r, c) for r in range(window[0], window[1] + 1) for c in range(window[2], window[3] + 1)
                      if (r, c) not in broken}
+        elif lattice:
+            fixed = {(r, c) for r in range(R) for c in range(C)}
         else:
-            raise SystemExit("--region fixed needs --window or --fixed-register")
+            raise SystemExit("--region fixed needs --window, --fixed-register or --lattice")
         if len(fixed) != a.n:
             raise SystemExit(f"--region fixed: the region has {len(fixed)} sites, not --n {a.n}")
     cz_weight = None
+    if a.cz_weights and a.compare:
+        raise SystemExit("--compare with --cz-weights: the given registers have no circuit-CZ count to rank by")
     if a.cz_weights:
         if a.region != "fixed" or not a.fixed_register:
             raise SystemExit("--cz-weights needs --region fixed --fixed-register (the circuits must be known)")
@@ -6096,9 +6120,11 @@ def cmd_layoutsearch(a):
         hs = REGISTERS[a.hint]
         lay_h = RegisterLayout(a.repo, a.hint)
         row_h = layout_row(hs["ace"]["width"], hs["ace"]["lrc"], hs["ace"]["lrr"], hs["ace"]["torus"], {})
-        hint = {(p // C, p % C): frozenset(s for s, _ in row_h["unpack"][x_])
-                for p, x_ in zip(lay_h.l2p, hs["ace"]["site"])}
-    geoms = parse_geometries(a.geometries, a.n, a.max_width, a.patches, a.torus, a.max_geometries)
+        (hr0, _), (hc0, _) = hs["rows"], hs["cols"]
+        hint = {(hr0 + pr, hc0 + pc): frozenset(s for s, _ in row_h["unpack"][x_])
+                for (pr, pc), x_ in zip(lay_h.pos, hs["ace"]["site"])}
+    geoms = parse_geometries(a.geometries, a.n, a.max_width, a.patches, a.torus, a.max_geometries,
+                             getattr(a, "extra_sites", 40))
     if not geoms:
         raise SystemExit("no ACE geometry fits; relax --max-width or --patches, or give --geometries")
     outdir = Path(a.outdir)
@@ -6107,7 +6133,7 @@ def cmd_layoutsearch(a):
     log = outdir / "layoutsearch.jsonl"
     prefix = a.prefix or f"ls{a.n}"
     print(f"# layoutsearch n={a.n}, region {a.region}" + (f" (trim {a.trim})" if a.region == "rect" else "")
-          + (f" window {window}" if window else "")
+          + (f" window {window}" if window else "") + (f" lattice {R}x{C}" if lattice else "")
           + f", broken qubits {a.broken}, caps {a.max_width}/{a.max_wide}, objective {','.join(objective)}, "
             f"{len(geoms)} geometr{'y' if len(geoms) == 1 else 'ies'}, {a.candidates} candidate(s) each", flush=True)
     cands = []
@@ -6153,6 +6179,24 @@ def cmd_layoutsearch(a):
                   + (f", VRAM {ver['die']['vram']:.1f} + GTT {ver['die']['gtt']:.1f} GiB" if "die" in ver else "") + "; "
                   f"verify {'OK' if ver['ok'] else 'FAILED: ' + '; '.join(ver['problems'])} "
                   f"({ver['exact']}/{ver['replica']}/{ver['cross']})", flush=True)
+    for cname in (a.compare or []):
+        # an existing register in the same verification, circuit test and ranking: it stays the best unless a
+        # searched layout beats it
+        if cname not in REGISTERS:
+            raise SystemExit(f"--compare: unknown register {cname}")
+        cs = REGISTERS[cname]
+        if cs["n"] != a.n or not cs.get("ace"):
+            raise SystemExit(f"--compare {cname}: needs an ACE placement of {a.n} qubits")
+        ver = verify_register(cname, cs, a.repo)
+        ace = cs["ace"]
+        cands.append(dict(name=cname, compare=True,
+                          geometry=dict(size=ace["width"], lrc=ace["lrc"], lrr=ace["lrr"], torus=ace["torus"]),
+                          cpsat=dict(status="GIVEN", seconds=0.0, seam=ver["seam"], bcz=ver["replica"], cz=0,
+                                     couplers=ver["couplers"], widths=ver["widths"]),
+                          verify=ver, spec={k: cs[k] for k in ("n", "rows", "cols", "drop") if k in cs}))
+        print(f"  {cname}: given (--compare) -- {ver['seam']} boundary qubits, {ver['replica']} of {ver['couplers']} "
+              f"couplers through a boundary, widths {ver['widths']}; verify "
+              f"{'OK' if ver['ok'] else 'FAILED: ' + '; '.join(ver['problems'])}", flush=True)
     good = [c for c in cands if c["verify"]["ok"]]
     if a.test_depths and good:
         env = dict(os.environ)
@@ -6161,21 +6205,30 @@ def cmd_layoutsearch(a):
         if a.cpu:
             os.makedirs("/tmp/no-icd", exist_ok=True)
             env.setdefault("OCL_ICD_VENDORS", "/tmp/no-icd")
-        print(f"# circuit tests: mirror, depths {a.test_depths}, {a.test_instances} instance(s) x "
-              f"{a.test_twirls} twirls x 10 inputs, theta {a.theta}, {'CPU' if a.cpu else 'OpenCL'}", flush=True)
+        print(f"# circuit tests: {a.test_family}, depths {a.test_depths}, {a.test_instances} instance(s)"
+              + (f" x {a.test_twirls} twirls x 10 inputs" if a.test_family == "mirror" else
+                 f", protocol {a.test_protocol or 'nighthawk'}")
+              + (", no error detection" if a.test_no_ed else "")
+              + f", theta {a.theta}, {'CPU' if a.cpu else 'OpenCL'}", flush=True)
 
         def test(c):
             out = outdir / f"{c['name']}.jsonl"
             cmd = [sys.executable, os.path.abspath(__file__), "run", "--backend", "ace", "--register", c["name"],
-                   "--theta", a.theta, "--mirror-estimator", "prob", "--instances", str(a.test_instances),
-                   "--twirls", str(a.test_twirls), "--out", str(out), "--depths", *map(str, a.test_depths)]
+                   "--theta", a.theta, "--instances", str(a.test_instances), "--out", str(out),
+                   "--depths", *map(str, a.test_depths)]
+            if a.test_family == "hamming":
+                cmd += ["--families", "hamming", "--fold", "1"] + (["--protocol", a.test_protocol] if a.test_protocol else [])
+            else:
+                cmd += ["--mirror-estimator", "prob", "--twirls", str(a.test_twirls)]
+            if a.test_no_ed:
+                cmd.append("--no-ace-error-detection")
             if a.repo:
                 cmd += ["--repo", a.repo]
             cmd += ["--cpu"] if a.cpu else ["--ace-gpu"] + (["--gtt", str(a.gtt), "--vram-gb", str(a.vram_gb or 8.0)] if a.gtt else [])
             t0 = time.time()
             p = subprocess.run(cmd, env=env, capture_output=True, text=True)
             c["test"] = dict(seconds=round(time.time() - t0, 1), returncode=p.returncode)
-            means, score = score_records(out, a.test_depths)
+            means, score = score_records(out, a.test_depths, a.test_family)
             c["test"].update(means={str(k): v for k, v in sorted(means.items())}, score=score)
             if p.returncode != 0:
                 c["test"]["stderr"] = p.stderr[-2000:]
@@ -14034,6 +14087,9 @@ def make_parser():
                          "geometry of n..n+40 sites with --patches patches that can hold n qubits under the cap")
     ls.add_argument("--patches", type=int, default=None, help="with auto: number of patches (2, 3, 4, ...)")
     ls.add_argument("--torus", choices=["flat", "torus", "any"], default="flat", help="with auto (default flat)")
+    ls.add_argument("--extra-sites", dest="extra_sites", type=int, default=40,
+                    help="with auto: try registers of n..n+K sites (default 40; the r3 tiles' 184-site register "
+                         "is n+64 for nighthawk120t and n+44 for nighthawk140)")
     ls.add_argument("--max-geometries", dest="max_geometries", type=int, default=4,
                     help="with auto: try this many geometries, most bulk capacity first (default 4)")
     ls.add_argument("--max-width", dest="max_width", type=int, default=28,
@@ -14057,6 +14113,10 @@ def make_parser():
     ls.add_argument("--min-boundary", dest="min_boundary", type=int, default=0,
                     help="at least this many boundary qubits (a floor against trivially decoupled patches)")
     ls.add_argument("--window", default=None, help="restrict the region to rows-cols, e.g. 0-9,1-9")
+    ls.add_argument("--lattice", default=None, metavar="RxC",
+                    help="search a full R x C rectangular lattice (no broken qubits) instead of the device's, e.g. "
+                         "10x12 or 10x14 for the r3 tiles of --device r3t; the region is the whole lattice "
+                         "(--n = R * C) and the result is a register usable in field --chips")
     ls.add_argument("--fixed-register", dest="fixed_register", default=None,
                     help="with --region fixed: use this register's sites (release, release:N = the release's first N "
                          "logical qubits, nighthawk88, ...)")
@@ -14081,6 +14141,16 @@ def make_parser():
     ls.add_argument("--workers", type=int, default=None, help="CP-SAT threads (default: cores, at most 16)")
     ls.add_argument("--test-depths", dest="test_depths", type=int, nargs="*", default=[4, 8],
                     help="mirror depths of the circuit test (default 4 8; none = rank by the CP-SAT objective only)")
+    ls.add_argument("--compare", nargs="+", default=None, metavar="REGISTER",
+                    help="existing registers of --n qubits verified, tested and ranked with the candidates, e.g. "
+                         "the layout being replaced: 'best' is one of them unless a searched layout beats it")
+    ls.add_argument("--test-family", dest="test_family", choices=["mirror", "hamming"], default="mirror",
+                    help="observable of the circuit test: mirror (default: survival of the input string, small on "
+                         "wide registers) or hamming (Dan Strano's mirror Hamming-weight signal, as field run measures)")
+    ls.add_argument("--test-protocol", dest="test_protocol", choices=["nighthawk", "nnqab"], default=None,
+                    help="with --test-family hamming: run --protocol (nnqab as the field benchmarks)")
+    ls.add_argument("--test-no-ace-error-detection", dest="test_no_ed", action="store_true",
+                    help="circuit tests without the error-detection ancilla (as field runs with --no-ace-error-detection)")
     ls.add_argument("--test-instances", dest="test_instances", type=int, default=1)
     ls.add_argument("--test-twirls", dest="test_twirls", type=int, default=4,
                     help="twirls per input (10 inputs) in the circuit test (default 4: 40 runs per point)")
@@ -15178,6 +15248,7 @@ def cmd_chipworker(a):
     """Started by the loom with the environment of one device. Protocol (length-prefixed
     pickles on stdin/stdout): init, batch(ops, query) -> marginals, prob(bits, seed), quit.
     stdout is taken over for the protocol; anything Qrack prints goes to stderr."""
+    load_register_files()   # chips from saved registers ($NIGHTHAWK_REGISTERS, nighthawk_registers.json)
     out = os.fdopen(os.dup(1), "wb")
     os.dup2(2, 1)
     inp = sys.stdin.buffer
