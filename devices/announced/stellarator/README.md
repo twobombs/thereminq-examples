@@ -215,7 +215,7 @@ Requirements: `numpy`, `scipy`, `pyqrack`, `ortools` (for `equiv`), `matplotlib`
 
 ## 5. Live Dashboard (`stellarator_ui.py` & `stellarator_colab.ipynb`)
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/twobombs/thereminq-examples/blob/main/devices/stellarator/stellarator_colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/twobombs/thereminq-examples/blob/main/devices/announced/stellarator/stellarator_colab.ipynb)
 
 For a browser-based interactive dashboard with zero local setup, open [`stellarator_colab.ipynb`](stellarator_colab.ipynb) in Google Colab via the badge above and run *Runtime > Run all* (a standard CPU runtime is enough).
 

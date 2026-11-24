@@ -127,7 +127,7 @@ The nineteen modules within `algorithms/` are organized into five thematic pilla
         | 36 | | | 2.0 | `nn_qab32plus.sh` | replicates 30 |
 
     *   **Adversarial Controls:** `nn_qab-adversarial.py` separates genuine approximate simulation from XEB spoofing attacks [[34]](#ref-34), [[37]](#ref-37) by comparing `ace` against seam-severed (`severed`), ideal-sampling (`ceiling`), and independent-circuit (`null`) control arms, pooling multi-run heterogeneity via DerSimonian–Laird random-effects meta-analysis.
-    *   **Related:** device-specific RCS and postselection studies (e.g. Nighthawk) live under [`devices/nighthawk/`](../devices/nighthawk/).
+    *   **Related:** device-specific RCS and postselection studies (e.g. Nighthawk) live under [`devices/released/nighthawk/`](../devices/released/nighthawk/).
 *   **Verified References:** [[31]](#ref-31) [arXiv:1608.00263](https://arxiv.org/abs/1608.00263), [[53]](#ref-53) [arXiv:1612.05903](https://arxiv.org/abs/1612.05903), [[32]](#ref-32) [arXiv:1910.11333](https://arxiv.org/abs/1910.11333), [[33]](#ref-33) [arXiv:2005.02464](https://arxiv.org/abs/2005.02464), [[34]](#ref-34) [arXiv:2112.01657](https://arxiv.org/abs/2112.01657), [[35]](#ref-35) [arXiv:2211.03999](https://arxiv.org/abs/2211.03999), [[36]](#ref-36) [arXiv:2211.13267](https://arxiv.org/abs/2211.13267), [[22]](#ref-22) [arXiv:2304.14969](https://arxiv.org/abs/2304.14969), [[37]](#ref-37) [arXiv:2304.11119](https://arxiv.org/abs/2304.11119), [[38]](#ref-38) [arXiv:2306.16659](https://arxiv.org/abs/2306.16659), [[39]](#ref-39) [arXiv:2406.18889](https://arxiv.org/abs/2406.18889).
 
 #### `rcsqbdd/`: RCS with Quantum Binary Decision Diagrams & Matrix Product States

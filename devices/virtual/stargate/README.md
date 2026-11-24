@@ -1,13 +1,13 @@
 # Nighthawk, consolidated: `nighthawk_qrack.py`
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/twobombs/thereminq-examples/blob/main/devices/nighthawk-r3/nighthawk_qrack_colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/twobombs/thereminq-examples/blob/main/devices/announced/nighthawk-r3/nighthawk_qrack_colab.ipynb)
 
-One script for every Nighthawk simulation in `devices/nighthawk`, plus IBM Quantum Nighthawk fields: the two-chip r3 system IBM plans for 2027, the same shape at a size that runs on small hosts, and a hypothetical six-chiplet field.
+One script for every Nighthawk simulation in `devices/released/nighthawk`, plus IBM Quantum Nighthawk fields: the two-chip r3 system IBM plans for 2027, the same shape at a size that runs on small hosts, and a hypothetical six-chiplet field.
 
 | | |
 |---|---|
 | Script | `nighthawk_qrack.py`, 21,061 lines |
-| Colab | [`nighthawk_qrack_colab.ipynb`](nighthawk_qrack_colab.ipynb) ([Open in Colab](https://colab.research.google.com/github/twobombs/thereminq-examples/blob/main/devices/nighthawk-r3/nighthawk_qrack_colab.ipynb)) |
+| Colab | [`nighthawk_qrack_colab.ipynb`](../../announced/nighthawk-r3/nighthawk_qrack_colab.ipynb) ([Open in Colab](https://colab.research.google.com/github/twobombs/thereminq-examples/blob/main/devices/announced/nighthawk-r3/nighthawk_qrack_colab.ipynb)) |
 | Viewers | `nighthawk_graph.py` (the `dual-nighthawk` version plus view 29, `--poster` for `field run` records and `--ghz-poster` for GHZ per chiplet and `--lab-poster` for the configuration lab, sections 3.4, 3.5 and 3.7; views 30 to 34 and `--stargate-poster` for `erepr stargate`, section 3.15), `nighthawk_3dgraph.py` (unchanged) |
 | Entry point | `nighthawk_qrack.py` only. The per-folder scripts and their forwarding wrappers (`nighthawk_ghz.py`, `nighthawk_cloverfield.py`, `nighthawk_erepr.py`) are no longer used and can be deleted |
 | Data | [`BlueQubitDev/rcs-nighthawk`](https://github.com/BlueQubitDev/rcs-nighthawk) next to the script, `--repo`, or `$NIGHTHAWK_REPO` |

@@ -26,7 +26,7 @@ gate-for-gate with the paper and the BlueQubitDev/rcs-nighthawk release:
   combine    inverse-variance mean over instances; unweighted log10 exponential fit
              of the mirror points (analysis/fidelity_vs_depth.py).
 
-Consolidated tool. This one file holds every Nighthawk simulation of thereminq-examples/devices/nighthawk; it
+Consolidated tool. This one file holds every Nighthawk simulation of thereminq-examples/devices/released/nighthawk; it
 is the only entry point (the per-folder scripts and their forwarding wrappers are gone):
   rcs-, vqe-, shrs-nighthawk   the commands below (run, hwxeb, layoutsearch, shor9, ...)
   ghz-, dual-nighthawk         the `ghz` command (its own parser: ghz -h)
@@ -386,7 +386,7 @@ def _is_repo(p):
 
 def find_repo(repo=None):
     """--repo if given; else $NIGHTHAWK_REPO; else a folder holding data/layout.json, or an
-    rcs-nighthawk clone, in the working dir, next to this script, or up to 3 parents up."""
+    rcs-nighthawk clone, in the working dir, next to this script, or up to 5 parents up."""
     if repo:
         if _is_repo(repo):
             return Path(repo)
@@ -394,7 +394,7 @@ def find_repo(repo=None):
     here, script = Path.cwd(), Path(__file__).resolve().parent
     cands = [os.environ.get("NIGHTHAWK_REPO")]
     for base in (here, script):
-        for p in [base, *list(base.parents)[:3]]:
+        for p in [base, *list(base.parents)[:5]]:
             cands += [p, p / REPO_NAME]
     for c in cands:
         if _is_repo(c):

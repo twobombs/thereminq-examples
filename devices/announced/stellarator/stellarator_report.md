@@ -272,7 +272,7 @@ The PyQrack shared library could not be loaded in our environment, so we did **n
 
 ```bash
 git clone https://github.com/twobombs/thereminq-examples
-cd thereminq-examples/devices/stellarator
+cd thereminq-examples/devices/announced/stellarator
 python3 stellarator.py bench        # all phase 0 to 8 gates, about 17 min on CPU
 python3 stellarator.py flow --manifest manifest.json --check --optimise \
     --telemetry flow_telemetry.npz --scoreboard scoreboard.json

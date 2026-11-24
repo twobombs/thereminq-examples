@@ -82,26 +82,34 @@ Full specifications, backends and a verified bibliography are in [`algorithms/RE
 
 ## `devices/`
 
-### `devices/nighthawk/`
+### `devices/announced/`
+
+| Path | Content | Main entry points |
+| :--- | :--- | :--- |
+| [`nighthawk-r3/`](./devices/announced/nighthawk-r3/) | Consolidated Nighthawk simulation tool and IBM Nighthawk r3 / multi-chip Cloverfield simulations | `nighthawk_qrack.py`, `nighthawk_graph.py`, `nighthawk_3dgraph.py`, `nighthawk_qrack_colab.ipynb` |
+| [`stellarator/`](./devices/announced/stellarator/) | W7-X-like Helias stellarator Kitaev Z₂ lattice-gauge emulation on 40 × 27-qubit PyQrack manifolds | `stellarator.py`, `stellarator_ui.py`, `stellarator_colab.ipynb` |
+
+### `devices/released/nighthawk/`
 
 Exact-reference PyQrack studies of IBM Nighthawk experiments. The `*-nighthawk` engine folders share `nighthawk_qrack.py` (release circuits rebuilt bit for bit, `exact` or `ace` backends) with `METHODOLOGY.md` and `RESULTS.md`; each folder carries the variant built for its experiment.
 
 | Path | Focus | Main entry points |
 | :--- | :--- | :--- |
-| [`bro-nighthawk/`](./devices/nighthawk/bro-nighthawk/) | Doped Clifford Sampling (DCS) toolkit for IBM's verifiable-fidelity experiment [[7]](#ref-7), [[8]](#ref-8): XEB scoring, postselection, tensor-network sweeps, 3D Porter–Thomas views, multi-GPU OpenCL via `QRACK_QUNITMULTI_DEVICES`; spoofing and phase-transition context [[9]](#ref-9), [[10]](#ref-10) | `dcs_post_select_paralel.py`, `tnsweep.py`, `bro-xeb-viz.py`, `experiment2-xeb-dash-UI.py` |
-| [`rcs-nighthawk/`](./devices/nighthawk/rcs-nighthawk/) | 61-qubit random circuit sampling on `ibm_phoenix` [[11]](#ref-11): mirror, patched, full and forward XEB under exact and ACE simulation; multi-chip cloverfield with the loom | `nighthawk_qrack.py`, `nighthawk_cloverfield.py`, `nighthawk_sweep.sh` |
-| [`vqe-nighthawk/`](./devices/nighthawk/vqe-nighthawk/) | VQE on two-patch ACE circuits at variable register size | `nighthawk_qrack.py` |
-| [`ghz-nighthawk/`](./devices/nighthawk/ghz-nighthawk/) | Chip-wide GHZ fidelity and GHZ-calibrated crosstalk refocusing for Shor order finding on a square lattice | `nighthawk_ghz.py`, paper PDF |
-| [`shrs-nighthawk/`](./devices/nighthawk/shrs-nighthawk/) | Shor order finding (`shor9`) on Nighthawk registers across sizes and GPUs | `nighthawk_qrack.py`, `shrs-sweep.sh`, `shrs-sweep-cpu.sh` |
-| [`dual-nighthawk/`](./devices/nighthawk/dual-nighthawk/) | Combined engine: dual-chip maps, GHZ, Shor, QrackBridge benchmark, 3D graphs | `nighthawk_qrack.py`, `nighthawk_3dgraph.py` |
-| [`erepr-nighthawk/`](./devices/nighthawk/erepr-nighthawk/) | Sycamore wormhole Hamiltonian re-derived and run as two Nighthawk chips joined by the loom | `nighthawk_erepr.py` |
+| [`bro-nighthawk/`](./devices/released/nighthawk/bro-nighthawk/) | Doped Clifford Sampling (DCS) toolkit for IBM's verifiable-fidelity experiment [[7]](#ref-7), [[8]](#ref-8): XEB scoring, postselection, tensor-network sweeps, 3D Porter–Thomas views, multi-GPU OpenCL via `QRACK_QUNITMULTI_DEVICES`; spoofing and phase-transition context [[9]](#ref-9), [[10]](#ref-10) | `dcs_post_select_paralel.py`, `tnsweep.py`, `bro-xeb-viz.py`, `experiment2-xeb-dash-UI.py` |
+| [`rcs-nighthawk/`](./devices/released/nighthawk/rcs-nighthawk/) | 61-qubit random circuit sampling on `ibm_phoenix` [[11]](#ref-11): mirror, patched, full and forward XEB under exact and ACE simulation; multi-chip cloverfield with the loom | `nighthawk_qrack.py`, `nighthawk_cloverfield.py`, `nighthawk_sweep.sh` |
+| [`vqe-nighthawk/`](./devices/released/nighthawk/vqe-nighthawk/) | VQE on two-patch ACE circuits at variable register size | `nighthawk_qrack.py` |
+| [`ghz-nighthawk/`](./devices/released/nighthawk/ghz-nighthawk/) | Chip-wide GHZ fidelity and GHZ-calibrated crosstalk refocusing for Shor order finding on a square lattice | `nighthawk_ghz.py`, paper PDF |
+| [`shrs-nighthawk/`](./devices/released/nighthawk/shrs-nighthawk/) | Shor order finding (`shor9`) on Nighthawk registers across sizes and GPUs | `nighthawk_qrack.py`, `shrs-sweep.sh`, `shrs-sweep-cpu.sh` |
+| [`dual-nighthawk/`](./devices/released/nighthawk/dual-nighthawk/) | Combined engine: dual-chip maps, GHZ, Shor, QrackBridge benchmark, 3D graphs | `nighthawk_qrack.py`, `nighthawk_3dgraph.py` |
+| [`erepr-nighthawk/`](./devices/released/nighthawk/erepr-nighthawk/) | Sycamore wormhole Hamiltonian re-derived and run as two Nighthawk chips joined by the loom | `nighthawk_erepr.py` |
 
-### Other devices
+### Other released & virtual devices
 
 | Path | Content |
 | :--- | :--- |
-| [`sycamore56/`](./devices/sycamore56/) | Pointer to [`twobombs/thereminq-classiq`](https://github.com/twobombs/thereminq-classiq) |
-| [`willow/`](./devices/willow/) | Early patched simulation of larger circuits: patch-quadrant timing CSV, runner script and 28-qubit FP32 `nn_qab` results |
+| [`released/sycamore56/`](./devices/released/sycamore56/) | Pointer to [`twobombs/thereminq-classiq`](https://github.com/twobombs/thereminq-classiq) |
+| [`released/willow/`](./devices/released/willow/) | Early patched simulation of larger circuits: patch-quadrant timing CSV, runner script and 28-qubit FP32 `nn_qab` results |
+| [`virtual/stargate/`](./devices/virtual/stargate/) | Virtual ER=EPR Holographic Stargate Device (ER-GATE) views and posters |
 
 ---
 

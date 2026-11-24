@@ -175,6 +175,12 @@ import numpy as np
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))          # nighthawk_qrack.py next to this file (also under python -I)
+if not (_HERE / "nighthawk_qrack.py").is_file():
+    for _sib in ("shrs-nighthawk", "dual-nighthawk"):
+        _cand = _HERE.parent / _sib
+        if (_cand / "nighthawk_qrack.py").is_file() and str(_cand) not in sys.path:
+            sys.path.append(str(_cand))
+            break
 
 import nighthawk_qrack as nq                 # noqa: E402
 

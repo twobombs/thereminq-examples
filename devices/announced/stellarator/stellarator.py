@@ -2274,7 +2274,12 @@ def hyperoctagon(path=None, L=6):
     """Cross-check free-fermion solver against the L=6 hyperoctagon anchor."""
     if path is None:
         here = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(here, "..", "coils", "K4-Chrystalstacks-Kitaev-single.py")
+        cands = (
+            os.path.join(here, "..", "coils", "K4-Chrystalstacks-Kitaev-single.py"),
+            os.path.join(here, "..", "..", "..", "architecture", "cloverleaf-fences",
+                         "lhv-ace-xyz", "NN4K", "coils", "K4-Chrystalstacks-Kitaev-single.py"),
+        )
+        path = next((c for c in cands if os.path.isfile(c)), cands[-1])
     spec = importlib.util.spec_from_file_location("k4e", path)
     m = importlib.util.module_from_spec(spec)
     argv, sys.argv = sys.argv, ["k4e"]

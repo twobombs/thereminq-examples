@@ -93,7 +93,9 @@ if os.path.exists(QRACK_LIB_PATH) and "PYQRACK_SHARED_LIB_PATH" not in os.enviro
 
 HERE = Path(__file__).resolve().parent
 os.environ.setdefault("NIGHTHAWK_TILE_CACHE", str(HERE / "erepr" / "tiles.json"))
-sys.path.insert(0, str(HERE))
+for _d in (HERE, HERE.parent / "rcs-nighthawk"):
+    if _d.is_dir() and str(_d) not in sys.path:
+        sys.path.append(str(_d)) if _d != HERE else sys.path.insert(0, str(_d))
 import nighthawk_qrack as nq            # noqa: E402
 import nighthawk_cloverfield as cf      # noqa: E402
 

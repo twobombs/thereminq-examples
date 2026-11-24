@@ -201,9 +201,12 @@ import numpy as np
 
 
 def load_nh():
-    p = Path(__file__).resolve().parent / "nighthawk_qrack.py"
+    here = Path(__file__).resolve().parent
+    cands = [here / "nighthawk_qrack.py",
+             here.parent.parent / "announced" / "nighthawk-r3" / "nighthawk_qrack.py"]
+    p = next((c for c in cands if c.exists()), cands[0])
     if not p.exists():
-        raise SystemExit(f"nighthawk_qrack.py not found next to this script ({p.parent})")
+        raise SystemExit(f"nighthawk_qrack.py not found next to this script ({here})")
     spec = importlib.util.spec_from_file_location("nighthawk_qrack", p)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
