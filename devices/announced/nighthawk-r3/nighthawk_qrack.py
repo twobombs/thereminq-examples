@@ -16144,6 +16144,83 @@ def chip_memory(spec, opts):
     return widths, sum(gib) + max(gib)
 
 
+# ebits a two-qubit gate can add across a cut (log2 of its operator Schmidt rank): controlled gates 1,
+# the swap family 2 (a swap carries a qubit's whole state, entanglement included, to the other side)
+# Empirical fit of measured Hamming signals to the cut load x (seam + loom ebits per qubit, forward half):
+# ln F = -CUT_FIT_K x^2, from 15 points (r3t, 2 tiles, r3x2s, 1 tile on an L4; clover6 on an A100 80GB;
+# d4 to d16; nnqab, no error detection, ghost loom), rms 0.14 in ln F. A guide for comparing layouts and
+# fields under those settings, not a law: other gate sets, backends or looms need their own fit.
+CUT_FIT_K = 0.108
+G2_CUT_EBITS = dict(cz=1, acz=1, cx=1, cy=1, acx=1, acy=1, swap=2, pswap=2, mswap=2, nswap=2, iswap=2, iiswap=2)
+
+
+def field_cut_report(field, opts, depths, protocol="nnqab", instances=(0, 1, 2)):
+    """Two-qubit gates of the forward half U of the field's Hamming circuits (fxeb_cycles, field_gates), by
+    where they act: inside one ACE patch (bulk, applied exactly), across an ACE seam inside a chip (seam), or
+    between chips (loom). Each gate counts the ebits it can add across a cut (G2_CUT_EBITS; CZ circuits 1),
+    averaged over the instances. Seam and loom ebits are the entanglement the simulation has to carry
+    across a cut it approximates: an upper bound per depth, by the rank argument (a tensor of rank r across
+    a split is a product of wires through one wire of dimension r).
+    Returns {d: dict(gates, bulk, seam, loom, seam_by_chip)} plus the coupler counts per class."""
+    seam_cp = []
+    for c, spec in enumerate(field.specs):
+        room = field.rooms[c] if field.rooms is not None else GhostRoom(spec, opts)
+        cut = set()
+        if not room.exact:
+            sid = [room.sids[room.site[q]] for q in range(field.chip_n[c])]
+            for col, es in field.lays[c].matchings.items():
+                for u, v in es:
+                    a_, b_ = sid[u], sid[v]
+                    if not (len(a_) == 1 and a_ == b_):
+                        cut.add((min(u, v), max(u, v)))
+        seam_cp.append(cut)
+    out = {}
+    for d in depths:
+        acc = dict(gates=0.0, bulk=0.0, seam=0.0, loom=0.0)
+        by_chip = [0.0] * len(field.specs)
+        for inst in instances:
+            cyc = fxeb_cycles(field, d, inst, field.n)
+            gates = field_gates(field, cyc, inst, protocol)
+            for ci, (_, es) in enumerate(cyc):
+                for j, (u, v) in enumerate(es):
+                    w = G2_CUT_EBITS.get(gates[ci][j], 1) if gates else 1
+                    acc["gates"] += 1
+                    cu, cv = field.chip_of[u], field.chip_of[v]
+                    if cu != cv:
+                        acc["loom"] += w
+                    else:
+                        lu, lv = field.local[u], field.local[v]
+                        if (min(lu, lv), max(lu, lv)) in seam_cp[cu]:
+                            acc["seam"] += w
+                            by_chip[cu] += w
+                        else:
+                            acc["bulk"] += w
+        k = len(instances)
+        out[d] = {key: v / k for key, v in acc.items()}
+        out[d]["seam_by_chip"] = [v / k for v in by_chip]
+    return out, [len(sc) for sc in seam_cp]
+
+
+def print_field_cut_report(field, opts, depths, protocol, loom):
+    rep_, seam_n = field_cut_report(field, opts, depths, protocol)
+    fit = opts["backend"] == "ace"        # CUT_FIT_K was measured on ACE chips
+    print(f"cut report: forward half U of the Hamming circuits ({protocol}, mean of 3 instances); ebits a gate "
+          f"can add across a cut: controlled gates 1, swap family 2")
+    print(f"  couplers: {sum(len(es) for es in field.matchings.values())} in the circuit, "
+          f"{sum(seam_n)} through an ACE seam (per chip {seam_n}), {len(field.links)} loom links ({loom})"
+          + (f"; {len(field.skipped)} facing pairs of the full device absent (skipped)" if field.skipped else ""))
+    print(f"  {'d':>3s} {'2q gates':>9s} {'bulk':>8s} {'seam':>8s} {'loom':>8s} {'cut/qubit':>9s} {'fit F':>7s}"
+          f"  seam per chip")
+    for d in depths:
+        r = rep_[d]
+        x = (r["seam"] + r["loom"]) / field.n
+        print(f"  {d:3d} {r['gates']:9.1f} {r['bulk']:8.1f} {r['seam']:8.1f} {r['loom']:8.1f} {x:9.3f} "
+              + (f"{math.exp(-CUT_FIT_K * x * x):7.4f}" if fit else f"{'-':>7s}") + "  "
+              + " ".join(f"{v:.0f}" for v in r["seam_by_chip"]))
+    print(f"  fit F = exp(-{CUT_FIT_K} x^2), x = cut/qubit: empirical, from measured nnqab Hamming runs on ACE chips "
+          f"(CUT_FIT_K)" + ("" if fit else "; not shown for exact chips"))
+
+
 def cmd_field_plan(a):
     field = build_field(a)
     desc = field.describe()
@@ -16241,6 +16318,8 @@ def cmd_field_plan(a):
               f"per {vram_gb if splits else a.die_gb:g} GB device: {'fits' if ok else 'DOES NOT FIT'}"
               + (f" (host memory mapped as GTT: {gtt_host:.1f} GiB per loom)" if gtt_host else "")
               + f"; devices per loom: {len(on_dev)}")
+    if getattr(a, "cut_report", None):
+        print_field_cut_report(field, opts, a.cut_report, a.cut_protocol, a.loom)
     if a.png:
         draw_field(field, a.png)
         print(f"drawn: {a.png}")
@@ -16999,6 +17078,11 @@ def field_main(argv=None):
     p = sub.add_parser("plan", help="the field: chips, couplers, links, memory, devices")
     add_field_args(p)
     p.add_argument("--die-gb", dest="die_gb", type=float, default=8.0)
+    p.add_argument("--cut-report", dest="cut_report", type=int, nargs="+", default=None, metavar="D",
+                   help="two-qubit gates of the Hamming circuits' forward half at these depths, by bulk / ACE "
+                        "seam / loom, weighted by the ebits each can add across a cut")
+    p.add_argument("--cut-protocol", dest="cut_protocol", choices=["nighthawk", "nnqab"], default="nnqab",
+                   help="the circuits of --cut-report: nnqab (the field benchmarks' gates) or nighthawk (CZ)")
     p.add_argument("--png", default=None, help="draw the field to this PNG")
     ls = sub.add_parser("linksearch", help="survival or Hamming signal against the number of links")
     add_field_args(ls)

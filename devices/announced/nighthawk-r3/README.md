@@ -651,6 +651,52 @@ python3 nighthawk_graph.py --out r3x2s_stack.jsonl --poster posters/r3x2s_stack_
 
 `field selftest` check [15] covers it.
 
+### 3.15 Cut load: `field plan --cut-report`
+
+`field plan --cut-report D [D ...]` counts the two-qubit gates of the forward half of the field's Hamming circuits (the `field run --family hamming` circuits, mean of three instances) by where they act, and weights each by the ebits it can add across a cut (log2 of its operator Schmidt rank).
+
+| Class | Gates | Simulation |
+|---|---|---|
+| bulk | both qubits in one ACE patch | exact |
+| seam | through an ACE seam inside a chip (`replica` couplers of the chip's placement) | approximated |
+| loom | between chips (ghost or mean-field) | approximated |
+
+| Gate | Ebits across a cut |
+|---|---|
+| `cz`, `acz`, `cx`, `cy`, `acx`, `acy` | 1 |
+| `swap`, `pswap`, `mswap`, `nswap`, `iswap`, `iiswap` | 2 |
+
+The cut load x is (seam + loom ebits) per qubit. Every coupler fires once per four cycles, so x grows linearly with depth and depends on the layout only through its share of couplers through a boundary. In the r3 tiles that share is 126 of 218 (`nighthawk120t`) and 144 of 256 (`nighthawk140`), and seams carry about 96 % of the load; loom links the rest.
+
+Measured signals against x (nnqab, `--no-ace-error-detection`, ghost loom unless noted):
+
+| Run | Machine | d | x | Signal | exp(-0.108 x^2) |
+|---|---|---|---|---|---|
+| r3t, W27, 27 links | L4 | 4 / 8 / 12 / 16 | 1.55 / 3.07 / 4.64 / 6.21 | 0.855 / 0.388 / 0.105 / 0.017 | 0.771 / 0.360 / 0.097 / 0.015 |
+| 2 tiles, W29, 9 links | L4 | 4 / 8 / 12 / 16 | 1.54 / 3.07 / 4.63 / 6.20 | 0.805 / 0.392 / 0.112 / 0.019 | 0.773 / 0.360 / 0.098 / 0.016 |
+| clover6, W31, 70 links | A100 80GB | 4 / 8 / 12 / 16 | 1.60 / 3.20 / 4.82 / 6.41 | 0.820 / 0.352 / 0.074 / 0.008 | 0.757 / 0.330 / 0.081 / 0.012 |
+| r3x2s, W29, 10 links | L4 | 4 | 1.58 | 0.802 | 0.762 |
+| `nighthawk120t` alone, mean loom | L4 | 4 / 8 | 1.56 / 3.11 | 0.834 / 0.310 | 0.769 / 0.352 |
+
+One constant fits all fifteen points: ln F = -0.108 x^2, rms 0.14 in ln F (a fit linear in x leaves 0.67). The fit is `CUT_FIT_K` in the script and the `fit F` column of the report. It under-predicts d4 by about 0.05 throughout. The quadratic dependence is what errors adding coherently would give; one instance per point at d4 and d8 and three at d12 and d16, so the fit is a guide for comparing layouts and fields under these settings, not a law.
+
+Searched tiles of the Colab notebook (section 5.2, L4, Hamming signal at d8, 2 instances) against their couplers through a boundary:
+
+| `nighthawk120t` layout | Cap | Couplers through a boundary | d8 signal |
+|---|---|---|---|
+| stored | 27 | 126 | 0.310 |
+| searched c0 | 29 | 105 | 0.372 |
+| searched c0 | 28 | 107 | 0.401 |
+| searched c1 | 29 | 107 | 0.465 |
+| searched c1 | 28 | 104 | 0.546 |
+
+Fewer couplers through a boundary go with a higher signal, with spread (the two c0 layouts measure lower than their count suggests). `layoutsearch --objective bcz,seam,couplers` puts that count first; the notebook's tile search runs it as its first round.
+
+```
+python3 nighthawk_qrack.py field plan --device r3t --loom ghost --ace-gpu --gpus 0 --chips-per-gpu 4 --vram-gb 22 --gtt 0 \
+        --ghost-max-width 27 --cut-report 4 8 12 16
+```
+
 ## 4. Names inside the script
 
 The merged commands keep their functions under prefixed names, for code that imports `nighthawk_qrack`:
