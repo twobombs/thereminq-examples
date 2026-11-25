@@ -6,7 +6,7 @@ One script for every Nighthawk simulation in `devices/released/nighthawk`, plus 
 
 | | |
 |---|---|
-| Script | `nighthawk_qrack.py`, 20,302 lines |
+| Script | `nighthawk_qrack.py`, 20,499 lines |
 | Colab | [`nighthawk_qrack_colab.ipynb`](nighthawk_qrack_colab.ipynb) ([Open in Colab](https://colab.research.google.com/github/twobombs/thereminq-examples/blob/main/devices/announced/nighthawk-r3/nighthawk_qrack_colab.ipynb)) |
 | Viewers | `nighthawk_graph.py` (the `dual-nighthawk` version plus view 29, `--poster` for `field run` records and `--ghz-poster` for GHZ per chiplet and `--lab-poster` for the configuration lab, sections 3.4, 3.5 and 3.7), `nighthawk_3dgraph.py` (unchanged) |
 | Entry point | `nighthawk_qrack.py` only. The per-folder scripts and their forwarding wrappers (`nighthawk_ghz.py`, `nighthawk_cloverfield.py`, `nighthawk_erepr.py`) are no longer used and can be deleted |
@@ -696,6 +696,39 @@ Fewer couplers through a boundary go with a higher signal, with spread (the two 
 python3 nighthawk_qrack.py field plan --device r3t --loom ghost --ace-gpu --gpus 0 --chips-per-gpu 4 --vram-gb 22 --gtt 0 \
         --ghost-max-width 27 --cut-report 4 8 12 16
 ```
+
+### 3.16 Plan memory and the error-detection ancilla
+
+QrackAceBackend adds one error-detection ancilla to every patch unless `--no-ace-error-detection` is given. The field planner (`field plan`, the ghost loom's admission) counts that qubit only when the run allocates it, so a planned patch width is the simulator's own width and a cap (`--ghost-max-width`) bounds that width. Pass the run's `--no-ace-error-detection` to `field plan` as well; without it the plan sizes every patch twice as large as such a run allocates. `layoutsearch --max-width` and `--ace-max-width` keep counting the ancilla (they choose layouts, not memory).
+
+| Quantity | Model |
+|---|---|
+| Patch width | logical qubits and ghosts on the patch, + 1 with error detection |
+| Chip peak | every patch dense, plus the widest patch once more (compose buffer) |
+| Device | the peaks of the chips placed on it, plus 0.5 GiB reserve per chip worker, within `--vram-gb` |
+
+`r3t` on an L4 (22.03 GiB, 4 chips on one device), `--ghost-max-width 27`, nnqab runs without error detection:
+
+| Plan | Links | Chip peaks, GiB | Planned, GiB | Measured peak, GiB |
+|---|---|---|---|---|
+| ancilla counted (before) | 27 | 3.8 / 7.0 / 2.5 / 5.8 | 19.07 | 10.29 device; workers 3.68 / 3.08 / 2.10 / 1.41 |
+| ancilla as the run allocates | 33 | 3.4 / 5.5 / 2.3 / 5.1 | 16.37 | |
+| cap 28, all patches | 38 | 5.6 / 11.3 / 2.4 / 9.7 | 29.0 | does not fit |
+| cap 28, one patch per chip at it | 35 | 3.5 / 7.8 / 2.3 / 7.6 | 21.2 | does not fit |
+
+The measured workers of the first row match the model once the ancilla is left out (the widest worker: 3.0 GiB of patches, 0.5 GiB compose buffer, OpenCL context).
+
+**Cap choice in the notebook** (section 5, `size_field`). A bisection on the fit finds the widest fitting cap. Links do not always grow with the cap: where a die holds one chip, the ghost admission keeps the chip within that die and a wider cap spends the memory on fewer, wider ghosts. The `GHOST_SCAN_BELOW` caps under the widest are planned too and the one with the most links is used (the wider on a tie). Then the next cap up is tried with 1, 2, ... patches per chip at it (`--ghost-max-wide`, up to `GHOST_MAX_WIDE_STEPS`) while that fits and adds links. Planner only, simulated devices:
+
+| Machine | r3t | clover6 |
+|---|---|---|
+| L4 22 GB | W27, 33 links, 16.3 GiB | W27, 68 links, 17.1 GiB |
+| A100 40GB | W28, 38 links, 29.0 GiB | W30, 70 links, 33.9 GiB |
+| A100 80GB | W31, 43 links, 75.7 GiB | W31, 70 links, 33.9 GiB |
+| 6x V340 8 GB dies, ROCm | W28 (one patch per chip at 28), 34 links, 20.2 GiB | W28, 70 links, 26.4 GiB |
+| 6x V340 8 GB dies, clvk (2 GiB max allocation) | W27, 33 links, 16.3 GiB | W27, 68 links, 17.1 GiB |
+
+clover6 has 70 l-couplers: once all are placed, a wider cap adds no link, so on an A100 80GB it plans 33.9 GiB. On the V340 dies a cap of 28 for every patch places 30 links (the 140-qubit tiles shed ghosts to stay within 8 GB), 27 places 33, 28 with one wide patch per chip 34.
 
 ## 4. Names inside the script
 

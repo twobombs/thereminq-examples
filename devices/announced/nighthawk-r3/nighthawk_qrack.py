@@ -1032,6 +1032,21 @@ def amp_bytes():
     return 2 ** (Qrack.fppow - 2)
 
 
+def plan_amp_bytes():
+    """amp_bytes() for memory plans; fp32 (8) where PyQrack does not load."""
+    try:
+        return amp_bytes()
+    except Exception:
+        return 8
+
+
+def ace_ancillae(opts_or_args):
+    """Qubits QrackAceBackend adds to every patch: 1 with error detection (the default), 0 with
+    --no-ace-error-detection. Plans count them so that a planned width is the simulator's own."""
+    get = opts_or_args.get if isinstance(opts_or_args, dict) else (lambda k, d=None: getattr(opts_or_args, k, d))
+    return 1 if get("ace_error_detection", True) else 0
+
+
 # ================================================================== VRAM + GTT
 # Where Qrack keeps an OpenCL state vector (QEngineOCL::SetDevice): in device memory when
 # three times its size fits the device's global memory, otherwise in host RAM that the GPU
@@ -14622,6 +14637,9 @@ class GhostRoom:
         else:
             W, N = None, None
         self.W, self.N = W, N
+        # the patch's ancilla only where QrackAceBackend has one: with --no-ace-error-detection every
+        # simulator is one qubit narrower, half the memory, and the caps hold the simulator's own width
+        self.ancillae = ace_ancillae(opts)
 
     def widths(self, extra=()):
         from collections import Counter
@@ -14629,7 +14647,7 @@ class GhostRoom:
         for x in extra:
             for s_ in self.sids[x]:
                 w[s_] += 1
-        return [w[p_] + 1 for p_ in self.patches]
+        return [w[p_] + self.ancillae for p_ in self.patches]
 
     def take(self, anchor):
         if self.exact:
@@ -14657,7 +14675,7 @@ class GhostRoom:
     def gib(self):
         if self.exact:
             return None
-        g = [2 ** w * 8 / 2 ** 30 for w in self.widths()]
+        g = [2 ** w * plan_amp_bytes() / 2 ** 30 for w in self.widths()]
         return sum(g) + max(g)
 
     def split(self, vram_gb=8.0, gtt_gb=0.0):
@@ -16139,8 +16157,8 @@ def chip_memory(spec, opts):
     site = transpile_layout(lay, lay.n, a, row, int(a.ace_width))
     sids = [frozenset(s for s, _ in u) for u in row["unpack"]]
     patches = sorted({next(iter(s)) for s in sids if len(s) == 1})
-    widths = [sum(1 for x in site if p in sids[x]) + 1 for p in patches]
-    gib = [2 ** w * 8 / 2 ** 30 for w in widths]
+    widths = [sum(1 for x in site if p in sids[x]) + ace_ancillae(opts) for p in patches]
+    gib = [2 ** w * plan_amp_bytes() / 2 ** 30 for w in widths]
     return widths, sum(gib) + max(gib)
 
 
@@ -16279,7 +16297,8 @@ def cmd_field_plan(a):
             reg = f"; {seam} seam qubits, {anc} link anchors"
         print(f"chip {c}: {spec['name']}, {field.chip_n[c]} qubits"
               + (f" + {ng} ghosts" if ng else "")
-              + (f", patch widths {widths} (incl. ancilla), peak about {gb:.1f} GiB fp32" if widths else "") + reg
+              + (f", patch widths {widths} ({'incl. ancilla' if ace_ancillae(opts) else 'no ancilla'}), peak about "
+                 f"{gb:.1f} GiB {'fp32' if plan_amp_bytes() == 8 else f'{plan_amp_bytes()} B/amp'}" if widths else "") + reg
               + (f"\n        on one die: {describe_split(sp, a.vram_gb or 8.0, a.gtt or 0.0)}" if sp else ""))
     if on_cpu:
         print(f"one loom = {len(field.specs)} chip workers on the CPU: about {sum(total):.1f} GiB fp32 of host "
