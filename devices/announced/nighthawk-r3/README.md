@@ -6,7 +6,7 @@ One script for every Nighthawk simulation in `devices/released/nighthawk`, plus 
 
 | | |
 |---|---|
-| Script | `nighthawk_qrack.py`, 20,499 lines |
+| Script | `nighthawk_qrack.py`, 20,680 lines |
 | Colab | [`nighthawk_qrack_colab.ipynb`](nighthawk_qrack_colab.ipynb) ([Open in Colab](https://colab.research.google.com/github/twobombs/thereminq-examples/blob/main/devices/announced/nighthawk-r3/nighthawk_qrack_colab.ipynb)) |
 | Viewers | `nighthawk_graph.py` (the `dual-nighthawk` version plus view 29, `--poster` for `field run` records and `--ghz-poster` for GHZ per chiplet and `--lab-poster` for the configuration lab, sections 3.4, 3.5 and 3.7), `nighthawk_3dgraph.py` (unchanged) |
 | Entry point | `nighthawk_qrack.py` only. The per-folder scripts and their forwarding wrappers (`nighthawk_ghz.py`, `nighthawk_cloverfield.py`, `nighthawk_erepr.py`) are no longer used and can be deleted |
@@ -55,11 +55,12 @@ Every command is `python3 nighthawk_qrack.py [GROUP] COMMAND ...`; each group ha
 | `r3` | `nighthawk520` | 1 x 1 | 0 | 520 | Nighthawk r3, one chip |
 | `r3t` | `nighthawk120t`, `nighthawk140`, twice | 2 x 2 | all 46 across the cuts | 520 | Nighthawk r3 as four tiles woven by the loom: the same 520 qubits and 994 couplers (3.13) |
 | `r3x2` | `nighthawk520*2` | 1 x 2 | 10 | 1,040 | the system IBM plans for 2027 |
+| `r3x2t` | `nighthawk120t`, `nighthawk140`, four times | 2 x 4 | all 46 across each chip's cuts, 10 between the chips (`--pair-links`) | 1,040 | `r3x2` as eight tiles: the same couplers and l-couplers on the same sites, runs on QrackAceBackend (3.17) |
 | `r3x2s` | `nighthawk120*2` | 1 x 2 | 10 | 240 | `r3x2` scaled to 120-qubit chips: the same two chips and ten l-couplers, runs on a small host |
 | `clover6` | `nighthawk120*6` | 2 x 3 | 10 per pair | 720 | hypothetical, not an IBM device: six chiplets (this tool's r3 model before the announcement) |
 | `clover12` | `nighthawk120*12` | 2 x 6 | 10 per pair | 1,440 | hypothetical: two `clover6` fields side by side |
 
-`--chips`, `--arrangement` and `--links` still work and override the preset. Without `--device` the defaults are the cloverfield's own (`nighthawk88e*2`, 4 links).
+`--chips`, `--arrangement` and `--links` still work and override the preset (a preset's `--pair-links` only applies with its own chips). Without `--device` the defaults are the cloverfield's own (`nighthawk88e*2`, 4 links).
 
 ```bash
 python3 nighthawk_qrack.py field plan --device r3x2 --backend exact --png r3x2.png      # geometry and l-couplers of the 1,040-qubit system
@@ -218,6 +219,7 @@ python3 nighthawk_graph.py --ghz-poster clover6_ghz.png --ghz-chip chip0.jsonl .
 | `--topology none` | only `--pairs` |
 | `--pairs 0-5,2-3` | added to any of these: long-range shortcuts |
 | `--long-links K` | l-couplers per pair that are not grid neighbours (default `--links`) |
+| `--pair-links "1-2:0,2,4,6,8;5-6:all"` | per grid-neighbour pair its own links: the rows (columns for vertical neighbours) that get one, or a `--links` value; recorded as `pair_links` |
 
 Grid neighbours are placed first, as before (facing borders, `--links` per pair); long-range pairs then take the sites nearest the other chip that still have a coupler colour free at both ends. `field plan` prints the pairs, the links per pair and the chip-to-chip hops; records of a non-grid field carry `topology`, `chip_pairs`, `hub` and `long_links`.
 
@@ -720,15 +722,51 @@ The measured workers of the first row match the model once the ancilla is left o
 
 **Cap choice in the notebook** (section 5, `size_field`). A bisection on the fit finds the widest fitting cap. Links do not always grow with the cap: where a die holds one chip, the ghost admission keeps the chip within that die and a wider cap spends the memory on fewer, wider ghosts. The `GHOST_SCAN_BELOW` caps under the widest are planned too and the one with the most links is used (the wider on a tie). Then the next cap up is tried with 1, 2, ... patches per chip at it (`--ghost-max-wide`, up to `GHOST_MAX_WIDE_STEPS`) while that fits and adds links. Planner only, simulated devices:
 
-| Machine | r3t | clover6 |
-|---|---|---|
-| L4 22 GB | W27, 33 links, 16.3 GiB | W27, 68 links, 17.1 GiB |
-| A100 40GB | W28, 38 links, 29.0 GiB | W30, 70 links, 33.9 GiB |
-| A100 80GB | W31, 43 links, 75.7 GiB | W31, 70 links, 33.9 GiB |
-| 6x V340 8 GB dies, ROCm | W28 (one patch per chip at 28), 34 links, 20.2 GiB | W28, 70 links, 26.4 GiB |
-| 6x V340 8 GB dies, clvk (2 GiB max allocation) | W27, 33 links, 16.3 GiB | W27, 68 links, 17.1 GiB |
+| Machine | r3t | clover6 | r3x2t |
+|---|---|---|---|
+| L4 22 GB | W27, 33 links, 16.3 GiB | W27, 68 links, 17.1 GiB | W26 (three patches per chip at 26), 50 links, 17.7 GiB |
+| A100 40GB | W28, 38 links, 29.0 GiB | W30, 70 links, 33.9 GiB | W27, 72 links, 34.2 GiB |
+| A100 80GB | W31, 43 links, 75.7 GiB | W31, 70 links, 33.9 GiB | W28, 84 links, 60.9 GiB |
+| 6x V340 8 GB dies, ROCm | W28 (one patch per chip at 28), 34 links, 20.2 GiB | W28, 70 links, 26.4 GiB | W27 (one patch per chip at 27), 63 links, 26.3 GiB |
+| 6x V340 8 GB dies, clvk (2 GiB max allocation) | W27, 33 links, 16.3 GiB | W27, 68 links, 17.1 GiB | W27 (one patch per chip at 27), 63 links, 26.3 GiB |
 
-clover6 has 70 l-couplers: once all are placed, a wider cap adds no link, so on an A100 80GB it plans 33.9 GiB. On the V340 dies a cap of 28 for every patch places 30 links (the 140-qubit tiles shed ghosts to stay within 8 GB), 27 places 33, 28 with one wide patch per chip 34.
+clover6 has 70 l-couplers: once all are placed, a wider cap adds no link, so on an A100 80GB it plans 33.9 GiB. On the V340 dies a cap of 28 for every patch places 30 links (the 140-qubit tiles shed ghosts to stay within 8 GB), 27 places 33, 28 with one wide patch per chip 34. r3x2t has 102 loom links; eight tiles on the V340s are two chip workers per die.
+
+### 3.17 The dual r3 system on QrackAceBackend: `--device r3x2t`
+
+`r3x2` (two 520-qubit r3 chips, ten l-couplers) has no ACE layout per chip: a ring of patches does not hold the 20 x 26 lattice (3.13). `r3x2t` builds each chip from the four `r3t` tiles, eight tiles on a 2 x 4 grid, and keeps `r3x2`'s couplers exactly.
+
+| | `r3x2` | `r3x2t` |
+|---|---|---|
+| Chips | `nighthawk520` x 2, 1 x 2 | `nighthawk120t`, `nighthawk140` x 4, 2 x 4 (tiles 0, 1, 4, 5 are chip A; 2, 3, 6, 7 chip B) |
+| Qubits | 1,040 | 1,040 |
+| Couplers inside the chips | 1,988 | 1,896 on the tiles + 92 loom links across the cuts (46 per chip) = 1,988, the same pairs |
+| l-couplers | 10, rows 0, 2, 4, 6, 8, 11, 13, 15, 17, 19, colour B | the same 10 sites and colour: `--pair-links 1-2:0,2,4,6,8;5-6:1,3,5,7,9` (tile rows) |
+| CZ per colour A / B / C / D | 520 / 480 + 10 / 520 / 468 | 520 / 440 + 50 / 520 / 416 + 52 |
+| Backend | exact chips only | QrackAceBackend, 8 patches per tile |
+
+`field selftest` [14] checks that both fields have the same coupler set on the 20 x 52 lattice and the same l-couplers. On the ghost loom the caps decide which of the 102 links get a ghost (3.16); a link without one leaves its coupler out of the circuit, so a cut-links run (same anchors) is the baseline the notebook runs next to it (section 5.3).
+
+```
+python3 nighthawk_qrack.py field plan --device r3x2t --loom ghost --ace-gpu --gpus 0 --chips-per-gpu 8 --vram-gb 79 --gtt 0 \
+        --ghost-max-width 28 --no-ace-error-detection --png r3x2t.png
+python3 nighthawk_qrack.py field run  --device r3x2t --loom ghost [--cut-links] --family hamming --protocol nnqab --fold 1 \
+        --depths 4 8 --instances 1 --ace-gpu --gpus 0 --chips-per-gpu 8 --vram-gb 79 --gtt 0 --ghost-max-width 28 \
+        --no-ace-error-detection --out r3x2t.jsonl
+python3 nighthawk_graph.py --out r3x2t.jsonl --poster r3x2t_poster.png
+```
+
+### 3.18 Plan graph: `field plan --png`
+
+The plan draws the field map the posters use, before anything runs:
+
+| Element | Drawn as |
+|---|---|
+| ACE patch | tint and outline in the patch's colour, `pN` at its centre (QrackAceBackend chips) |
+| Qubit | bulk (one patch) blue, seam (in more than one patch, untinted) orange, link anchor green; grey on exact chips |
+| Couplers | intra-chip light grey; loom links / l-couplers black; couplers between chips that got no link (no colour free, or no ghost room under the caps) dashed |
+| Per chip | index, register, patch count, widest patch (with the ghosts the loom placed) and peak GiB fp32, above the chip (the last chip row below, clear of the links) |
+| Title | chips, qubits, links placed, couplers left without one, loom, device |
 
 ## 4. Names inside the script
 

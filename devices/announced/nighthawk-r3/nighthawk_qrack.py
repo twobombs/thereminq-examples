@@ -14408,7 +14408,7 @@ Field
                 ghost room is then judged by the VRAM / GTT split instead of the register's
                 width caps, so wider patches and more ghost links fit on 8 GB dies
 
-Devices (--device NAME sets --chips, --arrangement and --links; giving any of the three overrides it)
+Devices (--device NAME sets --chips, --arrangement, --links and --pair-links; giving any of them overrides it)
   r2      one Nighthawk chip: nighthawk120, the whole 12 x 10 square lattice, 120 qubits
   r1x2    IBM's two-module Nighthawk r1 demonstration: nighthawk120*2, 1 x 2, four l-couplers
           (arXiv:2610.29986: state transfer 99.0 % mean, distant CZ 94.75 % mean; LCOUPLER in this file)
@@ -14417,7 +14417,9 @@ Devices (--device NAME sets --chips, --arrangement and --links; giving any of th
           the 520 qubits and all 994 couplers of the 20 x 26 lattice, 46 of them carried by the loom. The way
           to run r3 on QrackAceBackend: a ring of patches does not hold a 20 x 26 lattice
   r3x2    the system IBM plans for 2027: nighthawk520*2, 1 x 2, ten l-couplers, 1,040 qubits
-  r3x2s   r3x2 scaled to what runs here: nighthawk120*2, 1 x 2, ten l-couplers
+  r3x2t   r3x2 as eight tiles (r3t twice, 2 x 4, --pair-links 1-2:0,2,4,6,8;5-6:1,3,5,7,9): every coupler and
+          the ten l-couplers of r3x2 on the same sites, 102 loom links; the way to run r3x2 on QrackAceBackend
+  r3x2s  r3x2 scaled to what runs here: nighthawk120*2, 1 x 2, ten l-couplers
   clover6   hypothetical, not an IBM device: nighthawk120*6, 2 x 3, ten l-couplers per pair (720 qubits; this
             tool's r3 model before the announcement); one chip worker per chiplet, so --gpus 0-5 puts one
             chiplet on each of six dies. The topology, port and Quantum NUMA studies were done on it
@@ -14689,7 +14691,10 @@ class Field:
 
     def __init__(self, repo, chip_specs, arrangement=None, links="all", link_rows=None, link_cols=None,
                  ghost=None, cut_links=False, topology="grid", hub=None, pairs=None, long_links=None, port=None,
-                 port_site="inner", stack=False):
+                 port_site="inner", stack=False, pair_links=None):
+        # per chip pair (lower, higher index): its own --links value (K or all) or the lattice rows / columns
+        # that get a link, in place of links / link_rows / link_cols for that pair
+        self.pair_links = {tuple(sorted(k)): v for k, v in (pair_links or {}).items()}
         self.stack = bool(stack)              # chips stacked face to face: links join the same site on both chips
         self.cut = bool(cut_links)            # links placed (same anchors, same tag base) but not in the circuit
         self.repo = find_repo(repo)
@@ -14743,10 +14748,10 @@ class Field:
                 self._link_stack(min(c, d), max(c, d), links, used, k_)
             elif ci == di and abs(cj - dj) == 1:
                 lt, rt = (c, d) if cj < dj else (d, c)
-                self._link_pair(lt, rt, True, links, link_rows, used)
+                self._link_pair(lt, rt, True, *self._pair_spec(c, d, links, link_rows), used)
             elif cj == dj and abs(ci - di) == 1:
                 tp, bt = (c, d) if ci < di else (d, c)
-                self._link_pair(tp, bt, False, links, link_cols, used)
+                self._link_pair(tp, bt, False, *self._pair_spec(c, d, links, link_cols), used)
             else:
                 far.append((c, d))
         for c, d in far:
@@ -14783,6 +14788,14 @@ class Field:
                 self.pos.append((ci * (self.R_dev + 1) + r, cj * (self.C_dev + 1) + cc))
         self.grid = (gr * (self.R_dev + 1), gc * (self.C_dev + 1))
         self.name = "cloverfield"
+
+    def _pair_spec(self, c, d, links, chosen):
+        """(links, chosen lines) for chip pair c-d: its pair_links entry if it has one (a list: the lines that
+        get a link; otherwise a --links value), else the field's own."""
+        v = self.pair_links.get((min(c, d), max(c, d)))
+        if v is None:
+            return links, chosen
+        return (links, list(v)) if isinstance(v, (list, tuple)) else (str(v), None)
 
     def _chip_pairs(self, topology, hub, extra):
         """The chip pairs that get l-couplers, in placement order. grid: every pair of grid neighbours (row-major,
@@ -15112,6 +15125,9 @@ class Field:
             long_links=[[u, v] for u, v in sorted(self.long)])
         if self.stack:
             topo["stack"] = True
+        if self.pair_links:
+            topo["pair_links"] = [[c, d, list(v) if isinstance(v, (list, tuple)) else str(v)]
+                                  for (c, d), v in sorted(self.pair_links.items())]
         if self.port:
             topo.update(topology=self.topology, chip_pairs=[list(p) for p in self.chip_pairs], hub=self.hub,
                         long_links=[[u, v] for u, v in sorted(self.long)],
@@ -15682,7 +15698,24 @@ def build_field(a):
     return Field(a.repo, specs, arr, a.links, rows, cols, ghost=ghost, cut_links=getattr(a, "cut_links", False),
                  topology=getattr(a, "topology", "grid"), hub=getattr(a, "hub", None), pairs=pairs,
                  long_links=getattr(a, "long_links", None), port=getattr(a, "link_port", None),
-                 port_site=getattr(a, "port_site", "inner") or "inner", stack=getattr(a, "stack", False))
+                 port_site=getattr(a, "port_site", "inner") or "inner", stack=getattr(a, "stack", False),
+                 pair_links=parse_pair_links(getattr(a, "pair_links", None)))
+
+
+def parse_pair_links(text):
+    """--pair-links "1-2:0,2,4,6,8;5-6:1,3,5,7,9;0-4:all": per chip pair, the lattice lines that get a link (rows
+    between horizontal neighbours, columns between vertical ones) or a --links value (K or all)."""
+    if not text:
+        return None
+    out = {}
+    for part in (t.strip() for t in text.split(";")):
+        if not part:
+            continue
+        pr, val = part.split(":", 1)
+        c, d = (int(x) for x in pr.split("-"))
+        # several numbers: the lines; one number or all: a --links value for the pair
+        out[(min(c, d), max(c, d))] = [int(x) for x in val.split(",")] if "," in val else val.strip()
+    return out
 
 
 def engine_opts(a):
@@ -16340,31 +16373,154 @@ def cmd_field_plan(a):
     if getattr(a, "cut_report", None):
         print_field_cut_report(field, opts, a.cut_report, a.cut_protocol, a.loom)
     if a.png:
-        draw_field(field, a.png)
+        draw_field(field, a.png, engine_opts(a) if hasattr(a, "backend") else None,
+                   f"device {a.device}" if getattr(a, "device", None) else None)
         print(f"drawn: {a.png}")
 
 
-def draw_field(field, path):
+FIELD_PATCH_COLOURS = ["#3b82c4", "#d98a1f", "#2a9d8f", "#c8557a", "#7b61c9", "#7f9a2e", "#2f9fc4", "#a8683c",
+                       "#5d6b7a", "#b0589f", "#4a9a5a", "#c46a4a"]
+
+
+def field_chip_patches(field, opts):
+    """Per chip: (patch of every local qubit, None on a seam qubit; the patch widths as the run allocates them;
+    their GiB fp32) on QrackAceBackend, else None. The ghost loom's own rooms (ghosts placed) where the field has
+    them, otherwise each chip's ACE placement alone."""
+    if not opts or opts.get("backend") != "ace":
+        return [None] * len(field.specs)
+    out, memo = [], {}
+    for c, spec in enumerate(field.specs):
+        room = field.rooms[c] if field.rooms else None
+        if room is None:
+            if spec["name"] not in memo:
+                try:
+                    memo[spec["name"]] = GhostRoom(spec, opts)
+                except (SystemExit, Exception) as err:
+                    print(f"# patches of chip {c} ({spec['name']}): {str(err).splitlines()[0] if str(err) else err}")
+                    memo[spec["name"]] = None
+            room = memo[spec["name"]]
+        if room is None or room.exact:
+            out.append(None)
+            continue
+        idx = {p_: i for i, p_ in enumerate(room.patches)}
+        patch = [idx[next(iter(room.sids[x]))] if len(room.sids[x]) == 1 else None for x in room.site]
+        out.append((patch, room.widths(), room.gib()))
+    return out
+
+
+def draw_field(field, path, opts=None, note=None):
+    """The field's lattice: per chip its ACE patches (tint and outline, patch numbers; untinted cells are seam
+    qubits, held in more than one patch), the qubit regions (bulk, seam, link anchor), the intra-chip couplers,
+    the placed l-couplers (black) and couplers between chips that got no link (dashed); above each chip its
+    register, patch widths (with the ghosts the loom placed) and peak GiB fp32."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    cols = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#6250d6"]
-    H, W = field.grid
-    fig, ax = plt.subplots(figsize=(1.0 + 0.55 * W, 1.0 + 0.55 * H), dpi=110)
+    from matplotlib.patches import Rectangle
+    from matplotlib.lines import Line2D
+    import matplotlib.patheffects as pe
+    surf, ink, ink2, muted = "#fcfcfa", "#0b0b0b", "#52514e", "#8a8984"
+    region_col = dict(bulk="#2a78d6", seam="#eb6834", anchor="#1baf7a", exact="#5d6b7a")
+    patches = field_chip_patches(field, opts)
+    # the field's chip grid, spread: room above every chip row for its labels, and a wider gap between columns
+    GR, GC = 2.4, 1.0
+    gc = field.arr[1]
+    pos = [(r + divmod(field.chip_of[q], gc)[0] * GR, x + divmod(field.chip_of[q], gc)[1] * GC)
+           for q, (r, x) in enumerate(field.pos)]
+    H = max(r for r, _ in pos) + 1
+    W = max(x for _, x in pos) + 1
+    below = field.arr[0] > 1               # the last chip row is labelled under its chips, clear of the links above
+    fig, ax = plt.subplots(figsize=(1.0 + 0.40 * W, 1.6 + 0.40 * (H + GR * (1 + below))), dpi=110, facecolor=surf)
+    ax.set_facecolor(surf)
     ax.set_aspect("equal")
     ax.axis("off")
-    ax.set_xlim(-1, W)
-    ax.set_ylim(H, -1)
+    ax.set_xlim(-1.0, W)
+    ax.set_ylim(H + (GR - 0.6 if below else 0), -GR - 0.2)
+    anchors = field.anchor_set
+    at = {}                                       # (chip, (r, c)) -> patch, for the outlines
+    region = []
+    for q in range(field.n):
+        c = field.chip_of[q]
+        pp = patches[c]
+        p_ = pp[0][field.local[q]] if pp and field.local[q] < len(pp[0]) else None
+        at[(c, tuple(pos[q]))] = p_
+        region.append("anchor" if q in anchors else ("exact" if pp is None else "bulk" if p_ is not None else "seam"))
+    # patch tint and demarcation lines, patch numbers
+    cen = {}
+    for (c, (r, x)), p_ in at.items():
+        if p_ is None:
+            continue
+        col = FIELD_PATCH_COLOURS[p_ % len(FIELD_PATCH_COLOURS)]
+        ax.add_patch(Rectangle((x - 0.5, r - 0.5), 1, 1, fc=col, ec="none", alpha=0.20, zorder=0.4))
+        for (dr, dx), seg in (((-1, 0), ((x - 0.5, x + 0.5), (r - 0.5, r - 0.5))),
+                              ((1, 0), ((x - 0.5, x + 0.5), (r + 0.5, r + 0.5))),
+                              ((0, -1), ((x - 0.5, x - 0.5), (r - 0.5, r + 0.5))),
+                              ((0, 1), ((x + 0.5, x + 0.5), (r - 0.5, r + 0.5)))):
+            nb = (c, (r + dr, x + dx))
+            if nb in at and at[nb] != p_:
+                ax.plot(seg[0], seg[1], color=col, lw=1.8, zorder=1.6, solid_capstyle="projecting")
+        cen.setdefault((c, p_), []).append((r, x))
+    for (c, p_), pts in cen.items():
+        mr, mx = np.mean([a_ for a_, _ in pts]), np.mean([b_ for _, b_ in pts])
+        r, x = min(pts, key=lambda t: (t[0] - mr) ** 2 + (t[1] - mx) ** 2)
+        ax.text(x + 0.5, r + 0.5, f"p{p_}", fontsize=8, color=FIELD_PATCH_COLOURS[p_ % len(FIELD_PATCH_COLOURS)],
+                fontweight="bold", ha="center", va="center", zorder=6,
+                path_effects=[pe.withStroke(linewidth=2.4, foreground=surf)])
+    # couplers: intra-chip light, l-couplers black, couplers between chips with no link dashed
     for col, es in field.matchings.items():
         for u, v in es:
-            (r1, c1), (r2, c2) = field.pos[u], field.pos[v]
+            (r1, c1), (r2, c2) = pos[u], pos[v]
             lk = (min(u, v), max(u, v)) in field.link_set
-            ax.plot([c1, c2], [r1, r2], color="#0b0b0b" if lk else "#cfcfca", lw=3.2 if lk else 1.2, zorder=1 if not lk else 3)
-    for q, (r, c) in enumerate(field.pos):
-        ax.scatter([c], [r], s=60, color=cols[field.chip_of[q] % len(cols)], zorder=4, edgecolors="white", linewidths=1)
-    ax.set_title(f"cloverfield: {len(field.specs)} chips, {field.n} qubits, {len(field.links)} links (black)",
-                 fontsize=12, loc="left")
-    fig.savefig(path, bbox_inches="tight", facecolor="white")
+            ax.plot([c1, c2], [r1, r2], color=ink if lk else "#cfcfca", lw=2.6 if lk else 0.9, zorder=3 if lk else 1)
+    for (c, d, t, u, v) in field.skipped:
+        (r1, c1), (r2, c2) = pos[u], pos[v]
+        ax.plot([c1, c2], [r1, r2], color="#c8557a", lw=1.4, ls=(0, (2, 2)), zorder=2.5)
+    for reg, col in region_col.items():
+        qs = [q for q in range(field.n) if region[q] == reg]
+        if qs:
+            ax.scatter([pos[q][1] for q in qs], [pos[q][0] for q in qs], s=22 if reg != "anchor" else 34, color=col,
+                       zorder=4, edgecolors=surf, linewidths=0.6)
+    # chip labels
+    for c, spec in enumerate(field.specs):
+        qs = [q for q in range(field.n) if field.chip_of[q] == c]
+        top = min(pos[q][0] for q in qs)
+        bottom = max(pos[q][0] for q in qs)
+        left = min(pos[q][1] for q in qs)
+        last_row = below and c // gc == field.arr[0] - 1
+        pp = patches[c]
+        lab = f"chip {c}  {spec['name']}"
+        sub = ""
+        if pp:
+            ws, gb = pp[1], pp[2]
+            sub = f"{len(ws)} patches, widest {max(ws)}" + (f", {gb:.1f} GiB peak" if gb else "")
+        box = dict(fc=surf, ec="none", pad=1.2, alpha=0.92)       # readable over links crossing the gap
+        y_lab, y_sub = (bottom + 0.75, bottom + 1.5) if last_row else (top - 1.45, top - 0.7)
+        ax.text(left - 0.5, y_lab, lab, fontsize=9.5, color=ink, fontweight="bold", ha="left",
+                va="top" if last_row else "bottom", bbox=box, zorder=7)
+        if sub:
+            ax.text(left - 0.5, y_sub, sub, fontsize=8, color=ink2, ha="left", va="top" if last_row else "bottom",
+                    bbox=box, zorder=7)
+    loom = "" if not opts else (", ghost loom" if field.rooms else "")
+    n_ace = sum(1 for pp in patches if pp)
+    title = (f"cloverfield: {len(field.specs)} chips, {field.n} qubits, {len(field.links)} links placed"
+             + (f", {len(field.skipped)} couplers between chips without a link" if field.skipped else "") + loom)
+    sub = (f"ACE patches on {n_ace} of {len(field.specs)} chips (tint and outline; untinted cells are seam qubits)"
+           if n_ace else "exact chips: no ACE patches")
+    ax.set_title(title + "\n" + sub + (f"; {note}" if note else ""), loc="left", fontsize=11, color=ink, pad=6)
+    hands = [Line2D([], [], ls="", marker="o", color=region_col["bulk"], label="bulk (one patch)"),
+             Line2D([], [], ls="", marker="o", color=region_col["seam"], label="seam (patch boundary)"),
+             Line2D([], [], ls="", marker="o", color=region_col["anchor"], label="link anchor"),
+             Line2D([], [], color=ink, lw=2.6, label="l-coupler / loom link"),
+             Line2D([], [], color="#cfcfca", lw=1.2, label="intra-chip coupler")]
+    if not n_ace:
+        hands[0] = Line2D([], [], ls="", marker="o", color=region_col["exact"], label="qubit (exact chip)")
+        hands.pop(1)
+    if field.skipped:
+        hands.append(Line2D([], [], color="#c8557a", lw=1.4, ls=(0, (2, 2)), label="coupler between chips, no link"))
+    ax.legend(handles=hands, loc="upper center", bbox_to_anchor=(0.5, 0.0), ncol=len(hands), frameon=False,
+              fontsize=9, handletextpad=0.4, columnspacing=1.4)
+    fig.savefig(path, bbox_inches="tight", facecolor=surf)
+    plt.close(fig)
 
 
 # ================================================================== linksearch
@@ -16877,8 +17033,17 @@ def cmd_field_selftest(a):
     def dev(name, **kw):
         d = DEVICES[name]
         return build_field(argparse.Namespace(**dict(ta, chips=d["chips"], arrangement=d["arrangement"], links=d["links"],
-                                                     **kw)))
+                                                     pair_links=d.get("pair_links"), **kw)))
     d2, ds, d6, d1, dt = dev("r3x2"), dev("r3x2s"), dev("clover6"), dev("r1x2"), dev("r3t")
+    d8 = dev("r3x2t")
+    # r3x2t: site on the 20 x 52 lattice of the two r3 chips side by side (chip A columns 0-25, chip B 26-51)
+    at8 = lambda q: (10 * (d8.chip_of[q] // 4) + d8.cells[d8.chip_of[q]][d8.local[q]][0],
+                     [0, 12, 26, 38][d8.chip_of[q] % 4] + d8.cells[d8.chip_of[q]][d8.local[q]][1])
+    at2 = lambda q: (d2.cells[d2.chip_of[q]][d2.local[q]][0], 26 * d2.chip_of[q] + d2.cells[d2.chip_of[q]][d2.local[q]][1])
+    edges8 = {tuple(sorted((at8(u), at8(v)))) for es in d8.matchings.values() for u, v in es}
+    edges2 = {tuple(sorted((at2(u), at2(v)))) for es in d2.matchings.values() for u, v in es}
+    lc8 = {tuple(sorted((at8(u), at8(v)))) for u, v, _ in d8.links if (d8.chip_of[u] % 4 < 2) != (d8.chip_of[v] % 4 < 2)}
+    lc2 = {tuple(sorted((at2(u), at2(v)))) for u, v, _ in d2.links}
     at = lambda q: (10 * (dt.chip_of[q] // 2) + dt.cells[dt.chip_of[q]][dt.local[q]][0],
                     12 * (dt.chip_of[q] % 2) + dt.cells[dt.chip_of[q]][dt.local[q]][1])   # r3t: site on the 20 x 26 lattice
     rows3 = {r for r, _ in d2.cells[0]}
@@ -16892,12 +17057,16 @@ def cmd_field_selftest(a):
             and {tuple(sorted((at(u), at(v)))) for es in dt.matchings.values() for u, v in es}
             == {((r_, x_), (r_ + dr, x_ + dx)) for r_ in range(20) for x_ in range(26) for dr, dx in ((0, 1), (1, 0))
                 if r_ + dr < 20 and x_ + dx < 26}
-            and LCOUPLER["cz"] < LCOUPLER["transfer"] < LCOUPLER["transfer_target"])
+            and LCOUPLER["cz"] < LCOUPLER["transfer"] < LCOUPLER["transfer_target"]
+            and d8.n == 1040 and len(d8.links) == 102 and not d8.skipped and edges8 == edges2 and lc8 == lc2
+            and len(d8.describe().get("pair_links") or []) == 2)
     report("[14] devices: r3x2 is two 520-qubit chips (20 x 26) with ten l-couplers, 1,040 qubits; r3x2s the same "
            "shape on 120-qubit chips; r1x2 four l-couplers; clover6 the six-chiplet model; r3t four tiles with exactly "
-           "the couplers of the 20 x 26 lattice", good,
+           "the couplers of the 20 x 26 lattice; r3x2t eight tiles with exactly the couplers and l-couplers of r3x2",
+           good,
            f"r3x2 {d2.n} qubits, {len(d2.links)} links; r3x2s {ds.n}, {len(ds.links)}; clover6 {d6.n}, "
-           f"{len(d6.links)}; l-coupler CZ {LCOUPLER['cz']}")
+           f"{len(d6.links)}; r3x2t {d8.n}, {len(d8.links)} ({len(lc8)} between the r3 chips, on r3x2's sites: "
+           f"{lc8 == lc2}); l-coupler CZ {LCOUPLER['cz']}")
     print("ALL OK" if ok else "SOME CHECKS FAILED")
     raise SystemExit(0 if ok else 1)
 
@@ -16923,6 +17092,11 @@ DEVICES = {
                       "the two cuts linked, so the field has the 520 qubits and 994 couplers of the 20 x 26 chip"),
     "r3x2": dict(chips="nighthawk520*2", arrangement="1x2", links="10", gates=10000,
                  about="the system IBM plans for 2027: two Nighthawk r3 chips, 1,040 qubits, ten l-couplers"),
+    "r3x2t": dict(chips=",".join(["nighthawk120t", "nighthawk140"] * 4), arrangement="2x4", links="all",
+                  pair_links="1-2:0,2,4,6,8;5-6:1,3,5,7,9", gates=10000,
+                  about="r3x2 as eight tiles: each 520-qubit chip the four r3t tiles (all 46 couplers across its "
+                        "cuts linked), the ten l-couplers between the chips on the rows r3x2 puts them on, so it runs "
+                        "on QrackAceBackend with ACE patches"),
     "r3x2s": dict(chips="nighthawk120*2", arrangement="1x2", links="10", gates=10000,
                   about="r3x2 scaled to what runs here: the same two chips and ten l-couplers on 120-qubit chips"),
     "clover6": dict(chips="nighthawk120*6", arrangement="2x3", links="10", gates=10000,
@@ -16944,12 +17118,16 @@ def apply_device(a):
     if not hasattr(a, "chips"):
         return a
     preset = DEVICES[a.device] if getattr(a, "device", None) else {}
+    from_preset = a.chips is None
     if a.chips is None:
         a.chips = preset.get("chips", FIELD_DEFAULTS["chips"])
         if getattr(a, "arrangement", None) is None:
             a.arrangement = preset.get("arrangement")
     if a.links is None:
         a.links = preset.get("links", FIELD_DEFAULTS["links"])
+    # the preset's per-pair links belong to its own chips
+    if from_preset and getattr(a, "pair_links", None) is None and preset.get("pair_links"):
+        a.pair_links = preset["pair_links"]
     return a
 
 
@@ -16981,6 +17159,9 @@ def add_field_args(p):
     p.add_argument("--link-rows", dest="link_rows", default=None,
                    help="horizontal neighbours: lattice rows that get a link, e.g. 2,5,8 (overrides --links)")
     p.add_argument("--link-cols", dest="link_cols", default=None, help="vertical neighbours: lattice columns")
+    p.add_argument("--pair-links", dest="pair_links", default=None,
+                   help="per chip pair, its own links: I-J:ROWS (the rows, or columns for vertical neighbours, that "
+                        "get a link) or I-J:K or I-J:all, separated by ';', e.g. 1-2:0,2,4,6,8;5-6:1,3,5,7,9")
     p.add_argument("--topology", choices=["grid", "ring", "wheel", "hub", "none"], default="grid",
                    help="which chip pairs get l-couplers: grid (default): every pair of grid neighbours; ring: the "
                         "chips in a cycle around the grid centre; wheel: that ring as the rim plus every chord, so "

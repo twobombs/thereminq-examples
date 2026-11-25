@@ -4022,7 +4022,10 @@ def field_device(f):
         for name, d in hits:
             if str(d.get("links")) == str(per):
                 return name
-        return hits[0][0]
+        # the ghost loom can leave links out (no room under the caps): the preset with the fewest l-couplers per
+        # pair that still holds the placed ones
+        fit = [(int(d["links"]), name) for name, d in hits if str(d.get("links")).isdigit() and int(d["links"]) >= per]
+        return min(fit)[1] if fit else hits[0][0]
     return None
 
 
@@ -4049,8 +4052,10 @@ def field_geometry(store, rec, ghost=False):
         per_pair = max([per_pair] + [pairs[tuple(sorted(p))] for p in chip_pairs if tuple(sorted(p)) not in long_pairs])
         per_long = max([per_long] + [pairs[tuple(sorted(p))] for p in chip_pairs if tuple(sorted(p)) in long_pairs])
     port = f.get("port") or {}
+    # per-pair links of the record (r3x2t: the ten l-couplers between the two r3 chips on their rows)
+    pl = {(int(c), int(d)): (list(v) if isinstance(v, list) else str(v)) for c, d, v in f.get("pair_links") or []}
     key = (tuple(f["chips"]), tuple(f["arrangement"]), per_pair, ghost, rec.get("backend"), tuple(chip_pairs),
-           per_long, port.get("mode"), port.get("site"))
+           per_long, port.get("mode"), port.get("site"), json.dumps(sorted(pl.items()), default=str))
     if key in _FIELD_GEO:
         return _FIELD_GEO[key]
     geo = None
@@ -4066,7 +4071,7 @@ def field_geometry(store, rec, ghost=False):
         if port.get("mode"):
             topo.update(port=port["mode"], port_site=port.get("site") or "inner")
         geo = nh.Field(store.a.repo, specs, tuple(f["arrangement"]), str(per_pair or "all"), None, None,
-                       ghost=opts, cut_links=False, **topo)
+                       ghost=opts, cut_links=False, pair_links=pl or None, **topo)
         geo._opts = opts
     except (SystemExit, Exception) as err:          # no release, unknown chip: the views that need it are empty
         print(f"# field geometry for {key[:3]}: {str(err).splitlines()[0] if str(err) else type(err).__name__}")
